@@ -184,7 +184,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [ ] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
 - [ ] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
-- [ ] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
+- [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
 - [ ] **QUAL-08**: A CSV edge-case fixture corpus exists, generated from a seed rather than committed en masse, and grows as cases are discovered — the corpus is the specification — *(DoD 82)*
 - [ ] **QUAL-09**: Idempotency is tested, including the assertion that a re-run produces zero additional rows — *(DoD 83)*
 - [ ] **QUAL-10**: Deduplication is tested within files, across files and across batches — *(DoD 84)*
@@ -398,7 +398,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-04 | Phase 6 | Pending |
 | QUAL-05 | Phase 4 | Pending |
 | QUAL-06 | Phase 4 | Pending |
-| QUAL-07 | Phase 1 | Pending |
+| QUAL-07 | Phase 1 | Complete |
 | QUAL-08 | Phase 1 | Pending |
 | QUAL-09 | Phase 4 | Pending |
 | QUAL-10 | Phase 9 | Pending |
@@ -420,6 +420,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CICD-09 | Phase 11 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 142 total (114 README §94 DoD + 16 specification gaps + 12 research-derived constraints)
 - Mapped to phases: 142 ✓
 - Unmapped: 0 ✓ — no orphans, no duplicates (validated during roadmap creation)
