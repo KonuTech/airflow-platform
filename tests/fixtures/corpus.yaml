@@ -27,6 +27,22 @@
 # distinct capability they need exists now rather than being discovered in
 # Phase 6 — where adding it would mean re-baselining every digest.
 #
+# Plan 01-07 adds the thirty-one structural cases: dialect and quoting traps,
+# header/metadata/footer layouts, and row-shape anomalies. They are declarations
+# only — not one byte of `tools/corpus/` changed to admit them, which is the
+# prediction 01-06 made and this plan is the test of.
+#
+# CONVENTION for the literal fixtures added by 01-07: their `content:` is a
+# SINGLE-quoted YAML scalar, whereas 32 and 39 above use the double-quoted form.
+# Both end at the same bytes; what differs is which layer resolves the escape.
+# A single-quoted scalar gets no YAML escape processing at all, so `\n` reaches
+# the manifest loader as the two characters backslash-n and the loader's own
+# resolution (`_decode_content`) turns it into a newline — and, decisively, a
+# `"` is just a `"`. CSV content is mostly quotes; spelling every one of them
+# as `\"` inside a double-quoted scalar is how a fixture acquires a quote
+# nobody meant to write. A literal backslash is still written `\\`, because the
+# loader's escape resolution runs either way.
+#
 # Declaration order is append-friendly on purpose. Existing entries are never
 # moved: a fixture inserted between two others adds one line to CORPUS.sha256,
 # whereas reordering them rewrites the oracle and makes review impossible.
@@ -601,4 +617,850 @@ fixtures:
       comma_is_not_the_delimiter: true
       header_row_index: 0
       data_rows: 10
+      rejected_rows: 0
+
+  # ==========================================================================
+  # PLAN 01-07 — the structural core of README §73 (dialect, header, row shape)
+  # ==========================================================================
+
+  # --- dialect: the delimiter is a parameter, never an assumption -----------
+  # 02/03/04 are the plain cases. They look trivial and they are, which is the
+  # point: CSV-04 names five dialects, and a corpus that only ever exercises the
+  # comma lets a hard-coded `,` survive every test in the suite.
+  - name: "02_semicolon.csv"
+    covers: [CSV-04, CSV-05]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ";"
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, amount]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: ";"
+      contains_no_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 8
+      rejected_rows: 0
+
+  # The pipe is a regular-expression metacharacter. Any detector or splitter
+  # that builds a pattern from the delimiter without escaping it turns `|` into
+  # alternation and matches the empty string everywhere.
+  - name: "03_pipe.csv"
+    covers: [CSV-04, CSV-05]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: "|"
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, amount]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: "|"
+      delimiter_is_a_regex_metacharacter: true
+      delimiter_must_be_escaped_before_use_in_a_pattern: true
+      contains_no_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 8
+      rejected_rows: 0
+
+  # Tab-separated is NOT whitespace-separated, and the `notatka` column exists
+  # to make the difference observable: its values contain ASCII spaces, so a
+  # reader that splits on generic whitespace produces extra fields on every row
+  # while a reader that splits on `\t` does not.
+  - name: "04_tab.csv"
+    covers: [CSV-04, CSV-05]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: "\t"
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, notatka]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      notatka:
+        {
+          kind: pick,
+          values: ["do sprawdzenia", "ok", "brak danych", "zwrot do korekty"],
+        }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: "\t"
+      is_tab_separated_not_whitespace_separated: true
+      values_contain_ascii_spaces: true
+      splitting_on_generic_whitespace_would_split_values: true
+      contains_no_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 8
+      rejected_rows: 0
+
+  # --- quoting --------------------------------------------------------------
+  # Every field quoted, including the numeric ones. Quoting is a transport
+  # convention, not a type declaration: `"1234.56"` is still a number and
+  # `"000001"` is still an identifier whose leading zeros are data (SCHEMA-01).
+  # The quotes themselves are never part of the value.
+  - name: "08_quoted_fields.csv"
+    covers: [CSV-06, SCHEMA-01]
+    generator: literal
+    encoding: utf-8
+    content: '"id","name","amount"\n"000001","Kowalski","1234.56"\n"000002","Nowak","2345.67"\n"000003","Wiśniewski","3456.78"\n'
+    expect:
+      detected_delimiter: ","
+      quotechar: '"'
+      every_field_is_quoted: true
+      quotes_are_not_part_of_the_value: true
+      quoting_does_not_imply_string_type: true
+      leading_zeros_are_preserved: "000001"
+      value_row_1: ["000001", "Kowalski", "1234.56"]
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # The delimiter appears INSIDE quoted fields, which is the case a string
+  # split cannot survive — CSV-06 forbids string splitting for exactly this
+  # reason. `naive_split_field_counts` is the damage a `line.split(",")` does,
+  # stated as a number so the difference is measurable rather than asserted.
+  - name: "09_embedded_commas.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,address\n1,"Kowalski, Jan","ul. Główna 12, 00-001 Warszawa"\n2,"Nowak, Anna","ul. Kwiatowa 3, 30-002 Kraków"\n3,Prosty,"Bez przecinka"\n'
+    expect:
+      detected_delimiter: ","
+      delimiter_occurs_inside_quoted_fields: true
+      correct_field_count_per_record: 3
+      naive_split_field_counts: [3, 5, 5, 3]
+      value_row_1_name: "Kowalski, Jan"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # A record is not a line. Two of the three records span several physical
+  # lines, so line count (7) and record count (4) disagree — which is precisely
+  # why CSV-13 requires chunking in *records* and never by lines or byte
+  # offsets. A reader that chunks by line splits row 1 in half and reports two
+  # malformed records that do not exist in the source.
+  - name: "10_embedded_newlines.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,note\n1,"first line\nsecond line"\n2,ok\n3,"a\nb\nc"\n'
+    expect:
+      detected_delimiter: ","
+      physical_line_count: 7
+      record_count_including_header: 4
+      line_count_is_not_record_count: true
+      records_spanning_multiple_lines: [1, 3]
+      value_row_1_note: "first line\nsecond line"
+      chunking_by_line_fabricates_malformed_records: true
+      header_row_index: 0
+      column_count: 2
+      data_rows: 3
+      rejected_rows: 0
+
+  # A quote character inside a field that was never quoted. `5" pipe` is an
+  # inches mark, not a transport quote, and the stdlib parser preserves it —
+  # VERIFIED on CPython 3.12.3. So the declared outcome is a parsed record with
+  # the quote retained, NOT a rejection: treating a bare `"` as a parse error
+  # would quarantine every measurement in an engineering feed.
+  - name: "35_quote_in_unquoted_field.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,code,note\n1,ab"cd,plain\n2,5" pipe,inches\n3,normal,plain\n'
+    expect:
+      detected_delimiter: ","
+      quotechar_appears_inside_an_unquoted_field: true
+      affected_row_indices: [1, 2]
+      the_quote_is_data_because_the_field_is_not_quoted: true
+      value_row_1_code: 'ab"cd'
+      value_row_2_code: '5" pipe'
+      outcome: parsed-with-the-quote-preserved
+      parser_raises: false
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # Two escape conventions, one file. This fixture uses the RFC-4180 doubled
+  # quote; the backslash is ordinary data everywhere it appears.
+  #
+  # Row 2 is the whole point. Under the doubled convention the `"` after the
+  # backslash CLOSES the quoted field, so the value is `a\b"`. Under a
+  # backslash convention the same eight bytes read as `a"b`. Neither reading
+  # raises — the file parses either way — so choosing the wrong convention is a
+  # DATA CORRUPTION that no exception announces. That is why the convention has
+  # to be a declared contract parameter rather than a detector's guess.
+  - name: "36_doubled_vs_backslash_escape.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,value,convention\n1,"He said ""hello""",doubled-quote-escape\n2,"a\\"b",backslash-would-escape\n3,"path\\dir\\file",backslash-is-data\n'
+    expect:
+      detected_delimiter: ","
+      escape_convention: doubled-quote
+      backslash_is_data_never_an_escape_in_this_file: true
+      value_row_1: 'He said "hello"'
+      value_row_2_under_the_doubled_convention: 'a\b"'
+      value_row_2_under_a_backslash_convention: 'a"b'
+      value_row_3: 'path\dir\file'
+      misreading_the_convention_is_corruption_not_a_parse_error: true
+      convention_must_be_declared_in_the_contract: true
+      contract_parameter: "csv.escapechar"
+      parser_raises: false
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # The classic dialect-sniffer trap: the header row's delimiter frequencies
+  # disagree with the body's. The header carries three commas and two
+  # semicolons because one column name is itself a comma-separated list; every
+  # body row carries zero commas and two semicolons.
+  #
+  # A frequency heuristic that reads the first line picks `,`. The correct
+  # answer is `;`, and the evidence for it is in the BODY: with `;` every row
+  # including the header has three fields, whereas with `,` the header has four
+  # fields and each body row has one. Consistency across records is the signal;
+  # first-line frequency is noise (STACK.md §F — this is why csv.Sniffer is
+  # rejected and a consistency-measure detector is used instead).
+  - name: "37_delimiter_frequency_differs_header_vs_body.csv"
+    covers: [CSV-04, CSV-05]
+    generator: literal
+    encoding: utf-8
+    content: 'id;first,middle,last,suffix;amount\n1;Kowalski;1234.56\n2;Nowak;2345.67\n3;Wiśniewski;3456.78\n4;Wójcik;4567.89\n5;Kamiński;5678.90\n'
+    expect:
+      correct_delimiter: ";"
+      decision_must_come_from_the_body_not_the_first_line: true
+      header_delimiter_counts: { ",": 3, ";": 2 }
+      body_delimiter_counts_per_row: { ",": 0, ";": 2 }
+      first_line_frequency_heuristic_picks: ","
+      field_count_with_the_correct_delimiter: 3
+      header_field_count_if_comma_is_chosen: 4
+      body_field_count_if_comma_is_chosen: 1
+      header_row_index: 0
+      column_count: 3
+      data_rows: 5
+      rejected_rows: 0
+
+  # Nothing to detect. There is no delimiter in this file, so the only correct
+  # behaviour is to DECLINE — a guessed delimiter here splits a reference code
+  # into pieces and every downstream key is wrong, silently.
+  #
+  # The stdlib sniffer does not decline: it raises `_csv.Error: Could not
+  # determine delimiter` — VERIFIED on CPython 3.12.3. An exception is not the
+  # same as a clean "single column, no delimiter" answer, and a reader that
+  # catches it and falls back to `,` has turned a refusal into a guess.
+  - name: "38_single_column_no_delimiter.csv"
+    covers: [CSV-05, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'customer_reference\nCUST-000001\nCUST-000002\nCUST-000003\nCUST-000004\nCUST-000005\n'
+    expect:
+      detection_declines: true
+      detected_delimiter: null
+      a_guessed_delimiter_is_a_silent_corruption_source: true
+      stdlib_sniffer_raises: true
+      stdlib_sniffer_error: "Could not determine delimiter"
+      candidate_delimiters_absent: [",", ";", "|", "\t"]
+      resolution: "one column; the contract declares it, the detector never invents one"
+      header_row_index: 0
+      column_count: 1
+      data_rows: 5
+      rejected_rows: 0
+
+  # All three hazards in ONE field: the delimiter, a newline and a doubled-quote
+  # escape, simultaneously. Each is covered alone by 09, 10 and 36; a reader can
+  # pass all three of those and still fail here, because handling them together
+  # is a different problem from handling them in sequence.
+  #
+  # The exact parsed values are declared, so failure is visible rather than
+  # approximate.
+  - name: "66_triple_nasty.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,payload,note\n1,"a,b\nc""d",all three at once\n2,plain,control\n'
+    expect:
+      detected_delimiter: ","
+      contains_delimiter_inside_a_quoted_field: true
+      contains_newline_inside_a_quoted_field: true
+      contains_a_doubled_quote_escape_in_the_same_field: true
+      all_three_hazards_occur_in_one_field: true
+      value_row_1: ["1", "a,b\nc\"d", "all three at once"]
+      value_row_1_payload: "a,b\nc\"d"
+      physical_line_count: 4
+      record_count_including_header: 3
+      a_reader_that_handles_each_hazard_alone_still_fails_here: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 2
+      rejected_rows: 0
+
+  # --- header, metadata and footer layout (CSV-07, CSV-08) ------------------
+  # Every fixture in this group declares a header row index, INCLUDING the
+  # cases where there is none — `header_row_index: null` is a different
+  # statement from `header_row_index: 0`, and a pipeline that cannot tell them
+  # apart will name a column after a customer.
+  #
+  # Each also declares the contract parameter that overrides detection, because
+  # CSV-07/CSV-08 say the answer is configurable *or* detected, and a detector
+  # with no override is a detector you cannot correct at 03:00.
+
+  # No header at all. Row 0 has the same shape and the same field types as every
+  # row below it, which is the evidence — there is nothing about it that reads
+  # as a name. Consuming it as a header silently drops a record and renames the
+  # columns to one customer's data.
+  - name: "11_no_header.csv"
+    covers: [CSV-07, SCHEMA-02]
+    generator: literal
+    encoding: utf-8
+    content: '000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\n000004,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      has_header: false
+      header_row_index: null
+      header_is_absent_not_at_row_zero: true
+      first_row_is_data: true
+      detection_evidence: "row 0 has the same field count and the same field types as every row below it"
+      column_names_must_come_from_the_contract: true
+      contract_parameter: "csv.header_row"
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # A report preamble: three comment lines, then a blank line, then the header
+  # at row index 4. The preamble is also a dialect hazard — `# Generated:
+  # 2026-01-15` contains a colon, and the colon is one of CSV-04's five
+  # dialects. So the preamble must be excluded BEFORE delimiter detection runs,
+  # not after; a detector sampling from byte zero lets three comment lines vote
+  # on the dialect of a file they are not part of.
+  - name: "12_metadata_before_header.csv"
+    covers: [CSV-07, CSV-08]
+    generator: literal
+    encoding: utf-8
+    content: '# Export from System X\n# Generated: 2026-01-15\n# Rows: 4\n\nid,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\n000004,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      has_header: true
+      header_row_index: 4
+      preamble_row_count: 4
+      preamble_row_indices: [0, 1, 2, 3]
+      preamble_includes_a_blank_line: true
+      preamble_contains_a_colon_which_is_itself_a_candidate_delimiter: true
+      preamble_must_be_excluded_before_dialect_detection: true
+      data_starts_at_row_index: 5
+      detection_evidence: "the first row whose field count equals the modal field count of the rows below it"
+      header_row_index_is_configurable_or_detected: true
+      contract_parameter: "csv.header_row"
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # Trailing rows that are not records: a blank separator, a totals line and a
+  # sign-off. None of them has the modal field count, and none may be loaded.
+  # 64 is the harder sibling — there the footer is a single row that looks
+  # almost like data.
+  - name: "13_footer.csv"
+    covers: [CSV-08, VALID-06]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\n\nTotal: 7037.01\nEnd of report\n'
+    expect:
+      detected_delimiter: ","
+      has_header: true
+      header_row_index: 0
+      modal_field_count: 3
+      footer_row_count: 3
+      footer_row_indices: [4, 5, 6]
+      footer_field_counts: [0, 1, 1]
+      footer_rows_must_not_be_loaded_as_records: true
+      footer_carries_a_control_total: "7037.01"
+      control_total_equals_the_sum_of_the_amount_column: true
+      contract_parameter: "csv.skip_footer_rows"
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # Zero bytes. The twin of 19, and the pair is the point: an operator told
+  # "0 rows loaded" cannot act, because the two causes need opposite responses.
+  # Here NOTHING arrived — not the schema, not a record — so the file is
+  # evidence of a broken export, not of a quiet day.
+  - name: "18_empty.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: ''
+    expect:
+      byte_length: 0
+      has_header: false
+      header_row_index: null
+      schema_is_unknown: true
+      record_count_including_header: 0
+      physical_line_count: 0
+      data_rows: 0
+      outcome: empty-file
+      distinguishable_from_header_only: true
+      must_not_be_reported_as_zero_rows_against_a_known_schema: true
+      quarantine_reason: "empty-file"
+
+  # A header and nothing else. The twin of 18: the schema DID arrive and it is
+  # correct; there were simply no records. That is a legitimate quiet day for an
+  # incremental feed and must not raise. The two fixtures differ in their
+  # declared meaning, not merely in their size.
+  - name: "19_only_header.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n'
+    expect:
+      detected_delimiter: ","
+      byte_length_is_nonzero: true
+      has_header: true
+      header_row_index: 0
+      header: [id, name, amount]
+      schema_is_known: true
+      record_count_including_header: 1
+      physical_line_count: 1
+      data_rows: 0
+      outcome: header-only-no-records
+      distinguishable_from_empty: true
+      is_a_valid_empty_increment_not_an_error: true
+      column_count: 3
+
+  # `Name` and `name` are not the same string, so an exact-duplicate check
+  # passes and a case-insensitive one does not. That is the whole fixture: the
+  # collision only exists once names are folded — which they must be, because
+  # PostgreSQL folds unquoted identifiers to lower case and both columns would
+  # land on one target column.
+  #
+  # The declared outcome is a REJECTION. A silent rename (`name_1`) invents a
+  # column the contract never declared; a silent last-wins discards a column of
+  # real data with nothing recording that it happened.
+  - name: "48_duplicate_header_names_case_variant.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,Name,name,amount\n1,Kowalski,Jan,1234.56\n2,Nowak,Anna,2345.67\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      raw_header: [id, Name, name, amount]
+      colliding_names: [Name, name]
+      collision_is_case_insensitive_only: true
+      exact_duplicates_present: false
+      the_two_columns_carry_different_values: true
+      outcome: rejected-file
+      must_not_silently_rename: true
+      must_not_silently_last_wins: true
+      quarantine_reason: "duplicate-header-names"
+      contract_parameter: "csv.header_case_sensitive"
+      column_count: 4
+      data_rows: 2
+
+  # Padded header names. Both the raw and the trimmed forms are declared, so a
+  # reader that trims and one that preserves are distinguishable rather than
+  # both "passing". `amount` is the clean control — without it a test could not
+  # tell "trims every name" from "returns a fixed trimmed list".
+  #
+  # The stdlib's `skipinitialspace` strips LEADING whitespace only, so a reader
+  # that leans on it still carries `customer_id ` with its trailing space and
+  # every contract lookup misses.
+  - name: "49_header_with_leading_trailing_spaces.csv"
+    covers: [CSV-07, SCHEMA-02]
+    generator: literal
+    encoding: utf-8
+    content: ' customer_id , Name ,amount\n1,Kowalski,1234.56\n2,Nowak,2345.67\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      raw_header: [" customer_id ", " Name ", "amount"]
+      trimmed_header: ["customer_id", "Name", "amount"]
+      clean_control_column: "amount"
+      trimming_is_a_declared_normalisation_not_a_parser_default: true
+      stdlib_skipinitialspace_strips_leading_only: true
+      contract_lookup_against_the_raw_names_misses: true
+      contract_parameter: "csv.header_trim"
+      column_count: 3
+      data_rows: 2
+      rejected_rows: 0
+
+  # A concatenated export: two files joined, so the header line reappears at row
+  # index 3. Loaded as a record it becomes a row whose `amount` is the literal
+  # string "amount" — a type error if you are lucky and a NULL if you are not.
+  # The declared record count EXCLUDES the repeat, and the repeat's row index is
+  # named so the finding is locatable rather than a count discrepancy.
+  - name: "63_repeated_header_mid_file.csv"
+    covers: [CSV-08, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\nid,name,amount\n000003,Wiśniewski,3456.78\n000004,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      repeated_header_row_indices: [3]
+      repeated_header_occurrences: 1
+      detection_evidence: "a row whose values are exactly the header row's values"
+      data_rows: 4
+      data_rows_if_the_repeat_is_loaded: 5
+      the_repeat_must_not_be_loaded_as_a_record: true
+      cause: "concatenated export"
+      column_count: 3
+      rejected_rows: 0
+
+  # The footer that is hardest to spot: one trailing row, no blank line before
+  # it, values that look like data. What identifies it is its COLUMN COUNT — two
+  # fields against a modal three. A reader that pads it to the modal count
+  # loads a customer called TOTAL whose amount is the sum of every other row,
+  # and every aggregate downstream is exactly doubled.
+  - name: "64_footer_totals_with_different_column_count.csv"
+    covers: [CSV-08, VALID-06]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\nTOTAL,7037.01\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      modal_field_count: 3
+      footer_row_count: 1
+      footer_row_indices: [4]
+      footer_field_count: 2
+      footer_is_identified_by_its_differing_column_count: true
+      footer_must_not_be_padded_to_the_modal_count: true
+      footer_control_total: "7037.01"
+      control_total_equals_the_sum_of_the_amount_column: true
+      padding_it_would_double_every_aggregate: true
+      contract_parameter: "csv.skip_footer_rows"
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # --- row-shape anomalies (VALID-01, VALID-03) -----------------------------
+  # The single rule this whole group encodes: NO ROW IS EVER REPAIRED. A short
+  # row is not padded with NULLs, a long row is not truncated, a malformed row
+  # is not coerced into shape. Every one of them becomes a rejected record
+  # carrying its source row number and a reason (VALID-03), because a repaired
+  # row is a row that loaded successfully and is wrong — the one outcome this
+  # platform exists to prevent.
+  #
+  # Field counts below are 0-based physical row indices, header included at 0,
+  # and every one was VERIFIED against the stdlib reader on CPython 3.12.3.
+
+  # Exactly duplicated column names — the sibling of 48, where the collision
+  # only appeared after case folding. Here `amount` appears twice verbatim and
+  # the two columns carry DIFFERENT values, so a last-wins resolution silently
+  # discards a whole column of real data.
+  - name: "14_duplicate_columns.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,amount,amount,name\n1,10.00,20.00,Kowalski\n2,30.00,40.00,Nowak\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      raw_header: [id, amount, amount, name]
+      duplicated_name: amount
+      duplicate_is_exact_not_a_case_variant: true
+      duplicate_positions: [1, 2]
+      the_two_columns_carry_different_values: true
+      outcome: rejected-file
+      must_not_silently_keep_the_last_occurrence: true
+      quarantine_reason: "duplicate-header-names"
+      column_count: 4
+      data_rows: 2
+
+  # Rows with FEWER fields than the header. The trailing columns are absent, not
+  # empty — `city` was never written for rows 2 and 3, which is a different fact
+  # from `city` being the empty string, and padding with NULL destroys the
+  # distinction before anyone can act on it.
+  - name: "15_missing_columns.csv"
+    covers: [VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount,city\n1,Kowalski,1234.56,Warszawa\n2,Nowak,2345.67\n3,Wiśniewski\n4,Wójcik,4567.89,Kraków\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      header_field_count: 4
+      field_count_by_row_index: { 0: 4, 1: 4, 2: 3, 3: 2, 4: 4 }
+      short_row_indices: [2, 3]
+      rows_must_not_be_padded_with_null: true
+      absent_is_not_the_same_fact_as_empty: true
+      outcome: rejected-record
+      quarantine_reason: "field-count-below-header"
+      column_count: 4
+      data_rows: 4
+      rejected_rows: 2
+
+  # Rows with MORE fields than the header. Truncating them discards data that
+  # arrived; SCHEMA-05 says drift is reported, never silently adapted to, so the
+  # extra fields are evidence of an upstream schema change and belong in the
+  # rejection record rather than on the floor.
+  - name: "16_extra_columns.csv"
+    covers: [VALID-01, VALID-03, SCHEMA-05]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n1,Kowalski,1234.56\n2,Nowak,2345.67,extra\n3,Wiśniewski,3456.78,extra,more\n4,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      header_field_count: 3
+      field_count_by_row_index: { 0: 3, 1: 3, 2: 4, 3: 5, 4: 3 }
+      long_row_indices: [2, 3]
+      rows_must_not_be_truncated: true
+      surplus_values_are_evidence_of_drift_not_noise: true
+      outcome: rejected-record
+      quarantine_reason: "field-count-above-header"
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 2
+
+  # Three different malformations in one file, and one deliberate near-miss.
+  # Row 2 carries a bare quote inside an unquoted field: it PARSES, it has the
+  # right field count, and it is not a rejection (see 35). Rows 3 and 4 are the
+  # real rejections. Without row 2 a reader could pass this fixture by
+  # rejecting anything that looks unusual, which is the other way to lose data.
+  - name: "17_malformed_rows.csv"
+    covers: [VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n1,Kowalski,1234.56\n2,Now"ak,2345.67\n3,Wiśniewski\n4,Wójcik,4567.89,extra\n5,Kamiński,5678.90\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      header_field_count: 3
+      field_count_by_row_index: { 0: 3, 1: 3, 2: 3, 3: 2, 4: 4, 5: 3 }
+      rows_that_parse_but_look_wrong: [2]
+      rejected_row_indices: [3, 4]
+      malformation_by_row_index:
+        {
+          2: "quote-in-unquoted-field (parsed, not rejected)",
+          3: "field-count-below-header",
+          4: "field-count-above-header",
+        }
+      no_row_is_repaired_padded_or_truncated: true
+      every_rejected_row_carries_its_source_row_number: true
+      parser_raises: false
+      column_count: 3
+      data_rows: 5
+      accepted_rows: 3
+      rejected_rows: 2
+
+  # Byte-identical duplicate records inside one file. Both counts are declared
+  # because the DIFFERENCE is what DEDUP-04 has to explain: three rows were
+  # removed, and the audit trail must say which three and why. A `SELECT
+  # DISTINCT` gives the right number and no explanation, which DEDUP-03
+  # explicitly forbids.
+  - name: "25_duplicate_rows.csv"
+    covers: [DEDUP-01, DEDUP-04]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000001,Kowalski,1234.56\n000003,Wiśniewski,3456.78\n000002,Nowak,2345.67\n000001,Kowalski,1234.56\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      data_rows: 6
+      distinct_rows: 3
+      duplicate_rows_removed: 3
+      duplicates_are_byte_identical: true
+      occurrences_by_id: { "000001": 3, "000002": 2, "000003": 1 }
+      first_occurrence_row_indices: [1, 2, 4]
+      duplicate_row_indices: [3, 5, 6]
+      deduplication_must_be_auditable: true
+      removed_rows_are_recorded_not_discarded: true
+      column_count: 3
+      rejected_rows: 0
+
+  # THE high-severity case: rows that are both too short AND too long in the
+  # same file. Parsers commonly pad the short ones and truncate the long ones,
+  # and both happen silently, so a file that is 66% damaged loads clean.
+  #
+  # The distinct field counts run 2 through 6 around a modal 4, with values on
+  # both sides — a fixture that was only short, or only long, would let a reader
+  # that repairs in one direction pass.
+  - name: "33_ragged_rows.csv"
+    covers: [VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount,city\n1,Kowalski,1234.56,Warszawa\n2,Nowak,2345.67\n3,Wiśniewski,3456.78,Kraków,PL\n4,Wójcik\n5,Kamiński,5678.90,Gdańsk,PL,extra\n6,Zieliński,6789.01,Poznań\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      header_field_count: 4
+      modal_field_count: 4
+      field_count_by_row_index: { 0: 4, 1: 4, 2: 3, 3: 5, 4: 2, 5: 6, 6: 4 }
+      distinct_field_counts: [2, 3, 4, 5, 6]
+      short_row_indices: [2, 4]
+      long_row_indices: [3, 5]
+      raggedness_runs_in_both_directions_in_one_file: true
+      short_rows_must_not_be_padded: true
+      long_rows_must_not_be_truncated: true
+      quarantine_reasons:
+        ["field-count-below-header", "field-count-above-header"]
+      severity: high
+      column_count: 4
+      data_rows: 6
+      rejected_rows: 4
+
+  # An opening quote at row 2 that is never closed, so it consumes every
+  # remaining byte of the file into one field. The file has six physical lines
+  # and parses to THREE records — that gap is the finding, and both numbers are
+  # declared so a reader cannot report success on two rows and call it a day.
+  #
+  # The stdlib does NOT raise here (VERIFIED on CPython 3.12.3); it returns a
+  # short, plausible-looking result. Silence is the failure mode.
+  - name: "34_unclosed_quote_eof.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n1,Kowalski,1234.56\n2,"Nowak,2345.67\n3,Wiśniewski,3456.78\n4,Wójcik,4567.89\n5,Kamiński,5678.90\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      physical_line_count: 6
+      intended_data_rows: 5
+      record_count_including_header: 3
+      parsed_data_rows: 2
+      rows_swallowed_by_the_open_quote: 4
+      unclosed_quote_opens_at_row_index: 2
+      record_count_is_far_below_line_count: true
+      the_gap_between_the_two_counts_is_the_finding: true
+      parser_raises: false
+      outcome: rejected-file
+      quarantine_reason: "unclosed-quote-at-eof"
+      column_count: 3
+
+  # Every row ends with the delimiter, so every row — the header included — has
+  # a phantom fourth field that is always empty. It is not a first-row quirk:
+  # dropping it must be a deliberate, declared decision, because the obvious
+  # alternative is an off-by-one that also drops the last real column of the
+  # next file.
+  - name: "45_trailing_delimiter_every_row.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount,\n1,Kowalski,1234.56,\n2,Nowak,2345.67,\n3,Wiśniewski,3456.78,\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      parsed_field_count: 4
+      declared_columns: 3
+      phantom_final_column_index: 3
+      phantom_final_column_name: ""
+      phantom_column_is_always_empty: true
+      every_row_ends_with_the_delimiter: true
+      affects_every_row_not_only_the_first: true
+      field_count_by_row_index: { 0: 4, 1: 4, 2: 4, 3: 4 }
+      resolution: "drop the phantom column deliberately, never by an off-by-one that also drops real data"
+      data_rows: 3
+      rejected_rows: 0
+
+  # The last record has no terminator. It exists to prove the final record is
+  # NOT dropped — the classic `for line in f: ...` loop keeps it, but a reader
+  # that splits on the terminator and discards the last (empty) piece silently
+  # loses one row per file, forever, in a way no count reconciles against
+  # anything because the source count is wrong the same way.
+  - name: "46_no_trailing_newline.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n1,Kowalski,1234.56\n2,Nowak,2345.67\n3,Wiśniewski,3456.78'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      final_byte_is_a_line_terminator: false
+      terminator_count: 3
+      physical_line_count: 4
+      record_count_including_header: 4
+      final_record_must_not_be_dropped: true
+      last_row_values: ["3", "Wiśniewski", "3456.78"]
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # Blank lines INSIDE the data, not only ahead of the header — the second case
+  # is the one detectors miss, because a leading blank is part of the preamble
+  # problem (12) and an interior blank is not. The stdlib yields an empty list
+  # for each, which is neither a record nor an end-of-file, and row numbers must
+  # still count physical lines so a rejection at row 5 can be found by a human
+  # opening the file at line 5.
+  - name: "47_blank_lines_interspersed.csv"
+    covers: [CSV-08, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n\n1,Kowalski,1234.56\n\n2,Nowak,2345.67\n3,Wiśniewski,3456.78\n\n4,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      physical_line_count: 8
+      blank_line_indices: [1, 3, 6]
+      blank_lines_appear_inside_the_data_not_only_before_the_header: true
+      stdlib_yields_an_empty_list_for_a_blank_line: true
+      blank_lines_must_not_be_loaded_as_empty_records: true
+      blank_lines_must_not_terminate_the_file: true
+      row_numbers_must_still_reference_physical_lines: true
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # Wider than a thousand columns, and only two rows deep so generation stays
+  # cheap. The width is what is being tested: readers that build a per-column
+  # structure per row, and databases with their own ceilings, both change
+  # behaviour here. PostgreSQL's limit is 1 600 columns, so 1 024 is DELIBERATELY
+  # under it — the database will accept this table, which means any failure
+  # belongs to the reader and cannot be blamed on the target.
+  #
+  # Most fields are empty, because a wide export is mostly empty in practice and
+  # because it keeps the declaration reviewable. The first and last value of
+  # each row are named, so an off-by-one at either edge is visible.
+  #
+  # The content is written as a block scalar rather than the single-quoted form
+  # used above: it is pure ASCII with no backslash and no quote, so there is
+  # nothing for the loader's escape resolution to change, and each record gets
+  # its own line instead of one 7 kB string.
+  - name: "65_very_wide.csv"
+    covers: [CSV-06, LOAD-07]
+    generator: literal
+    encoding: utf-8
+    content: |
+      c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16,c17,c18,c19,c20,c21,c22,c23,c24,c25,c26,c27,c28,c29,c30,c31,c32,c33,c34,c35,c36,c37,c38,c39,c40,c41,c42,c43,c44,c45,c46,c47,c48,c49,c50,c51,c52,c53,c54,c55,c56,c57,c58,c59,c60,c61,c62,c63,c64,c65,c66,c67,c68,c69,c70,c71,c72,c73,c74,c75,c76,c77,c78,c79,c80,c81,c82,c83,c84,c85,c86,c87,c88,c89,c90,c91,c92,c93,c94,c95,c96,c97,c98,c99,c100,c101,c102,c103,c104,c105,c106,c107,c108,c109,c110,c111,c112,c113,c114,c115,c116,c117,c118,c119,c120,c121,c122,c123,c124,c125,c126,c127,c128,c129,c130,c131,c132,c133,c134,c135,c136,c137,c138,c139,c140,c141,c142,c143,c144,c145,c146,c147,c148,c149,c150,c151,c152,c153,c154,c155,c156,c157,c158,c159,c160,c161,c162,c163,c164,c165,c166,c167,c168,c169,c170,c171,c172,c173,c174,c175,c176,c177,c178,c179,c180,c181,c182,c183,c184,c185,c186,c187,c188,c189,c190,c191,c192,c193,c194,c195,c196,c197,c198,c199,c200,c201,c202,c203,c204,c205,c206,c207,c208,c209,c210,c211,c212,c213,c214,c215,c216,c217,c218,c219,c220,c221,c222,c223,c224,c225,c226,c227,c228,c229,c230,c231,c232,c233,c234,c235,c236,c237,c238,c239,c240,c241,c242,c243,c244,c245,c246,c247,c248,c249,c250,c251,c252,c253,c254,c255,c256,c257,c258,c259,c260,c261,c262,c263,c264,c265,c266,c267,c268,c269,c270,c271,c272,c273,c274,c275,c276,c277,c278,c279,c280,c281,c282,c283,c284,c285,c286,c287,c288,c289,c290,c291,c292,c293,c294,c295,c296,c297,c298,c299,c300,c301,c302,c303,c304,c305,c306,c307,c308,c309,c310,c311,c312,c313,c314,c315,c316,c317,c318,c319,c320,c321,c322,c323,c324,c325,c326,c327,c328,c329,c330,c331,c332,c333,c334,c335,c336,c337,c338,c339,c340,c341,c342,c343,c344,c345,c346,c347,c348,c349,c350,c351,c352,c353,c354,c355,c356,c357,c358,c359,c360,c361,c362,c363,c364,c365,c366,c367,c368,c369,c370,c371,c372,c373,c374,c375,c376,c377,c378,c379,c380,c381,c382,c383,c384,c385,c386,c387,c388,c389,c390,c391,c392,c393,c394,c395,c396,c397,c398,c399,c400,c401,c402,c403,c404,c405,c406,c407,c408,c409,c410,c411,c412,c413,c414,c415,c416,c417,c418,c419,c420,c421,c422,c423,c424,c425,c426,c427,c428,c429,c430,c431,c432,c433,c434,c435,c436,c437,c438,c439,c440,c441,c442,c443,c444,c445,c446,c447,c448,c449,c450,c451,c452,c453,c454,c455,c456,c457,c458,c459,c460,c461,c462,c463,c464,c465,c466,c467,c468,c469,c470,c471,c472,c473,c474,c475,c476,c477,c478,c479,c480,c481,c482,c483,c484,c485,c486,c487,c488,c489,c490,c491,c492,c493,c494,c495,c496,c497,c498,c499,c500,c501,c502,c503,c504,c505,c506,c507,c508,c509,c510,c511,c512,c513,c514,c515,c516,c517,c518,c519,c520,c521,c522,c523,c524,c525,c526,c527,c528,c529,c530,c531,c532,c533,c534,c535,c536,c537,c538,c539,c540,c541,c542,c543,c544,c545,c546,c547,c548,c549,c550,c551,c552,c553,c554,c555,c556,c557,c558,c559,c560,c561,c562,c563,c564,c565,c566,c567,c568,c569,c570,c571,c572,c573,c574,c575,c576,c577,c578,c579,c580,c581,c582,c583,c584,c585,c586,c587,c588,c589,c590,c591,c592,c593,c594,c595,c596,c597,c598,c599,c600,c601,c602,c603,c604,c605,c606,c607,c608,c609,c610,c611,c612,c613,c614,c615,c616,c617,c618,c619,c620,c621,c622,c623,c624,c625,c626,c627,c628,c629,c630,c631,c632,c633,c634,c635,c636,c637,c638,c639,c640,c641,c642,c643,c644,c645,c646,c647,c648,c649,c650,c651,c652,c653,c654,c655,c656,c657,c658,c659,c660,c661,c662,c663,c664,c665,c666,c667,c668,c669,c670,c671,c672,c673,c674,c675,c676,c677,c678,c679,c680,c681,c682,c683,c684,c685,c686,c687,c688,c689,c690,c691,c692,c693,c694,c695,c696,c697,c698,c699,c700,c701,c702,c703,c704,c705,c706,c707,c708,c709,c710,c711,c712,c713,c714,c715,c716,c717,c718,c719,c720,c721,c722,c723,c724,c725,c726,c727,c728,c729,c730,c731,c732,c733,c734,c735,c736,c737,c738,c739,c740,c741,c742,c743,c744,c745,c746,c747,c748,c749,c750,c751,c752,c753,c754,c755,c756,c757,c758,c759,c760,c761,c762,c763,c764,c765,c766,c767,c768,c769,c770,c771,c772,c773,c774,c775,c776,c777,c778,c779,c780,c781,c782,c783,c784,c785,c786,c787,c788,c789,c790,c791,c792,c793,c794,c795,c796,c797,c798,c799,c800,c801,c802,c803,c804,c805,c806,c807,c808,c809,c810,c811,c812,c813,c814,c815,c816,c817,c818,c819,c820,c821,c822,c823,c824,c825,c826,c827,c828,c829,c830,c831,c832,c833,c834,c835,c836,c837,c838,c839,c840,c841,c842,c843,c844,c845,c846,c847,c848,c849,c850,c851,c852,c853,c854,c855,c856,c857,c858,c859,c860,c861,c862,c863,c864,c865,c866,c867,c868,c869,c870,c871,c872,c873,c874,c875,c876,c877,c878,c879,c880,c881,c882,c883,c884,c885,c886,c887,c888,c889,c890,c891,c892,c893,c894,c895,c896,c897,c898,c899,c900,c901,c902,c903,c904,c905,c906,c907,c908,c909,c910,c911,c912,c913,c914,c915,c916,c917,c918,c919,c920,c921,c922,c923,c924,c925,c926,c927,c928,c929,c930,c931,c932,c933,c934,c935,c936,c937,c938,c939,c940,c941,c942,c943,c944,c945,c946,c947,c948,c949,c950,c951,c952,c953,c954,c955,c956,c957,c958,c959,c960,c961,c962,c963,c964,c965,c966,c967,c968,c969,c970,c971,c972,c973,c974,c975,c976,c977,c978,c979,c980,c981,c982,c983,c984,c985,c986,c987,c988,c989,c990,c991,c992,c993,c994,c995,c996,c997,c998,c999,c1000,c1001,c1002,c1003,c1004,c1005,c1006,c1007,c1008,c1009,c1010,c1011,c1012,c1013,c1014,c1015,c1016,c1017,c1018,c1019,c1020,c1021,c1022,c1023,c1024
+      r1f1,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,r1f1024
+      r2f1,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,r2f1024
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      column_count: 1024
+      exceeds_one_thousand_columns: true
+      first_column_name: c1
+      last_column_name: c1024
+      row_1_first_value: r1f1
+      row_1_last_value: r1f1024
+      row_2_first_value: r2f1
+      row_2_last_value: r2f1024
+      empty_fields_per_row: 1022
+      every_row_has_the_same_field_count: true
+      exercises_reader_and_database_column_limits: true
+      postgres_max_columns: 1600
+      column_count_is_below_the_postgres_limit: true
+      data_rows: 2
       rejected_rows: 0
