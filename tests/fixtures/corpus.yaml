@@ -19,9 +19,17 @@
 # fixture's declared meaning and the detector's behaviour is a test failure
 # rather than a judgement call.
 #
-# Phase 1 seeds five fixtures here — one per generator kind, plus the large
-# profile — so the framework is proven before plans 01-06, 01-07 and 01-08
-# author the remaining sixty-four.
+# Plan 01-03 seeded five fixtures here — one per generator kind, plus the large
+# profile — so the framework was proven before the rest were authored. Plan
+# 01-06 adds the sixteen whose construction is byte-level hard: encodings,
+# marks, control bytes, terminator mixes, field sizes and split delivery. Those
+# are the ones a naive generator cannot be retrofitted to produce, so every
+# distinct capability they need exists now rather than being discovered in
+# Phase 6 — where adding it would mean re-baselining every digest.
+#
+# Declaration order is append-friendly on purpose. Existing entries are never
+# moved: a fixture inserted between two others adds one line to CORPUS.sha256,
+# whereas reordering them rewrites the oracle and makes review impossible.
 
 version: 1
 master_seed: "airflow-platform/corpus/v1"
@@ -48,6 +56,152 @@ fixtures:
       header_row_index: 0
       data_rows: 20
       rejected_rows: 0
+
+  # --- encoding and Unicode -------------------------------------------------
+  # A mark is deterministic evidence, so the confidence floor is 1.0 and no
+  # probabilistic detector may override it (STACK.md §F). The other half of the
+  # expectation is the one people forget: the mark is not data. A reader that
+  # decodes with plain `utf-8` rather than `utf-8-sig` produces a first column
+  # literally named "﻿id", and every contract lookup against it misses.
+  - name: "05_utf8_bom.csv"
+    covers: [CSV-02, CSV-03]
+    generator: tabular
+    encoding: utf-8
+    bom: true
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\r\n"
+    header: [id, name, amount]
+    rows: 10
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      encoding_confidence_min: 1.0
+      bom_byte_offset: 0
+      bom_is_stripped_before_the_first_field: true
+      detected_delimiter: ","
+      detected_line_terminator: "\r\n"
+      header_row_index: 0
+      data_rows: 10
+      rejected_rows: 0
+
+  # No mark, single-byte encoding: detection is a probability, not a fact, which
+  # is exactly the CSV-03 path. The Polish characters are the evidence — every
+  # one of them is a byte above 0x7F that is *not* valid UTF-8, so a reader that
+  # assumes UTF-8 fails loudly here instead of silently mangling a name.
+  - name: "06_windows1250.csv"
+    covers: [CSV-02, CSV-03]
+    generator: tabular
+    encoding: cp1250
+    bom: false
+    delimiter: ";"
+    quotechar: '"'
+    line_terminator: "\r\n"
+    header: [id, miasto, kwota]
+    rows: 10
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      miasto:
+        {
+          kind: pick,
+          values: ["Łódź", "Gdańsk", "Żółkiewski", "Ćwikła", "Świętochłowice"],
+        }
+      kwota:
+        {
+          kind: decimal,
+          min: "100.00",
+          max: "99999.99",
+          scale: 2,
+          decimal_separator: ",",
+        }
+    expect:
+      detected_encoding: cp1250
+      encoding_confidence_max: 0.99
+      decodes_as_strict_utf8: false
+      detected_delimiter: ";"
+      decimal_separator: ","
+      data_rows: 10
+
+  # Two-byte encoding WITH a mark — the certain case, and the counterpart to
+  # 40_utf16_no_bom.csv, which is the same encoding without one.
+  - name: "07_utf16.csv"
+    covers: [CSV-02, CSV-03]
+    generator: tabular
+    encoding: utf-16-le
+    bom: true
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\r\n"
+    header: [id, name, amount]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-16-le
+      encoding_confidence_min: 1.0
+      bom_byte_offset: 0
+      byte_length_is_not_character_length: true
+      data_rows: 8
+
+  # Multiple scripts plus one non-BMP character, so "one character is one byte"
+  # and "one character is one UTF-16 code unit" are both false in this file.
+  - name: "26_unicode.csv"
+    covers: [CSV-02, CSV-12]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, label, amount]
+    rows: 12
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      label:
+        {
+          kind: pick,
+          values: ["Ωμέγα", "Привет", "日本語", "\U0001F600 smile", "naïve"],
+        }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      contains_non_bmp_code_point: true
+      byte_length_is_not_character_length: true
+      data_rows: 12
+
+  # The domain's own alphabet. Written as literal characters rather than
+  # escapes because they are legible; the digest oracle is what protects them —
+  # an editor that renormalised this file would change these bytes and
+  # `make fixtures-verify` would say so on the next run.
+  - name: "27_polish_characters.csv"
+    covers: [CSV-02, CSV-12, DEDUP-01]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ";"
+    quotechar: '"'
+    line_terminator: "\r\n"
+    header: [id, nazwisko, miasto]
+    rows: 12
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      nazwisko:
+        {
+          kind: pick,
+          values: ["Wiśniewski", "Żółkiewski", "Ćwikła", "Łukasiewicz", "Główczyński"],
+        }
+      miasto:
+        { kind: pick, values: ["Łódź", "Gdańsk", "Poznań", "Kraków", "Wrocław"] }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: ";"
+      diacritics_survive_round_trip: true
+      data_rows: 12
 
   # --- tabular, large profile ----------------------------------------------
   # Generated on every gate run, never cached. A cache would be the only
@@ -98,6 +252,140 @@ fixtures:
       contains_nul_in_column: name
       quarantine_reason: "nul-byte-in-text-field"
 
+  # --- literal, with raw bytes spliced in -----------------------------------
+  # Bytes that are NOT valid UTF-8, which is why they are spliced rather than
+  # encoded: no encoder would ever produce them. They live here as escaped
+  # literals so the generated tree stays 100% generated.
+  #
+  # Content is `id,name\n1,ok\n2,ok\n3,ok\n`, so the encoded offsets are:
+  #   0..7   "id,name\n"   8..12  "1,ok\n"   13..17 "2,ok\n"   18..22 "3,ok\n"
+  # Offset 12 therefore lands immediately after the `ok` of row 1 and before its
+  # terminator — inside a text field, which is where a truncated multibyte
+  # sequence actually turns up. The second splice uses record addressing so both
+  # modes are exercised; it lands at the start of row 3.
+  #
+  # The expectation deliberately does NOT name one error policy. §9's reader
+  # must *declare* `strict`, `replace` or `surrogateescape` in its contract;
+  # what this fixture pins is that the default (strict) raises, so the choice
+  # cannot be made by accident.
+  - name: "39_utf8_invalid_sequences.csv"
+    covers: [CSV-02, CSV-03, VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: "id,name\n1,ok\n2,ok\n3,ok\n"
+    splices:
+      - { bytes: "\\xc3\\x28", offset: 12 }
+      - { bytes: "\\x80", after_record: 3 }
+    expect:
+      data_rows: 3
+      decodes_as_strict_utf8: false
+      error_policy_must_be_declared: true
+      invalid_sequence_classes:
+        ["truncated-two-byte-lead", "lone-continuation-byte"]
+      affected_rows: [1, 3]
+      quarantine_reason: "undecodable-bytes"
+
+  # The same encoding as 07_utf16.csv with the mark removed: genuinely
+  # ambiguous, and therefore the confidence-and-override path. The expectation
+  # asserts that detection is NOT certain — a detector that returns 1.0 here is
+  # claiming determinism it does not have, which CSV-03 forbids.
+  - name: "40_utf16_no_bom.csv"
+    covers: [CSV-02, CSV-03, CSV-05]
+    generator: tabular
+    encoding: utf-16-le
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name]
+    rows: 6
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+    expect:
+      declared_encoding: utf-16-le
+      encoding_is_certain: false
+      encoding_confidence_max: 0.99
+      bom_present: false
+      requires_contract_override: true
+      data_rows: 6
+
+  # What a concatenated export looks like: the mark appears part-way through,
+  # after the first data record, not at offset zero. A reader that sniffs only
+  # the first bytes will not see it, and a reader that treats any mark anywhere
+  # as an encoding declaration will re-decode the whole file on the strength of
+  # three bytes in the middle of it. Here the mark is data, and the row it is
+  # attached to must still parse.
+  - name: "41_bom_mid_file.csv"
+    covers: [CSV-02, CSV-03, CSV-08]
+    generator: tabular
+    encoding: utf-8
+    bom: true
+    bom_after_record: 2
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name]
+    rows: 4
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+    expect:
+      detected_encoding: utf-8
+      bom_at_offset_zero: false
+      bom_after_record: 2
+      mark_is_data_not_an_encoding_declaration: true
+      data_rows: 4
+
+  # Invisible in a diff, which is why the code points are named here and written
+  # as escapes rather than pasted. U+200B and U+200E render as nothing at all,
+  # so three keys that look identical to a human are three distinct strings to a
+  # hash — and deduplication and SCD2 change detection both run on hashes.
+  - name: "42_zero_width_and_bidi.csv"
+    covers: [CSV-12, DEDUP-01, VALID-02]
+    generator: literal_unicode
+    encoding: utf-8
+    delimiter: ","
+    line_terminator: "\n"
+    rows_spec:
+      - id: "1"
+        customer_key: "AB\u200BC12" # U+200B ZERO WIDTH SPACE
+      - id: "2"
+        customer_key: "AB\u200EC12" # U+200E LEFT-TO-RIGHT MARK
+      - id: "3"
+        customer_key: "ABC12" # the clean control
+    expect:
+      data_rows: 3
+      code_points_present:
+        ["U+200B ZERO WIDTH SPACE", "U+200E LEFT-TO-RIGHT MARK"]
+      keys_look_identical_to_a_reader: true
+      distinct_before_invisible_stripping: 3
+      distinct_after_invisible_stripping: 1
+
+  # U+00A0 as a thousands separator is ubiquitous in Polish and French exports
+  # and is NOT the ASCII space, so a `strip()`-and-`replace(" ", "")` normaliser
+  # leaves it in place and the value fails to parse as a number.
+  - name: "43_nbsp_thousands_separator.csv"
+    covers: [CSV-10, VALID-02]
+    generator: literal_unicode
+    encoding: utf-8
+    delimiter: ";"
+    line_terminator: "\r\n"
+    rows_spec:
+      - id: "1"
+        kwota: "1\u00A0234,56" # U+00A0 NO-BREAK SPACE
+      - id: "2"
+        kwota: "12\u00A0345,00"
+      - id: "3"
+        kwota: "999,99"
+    expect:
+      data_rows: 3
+      code_points_present: ["U+00A0 NO-BREAK SPACE"]
+      thousands_separator: "U+00A0"
+      decimal_separator: ","
+      ascii_space_is_absent: true
+      normalised_values: ["1234.56", "12345.00", "999.99"]
+
   # --- literal_unicode ------------------------------------------------------
   # The two names below are NOT pasted as visually identical strings: the
   # generator applies unicodedata.normalize explicitly (R9), because editors,
@@ -134,3 +422,47 @@ fixtures:
     expect:
       decompresses_to: "01_simple.csv"
       data_rows: 20
+
+  # --- the most common real export shape in this project's domain -----------
+  # A Polish Excel "Save as CSV" produces all three of these at once: a UTF-8
+  # mark, a semicolon delimiter and comma decimal separators. Each is covered
+  # individually above; this fixture exists because they interact — a detector
+  # that sees `1234,56` and a `,` in its delimiter candidates can conclude the
+  # delimiter is a comma and split every amount in half. Dialect detection runs
+  # before numeric normalisation precisely so that cannot happen, and this is
+  # the file that proves it.
+  - name: "68_utf8_bom_semicolon_pl_excel.csv"
+    covers: [CSV-02, CSV-04, CSV-05, CSV-10]
+    generator: tabular
+    encoding: utf-8
+    bom: true
+    delimiter: ";"
+    quotechar: '"'
+    line_terminator: "\r\n"
+    header: [id, klient, kwota]
+    rows: 10
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      klient:
+        {
+          kind: pick,
+          values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik", "Kamiński"],
+        }
+      kwota:
+        {
+          kind: decimal,
+          min: "100.00",
+          max: "99999.99",
+          scale: 2,
+          decimal_separator: ",",
+        }
+    expect:
+      detected_encoding: utf-8
+      encoding_confidence_min: 1.0
+      bom_byte_offset: 0
+      detected_delimiter: ";"
+      decimal_separator: ","
+      comma_is_not_the_delimiter: true
+      header_row_index: 0
+      data_rows: 10
+      rejected_rows: 0
