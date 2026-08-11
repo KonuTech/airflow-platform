@@ -13,6 +13,14 @@ preview. If the decision has not been made yet, there is nothing to record.
 | # | Title | Status | Date |
 |---|---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Architecture decisions are recorded as numbered MADR files under `docs/adr/` | accepted | 2026-08-11 |
+| [0002](0002-dataplat-core-with-csv-processor-plugin.md) | `dataplat` is the source-agnostic core; `csv_processor` is a plugin that depends on it | accepted | 2026-08-11 |
+| [0003](0003-uv-workspace-members-under-packages.md) | Workspace members live under `packages/`, with src-layout preserved inside each member | accepted | 2026-08-11 |
+| [0004](0004-two-images-two-dependency-sets.md) | Two images with two dependency sets; the Airflow distribution is not a workspace member | accepted | 2026-08-11 |
+| [0005](0005-fixture-corpus-generated-from-a-seed.md) | The CSV fixture corpus is generated from a seed and never committed; the digest file is the oracle | accepted | 2026-08-11 |
+
+Records 0002 through 0005 are the decisions Phase 1 actually takes. 0002 is the
+headline departure from README §68/§75; 0003 and 0004 are its physical
+consequences; 0005 is the phase's design decision about the fixture corpus.
 
 `0000-template.md` is the template. `0000` is its permanent number; it is never a
 record and never appears in the table above.
