@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from tools.corpus.generators import generate_corpus
+from tools.corpus.generators import generate_corpus, output_names
 from tools.corpus.manifest import load_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,5 +49,12 @@ def test_two_generations_in_one_process_agree() -> None:
 
     # Declared order is part of the contract: it is what makes adding a fixture
     # a one-line diff in CORPUS.sha256 (R1) instead of a reshuffle.
+    #
+    # One declaration is not always one file — a part set emits several — so the
+    # expected listing is the declared order expanded through the *same*
+    # definition the generator uses. That keeps this assertion exact (it still
+    # pins every emitted name, including each part) rather than loosening it to
+    # "some set of files appeared".
+    expected = [name for fixture in manifest.fixtures for name in output_names(fixture)]
     assert list(digests_a) == list(digests_b)
-    assert list(digests_a) == [fixture.name for fixture in manifest.fixtures]
+    assert list(digests_a) == expected
