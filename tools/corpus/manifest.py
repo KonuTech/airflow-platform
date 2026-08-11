@@ -47,11 +47,17 @@ import yaml  # type: ignore[import-untyped]
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-GeneratorKind = Literal["tabular", "literal", "literal_unicode", "wrapper"]
+GeneratorKind = Literal["tabular", "literal", "literal_unicode", "wrapper", "multipart"]
 NormalisationForm = Literal["NFC", "NFD", "NFKC", "NFKD"]
 Profile = Literal["default", "large"]
 
-_GENERATOR_KINDS: Final[tuple[str, ...]] = ("tabular", "literal", "literal_unicode", "wrapper")
+_GENERATOR_KINDS: Final[tuple[str, ...]] = (
+    "tabular",
+    "literal",
+    "literal_unicode",
+    "wrapper",
+    "multipart",
+)
 _NORMALISATION_FORMS: Final[tuple[str, ...]] = ("NFC", "NFD", "NFKC", "NFKD")
 _PROFILES: Final[tuple[str, ...]] = ("default", "large")
 _COMPRESSIONS: Final[tuple[str, ...]] = ("gzip",)
@@ -71,29 +77,43 @@ _FIXTURE_KEY_ORDER: Final[tuple[str, ...]] = (
     "generator",
     "encoding",
     "bom",
+    "bom_after_record",
     "delimiter",
     "quotechar",
     "line_terminator",
+    "line_terminators",
     "header",
     "rows",
     "row_spec",
     "rows_spec",
     "content",
+    "splices",
     "wraps",
     "compression",
     "gzip_mtime",
     "gzip_filename",
+    "parts",
     "profile",
     "expect",
 )
+
+_SPLICE_KEY_ORDER: Final[tuple[str, ...]] = ("bytes", "offset", "after_record")
 
 _COLUMN_KEY_ORDER: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
         "zero_padded_int": ("kind", "width", "start"),
         "pick": ("kind", "values"),
         "decimal": ("kind", "min", "max", "scale", "decimal_separator"),
+        "repeat": ("kind", "char", "length"),
     }
 )
+
+# Only these two kinds declare their record structure up front (a header plus a
+# known number of rows), which is what makes "is this mark position inside the
+# file?" answerable at load time rather than halfway through generation.
+_RECORD_STRUCTURED_KINDS: Final[tuple[str, ...]] = ("tabular", "literal_unicode")
+
+_MIN_MULTIPART_PARTS: Final = 2
 
 _SUPPORTED_VERSION: Final = 1
 
@@ -158,7 +178,55 @@ class DecimalColumn:
     kind: Literal["decimal"] = "decimal"
 
 
-ColumnSpec = ZeroPaddedIntColumn | PickColumn | DecimalColumn
+@dataclass(frozen=True, slots=True)
+class RepeatColumn:
+    """One character repeated to an exact length — the field-size knob.
+
+    The point of this column is that the *width of a field* is a manifest
+    parameter, so a fixture can sit just below the standard parser's default
+    field limit and its twin can sit above it. Both are declared, neither is a
+    happy accident of the data.
+
+    It consumes no randomness, so a size change perturbs nothing else (R1).
+
+    Attributes:
+        character: The single character repeated.
+        length: Number of characters in the rendered field.
+        kind: Discriminator, fixed for this column type.
+    """
+
+    character: str
+    length: int
+    kind: Literal["repeat"] = "repeat"
+
+
+ColumnSpec = ZeroPaddedIntColumn | PickColumn | DecimalColumn | RepeatColumn
+
+
+@dataclass(frozen=True, slots=True)
+class Splice:
+    """Raw bytes injected into an encoded fixture at a declared position.
+
+    This is how a byte sequence that is *not valid text* in the fixture's own
+    encoding enters the corpus: as an escaped literal in the manifest, spliced
+    into the encoded output. It never exists as a committed binary file, so the
+    whole of ``tests/fixtures/csv/`` stays generated.
+
+    Exactly one addressing mode is declared. ``offset`` is an absolute byte
+    offset into the encoded content; ``after_record`` names a position just past
+    the *n*-th line terminator, which is the mode that survives an edit to the
+    content above it.
+
+    Attributes:
+        raw: The bytes to inject. Never decoded — the bytes are the point.
+        offset: Absolute byte offset, or ``None`` when addressing by record.
+        after_record: 1-based record number, or ``None`` when addressing by
+            offset.
+    """
+
+    raw: bytes
+    offset: int | None
+    after_record: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,19 +256,27 @@ class Fixture:
         generator: Which generator kind builds it.
         covers: Requirement IDs this fixture exercises.
         encoding: Codec the rendered text is encoded with (R3).
-        bom: Whether the encoding's byte-order mark is prepended.
+        bom: Whether the encoding's byte-order mark appears in the file at all.
+        bom_after_record: Where the mark goes. ``0`` means offset zero; ``n``
+            means immediately after record *n*'s terminator, which is what a
+            concatenated export looks like.
         delimiter: Field separator.
         quotechar: Quoting character.
         line_terminator: Explicit line terminator, joined by hand (R4).
+        line_terminators: A cycle of terminators applied per record, for a file
+            that genuinely mixes them. Mutually exclusive with
+            ``line_terminator``.
         header: Header row, in declared order.
         rows: Number of data rows for ``tabular``.
         row_spec: Per-column generation spec, keyed by header name.
         rows_spec: Explicit rows for ``literal_unicode``.
         content: Literal file content for ``literal``, with escapes resolved.
-        wraps: Name of an earlier fixture, for ``wrapper``.
+        splices: Raw byte sequences injected into the encoded content.
+        wraps: Name of an earlier fixture, for ``wrapper`` and ``multipart``.
         compression: Compression applied by ``wrapper``.
         gzip_mtime: Embedded gzip timestamp — 0 is non-negotiable (R5).
         gzip_filename: Embedded gzip source name — empty is non-negotiable (R5).
+        parts: Number of numbered parts emitted by ``multipart``.
         profile: ``large`` fixtures are skipped by the fast development loop.
         expect: The fixture's declared meaning. Permissive by design.
     """
@@ -210,20 +286,39 @@ class Fixture:
     covers: tuple[str, ...]
     encoding: str
     bom: bool
+    bom_after_record: int
     delimiter: str
     quotechar: str
     line_terminator: str
+    line_terminators: tuple[str, ...]
     header: tuple[str, ...]
     rows: int
     row_spec: Mapping[str, ColumnSpec]
     rows_spec: tuple[Mapping[str, str | UnicodeField], ...]
     content: str | None
+    splices: tuple[Splice, ...]
     wraps: str | None
     compression: str | None
     gzip_mtime: int
     gzip_filename: str
+    parts: int
     profile: Profile
     expect: Mapping[str, Any]
+
+    def terminator_for(self, record_index: int) -> str:
+        """Return the terminator that ends a given record.
+
+        Args:
+            record_index: 0-based index of the emitted record; index 0 is the
+                header.
+
+        Returns:
+            The declared terminator, cycling through ``line_terminators`` when
+            the fixture mixes them.
+        """
+        if not self.line_terminators:
+            return self.line_terminator
+        return self.line_terminators[record_index % len(self.line_terminators)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +401,7 @@ def parse_manifest(text: str, *, source: str = "<manifest>") -> Manifest:
 
     fixtures: list[Fixture] = []
     seen: dict[str, int] = {}
+    by_name: dict[str, Fixture] = {}
     for index, entry in enumerate(raw_fixtures):
         fixture = _parse_fixture(entry, index=index, source=source)
         if fixture.name in seen:
@@ -314,9 +410,12 @@ def parse_manifest(text: str, *, source: str = "<manifest>") -> Manifest:
                 f"(first declared at index {seen[fixture.name]}, again at index {index})"
             )
             raise ManifestError(msg)
-        if fixture.generator == "wrapper":
+        if fixture.generator in ("wrapper", "multipart"):
             _check_wrapper_target(fixture, seen, source)
+        if fixture.generator == "multipart":
+            _check_multipart_target(fixture, by_name, source)
         seen[fixture.name] = index
+        by_name[fixture.name] = fixture
         fixtures.append(fixture)
 
     return Manifest(version=version, master_seed=master_seed, fixtures=tuple(fixtures))
@@ -332,6 +431,58 @@ def _check_wrapper_target(fixture: Fixture, seen: Mapping[str, int], source: str
             f"{source}: fixture {fixture.name!r} wraps {target!r}, which is not "
             f"declared earlier in the manifest. Generation is a single ordered "
             f"pass, so a forward reference has no bytes to wrap."
+        )
+        raise ManifestError(msg)
+
+
+def _check_multipart_target(fixture: Fixture, by_name: Mapping[str, Fixture], source: str) -> None:
+    """Reject a part set whose target cannot be split at record boundaries.
+
+    Splitting is defined in terms of records, not bytes, because the header must
+    land in the first part and nowhere else. That is only well defined when the
+    target declares a single terminator and a known number of data records.
+    """
+    where = f"{source}: fixture {fixture.name!r}"
+    target = by_name[str(fixture.wraps)]
+
+    if target.generator not in _RECORD_STRUCTURED_KINDS:
+        known = ", ".join(_RECORD_STRUCTURED_KINDS)
+        msg = (
+            f"{where}: wraps {target.name!r}, whose generator is "
+            f"{target.generator!r}. A part set splits at record boundaries, so "
+            f"its target must declare its record structure ({known})."
+        )
+        raise ManifestError(msg)
+    if target.profile == "large":
+        msg = (
+            f"{where}: wraps {target.name!r}, which is a large-profile fixture. "
+            f"Splitting reads the target whole, so a part set over a "
+            f"deliberately-larger-than-memory file would break the one property "
+            f"that fixture exists to prove."
+        )
+        raise ManifestError(msg)
+    if target.line_terminators:
+        msg = (
+            f"{where}: wraps {target.name!r}, which mixes line terminators. "
+            f"Splitting a mixed-terminator file at record boundaries has no "
+            f"single correct answer, so it is refused rather than guessed."
+        )
+        raise ManifestError(msg)
+    if target.encoding != fixture.encoding or target.line_terminator != fixture.line_terminator:
+        msg = (
+            f"{where}: declares encoding {fixture.encoding!r} and line_terminator "
+            f"{fixture.line_terminator!r}, but {target.name!r} declares "
+            f"{target.encoding!r} and {target.line_terminator!r}. The parts are "
+            f"byte ranges of the target, so the two declarations must agree."
+        )
+        raise ManifestError(msg)
+
+    data_records = _declared_record_count(target) - 1
+    if data_records < fixture.parts:
+        msg = (
+            f"{where}: splits {target.name!r} into {fixture.parts} parts, but the "
+            f"target has only {data_records} data record(s). An empty part is not "
+            f"a part."
         )
         raise ManifestError(msg)
 
@@ -384,24 +535,30 @@ def _parse_fixture(entry: object, *, index: int, source: str) -> Fixture:
             msg = f"{where}: unknown compression {compression!r}"
             raise ManifestError(msg)
 
+    line_terminators = _parse_line_terminators(data, where)
+
     fixture = Fixture(
         name=name,
         generator=_as_generator_kind(generator),
         covers=_optional_str_tuple(data, "covers", where),
         encoding=encoding,
         bom=_optional_bool(data, "bom", where, default=False),
+        bom_after_record=_optional_int(data, "bom_after_record", where, default=0),
         delimiter=_optional_str(data, "delimiter", where, default=","),
         quotechar=_optional_str(data, "quotechar", where, default='"'),
         line_terminator=line_terminator,
+        line_terminators=line_terminators,
         header=_optional_str_tuple(data, "header", where),
         rows=_optional_int(data, "rows", where, default=0),
         row_spec=_parse_row_spec(data.get("row_spec"), where=where),
         rows_spec=_parse_rows_spec(data.get("rows_spec"), where=where),
         content=_decode_content(data.get("content"), where=where),
+        splices=_parse_splices(data.get("splices"), where=where),
         wraps=None if data.get("wraps") is None else _require_str(data, "wraps", where),
         compression=compression,
         gzip_mtime=_optional_int(data, "gzip_mtime", where, default=0),
         gzip_filename=_optional_str(data, "gzip_filename", where, default=""),
+        parts=_optional_int(data, "parts", where, default=0),
         profile=_as_profile(profile),
         expect=_parse_expect(data.get("expect"), where=where),
     )
@@ -409,7 +566,41 @@ def _parse_fixture(entry: object, *, index: int, source: str) -> Fixture:
     _VALIDATORS[fixture.generator](fixture, where)
     _validate_delimiter_does_not_collide(fixture, where)
     _validate_large_profile(fixture, where)
+    _validate_byte_order_mark(fixture, where)
+    _validate_line_terminator_cycle(fixture, where)
+    _validate_splices(fixture, where)
+    _validate_parts_scope(fixture, where)
     return fixture
+
+
+def _parse_line_terminators(data: Mapping[str, Any], where: str) -> tuple[str, ...]:
+    """Validate the per-record terminator cycle, if one is declared."""
+    if data.get("line_terminators") is None:
+        return ()
+    if data.get("line_terminator") is not None:
+        msg = (
+            f"{where}: declares both line_terminator and line_terminators. "
+            f"One file has one rule for its terminators; declare the cycle or "
+            f"the single value, not both."
+        )
+        raise ManifestError(msg)
+
+    terminators = _optional_str_tuple(data, "line_terminators", where)
+    if len(terminators) < 2:  # noqa: PLR2004 - a "cycle" of one is a single value
+        msg = (
+            f"{where}: line_terminators declares {len(terminators)} entr(y/ies); "
+            f"a cycle needs at least two. Use line_terminator for a file with "
+            f"one terminator throughout."
+        )
+        raise ManifestError(msg)
+    for terminator in terminators:
+        if terminator not in _LINE_TERMINATORS:
+            msg = (
+                f"{where}: line_terminators entry {terminator!r} is not one of "
+                f"{list(_LINE_TERMINATORS)!r}"
+            )
+            raise ManifestError(msg)
+    return terminators
 
 
 def _validate_tabular(fixture: Fixture, where: str) -> None:
@@ -466,12 +657,34 @@ def _validate_wrapper(fixture: Fixture, where: str) -> None:
         raise ManifestError(msg)
 
 
+def _validate_multipart(fixture: Fixture, where: str) -> None:
+    """Reject a part set with no target, no split count, or a split below two."""
+    if fixture.wraps is None:
+        msg = f"{where}: a multipart fixture needs a wraps field"
+        raise ManifestError(msg)
+    if fixture.compression is not None:
+        msg = (
+            f"{where}: a multipart fixture declares compression "
+            f"{fixture.compression!r}. Splitting and compressing are separate "
+            f"wrappers; declare a wrapper over the part set instead."
+        )
+        raise ManifestError(msg)
+    if fixture.parts < _MIN_MULTIPART_PARTS:
+        msg = (
+            f"{where}: parts is {fixture.parts}; a split needs at least "
+            f"{_MIN_MULTIPART_PARTS}. A one-part 'split' is a copy of the "
+            f"target under a second name, which is not what the fixture means."
+        )
+        raise ManifestError(msg)
+
+
 _VALIDATORS: Final[Mapping[str, Any]] = MappingProxyType(
     {
         "tabular": _validate_tabular,
         "literal": _validate_literal,
         "literal_unicode": _validate_literal_unicode,
         "wrapper": _validate_wrapper,
+        "multipart": _validate_multipart,
     }
 )
 
@@ -519,6 +732,235 @@ def _validate_large_profile(fixture: Fixture, where: str) -> None:
         raise ManifestError(msg)
 
 
+def _declared_record_count(fixture: Fixture) -> int:
+    """Return the number of records a record-structured fixture emits."""
+    if fixture.generator == "tabular":
+        return 1 + fixture.rows
+    if fixture.generator == "literal_unicode":
+        return 1 + len(fixture.rows_spec)
+    msg = f"{fixture.name}: {fixture.generator!r} does not declare a record count"
+    raise ManifestError(msg)
+
+
+def character_boundaries(text: str, encoding: str) -> tuple[int, ...]:
+    """Return the byte offsets in ``text.encode(encoding)`` between characters.
+
+    Splicing raw bytes into the middle of a multi-byte character produces a file
+    that is corrupt in a way nobody declared, which is the opposite of a fixture
+    whose bytes mean something. This is the definition of a legal splice point,
+    and both the validator and the generator use it, so they cannot disagree.
+
+    Args:
+        text: The text that will be encoded.
+        encoding: The declared codec.
+
+    Returns:
+        Every legal offset, ascending, including 0 and the total length.
+    """
+    encoder = codecs.getincrementalencoder(encoding)("strict")
+    offsets = [0]
+    total = 0
+    for character in text:
+        total += len(encoder.encode(character))
+        offsets.append(total)
+    total += len(encoder.encode("", final=True))
+    if offsets[-1] != total:
+        offsets.append(total)
+    return tuple(offsets)
+
+
+def resolve_splice_offset(fixture: Fixture, splice: Splice) -> int:
+    """Resolve one splice to a byte offset in the fixture's encoded content.
+
+    Args:
+        fixture: The fixture the splice belongs to.
+        splice: The declared splice.
+
+    Returns:
+        The absolute byte offset the raw bytes are injected at.
+
+    Raises:
+        ManifestError: If a record-addressed splice names a record the content
+            does not have.
+    """
+    if splice.offset is not None:
+        return splice.offset
+
+    encoded = str(fixture.content).encode(fixture.encoding, "strict")
+    terminator = fixture.line_terminator.encode(fixture.encoding, "strict")
+    cursor = 0
+    for _ in range(int(splice.after_record or 0)):
+        found = encoded.find(terminator, cursor)
+        if found < 0:
+            msg = (
+                f"{fixture.name}: splice names after_record {splice.after_record}, "
+                f"but the content has fewer records than that."
+            )
+            raise ManifestError(msg)
+        cursor = found + len(terminator)
+    return cursor
+
+
+def _validate_byte_order_mark(fixture: Fixture, where: str) -> None:
+    """Reject a mark position that is absent, negative or past the last record."""
+    if fixture.bom_after_record == 0:
+        return
+    if not fixture.bom:
+        msg = (
+            f"{where}: bom_after_record is {fixture.bom_after_record} but bom is "
+            f"false. A position for a mark that is never written means the "
+            f"fixture does not do what its declaration says."
+        )
+        raise ManifestError(msg)
+    if fixture.generator not in _RECORD_STRUCTURED_KINDS:
+        known = ", ".join(_RECORD_STRUCTURED_KINDS)
+        msg = (
+            f"{where}: bom_after_record needs a fixture whose record count is "
+            f"declared ({known}), not {fixture.generator!r}."
+        )
+        raise ManifestError(msg)
+    if fixture.bom_after_record < 0:
+        msg = f"{where}: bom_after_record must not be negative"
+        raise ManifestError(msg)
+
+    records = _declared_record_count(fixture)
+    if fixture.bom_after_record >= records:
+        msg = (
+            f"{where}: bom_after_record is {fixture.bom_after_record}, but the "
+            f"fixture emits {records} record(s), so the mark would land at or "
+            f"past the end of the file. A mark with nothing after it tests "
+            f"nothing."
+        )
+        raise ManifestError(msg)
+
+
+def _validate_line_terminator_cycle(fixture: Fixture, where: str) -> None:
+    """Reject a terminator cycle on a kind that does not join records itself."""
+    if not fixture.line_terminators:
+        return
+    if fixture.generator not in _RECORD_STRUCTURED_KINDS:
+        known = ", ".join(_RECORD_STRUCTURED_KINDS)
+        msg = (
+            f"{where}: line_terminators needs a fixture that joins records "
+            f"itself ({known}), not {fixture.generator!r}. A literal fixture "
+            f"already carries its terminators in its content."
+        )
+        raise ManifestError(msg)
+
+
+def _validate_splices(fixture: Fixture, where: str) -> None:
+    """Reject splices that are unaddressable, misaligned or out of order."""
+    if not fixture.splices:
+        return
+    if fixture.generator != "literal":
+        msg = (
+            f"{where}: splices need a literal fixture, not {fixture.generator!r}. "
+            f"The injection point is checked against the encoded content, which "
+            f"only a literal fixture declares up front."
+        )
+        raise ManifestError(msg)
+    if fixture.bom:
+        msg = (
+            f"{where}: declares both bom and splices. Both insert bytes at "
+            f"declared positions, and 'is this offset measured before or after "
+            f"the mark?' is exactly the ambiguity a fixture must not carry."
+        )
+        raise ManifestError(msg)
+
+    content = str(fixture.content)
+    legal = frozenset(character_boundaries(content, fixture.encoding))
+    limit = max(legal)
+    previous = -1
+    for index, splice in enumerate(fixture.splices):
+        offset = resolve_splice_offset(fixture, splice)
+        splice_where = f"{where}: splices[{index}]"
+        if offset > limit:
+            msg = f"{splice_where}: offset {offset} is past the {limit}-byte encoded content"
+            raise ManifestError(msg)
+        if offset not in legal:
+            msg = (
+                f"{splice_where}: offset {offset} falls inside a multi-byte "
+                f"character. Splicing there corrupts a character nobody declared "
+                f"as corrupt; legal offsets are the character boundaries."
+            )
+            raise ManifestError(msg)
+        if offset <= previous:
+            msg = (
+                f"{splice_where}: offset {offset} is not after the previous "
+                f"splice at {previous}. Splices are applied in declared order, "
+                f"so overlapping or reordered offsets have no single meaning."
+            )
+            raise ManifestError(msg)
+        previous = offset
+
+
+def _validate_parts_scope(fixture: Fixture, where: str) -> None:
+    """Reject a split count on a fixture that emits exactly one file."""
+    if fixture.parts and fixture.generator != "multipart":
+        msg = (
+            f"{where}: parts is {fixture.parts} on a {fixture.generator!r} "
+            f"fixture, which emits one file. Only a multipart fixture splits."
+        )
+        raise ManifestError(msg)
+
+
+def _parse_splices(raw: object, *, where: str) -> tuple[Splice, ...]:
+    """Validate the declared raw-byte injections."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        msg = f"{where}: splices must be a non-empty list"
+        raise ManifestError(msg)
+
+    splices: list[Splice] = []
+    for index, entry in enumerate(raw):
+        splice_where = f"{where}: splices[{index}]"
+        data = _require_mapping(entry, splice_where)
+        _reject_extra_keys(data, _SPLICE_KEY_ORDER, splice_where)
+
+        addressed = [key for key in ("offset", "after_record") if data.get(key) is not None]
+        if len(addressed) != 1:
+            msg = (
+                f"{splice_where}: declare exactly one of offset or after_record "
+                f"(declared: {addressed or 'neither'})"
+            )
+            raise ManifestError(msg)
+
+        payload = _decode_raw_bytes(_require_str(data, "bytes", splice_where), splice_where)
+        if not payload:
+            msg = f"{splice_where}: bytes must not be empty"
+            raise ManifestError(msg)
+
+        offset = None if data.get("offset") is None else _require_int(data, "offset", splice_where)
+        after = (
+            None
+            if data.get("after_record") is None
+            else _require_int(data, "after_record", splice_where)
+        )
+        if (offset is not None and offset < 0) or (after is not None and after < 1):
+            msg = f"{splice_where}: offset must be >= 0 and after_record must be >= 1"
+            raise ManifestError(msg)
+        splices.append(Splice(raw=payload, offset=offset, after_record=after))
+    return tuple(splices)
+
+
+def _decode_raw_bytes(raw: str, where: str) -> bytes:
+    r"""Resolve an escaped literal into the exact bytes it names.
+
+    The result is never decoded as text: a fixture exists precisely because
+    these bytes are *not* valid text in the declared encoding. ``\xc3`` in the
+    manifest therefore has to become the single byte 0xC3 here.
+    """
+    try:
+        return raw.encode("utf-8").decode("unicode_escape").encode("latin-1")
+    except (UnicodeDecodeError, UnicodeEncodeError) as exc:
+        msg = (
+            f"{where}: bytes must be written as escapes over the 0x00-0xFF range "
+            f"(e.g. '\\xc3\\x28'); got {raw!r}: {exc}"
+        )
+        raise ManifestError(msg) from exc
+
+
 def _parse_row_spec(raw: object, *, where: str) -> Mapping[str, ColumnSpec]:
     """Validate the per-column generation spec, preserving declared order."""
     if raw is None:
@@ -552,6 +994,16 @@ def _parse_column(raw: object, *, where: str) -> ColumnSpec:
             msg = f"{where}: pick needs a non-empty values list"
             raise ManifestError(msg)
         return PickColumn(values=values)
+    if kind == "repeat":
+        character = _require_str(data, "char", where)
+        if len(character) != 1:
+            msg = f"{where}: char must be exactly one character, got {character!r}"
+            raise ManifestError(msg)
+        length = _require_int(data, "length", where)
+        if length < 1:
+            msg = f"{where}: length must be at least 1, got {length}"
+            raise ManifestError(msg)
+        return RepeatColumn(character=character, length=length)
 
     minimum = _require_decimal(data, "min", where)
     maximum = _require_decimal(data, "max", where)
