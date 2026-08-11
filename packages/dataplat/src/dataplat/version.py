@@ -36,3 +36,7 @@ def resolve_version(distribution: str = DISTRIBUTION_NAME) -> str:
         return distribution_version(distribution)
     except PackageNotFoundError:
         return UNKNOWN_VERSION
+
+
+def _gate_probe() -> None:
+    print("deliberate gate violation - T201")
