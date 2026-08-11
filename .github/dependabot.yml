@@ -1,0 +1,23 @@
+version: 2
+
+updates:
+  # Dependency CVEs arrive as pull requests that pass the same `make check`
+  # every other change passes.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Actions are pinned by commit SHA; Dependabot rewrites both the SHA and the
+  # trailing version comment, which is the only sustainable way to keep a
+  # SHA-pinned workflow current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(actions)"
