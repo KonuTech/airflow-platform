@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 7
 waived_count: 0
 fixed_count: 1
-total_count: 7
-last_updated: 2026-08-11T20:28:31.616Z
+total_count: 8
+last_updated: 2026-08-11T20:40:04.033Z
 ---
 
 # Broken Windows Ledger
@@ -22,6 +22,7 @@ last_updated: 2026-08-11T20:28:31.616Z
 | 5 | 01 | unmet-truth | tests/policy/test_ci_invokes_make_only.py |  | CR-review WR: regex for 'make gitleaks' also matches 'make gitleaks-selftest', so test_a_scanning_job_exists_at_all is satisfied by a workflow that runs only the self-test and never the real full-history scan. | open |  | 2026-08-11T20:28:31.466Z |  |
 | 6 | 01 | fixme | tools/corpus/generators.py |  | CR-review WR: _decimal_renderer renders negative decimals incorrectly (-1234 -> -13.66), affecting generated numeric fixture content. | open |  | 2026-08-11T20:28:31.541Z |  |
 | 7 | 01 | todo | .gitignore |  | CR-review WR-04: .gsd/ is untracked and unignored; it holds a run-scoped dispatch sentinel that will be swept into a commit during phase 2. Add .gsd/ to .gitignore. | open |  | 2026-08-11T20:28:31.616Z |  |
+| 8 | 01 | todo | Makefile |  | Phase 3 must wire tests/property, tests/integration and tests/e2e into a target that can provide testcontainers or a live cluster. make check names test paths explicitly, so a new test directory is silently uncollected until named — the defect that made QUAL-07 partial. Do not assume make check collects them. | open |  | 2026-08-11T20:40:04.033Z |  |
 
 ````json
 [
@@ -107,6 +108,18 @@ last_updated: 2026-08-11T20:28:31.616Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-11T20:28:31.616Z",
+    "resolved_at": null
+  },
+  {
+    "id": 8,
+    "kind": "todo",
+    "phase": "01",
+    "file": "Makefile",
+    "line": null,
+    "description": "Phase 3 must wire tests/property, tests/integration and tests/e2e into a target that can provide testcontainers or a live cluster. make check names test paths explicitly, so a new test directory is silently uncollected until named — the defect that made QUAL-07 partial. Do not assume make check collects them.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-11T20:40:04.033Z",
     "resolved_at": null
   }
 ]

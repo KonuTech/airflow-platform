@@ -59,8 +59,18 @@ typecheck:                     ## mypy strict (QUAL-01)
 imports:                       ## import-linter contracts
 	$(RUN) lint-imports
 
-test:                          ## unit tests, with a coverage report and no threshold
-	$(RUN) pytest tests/unit -q --cov --cov-report=term-missing
+test:                          ## unit + regression tests, coverage report, no threshold
+	# tests/regression is named EXPLICITLY alongside tests/unit. Naming only
+	# tests/unit left the regression tree uncollected by every gate: its
+	# provenance-enforcing conftest worked when invoked directly, but a
+	# regression test placed there would not have run in CI at all — the
+	# opposite of what a regression suite is for (QUAL-07).
+	#
+	# tests/property, tests/integration and tests/e2e are deliberately NOT
+	# here: they are empty today and will need testcontainers or a live
+	# cluster. Phase 3 must add them to a target that can provide those, and
+	# must not assume `make check` already collects them.
+	$(RUN) pytest tests/unit tests/regression -q --cov --cov-report=term-missing
 
 policy:                        ## repository policy tests (LOAD-12 ban, CI/Make parity)
 	$(RUN) pytest tests/policy -q
