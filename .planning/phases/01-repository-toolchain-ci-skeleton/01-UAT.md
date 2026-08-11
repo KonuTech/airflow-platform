@@ -8,11 +8,10 @@ updated: 2026-08-11T21:10:00Z
 
 ## Current Test
 
-number: 1
-name: Decide whether the gitleaks installer's trust anchor is acceptable (CR-03)
+number: 2
+name: Filename of tests/policy/test_secret_scan_depth.py (optional, blocks nothing)
 expected: |
-  Either pin the expected SHA-256 in the repository so the digest is independent
-  of the download origin, or accept the risk in writing.
+  Either split the file, or rename it to something like test_supply_chain_guards.py.
 awaiting: user response
 
 ## Tests
@@ -20,7 +19,41 @@ awaiting: user response
 ### 1. gitleaks installer trust anchor (CR-03)
 
 expected: A digest that is not fetched from the same origin as the artifact it validates — or a written risk acceptance.
-result: [pending]
+result: pass
+resolution: |
+  PINNED. The user delegated the decision. Chosen because (a) this project
+  already pins by digest elsewhere — `kindest/node:v1.35.5@sha256:ce977ae…` —
+  so leaving the credential scanner unpinned would be inconsistent with an
+  established convention; (b) the failure is unrecoverable, since a tampered
+  scanner reports "no leaks found" forever and a credential published to a
+  public repo can only be rotated, never withdrawn; and (c) the cost is one
+  constant per version bump.
+
+  Implemented: SHA-256 for all four supported platforms committed to
+  install_gitleaks.sh; the verification input is now BUILT from the in-repo pin
+  rather than filtered out of the downloaded checksums.txt. The release's own
+  checksums file is still consulted, but only as an advisory cross-check that
+  runs AFTER the authoritative comparison and can never substitute for it.
+
+  The second half of CR-03 is fixed too: the idempotent fast path no longer
+  executes `"${dest}" version` to decide whether to trust the binary. It
+  compares digests against the pin instead.
+
+  Observed, not asserted:
+    - correct pin -> installs, exit 0
+    - deliberately wrong pin -> exit 1, tools/bin/ left EMPTY
+    - planted shim reporting "8.30.1" and "no leaks found" -> REPLACED by the
+      real binary (the old code executed it, matched the version string, and
+      trusted it permanently)
+  Covered permanently by test_the_installer_trusts_only_an_in_repo_digest,
+  marked `regression`.
+
+  Honest limit, recorded rather than hidden: the digests were captured from the
+  published checksums at pin time, so this is trust-on-first-use. It cannot
+  prove the pinned bytes were authentic; it makes any later change detectable.
+  The stamp file in gitignored tools/bin/ is a cache key, not a trust anchor —
+  an attacker with local write access is out of scope for T-01-09, which
+  concerns the download.
 
 **What was observed.** `tools/security/install_gitleaks.sh` downloads
 `gitleaks_<version>_linux_x64.tar.gz` and `gitleaks_<version>_checksums.txt` from
@@ -57,9 +90,9 @@ fix before ten more phases accrete around it.
 ## Summary
 
 total: 2
-passed: 0
+passed: 1
 issues: 0
-pending: 2
+pending: 1
 skipped: 0
 blocked: 0
 

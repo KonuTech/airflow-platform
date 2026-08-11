@@ -229,3 +229,46 @@ def test_make_install_refuses_a_stale_lockfile() -> None:
         "silently rewritten before `lock-check` inspects it, and an unreviewed "
         "dependency resolution passes CI (CR-01)"
     )
+
+
+@pytest.mark.regression
+def test_the_installer_trusts_only_an_in_repo_digest() -> None:
+    """CR-03: the scanner's trust anchor must not come from the download origin.
+
+    Two defects, one fix. First, the release's `checksums.txt` was fetched from
+    the same URL prefix as the tarball it describes, so whoever could alter one
+    could alter the other — the digest caught corruption in transit but not
+    substitution at the source, which is the threat T-01-09 names. Second, an
+    already-present binary in the gitignored `tools/bin/` was EXECUTED to read
+    its version, so a once-planted binary was trusted forever and never
+    re-verified. Observed: a shim reporting `8.30.1` and `no leaks found` was
+    accepted by the old idempotent path; it is now replaced by the real binary.
+
+    Both are asserted structurally, because the behaviour needs a network
+    download that `make check` must not perform (ROADMAP criterion 4). The
+    behavioural proof was run by hand at fix time: a deliberately wrong pin
+    exited 1 with `tools/bin/` left empty.
+    """
+    text = (REPO_ROOT / INSTALLER).read_text(encoding="utf-8")
+    executable = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+    assert re.search(r"^PINNED_SHA256_\w+=", executable, re.MULTILINE), (
+        f"{INSTALLER} no longer pins any SHA-256 in-repo — the digest would come "
+        "from the same origin as the artifact it validates (CR-03)"
+    )
+
+    # The verified-against file must be BUILT from the pin, not filtered out of
+    # the downloaded checksums. `grep ... "${checksums}" > expected.sha256` was
+    # the origin-vouches-for-itself construction this replaced.
+    assert 'echo "${pinned}  ${tarball}" > expected.sha256' in executable, (
+        f"{INSTALLER} no longer builds its verification input from the in-repo "
+        "pin; a digest taken from the download cannot authenticate the download"
+    )
+
+    # The idempotent fast path must not run the binary to decide whether to
+    # trust it. Executing an unverified artifact IS the vulnerability.
+    assert '"${dest}" version' not in executable, (
+        f"{INSTALLER} executes the installed binary to decide whether to trust "
+        "it — a planted binary that lies about its version is then trusted "
+        "forever and never re-verified (CR-03)"
+    )

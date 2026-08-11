@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 7
+open_count: 6
 waived_count: 0
-fixed_count: 1
+fixed_count: 2
 total_count: 8
-last_updated: 2026-08-11T20:40:04.033Z
+last_updated: 2026-08-11T21:01:17.971Z
 ---
 
 # Broken Windows Ledger
@@ -17,7 +17,7 @@ last_updated: 2026-08-11T20:40:04.033Z
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
 | 1 | 01 | unrun-verify | tools/security/install_gitleaks.sh |  | Installer fail-closed path has only static ordering coverage (verify-before-extract); the corrupted-download behaviour is still uncovered by an automated test | open |  | 2026-08-11T17:46:09.436Z |  |
 | 2 | 01 | unrun-verify | docs/ci-branch-protection.md |  | Branch protection rule specified but NOT applied; no CI run ever observed. Environment denied git push and gh run list. CICD-01/CICD-02/SEC-02/SEC-10 remain open. | fixed |  | 2026-08-11T19:55:18.744Z | 2026-08-11T20:11:19.647Z |
-| 3 | 01 | unrun-verify | tools/security/install_gitleaks.sh |  | CR-03: gitleaks tarball and checksums.txt are fetched from the same base_url, so the digest catches transit corruption but not the source tampering threat T-01-09 names. Also an existing binary in gitignored tools/bin/ is EXECUTED to read its version before any verification. Fix: commit the per-platform SHA-256 as trust anchor; verify before executing. | open |  | 2026-08-11T20:28:22.993Z |  |
+| 3 | 01 | unrun-verify | tools/security/install_gitleaks.sh |  | CR-03: gitleaks tarball and checksums.txt are fetched from the same base_url, so the digest catches transit corruption but not the source tampering threat T-01-09 names. Also an existing binary in gitignored tools/bin/ is EXECUTED to read its version before any verification. Fix: commit the per-platform SHA-256 as trust anchor; verify before executing. | fixed |  | 2026-08-11T20:28:22.993Z | 2026-08-11T21:01:17.971Z |
 | 4 | 01 | unrun-verify | tests/regression/ |  | CR-review WR: tests/regression/ is run by NO Makefile target, so 01-04's QUAL-07 provenance-enforcing collection hook never executes in make check or make ci. Hook verified by hand but not wired into any gate. | open |  | 2026-08-11T20:28:31.390Z |  |
 | 5 | 01 | unmet-truth | tests/policy/test_ci_invokes_make_only.py |  | CR-review WR: regex for 'make gitleaks' also matches 'make gitleaks-selftest', so test_a_scanning_job_exists_at_all is satisfied by a workflow that runs only the self-test and never the real full-history scan. | open |  | 2026-08-11T20:28:31.466Z |  |
 | 6 | 01 | fixme | tools/corpus/generators.py |  | CR-review WR: _decimal_renderer renders negative decimals incorrectly (-1234 -> -13.66), affecting generated numeric fixture content. | open |  | 2026-08-11T20:28:31.541Z |  |
@@ -57,10 +57,10 @@ last_updated: 2026-08-11T20:40:04.033Z
     "file": "tools/security/install_gitleaks.sh",
     "line": null,
     "description": "CR-03: gitleaks tarball and checksums.txt are fetched from the same base_url, so the digest catches transit corruption but not the source tampering threat T-01-09 names. Also an existing binary in gitignored tools/bin/ is EXECUTED to read its version before any verification. Fix: commit the per-platform SHA-256 as trust anchor; verify before executing.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-08-11T20:28:22.993Z",
-    "resolved_at": null
+    "resolved_at": "2026-08-11T21:01:17.971Z"
   },
   {
     "id": 4,
