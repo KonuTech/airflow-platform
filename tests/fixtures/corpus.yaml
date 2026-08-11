@@ -43,6 +43,22 @@
 # nobody meant to write. A literal backslash is still written `\\`, because the
 # loader's escape resolution runs either way.
 #
+# Plan 01-08 adds the final seventeen: the semantic-damage cases where a value
+# arrives ALREADY DESTROYED by the system that exported it — numbers, dates,
+# nulls and booleans.
+#
+# THE CORPUS IS COMPLETE AS OF PHASE 1. All sixty-nine fixtures named across
+# README §73 (which lists 01-29) and .planning/research/FEATURES.md §3.4 (which
+# adds 30-70) are declared here: no gaps, no duplicates, no inventions. The
+# accounting is asserted, not claimed — see
+# tests/unit/test_corpus_semantic_fixtures.py, which compares the declared names
+# against the expected sixty-nine and fails on any of the three.
+#
+# "Complete" means complete against those two sources, NOT closed. README §73's
+# own wording is "grow the corpus as edge cases are discovered", and growth here
+# is one manifest entry plus one digest line. A case found in Phase 6 or in
+# production belongs in this file, not in a test module's private fixture.
+#
 # Declaration order is append-friendly on purpose. Existing entries are never
 # moved: a fixture inserted between two others adds one line to CORPUS.sha256,
 # whereas reordering them rewrites the oracle and makes review impossible.
@@ -2058,3 +2074,126 @@ fixtures:
       header_row_index: 0
       column_count: 3
       data_rows: 3
+
+  # --- null and boolean tokens: a contract decision, never a global rule ----
+  # The several textual conventions that mean "absent", plus the control that
+  # makes the fixture honest.
+  #
+  # Row 8 is that control. `NULL Industries` is a COMPANY NAME — it is data,
+  # not absence — and a reader that tests `"NULL" in value` instead of
+  # `value == "NULL"` destroys it silently. The mapping is exact-match against
+  # a declared token list, and the list is a contract decision: `NA` is the
+  # ISO 3166 country code for Namibia, so a dataset of countries must NOT
+  # declare it absent while a dataset of measurements probably must.
+  - name: "24_null_values.csv"
+    covers: [CSV-10, VALID-01, VALID-02]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount,note\n1,,100.00,the empty string\n2,NULL,200.00,the four letter token\n3,N/A,300.00,not applicable\n4,NA,400.00,the two letter token\n5,null,500.00,lower case\n6,-,600.00,a dash\n7,None,700.00,a Python repr that leaked into an export\n8,NULL Industries,800.00,a company name that contains the token\n'
+    expect:
+      detected_delimiter: ","
+      declared_null_tokens: ["", "NULL", "null", "N/A", "NA", "-", "None"]
+      matching_is_exact_never_substring: true
+      case_sensitivity_is_declared_not_assumed: true
+      contract_parameter: "csv.null_tokens"
+      absent_row_indices: [1, 2, 3, 4, 5, 6, 7]
+      literal_string_row_indices: [8]
+      row_8_value: "NULL Industries"
+      row_8_is_data_not_absent: true
+      substring_matching_would_destroy_row_8: true
+      the_token_list_is_a_contract_decision_not_a_universal_rule: true
+      a_reader_that_hardcodes_the_list_is_wrong_for_the_next_dataset: true
+      NA_is_also_the_iso_3166_country_code_for_namibia: true
+      a_country_dataset_must_not_declare_NA_absent: true
+      the_empty_string_is_one_token_among_several_not_a_special_case: true
+      values_are_exact_decimals_never_binary_floats: true
+      amounts: ["100.00", "200.00", "300.00", "400.00", "500.00", "600.00", "700.00", "800.00"]
+      header_row_index: 0
+      column_count: 4
+      data_rows: 8
+      rejected_rows: 0
+
+  # Booleans in four languages plus the single-letter forms. The mapping is
+  # locale-specific and declared; an UNMAPPED value is a rejection, never a
+  # default, because defaulting invents a fact the file never stated and a
+  # boolean has only two values so the invention is always 50% wrong.
+  #
+  # The letter `O` is the trap worth naming: it is French `Oui`, meaning TRUE,
+  # and it is one keystroke from the digit zero. A reader that folds it to
+  # zero-or-off INVERTS the record — and an inverted boolean is invisible to
+  # every row count, checksum and reconciliation total.
+  - name: "60_boolean_localized.csv"
+    covers: [CSV-10, VALID-01, VALID-02]
+    generator: literal
+    encoding: utf-8
+    content: 'id,flag,language,note\n1,Tak,pl,polish yes\n2,Nie,pl,polish no\n3,Ja,de,german yes\n4,Nein,de,german no\n5,O,fr,french single letter yes\n6,N,fr,french single letter no\n7,Y,en,english single letter yes\n8,Maybe,en,not in the declared mapping\n'
+    expect:
+      detected_delimiter: ","
+      declared_true_tokens: ["Tak", "Ja", "O", "Y"]
+      declared_false_tokens: ["Nie", "Nein", "N"]
+      languages_present: [pl, de, fr, en]
+      mapping_is_locale_specific_and_declared: true
+      contract_parameter: "csv.boolean_tokens"
+      true_row_indices: [1, 3, 5, 7]
+      false_row_indices: [2, 4, 6]
+      unmapped_row_indices: [8]
+      unmapped_value: "Maybe"
+      outcome_for_an_unmapped_value: rejected-record
+      quarantine_reason: "unmapped-boolean-token"
+      must_not_default_to_false: true
+      defaulting_an_unmapped_value_invents_a_fact_the_file_never_stated: true
+      a_boolean_has_two_values_so_a_default_is_always_half_wrong: true
+      the_letter_O_is_french_oui_and_means_true: true
+      mistaking_O_for_zero_or_off_inverts_the_record: true
+      an_inverted_boolean_is_invisible_to_every_row_count_and_checksum: true
+      single_letter_forms_collide_across_languages: true
+      header_row_index: 0
+      column_count: 4
+      data_rows: 8
+      rejected_rows: 1
+
+  # THE SUBTLEST DECLARATION IN THE CORPUS. A trailing field that is PRESENT
+  # AND EMPTY must stay distinguishable from one that is ABSENT.
+  #
+  # Row 1 ends with the delimiter, so `comment` is present and its value is the
+  # empty string: the source recorded nothing THERE. Row 2 does not, so
+  # `comment` is absent: the source did not record the field AT ALL. Those are
+  # different facts about the world, and the only evidence for which is the
+  # FIELD COUNT — the two rows are otherwise indistinguishable once parsed.
+  #
+  # Collapsing both to NULL destroys the distinction before anyone can act on
+  # it, which is the same rule 15_missing_columns encodes; row 2 is therefore a
+  # rejected record carrying the same quarantine reason, not a padded row.
+  - name: "70_empty_last_field_vs_null.csv"
+    covers: [CSV-10, VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,comment\n1,Kowalski,\n2,Nowak\n3,Wisniewski,ok\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      header_field_count: 3
+      field_count_by_row_index: { 0: 3, 1: 3, 2: 2, 3: 3 }
+      row_1_comment_state: present-and-empty
+      row_1_comment_value: ""
+      row_2_comment_state: absent
+      row_2_comment_value: null
+      row_3_comment_state: present-and-populated
+      row_3_comment_value: "ok"
+      present_and_empty_is_not_the_same_fact_as_absent: true
+      an_empty_string_means_the_source_recorded_nothing_there: true
+      absent_means_the_source_did_not_record_the_field_at_all: true
+      row_1_ends_with_the_delimiter_and_row_2_does_not: true
+      the_field_count_is_the_only_evidence_of_which: true
+      collapsing_both_to_null_destroys_the_distinction: true
+      the_distinction_cannot_be_recovered_once_collapsed: true
+      must_not_be_padded_with_null: true
+      outcome_row_1: accepted
+      outcome_row_2: rejected-record
+      quarantine_reason_row_2: "field-count-below-header"
+      consistent_with: "15_missing_columns.csv"
+      contract_parameter: "csv.empty_string_is_null"
+      whether_an_empty_string_becomes_null_is_a_contract_decision: true
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 1
