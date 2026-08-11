@@ -56,7 +56,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Adding a `print()` to library code, an untyped public function, or an undocumented public API fails CI.
   4. A developer clones the repo and runs `uv sync && make check` successfully with no cluster, no credentials and no network services.
   5. A scan of full git history reports zero secrets, and no CI job echoes a secret value into its log.
-**Plans**: 9 plans in 6 waves
+**Plans**: 9 plans in 7 waves
 
 Plans:
 - [ ] 01-01-PLAN.md — Tracer: one commit through the whole gate (uv workspace, Makefile, CI quality-gate job)

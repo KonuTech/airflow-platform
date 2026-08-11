@@ -1337,7 +1337,7 @@ Claims tagged `[ASSUMED]` in this document. Each needs user confirmation or a ve
 | A7 | Running the **full-history** gitleaks scan on every PR is affordable indefinitely — extrapolated from ~85 ms on a 3-commit repository | Code Examples → workflow | LOW. Degrades gradually and visibly; the documented split (diff on PRs, `--all` on main + schedule) is the remedy |
 | A8 | `python 3.12` is the only interpreter that will ever run the generator, so R2's cross-version guarantee is untested-but-relied-upon | Fixture Corpus → R2 | LOW-MEDIUM. The CPython guarantee is explicit. The R2 policy test is the insurance |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should QUAL-02 be enforced beyond docstring presence?**
    - What we know: ruff `D` proves presence and scopes correctly to public names [VERIFIED]. `D417` checks documented parameters under the Google convention.
@@ -1362,6 +1362,30 @@ Claims tagged `[ASSUMED]` in this document. Each needs user confirmation or a ve
 5. **Coverage threshold — now or later?**
    - What we know: CICD-05 (coverage reporting) is Phase 11, not Phase 1.
    - Recommendation: install `pytest-cov` and emit a report in Phase 1, but set **no failure threshold**. A threshold on a codebase that is ~95 % config files produces a meaningless number that people then game.
+
+### Resolutions
+
+All five questions were closed during planning, and the plans cite the resolutions inline. Recorded
+here so the section is not read as still-open work.
+
+| # | Resolution | Where it is implemented |
+|---|------------|-------------------------|
+| 1 | **Adopted as recommended.** Ship ruff `D` + `D417` in Phase 1; no second docstring tool. `pydoclint` stays a Phase-3 candidate, revisited when `dataplat/errors.py` gives it real `raise` statements to cross-check. The honest limit — presence is mechanical, quality is not — is recorded in `01-VALIDATION.md` and must not be marked green on a passing lint run | `01-01-PLAN.md` task 1 (ruff config, `D417` confirmed enabled under the Google convention); `01-05-PLAN.md` task 1 (the `missing_param_doc` bad sample proves it fires) |
+| 2 | **SUPERSEDED by user decision.** The recommendation was ~50 fixtures in Phase 1 with the ~19 plain-text semantic ones deferred to Phase 6. The developer decided during planning to author **all 69 in Phase 1**, so the corpus is complete before any implementation reads it. This also closes assumption **A6**: the scope split it hedged against no longer exists, and with it the risk that Phase 6 discovers a missing generator capability and has to re-baseline every digest. The cost is that Phase 1 is a nine-plan phase; that was accepted knowingly | `01-03-PLAN.md` (5 fixtures + the framework), `01-06-PLAN.md` (16 → 21), `01-07-PLAN.md` (31 → 52), `01-08-PLAN.md` (17 → 69, with a completeness assertion that fails on a gap or an invention) |
+| 3 | **Adopted as recommended.** `expect:` ships in Phase 1 with a permissive sub-schema: the outer manifest forbids unknown keys, `expect:` accepts them, so vocabulary fixed in Phases 6 and 8 is writable today without a model migration. The relaxation carries a comment explaining itself, because an unexplained relaxation is the one a later reader widens | `01-03-PLAN.md` task 1 (the model and the comment); `01-06-PLAN.md` task 2 |
+| 4 | **Adopted as recommended.** `airflow/dags/` is created with a `.gitkeep` in Phase 1; import-linter **contract 2** is deferred to Phase 4, when the first DAG makes it non-vacuous. Contract 1 (`dataplat` must not import `csv_processor`) ships now and is non-vacuous immediately | `01-01-PLAN.md` task 1 (`setup.cfg`, contract 1 only, with the deferral recorded as a comment) and task 2 (the directory) |
+| 5 | **Adopted as recommended.** `pytest-cov` is installed and the `test` target emits a report, with **no failure threshold**. CICD-05 lands in Phase 11 | `01-01-PLAN.md` task 1 (the `test` target) |
+
+**Related assumption also resolved: A4 (branch protection).** A4 recorded that requiring the
+`check` and `secrets` status checks is a repository setting that "cannot be verified from the
+working tree", and called for a `checkpoint:human-verify`. It is **resolved**: the developer made
+the repository public during planning, so the branch-protection API is reachable and the rule's
+*contents* are now read back automatically rather than attested by a human. Plan `01-09-PLAN.md`
+task 1 applies the rule through the API, asserts both required check names and `enforce_admins`,
+and records the applying and reversing commands in `docs/ci-branch-protection.md`. One claim
+remains genuinely human-only and stays that way — that a failing required check blocks the **merge
+button**, not merely the build — and it is carried as a `<human-check>` in `01-09` task 2 and in
+`01-VALIDATION.md` § Manual-Only Verifications.
 
 ## Sources
 

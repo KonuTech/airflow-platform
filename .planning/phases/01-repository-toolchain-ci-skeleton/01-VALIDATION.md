@@ -49,10 +49,11 @@ row is Wave 0 because the repository currently contains no source, test or confi
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 01-01/T1 | 01-01 | 1 | QUAL-01, QUAL-02, OBS-03, CICD-03, CICD-04 | T-01-03, T-01-04 | Exact-pinned gating tools from one lockfile; gate defined once | meta + unit | `uv sync --all-packages && make check` | ❌ W0 | ⬜ pending |
-| 01-01/T1 (LOAD-12) | 01-01 | 1 | QUAL-07 | T-01-04 | Architecture policy live before the code it governs | policy | `uv run --frozen pytest tests/policy/test_no_postgres_csv_parsing.py -q` | ❌ W0 | ⬜ pending |
+| 01-01/T1 | 01-01 | 1 | QUAL-01, QUAL-02, OBS-03, CICD-03, CICD-04 | T-01-03, T-01-04 | Exact-pinned gating tools from one lockfile; gate defined once | meta + unit | `uv sync && make check` | ❌ W0 | ⬜ pending |
+| 01-01/T1 (LOAD-12) | 01-01 | 1 | — (LOAD-12, enforced for Phase 4) | T-01-04 | Architecture policy live before the code it governs | policy | `uv run --frozen pytest tests/policy/test_no_postgres_csv_parsing.py -q` | ❌ W0 | ⬜ pending |
 | 01-01/T2 | 01-01 | 1 | — (structure) | — | Generated artifacts un-committable by construction | structural | `git ls-files tests/fixtures/csv` is empty; `make check` | ❌ W0 | ⬜ pending |
-| 01-01/T3 | 01-01 | 1 | CICD-01, CICD-02, SEC-10 | T-01-01, T-01-02, T-01-05 | SHA-pinned actions; least-privilege permissions; zero secret references | config | YAML parse assertion + `grep -Ec 'secrets\.' .github/workflows/ci.yml` | ❌ W0 | ⬜ pending |
+| 01-01/T3 | 01-01 | 1 | CICD-01, CICD-02, SEC-10 | T-01-01, T-01-02, T-01-05 | SHA-pinned actions; least-privilege permissions; zero secret references; workflow named `CI` | config | YAML parse assertion (`name == CI`, job display name `Quality gate`) + `grep -Ec 'secrets\.' .github/workflows/ci.yml` | ❌ W0 | ⬜ pending |
+| 01-01/T3 (PR template) | 01-01 | 1 | QUAL-07 | — | QUAL-07's review-time half: the regression-test checkbox no linter can replace | structural | `grep -q 'tests/regression/' .github/pull_request_template.md` | ❌ W0 | ⬜ pending |
 | 01-02/T1 | 01-02 | 2 | SEC-02 | T-01-08, T-01-09 | Checksum-verified scanner; path-and-prefix scoped allowlists | integration | `make gitleaks` | ❌ W0 | ⬜ pending |
 | 01-02/T2 | 01-02 | 2 | SEC-11 | T-01-11, T-01-08 | Scanner observed failing on non-vendor canaries; allowlist proven non-global | integration | `make gitleaks-selftest` | ❌ W0 | ⬜ pending |
 | 01-02/T3 | 01-02 | 2 | SEC-02, SEC-10 | T-01-10, T-01-12 | Full-history checkout; redaction on every invocation | config | YAML assertion on the `secrets` job + `make ci` | ❌ W0 | ⬜ pending |
@@ -65,23 +66,25 @@ row is Wave 0 because the repository currently contains no source, test or confi
 | 01-05/T1 | 01-05 | 3 | QUAL-01, QUAL-02, OBS-03, CICD-03, CICD-04 | T-01-23, T-01-28 | Every gate observed rejecting a bad sample and accepting a good one | meta | `uv run --frozen pytest tests/policy/test_gates_actually_fail.py -q` | ❌ W0 | ⬜ pending |
 | 01-05/T2 | 01-05 | 3 | CICD-02, CICD-03, CICD-04 | T-01-24, T-01-25 | CI delegates to make; pins agree; print-ban scope fixed | policy | `uv run --frozen pytest tests/policy/test_ci_invokes_make_only.py tests/policy/test_ci_calls_make_ci.py tests/policy/test_pinned_tool_versions_agree.py tests/policy/test_print_ban_scope.py -q` | ❌ W0 | ⬜ pending |
 | 01-05/T3 | 01-05 | 3 | SEC-02, SEC-10 | T-01-26, T-01-27 | Full-depth scan; mandatory redaction; empty secret set | policy | `uv run --frozen pytest tests/policy/test_secret_scan_depth.py tests/policy/test_workflow_secrets.py -q` | ❌ W0 | ⬜ pending |
-| 01-06/T1 | 01-06 | 3 | QUAL-08 | T-01-29 | New capability disturbs no existing byte | integration | `make fixtures-verify && git diff --exit-code tests/fixtures/CORPUS.sha256` | ❌ W0 | ⬜ pending |
-| 01-06/T2 | 01-06 | 3 | QUAL-08 | T-01-30, T-01-31 | Encoding and mark semantics asserted, not assumed | unit | `uv run --frozen pytest tests/unit/test_corpus_byte_level_fixtures.py -q` | ❌ W0 | ⬜ pending |
-| 01-06/T3 | 01-06 | 3 | QUAL-08 | T-01-32, T-01-33 | Deterministic archive and multipart output | integration + unit | `make fixtures && make fixtures-verify` + the byte-level module | ❌ W0 | ⬜ pending |
-| 01-07/T1 | 01-07 | 4 | QUAL-08 | T-01-35, T-01-36 | No ad-hoc generator special cases; detection declines rather than guesses | integration | `make fixtures-verify` + `git diff --stat tools/corpus/` empty | ❌ W0 | ⬜ pending |
-| 01-07/T2 | 01-07 | 4 | QUAL-08 | T-01-34 | Header layout declared, degenerate files distinguishable | integration | manifest count assertion + `make fixtures-verify` | ❌ W0 | ⬜ pending |
-| 01-07/T3 | 01-07 | 4 | QUAL-08 | T-01-34, T-01-37 | Row-shape anomalies asserted structurally | unit | `uv run --frozen pytest tests/unit/test_corpus_structural_fixtures.py -q` | ❌ W0 | ⬜ pending |
-| 01-08/T1 | 01-08 | 5 | QUAL-08 | T-01-38, T-01-40 | Unrecoverable damage declared as rejection; exact decimal expectations | integration | manifest count assertion + `make fixtures-verify` | ❌ W0 | ⬜ pending |
-| 01-08/T2 | 01-08 | 5 | QUAL-08 | T-01-39 | Explicit formats only; real zone transitions | unit | zone-resolution assertion + `uv run --frozen pytest tests/unit/test_corpus_semantic_fixtures.py -q` | ❌ W0 | ⬜ pending |
-| 01-08/T3 | 01-08 | 5 | QUAL-08 | T-01-41, T-01-42 | Corpus complete at 69 names, no gaps or inventions | unit | completeness assertion in `tests/unit/test_corpus_semantic_fixtures.py` | ❌ W0 | ⬜ pending |
-| 01-09/T1 | 01-09 | 6 | CICD-02, SEC-02 | T-01-43, T-01-44, T-01-45, T-01-46 | Required checks enforce the gate; no force push; scan green before publication | config read-back | `gh api "repos/{owner}/{repo}/branches/main/protection" --jq '.required_status_checks.contexts'` | ❌ W0 | ⬜ pending |
-| 01-09/T2 | 01-09 | 6 | CICD-01, SEC-10 | T-01-47 | A real run observed green with both jobs present | end-to-end | `gh run list --branch main --workflow CI --limit 1 --json conclusion` | ❌ W0 | ⬜ pending |
-| 01-09/T2 (manual) | 01-09 | 6 | CICD-02 | T-01-43 | A failing required check blocks the merge, not only the build | human-check | none — deliberately manual; see Manual-Only Verifications | ❌ W0 | ⬜ pending |
+| 01-06/T1 | 01-06 | 4 | QUAL-08 | T-01-29 | New capability disturbs no existing byte | integration | `make fixtures-verify && git diff --exit-code tests/fixtures/CORPUS.sha256` | ❌ W0 | ⬜ pending |
+| 01-06/T2 | 01-06 | 4 | QUAL-08 | T-01-30, T-01-31 | Encoding and mark semantics asserted, not assumed | unit | `uv run --frozen pytest tests/unit/test_corpus_byte_level_fixtures.py -q` | ❌ W0 | ⬜ pending |
+| 01-06/T3 | 01-06 | 4 | QUAL-08 | T-01-32, T-01-33 | Deterministic archive and multipart output | integration + unit | `make fixtures && make fixtures-verify` + the byte-level module | ❌ W0 | ⬜ pending |
+| 01-07/T1 | 01-07 | 5 | QUAL-08 | T-01-35, T-01-36 | No ad-hoc generator special cases; detection declines rather than guesses | integration | `make fixtures-verify` + `git diff --stat tools/corpus/` empty | ❌ W0 | ⬜ pending |
+| 01-07/T2 | 01-07 | 5 | QUAL-08 | T-01-34 | Header layout declared, degenerate files distinguishable | integration | manifest count assertion + `make fixtures-verify` | ❌ W0 | ⬜ pending |
+| 01-07/T3 | 01-07 | 5 | QUAL-08 | T-01-34, T-01-37 | Row-shape anomalies asserted structurally | unit | `uv run --frozen pytest tests/unit/test_corpus_structural_fixtures.py -q` | ❌ W0 | ⬜ pending |
+| 01-08/T1 | 01-08 | 6 | QUAL-08 | T-01-38, T-01-40 | Unrecoverable damage declared as rejection; exact decimal expectations | integration | manifest count assertion + `make fixtures-verify` | ❌ W0 | ⬜ pending |
+| 01-08/T2 | 01-08 | 6 | QUAL-08 | T-01-39 | Explicit formats only; real zone transitions | unit | zone-resolution assertion + `uv run --frozen pytest tests/unit/test_corpus_semantic_fixtures.py -q` | ❌ W0 | ⬜ pending |
+| 01-08/T3 | 01-08 | 6 | QUAL-08 | T-01-41, T-01-42 | Corpus complete at 69 names, no gaps or inventions | unit | completeness assertion in `tests/unit/test_corpus_semantic_fixtures.py` | ❌ W0 | ⬜ pending |
+| 01-09/T1 | 01-09 | 7 | CICD-02, SEC-02 | T-01-43, T-01-44, T-01-45, T-01-46 | Required checks enforce the gate; no force push; scan green before publication | config read-back | `gh api "repos/{owner}/{repo}/branches/main/protection" --jq '.required_status_checks.contexts'` | ❌ W0 | ⬜ pending |
+| 01-09/T1 (admin bypass) | 01-09 | 7 | CICD-02 | T-01-43b | Rule enforces without locking the sole maintainer out — `enforce_admins` stays false so phases 2–11 can commit | config read-back | `gh api "repos/{owner}/{repo}/branches/main/protection" --jq '.enforce_admins.enabled' \| grep -qx false` | ❌ W0 | ⬜ pending |
+| 01-09/T2 | 01-09 | 7 | CICD-01, SEC-10 | T-01-47 | A real run observed green with both jobs present | end-to-end | `gh run list --branch main --workflow CI --limit 1 --json conclusion` | ❌ W0 | ⬜ pending |
+| 01-09/T2 (manual) | 01-09 | 7 | CICD-02 | T-01-43 | A failing required check blocks the merge, not only the build | human-check | none — deliberately manual; see Manual-Only Verifications | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
 **Requirement coverage:** QUAL-01 (01-01/T1, 01-05/T1) · QUAL-02 (01-01/T1, 01-05/T1) ·
-QUAL-07 (01-01/T1-LOAD-12, 01-04/T1-T3) · QUAL-08 (01-03/T1-T3, 01-06, 01-07, 01-08) ·
+QUAL-07 (01-01/T3 pull-request checkbox — the review-time half; 01-04/T1-T3 — the mechanical half) ·
+QUAL-08 (01-03/T1-T3, 01-06, 01-07, 01-08) ·
 CICD-01 (01-01/T3, 01-09/T2) · CICD-02 (01-01/T3, 01-05/T2, 01-09/T1) · CICD-03 (01-01/T1, 01-05/T1-T2) ·
 CICD-04 (01-01/T1, 01-05/T1-T2) · SEC-02 (01-02/T1, 01-02/T3, 01-05/T3, 01-09/T1) ·
 SEC-10 (01-01/T3, 01-02/T3, 01-05/T3, 01-09/T2) · SEC-11 (01-02/T2) · OBS-03 (01-01/T1, 01-05/T1).
@@ -96,7 +99,7 @@ Condensed from `01-RESEARCH.md` § Validation Architecture. Full detail lives th
 |-------------|-----------|---------|
 | QUAL-01 type hints | mypy strict (flags enumerated individually — `strict=false` in `[[tool.mypy.overrides]]` is silently ignored by mypy 2.3.0) | every PR |
 | QUAL-02 docstrings | ruff `D` pydocstyle, scoped to public API | every PR — **partial**, presence not quality |
-| QUAL-07 regression tests | `tests/regression/` exists + policy documented | phase acceptance |
+| QUAL-07 regression tests | `tests/regression/` + the collection hook that rejects a provenance-less test (01-04); the pull-request checkbox for the judgement half (01-01/T3). The LOAD-12 policy test is **not** a QUAL-07 mechanism — it is an architecture ban landed early for Phase 4 | phase acceptance |
 | QUAL-08 fixture corpus | `make fixtures` + committed SHA-256 digest manifest | every PR |
 | CICD-01 GitHub Actions | workflow file present and running | every PR |
 | CICD-02 PR quality gate | required checks on PR | every PR |
@@ -138,6 +141,17 @@ repository public during planning, which unlocks the setting that previously ret
 error on a private personal-account repository. Plan 01-09 configures it through the API and
 records the applying and removing commands in `docs/ci-branch-protection.md`, so it is reproducible
 from the repository rather than from memory.
+
+**Note on admin bypass — a deliberate, locked shape, not an oversight.** The rule sets
+`enforce_admins: false`, `strict: false` and `required_approving_review_count: 0`. This project
+commits straight to the default branch (`branching_strategy: "none"`), so admin enforcement would
+refuse the owner's pushes and stop phases 2 through 11; and on a single-maintainer repository a
+positive approval count makes any pull request unmergeable, because an author cannot approve their
+own. What the rule still buys: a failing check blocks a pull-request merge, and force pushes and
+branch deletions are refused outright. What it knowingly does not buy: it cannot stop the owner
+pushing past a red gate — that residual is accepted and recorded as T-01-43b. The
+`enforce_admins` read-back is asserted so a future "obvious" tightening fails a check instead of
+silently halting the project.
 
 ---
 
