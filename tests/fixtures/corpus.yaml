@@ -1,0 +1,136 @@
+# tests/fixtures/corpus.yaml — COMMITTED. The only specification of the corpus.
+#
+# The corpus itself is generated, never committed (QUAL-08, ROADMAP criterion 2).
+# Two files are tracked: this manifest, which states what every fixture *means*,
+# and CORPUS.sha256, which is the oracle proving the bytes have not drifted.
+#
+# `make fixtures` materialises the corpus and rewrites the oracle.
+# `make fixtures-verify` regenerates into a temporary directory and only reads
+# the oracle. That asymmetry is what makes a generator change a reviewable diff.
+#
+# Pathological byte sequences live IN this file as escaped literals, so 100% of
+# tests/fixtures/csv/ stays generated. Splitting the corpus into committed and
+# generated halves would make the byte-identity claim only partly true, which is
+# the same as not making it.
+#
+# The `expect:` block is the important half: it is what makes "the corpus is the
+# specification" true rather than aspirational. Phase 6's detector tests are a
+# parametrised loop over these declarations, so a disagreement between a
+# fixture's declared meaning and the detector's behaviour is a test failure
+# rather than a judgement call.
+#
+# Phase 1 seeds five fixtures here — one per generator kind, plus the large
+# profile — so the framework is proven before plans 01-06, 01-07 and 01-08
+# author the remaining sixty-four.
+
+version: 1
+master_seed: "airflow-platform/corpus/v1"
+
+fixtures:
+  # --- tabular -------------------------------------------------------------
+  - name: "01_simple.csv"
+    covers: [CSV-04, CSV-07]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, amount]
+    rows: 20
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: ","
+      header_row_index: 0
+      data_rows: 20
+      rejected_rows: 0
+
+  # --- tabular, large profile ----------------------------------------------
+  # Generated on every gate run, never cached. A cache would be the only
+  # artifact in this system whose staleness could invalidate the reproducibility
+  # claim it exists to support, and it would save a few seconds.
+  #
+  # `rlimit_as_bytes` is the address-space ceiling the Phase 6 bounded-memory
+  # test runs the streaming reader under: a streaming parse must pass and a
+  # buffering parse must die. 128 MiB is the measured value that still leaves
+  # the interpreter its own ~30-50 MB of footprint. The manifest validator
+  # enforces `approx_bytes > 2 * rlimit_as_bytes`, because a file that merely
+  # exceeds the limit makes the assertion marginal rather than decisive.
+  - name: "29_large_file.csv"
+    covers: [LOAD-07]
+    generator: tabular
+    encoding: utf-8
+    delimiter: ","
+    line_terminator: "\n"
+    header: [id, name, amount]
+    rows: 11000000
+    profile: large
+    row_spec:
+      id: { kind: zero_padded_int, width: 8, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      approx_bytes: 293000000
+      rlimit_as_bytes: 134217728
+      data_rows: 11000000
+
+  # --- literal --------------------------------------------------------------
+  # VERIFIED on CPython 3.12.3: the stdlib CSV reader parses an embedded NUL
+  # without raising, and the byte survives inside the field. FEATURES.md §3.4
+  # states the opposite and is wrong. This matters because it moves the failure
+  # downstream: the NUL is not a parsing problem, it is a PostgreSQL problem —
+  # `text`/`varchar` cannot store U+0000. So the expectation below is a
+  # validation/quarantine outcome, not a parser exception. Planning for an
+  # exception that never arrives would leave NUL bytes to surface as an opaque
+  # psycopg error during COPY, attributable to no particular row.
+  - name: "32_nul_bytes.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: "id,name\n1,ab\\x00cd\n2,ok\n"
+    expect:
+      data_rows: 2
+      parser_raises: false
+      contains_nul_in_column: name
+      quarantine_reason: "nul-byte-in-text-field"
+
+  # --- literal_unicode ------------------------------------------------------
+  # The two names below are NOT pasted as visually identical strings: the
+  # generator applies unicodedata.normalize explicitly (R9), because editors,
+  # git filters and terminals silently collapse exactly the distinction this
+  # fixture exists to test.
+  - name: "44_unicode_nfc_vs_nfd.csv"
+    covers: [CSV-12, DEDUP-01]
+    generator: literal_unicode
+    encoding: utf-8
+    delimiter: ","
+    line_terminator: "\n"
+    rows_spec:
+      - id: "1"
+        name: { text: "Wiśniewski", form: NFC }
+      - id: "1"
+        name: { text: "Wiśniewski", form: NFD }
+    expect:
+      data_rows: 2
+      distinct_after_nfc_normalization: 1
+      distinct_before_normalization: 2
+
+  # --- wrapper --------------------------------------------------------------
+  # gzip_mtime and gzip_filename are non-negotiable (R5). gzip embeds the
+  # current wall-clock time and the source filename in its header; without both
+  # of these, two runs a second apart produce different bytes and this fixture
+  # fails verification on every machine, forever, for no visible reason.
+  - name: "61_gzipped.csv.gz"
+    covers: [CSV-11]
+    generator: wrapper
+    wraps: "01_simple.csv"
+    compression: gzip
+    gzip_mtime: 0
+    gzip_filename: ""
+    expect:
+      decompresses_to: "01_simple.csv"
+      data_rows: 20

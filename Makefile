@@ -12,6 +12,15 @@ RUN := $(UV) run --frozen
 # exist yet.
 TYPECHECK_PATHS := packages/dataplat/src packages/csv-processor/src $(wildcard tools)
 
+# `make fixtures FAST=1` skips the ~293 MB fixture for the inner development
+# loop. `make check` and CI never set it: a fast path that is also the default
+# is a fast path that silently stops testing the thing. A --fast run is also
+# forbidden from rewriting the oracle, because a partial oracle looks complete —
+# so FAST=1 drops --write-digests rather than passing a truncated listing.
+FAST ?=
+FIXTURES_FAST  := $(if $(FAST),--fast,)
+FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha256)
+
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean
 
@@ -51,14 +60,15 @@ test:                          ## unit tests, with a coverage report and no thre
 policy:                        ## repository policy tests (LOAD-12 ban, CI/Make parity)
 	$(RUN) pytest tests/policy -q
 
-fixtures:                      ## (re)generate the corpus + rewrite CORPUS.sha256 [plan 01-03]
+fixtures:                      ## (re)generate the corpus + rewrite CORPUS.sha256 (FAST=1 skips the large profile)
 	$(RUN) python -m tools.corpus generate --out tests/fixtures/csv \
 	                                       --manifest tests/fixtures/corpus.yaml \
-	                                       --write-digests tests/fixtures/CORPUS.sha256
+	                                       $(FIXTURES_WRITE)
 
-fixtures-verify:               ## QUAL-08: prove byte-identity against the oracle [plan 01-03]
+fixtures-verify:               ## QUAL-08: prove byte-identity against the oracle
 	$(RUN) python -m tools.corpus verify --manifest tests/fixtures/corpus.yaml \
-	                                     --digests tests/fixtures/CORPUS.sha256
+	                                     --digests tests/fixtures/CORPUS.sha256 \
+	                                     $(FIXTURES_FAST)
 
 gitleaks:                      ## SEC-02/SEC-11: full history + working tree [plan 01-02]
 	./tools/bin/gitleaks git --log-opts="--all" --redact --no-banner --exit-code 1 .
@@ -70,8 +80,9 @@ gitleaks-selftest:             ## SEC-11: prove the scanner actually fails a bui
 # `check` must never need the network: ROADMAP success criterion 4 is a clone
 # followed by `uv sync && make check` with no services running. That is why
 # `gitleaks` (which needs a downloaded binary) lives in `ci` and not here.
-# Plan 01-03 appends `fixtures-verify` once a corpus exists.
-check: uv-guard lock-check lint format typecheck imports policy test  ## Local gate
+# `fixtures-verify` regenerates the whole corpus into a temporary directory and
+# compares against the committed oracle — the QUAL-08 mechanism, on every run.
+check: uv-guard lock-check lint format typecheck imports policy test fixtures-verify  ## Local gate
 ci: check gitleaks gitleaks-selftest                                  ## CI gate (superset)
 
 clean:                         ## Remove the venv and every tool cache
