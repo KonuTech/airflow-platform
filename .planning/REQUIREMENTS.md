@@ -44,7 +44,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 ### SEC — Secrets Management and Workload Identity
 
 - [ ] **SEC-01**: A dedicated secrets-management solution is deployed and is the only source of runtime credentials — *(DoD 90)*
-- [ ] **SEC-02**: No secret exists anywhere in git history or the working tree — *(DoD 91)*
+- [x] **SEC-02**: No secret exists anywhere in git history or the working tree — *(DoD 91)*
 - [ ] **SEC-03**: No credential is hard-coded in Python source — *(DoD 92)*
 - [ ] **SEC-04**: No secret is baked into any container image — *(DoD 93)*
 - [ ] **SEC-05**: Airflow resolves connections through the Vault secrets backend, verified with the metadata-DB connection deleted and `AIRFLOW_CONN_*` unset — the backend fails open, so a test that skips this proves nothing — *(DoD 94)*
@@ -52,8 +52,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **SEC-07**: Workloads authenticate with least-privilege Kubernetes service-account identities, not a shared root token — *(DoD 96)*
 - [ ] **SEC-08**: Secret access is auditable — which workload read which path, when, and whether it succeeded — without logging secret values — *(DoD 97)*
 - [ ] **SEC-09**: Secret rotation is documented, including which credentials need a workload restart and which refresh dynamically — *(DoD 98)*
-- [ ] **SEC-10**: CI/CD holds no unnecessary long-lived credentials, and secrets are never printed during CI execution — *(DoD 99)*
-- [ ] **SEC-11**: Automated secret scanning runs in CI and fails the build on a detected credential — *(DoD 100)*
+- [x] **SEC-10**: CI/CD holds no unnecessary long-lived credentials, and secrets are never printed during CI execution — *(DoD 99)*
+- [x] **SEC-11**: Automated secret scanning runs in CI and fails the build on a detected credential — *(DoD 100)*
 - [ ] **SEC-12**: A negative test proves an unauthorized service account is *denied* access to another workload's secrets — if this test is awkward to write, the identity model is not real — *(DoD 101)*
 - [ ] **SEC-13**: Development secrets are clearly marked, never committed, isolated from production, and reproducible when rebuilding the local environment — *(DoD 102)*
 - [ ] **SEC-14**: The secrets architecture is documented end-to-end — injection mechanism, trust boundaries, and how a production secrets manager would substitute without application code changes — *(DoD 111)*
@@ -185,7 +185,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
 - [ ] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
 - [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
-- [ ] **QUAL-08**: A CSV edge-case fixture corpus exists, generated from a seed rather than committed en masse, and grows as cases are discovered — the corpus is the specification — *(DoD 82)*
+- [x] **QUAL-08**: A CSV edge-case fixture corpus exists, generated from a seed rather than committed en masse, and grows as cases are discovered — the corpus is the specification — *(DoD 82)*
 - [ ] **QUAL-09**: Idempotency is tested, including the assertion that a re-run produces zero additional rows — *(DoD 83)*
 - [ ] **QUAL-10**: Deduplication is tested within files, across files and across batches — *(DoD 84)*
 - [ ] **QUAL-11**: Backfills are tested for idempotency and historical schema resolution — *(DoD 85)*
@@ -198,8 +198,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### CICD — Continuous Integration and Delivery
 
-- [ ] **CICD-01**: GitHub Actions provides CI/CD — *(DoD 103)*
-- [ ] **CICD-02**: Pull requests automatically run the full quality gate — *(DoD 104)*
+- [x] **CICD-01**: GitHub Actions provides CI/CD — *(DoD 103)*
+- [x] **CICD-02**: Pull requests automatically run the full quality gate — *(DoD 104)*
 - [x] **CICD-03**: Linting runs automatically via ruff — *(DoD 105)*
 - [x] **CICD-04**: Type checking runs automatically via mypy — *(DoD 106)*
 - [ ] **CICD-05**: Unit, integration and E2E tests run automatically with coverage reporting — *(DoD 107)*
@@ -291,7 +291,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-10 | Phase 2 | Pending |
 | INFRA-11 | Phase 11 | Pending |
 | SEC-01 | Phase 5 | Pending |
-| SEC-02 | Phase 1 | Pending |
+| SEC-02 | Phase 1 | Complete |
 | SEC-03 | Phase 5 | Pending |
 | SEC-04 | Phase 5 | Pending |
 | SEC-05 | Phase 5 | Pending |
@@ -299,8 +299,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SEC-07 | Phase 5 | Pending |
 | SEC-08 | Phase 5 | Pending |
 | SEC-09 | Phase 5 | Pending |
-| SEC-10 | Phase 1 | Pending |
-| SEC-11 | Phase 1 | Pending |
+| SEC-10 | Phase 1 | Complete |
+| SEC-11 | Phase 1 | Complete |
 | SEC-12 | Phase 5 | Pending |
 | SEC-13 | Phase 5 | Pending |
 | SEC-14 | Phase 5 | Pending |
@@ -399,7 +399,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-05 | Phase 4 | Pending |
 | QUAL-06 | Phase 4 | Pending |
 | QUAL-07 | Phase 1 | Complete |
-| QUAL-08 | Phase 1 | Pending |
+| QUAL-08 | Phase 1 | Complete |
 | QUAL-09 | Phase 4 | Pending |
 | QUAL-10 | Phase 9 | Pending |
 | QUAL-11 | Phase 9 | Pending |
@@ -409,8 +409,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-15 | Phase 11 | Pending |
 | QUAL-16 | Phase 6 | Pending |
 | QUAL-17 | Phase 6 | Pending |
-| CICD-01 | Phase 1 | Pending |
-| CICD-02 | Phase 1 | Pending |
+| CICD-01 | Phase 1 | Complete |
+| CICD-02 | Phase 1 | Complete |
 | CICD-03 | Phase 1 | Complete |
 | CICD-04 | Phase 1 | Complete |
 | CICD-05 | Phase 11 | Pending |

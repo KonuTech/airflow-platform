@@ -32,7 +32,7 @@ first (D4); observability as an explicit stage (D5).
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Repository, Toolchain & CI Skeleton** - Gated repo from day one: uv, ruff, mypy, pytest, gitleaks in GitHub Actions, plus a seed-generated CSV fixture corpus
+- [x] **Phase 1: Repository, Toolchain & CI Skeleton** - Gated repo from day one: uv, ruff, mypy, pytest, gitleaks in GitHub Actions, plus a seed-generated CSV fixture corpus (completed 2026-08-11)
 - [ ] **Phase 2: kind Cluster & Core Infrastructure** - A destroyable/recreatable 3-node kind cluster running MinIO, two separate PostgreSQL clusters and Airflow 3.3, all from committed files
 - [ ] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster
 - [ ] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows
@@ -60,7 +60,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A developer clones the repo and runs `uv sync && make check` successfully with no cluster, no credentials and no network services.
   5. A scan of full git history reports zero secrets, and no CI job echoes a secret value into its log.
 
-**Plans**: 8/9 plans executed in 7 waves
+**Plans**: 9/9 plans executed in 7 waves
 
 Plans:
 **Wave 1**
@@ -91,7 +91,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 01-09-PLAN.md — Branch protection and end-to-end CI acceptance
+- [x] 01-09-PLAN.md — Branch protection and end-to-end CI acceptance
 
 **Cross-cutting constraints:**
 
@@ -477,7 +477,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Repository, Toolchain & CI Skeleton | 8/9 | In Progress|  |
+| 1. Repository, Toolchain & CI Skeleton | 9/9 | Complete    | 2026-08-11 |
 | 2. kind Cluster & Core Infrastructure | 0/TBD | Not started | - |
 | 3. `dataplat` Core Library & Metadata Control Plane | 0/TBD | Not started | - |
 | 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/TBD | Not started | - |
