@@ -75,7 +75,7 @@ jobs:
           # proves nothing. Verified by execution: a depth-1 checkout logs
           # "1 commits scanned". gitleaks prints that count on every run, so a
           # future regression here is visible in the job log, and plan 01-05's
-          # test_secret_scan_depth.py fails the build if this line disappears.
+          # test_supply_chain_guards.py fails the build if this line disappears.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
