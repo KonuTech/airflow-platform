@@ -102,12 +102,28 @@ uv run --frozen pytest tests/regression      # this directory
 uv run --frozen pytest -m regression         # the marked tests, wherever they live
 ```
 
-`make check` runs `tests/unit` and `tests/policy` explicitly and does not name
-this directory, so an empty regression tree cannot make the gate exit with
-pytest's "no tests collected" status. A bare `uv run --frozen pytest` collects
-`tests/` as a whole and is likewise unaffected.
+`make check` names this directory: its `test` target runs
+`pytest tests/unit tests/regression`. That was **not** true when this file was
+first written, and the omission was a real defect — the provenance rule below
+worked when pytest was pointed here directly, but no gate ever collected the
+directory, so a regression test placed here would not have run in CI at all.
+Phase 1 verification caught it; commit `e92ac5d` fixed it.
+
+Because `tests/unit` is named in the same invocation, an empty regression tree
+still cannot make the gate exit with pytest's "no tests collected" status. A
+bare `uv run --frozen pytest` collects `tests/` as a whole and is likewise
+unaffected.
 
 Running `pytest tests/regression` **on its own** while the directory is empty does
 report `no tests ran` and exits 5. That is pytest reporting the truth, and it is
 not papered over: an exit-code override in this conftest would have to mask the
 same status in the runs where it means something real.
+
+**The marker is the route for hardened-in-place tests.** Not every fixed bug
+earns a new file here. When the right permanent test is a *strengthened
+existing* test — because the original assertion was what let the bug through —
+harden it where it lives and tag it `@pytest.mark.regression`. That keeps
+`pytest -m regression` an honest inventory of every bug this project has
+promised never to reintroduce, wherever the test physically sits. A hardened
+assertion that carries no marker is invisible to that inventory, which is the
+same failure mode as an uncollected directory.

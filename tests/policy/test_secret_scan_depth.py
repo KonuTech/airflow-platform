@@ -32,6 +32,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -140,6 +141,7 @@ def test_removing_full_depth_is_reported() -> None:
     )
 
 
+@pytest.mark.regression
 def test_the_installer_verifies_before_it_extracts() -> None:
     """T-01-09: the scanner binary is fetched over the network, then executed.
 
@@ -180,4 +182,50 @@ def test_the_installer_verifies_before_it_extracts() -> None:
     assert verify < extract, (
         f"{INSTALLER} extracts the archive before verifying its checksum — the "
         "download must fail closed, with nothing written on mismatch"
+    )
+
+
+@pytest.mark.regression
+def test_make_install_refuses_a_stale_lockfile() -> None:
+    """CR-01: `make install` must not be able to rewrite `uv.lock`.
+
+    The bug: `install:` ran a bare `uv sync`, which *updates* a stale lockfile
+    rather than failing on it. CI runs `make install` before `make check`, and
+    `check` depends on `lock-check` (`uv lock --check`) — so by the time the
+    staleness gate ran, `uv sync` had already refreshed the very file it
+    inspects. Observed end to end: with a stale lock `uv lock --check` exited
+    1, `uv sync` rewrote the lock, and the same check then exited 0. A pull
+    request could change a dependency without regenerating the lock and still
+    go green, on a dependency resolution nobody reviewed.
+
+    `--locked` makes `uv sync` fail instead of resolving, so the lockfile
+    reaching `lock-check` is the one that was committed.
+
+    This asserts the flag rather than the behaviour, deliberately: reproducing
+    the behaviour needs a network resolve and a mutated `pyproject.toml`, which
+    does not belong in the offline `make check` path (ROADMAP criterion 4). The
+    flag is the whole fix, and dropping it is the plausible regression.
+    """
+    text = MAKEFILE.read_text(encoding="utf-8")
+
+    body = re.search(r"^install:.*?(?=^\S)", text, re.MULTILINE | re.DOTALL)
+    assert body, "Makefile no longer defines an `install:` target"
+
+    # Executable lines only — a `--locked` mentioned in the rationale comment
+    # above the recipe must not satisfy this. That exact comment-vs-code
+    # confusion is what made the T-01-09 ordering guard vacuous (CR-02).
+    recipe = "\n".join(
+        line for line in body.group(0).splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert "uv" in recipe, (
+        "`install:` no longer invokes uv — re-check this guard against the new recipe"
+    )
+    assert "sync" in recipe, (
+        "`install:` no longer runs `uv sync` — re-check this guard against the new recipe"
+    )
+    assert "--locked" in recipe, (
+        "`make install` runs `uv sync` WITHOUT `--locked`, so a stale uv.lock is "
+        "silently rewritten before `lock-check` inspects it, and an unreviewed "
+        "dependency resolution passes CI (CR-01)"
     )
