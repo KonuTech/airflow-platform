@@ -1,5 +1,5 @@
 ---
-status: testing
+status: complete
 phase: 01-repository-toolchain-ci-skeleton
 source: [01-VERIFICATION.md]
 started: 2026-08-11T21:10:00Z
@@ -8,11 +8,7 @@ updated: 2026-08-11T21:10:00Z
 
 ## Current Test
 
-number: 2
-name: Filename of tests/policy/test_secret_scan_depth.py (optional, blocks nothing)
-expected: |
-  Either split the file, or rename it to something like test_supply_chain_guards.py.
-awaiting: user response
+none — all tests complete
 
 ## Tests
 
@@ -76,7 +72,22 @@ Recorded in `.planning/WINDOWS.md`.
 ### 2. Filename of `tests/policy/test_secret_scan_depth.py` (optional, blocks nothing)
 
 expected: Either split the file, or rename it to something like `test_supply_chain_guards.py`.
-result: [pending]
+result: pass
+resolution: |
+  RENAMED to `tests/policy/test_supply_chain_guards.py` (git mv, history
+  preserved). Renamed rather than split: the four guards defend one claim — that
+  the secret scan is real and cannot be quietly neutered — so splitting them
+  would scatter a single argument across files. The module docstring now states
+  that claim and lists what each guard protects.
+
+  Nothing in code, config or the Makefile referenced the old filename, so the
+  rename is inert. The remaining references live in `.planning/` artifacts
+  (01-02-PLAN, 01-05-PLAN, 01-REVIEW) and were deliberately NOT rewritten: those
+  are historical records of what was true when written, and editing them to
+  match today would falsify the record. This note is the forwarding pointer —
+  `test_secret_scan_depth.py` is now `test_supply_chain_guards.py`.
+
+  `make ci` green after the rename; `pytest -m regression` still selects 3.
 
 The file now holds three unrelated guards: the original full-history scan-depth
 assertions, the installer verify-before-extract ordering guard (CR-02), and the
@@ -90,9 +101,9 @@ fix before ten more phases accrete around it.
 ## Summary
 
 total: 2
-passed: 1
+passed: 2
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 

@@ -1,4 +1,21 @@
-"""SEC-02: the secret scan must see the whole history, not one commit.
+"""Guards on the supply chain that keeps credentials out of this repository.
+
+Three unrelated things are asserted here because they defend one claim — that
+the secret scan is real and cannot be quietly neutered:
+
+* SEC-02: the scan sees the whole history, not one commit (below).
+* T-01-09 / CR-02: the scanner binary is verified BEFORE it is extracted.
+* CR-03: its trust anchor is pinned in this repository, and the installed
+  binary is never executed to decide whether to trust it.
+* CR-01: `make install` cannot rewrite a stale `uv.lock` out from under
+  `lock-check`.
+
+The last three arrived as fixes for bugs found during Phase 1 review and
+verification, and each carries `@pytest.mark.regression` so
+`pytest -m regression` is an honest inventory of what this project has promised
+not to reintroduce.
+
+SEC-02: the secret scan must see the whole history, not one commit.
 
 This is not a style rule. `actions/checkout` defaults to `fetch-depth: 1`, and
 `gitleaks git --log-opts="--all"` over a depth-1 checkout examines a single
