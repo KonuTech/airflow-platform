@@ -1,0 +1,9 @@
+# Written in Phase 1 although the first Dockerfile lands in Phase 4: without it
+# the first `docker build` uploads the whole generated fixture tree as build
+# context, and any fixture change busts every layer cache.
+tests/
+.planning/
+.git/
+docs/
+.venv/
+tools/bin/
