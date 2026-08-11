@@ -258,19 +258,176 @@ Explicitly excluded, with reasoning, to prevent scope creep.
 
 ## Traceability
 
-Populated during roadmap creation. Each requirement maps to exactly one phase.
+Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
+
+**Phase legend:**
+
+- **Phase 1** — Repository, Toolchain & CI Skeleton
+- **Phase 2** — kind Cluster & Core Infrastructure
+- **Phase 3** — `dataplat` Core Library & Metadata Control Plane
+- **Phase 4** — Vertical Slice — CSV to Analytical PostgreSQL
+- **Phase 5** — Vault Secrets & Workload Identity
+- **Phase 6** — Universal CSV Engine, Schema Contracts & Normalization
+- **Phase 7** — Observability, Metrics, Tracing & Lineage
+- **Phase 8** — Validation, Quarantine & Metadata Control-Plane Completion
+- **Phase 9** — ETL Correctness — Dedup, Incremental, Backfill & Recovery
+- **Phase 10** — CDC & Slowly Changing Dimensions
+- **Phase 11** — CI/CD Completion & Operations
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| *(pending roadmap creation)* | — | Pending |
+| META-01 | Phase 3 | Pending |
+| META-02 | Phase 3 | Pending |
+| META-03 | Phase 4 | Pending |
+| INFRA-01 | Phase 2 | Pending |
+| INFRA-02 | Phase 2 | Pending |
+| INFRA-03 | Phase 2 | Pending |
+| INFRA-04 | Phase 2 | Pending |
+| INFRA-05 | Phase 2 | Pending |
+| INFRA-06 | Phase 5 | Pending |
+| INFRA-07 | Phase 2 | Pending |
+| INFRA-08 | Phase 3 | Pending |
+| INFRA-09 | Phase 2 | Pending |
+| INFRA-10 | Phase 2 | Pending |
+| INFRA-11 | Phase 11 | Pending |
+| SEC-01 | Phase 5 | Pending |
+| SEC-02 | Phase 1 | Pending |
+| SEC-03 | Phase 5 | Pending |
+| SEC-04 | Phase 5 | Pending |
+| SEC-05 | Phase 5 | Pending |
+| SEC-06 | Phase 5 | Pending |
+| SEC-07 | Phase 5 | Pending |
+| SEC-08 | Phase 5 | Pending |
+| SEC-09 | Phase 5 | Pending |
+| SEC-10 | Phase 1 | Pending |
+| SEC-11 | Phase 1 | Pending |
+| SEC-12 | Phase 5 | Pending |
+| SEC-13 | Phase 5 | Pending |
+| SEC-14 | Phase 5 | Pending |
+| SEC-15 | Phase 3 | Pending |
+| ORCH-01 | Phase 4 | Pending |
+| ORCH-02 | Phase 4 | Pending |
+| ORCH-03 | Phase 4 | Pending |
+| ORCH-04 | Phase 4 | Pending |
+| ORCH-05 | Phase 4 | Pending |
+| ORCH-06 | Phase 4 | Pending |
+| ORCH-07 | Phase 4 | Pending |
+| ORCH-08 | Phase 4 | Pending |
+| ORCH-09 | Phase 4 | Pending |
+| CSV-01 | Phase 6 | Pending |
+| CSV-02 | Phase 6 | Pending |
+| CSV-03 | Phase 6 | Pending |
+| CSV-04 | Phase 6 | Pending |
+| CSV-05 | Phase 6 | Pending |
+| CSV-06 | Phase 6 | Pending |
+| CSV-07 | Phase 6 | Pending |
+| CSV-08 | Phase 6 | Pending |
+| CSV-09 | Phase 6 | Pending |
+| CSV-10 | Phase 6 | Pending |
+| CSV-11 | Phase 6 | Pending |
+| CSV-12 | Phase 6 | Pending |
+| CSV-13 | Phase 3 | Pending |
+| SCHEMA-01 | Phase 6 | Pending |
+| SCHEMA-02 | Phase 6 | Pending |
+| SCHEMA-03 | Phase 6 | Pending |
+| SCHEMA-04 | Phase 6 | Pending |
+| SCHEMA-05 | Phase 6 | Pending |
+| SCHEMA-06 | Phase 6 | Pending |
+| SCHEMA-07 | Phase 3 | Pending |
+| VALID-01 | Phase 8 | Pending |
+| VALID-02 | Phase 8 | Pending |
+| VALID-03 | Phase 8 | Pending |
+| VALID-04 | Phase 8 | Pending |
+| VALID-05 | Phase 9 | Pending |
+| VALID-06 | Phase 9 | Pending |
+| VALID-07 | Phase 8 | Pending |
+| VALID-08 | Phase 8 | Pending |
+| VALID-09 | Phase 8 | Pending |
+| LOAD-01 | Phase 4 | Pending |
+| LOAD-02 | Phase 4 | Pending |
+| LOAD-03 | Phase 4 | Pending |
+| LOAD-04 | Phase 4 | Pending |
+| LOAD-05 | Phase 4 | Pending |
+| LOAD-06 | Phase 9 | Pending |
+| LOAD-07 | Phase 6 | Pending |
+| LOAD-08 | Phase 4 | Pending |
+| LOAD-09 | Phase 4 | Pending |
+| LOAD-10 | Phase 8 | Pending |
+| LOAD-11 | Phase 8 | Pending |
+| LOAD-12 | Phase 4 | Pending |
+| DEDUP-01 | Phase 9 | Pending |
+| DEDUP-02 | Phase 9 | Pending |
+| DEDUP-03 | Phase 9 | Pending |
+| DEDUP-04 | Phase 9 | Pending |
+| INCR-01 | Phase 9 | Pending |
+| INCR-02 | Phase 9 | Pending |
+| INCR-03 | Phase 9 | Pending |
+| INCR-04 | Phase 9 | Pending |
+| INCR-05 | Phase 9 | Pending |
+| INCR-06 | Phase 9 | Pending |
+| INCR-07 | Phase 11 | Pending |
+| INCR-08 | Phase 4 | Pending |
+| CDC-01 | Phase 10 | Pending |
+| CDC-02 | Phase 10 | Pending |
+| CDC-03 | Phase 10 | Pending |
+| SCD-01 | Phase 10 | Pending |
+| SCD-02 | Phase 10 | Pending |
+| SCD-03 | Phase 10 | Pending |
+| SCD-04 | Phase 10 | Pending |
+| SCD-05 | Phase 10 | Pending |
+| SCD-06 | Phase 10 | Pending |
+| SCD-07 | Phase 10 | Pending |
+| SCD-08 | Phase 10 | Pending |
+| SCD-09 | Phase 10 | Pending |
+| SCD-10 | Phase 10 | Pending |
+| SCD-11 | Phase 10 | Pending |
+| SCD-12 | Phase 10 | Pending |
+| OBS-01 | Phase 7 | Pending |
+| OBS-02 | Phase 3 | Pending |
+| OBS-03 | Phase 1 | Pending |
+| OBS-04 | Phase 3 | Pending |
+| OBS-05 | Phase 3 | Pending |
+| OBS-06 | Phase 11 | Pending |
+| OBS-07 | Phase 7 | Pending |
+| OBS-08 | Phase 7 | Pending |
+| OBS-09 | Phase 7 | Pending |
+| OBS-10 | Phase 7 | Pending |
+| QUAL-01 | Phase 1 | Pending |
+| QUAL-02 | Phase 1 | Pending |
+| QUAL-03 | Phase 3 | Pending |
+| QUAL-04 | Phase 6 | Pending |
+| QUAL-05 | Phase 4 | Pending |
+| QUAL-06 | Phase 4 | Pending |
+| QUAL-07 | Phase 1 | Pending |
+| QUAL-08 | Phase 1 | Pending |
+| QUAL-09 | Phase 4 | Pending |
+| QUAL-10 | Phase 9 | Pending |
+| QUAL-11 | Phase 9 | Pending |
+| QUAL-12 | Phase 6 | Pending |
+| QUAL-13 | Phase 10 | Pending |
+| QUAL-14 | Phase 10 | Pending |
+| QUAL-15 | Phase 11 | Pending |
+| QUAL-16 | Phase 6 | Pending |
+| QUAL-17 | Phase 6 | Pending |
+| CICD-01 | Phase 1 | Pending |
+| CICD-02 | Phase 1 | Pending |
+| CICD-03 | Phase 1 | Pending |
+| CICD-04 | Phase 1 | Pending |
+| CICD-05 | Phase 11 | Pending |
+| CICD-06 | Phase 11 | Pending |
+| CICD-07 | Phase 2 | Pending |
+| CICD-08 | Phase 11 | Pending |
+| CICD-09 | Phase 11 | Pending |
 
 **Coverage:**
 - v1 requirements: 142 total (114 README §94 DoD + 16 specification gaps + 12 research-derived constraints)
-- Mapped to phases: 0
-- Unmapped: 142 ⚠️ — resolved by `gsd-roadmapper`
+- Mapped to phases: 142 ✓
+- Unmapped: 0 ✓ — no orphans, no duplicates (validated during roadmap creation)
 
 **Per-category counts:** QUAL 17 · SEC 15 · CSV 13 · SCD 12 · LOAD 12 · INFRA 11 · OBS 10 · VALID 9 · ORCH 9 · CICD 9 · INCR 8 · SCHEMA 7 · DEDUP 4 · META 3 · CDC 3
 
+**Per-phase counts:** P1 12 · P2 9 · P3 10 · P4 22 · P5 12 · P6 23 · P7 5 · P8 9 · P9 15 · P10 17 · P11 8 = 142
+
 ---
 *Requirements defined: 2026-08-11*
-*Last updated: 2026-08-11 after initial definition*
+*Last updated: 2026-08-11 after roadmap creation — traceability populated*
