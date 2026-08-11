@@ -56,7 +56,18 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Adding a `print()` to library code, an untyped public function, or an undocumented public API fails CI.
   4. A developer clones the repo and runs `uv sync && make check` successfully with no cluster, no credentials and no network services.
   5. A scan of full git history reports zero secrets, and no CI job echoes a secret value into its log.
-**Plans**: TBD
+**Plans**: 9 plans in 6 waves
+
+Plans:
+- [ ] 01-01-PLAN.md — Tracer: one commit through the whole gate (uv workspace, Makefile, CI quality-gate job)
+- [ ] 01-02-PLAN.md — Secret scanning: scoped allowlists, full-history job, and the negative proof
+- [ ] 01-03-PLAN.md — Corpus generator: determinism framework and the committed digest oracle
+- [ ] 01-04-PLAN.md — ADRs 0001–0005 and the regression-test policy
+- [ ] 01-05-PLAN.md — Policy tests: every gate observed to fail, CI/local parity, gate-strength drift
+- [ ] 01-06-PLAN.md — Fixture corpus I: byte-level-hard (16 fixtures, 21 of 69 cumulative)
+- [ ] 01-07-PLAN.md — Fixture corpus II: structural, dialect and header (31 fixtures, 52 of 69)
+- [ ] 01-08-PLAN.md — Fixture corpus III: semantic and type damage (17 fixtures, 69 of 69 — complete)
+- [ ] 01-09-PLAN.md — Branch protection and end-to-end CI acceptance
 
 **Research stage**: S0. **Skip `--research-phase`** — STACK.md pins ruff `0.16.2`, mypy `2.3.0`, pytest `9.1.1`, uv `0.12.3` and gitleaks `8.30.1` with commands.
 

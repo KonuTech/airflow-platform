@@ -43,13 +43,48 @@ created: 2026-08-11
 
 ## Per-Task Verification Map
 
-Populated by the planner. Each of the 12 phase requirements must appear against at least one task.
+Seeded by the planner; statuses are filled in during execution and finalised by plan 01-09 task 2.
+All 12 phase requirements appear below. `File Exists` is the state **before** the phase runs — every
+row is Wave 0 because the repository currently contains no source, test or configuration file.
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| *(pending planner)* | — | — | — | — | — | — | — | ❌ W0 | ⬜ pending |
+| 01-01/T1 | 01-01 | 1 | QUAL-01, QUAL-02, OBS-03, CICD-03, CICD-04 | T-01-03, T-01-04 | Exact-pinned gating tools from one lockfile; gate defined once | meta + unit | `uv sync --all-packages && make check` | ❌ W0 | ⬜ pending |
+| 01-01/T1 (LOAD-12) | 01-01 | 1 | QUAL-07 | T-01-04 | Architecture policy live before the code it governs | policy | `uv run --frozen pytest tests/policy/test_no_postgres_csv_parsing.py -q` | ❌ W0 | ⬜ pending |
+| 01-01/T2 | 01-01 | 1 | — (structure) | — | Generated artifacts un-committable by construction | structural | `git ls-files tests/fixtures/csv` is empty; `make check` | ❌ W0 | ⬜ pending |
+| 01-01/T3 | 01-01 | 1 | CICD-01, CICD-02, SEC-10 | T-01-01, T-01-02, T-01-05 | SHA-pinned actions; least-privilege permissions; zero secret references | config | YAML parse assertion + `grep -Ec 'secrets\.' .github/workflows/ci.yml` | ❌ W0 | ⬜ pending |
+| 01-02/T1 | 01-02 | 2 | SEC-02 | T-01-08, T-01-09 | Checksum-verified scanner; path-and-prefix scoped allowlists | integration | `make gitleaks` | ❌ W0 | ⬜ pending |
+| 01-02/T2 | 01-02 | 2 | SEC-11 | T-01-11, T-01-08 | Scanner observed failing on non-vendor canaries; allowlist proven non-global | integration | `make gitleaks-selftest` | ❌ W0 | ⬜ pending |
+| 01-02/T3 | 01-02 | 2 | SEC-02, SEC-10 | T-01-10, T-01-12 | Full-history checkout; redaction on every invocation | config | YAML assertion on the `secrets` job + `make ci` | ❌ W0 | ⬜ pending |
+| 01-03/T1 | 01-03 | 2 | QUAL-08 | T-01-13 | Safe deserialisation into a closed, frozen model | unit | `uv run --frozen pytest tests/unit/test_corpus_manifest.py -q` | ❌ W0 | ⬜ pending |
+| 01-03/T2 | 01-03 | 2 | QUAL-08 | T-01-14, T-01-17 | Committed oracle; regeneration never rewrites it | integration | `make fixtures && make fixtures-verify` | ❌ W0 | ⬜ pending |
+| 01-03/T3 | 01-03 | 2 | QUAL-08 | T-01-15, T-01-18 | Determinism rules enforced by source inspection and by consequence | policy | `uv run --frozen pytest tests/policy -q` | ❌ W0 | ⬜ pending |
+| 01-04/T1 | 01-04 | 2 | QUAL-07 | T-01-19 | Decision format and numbering fixed before the first record | structural | `grep -q 'Migration trigger' docs/adr/0000-template.md` | ❌ W0 | ⬜ pending |
+| 01-04/T2 | 01-04 | 2 | QUAL-07 | T-01-19, T-01-21 | Every taken decision recorded with alternatives and a reversal trigger | structural | trigger-presence loop over `docs/adr/000[1-5]-*.md` | ❌ W0 | ⬜ pending |
+| 01-04/T3 | 01-04 | 2 | QUAL-07 | T-01-20, T-01-22 | Bug provenance enforced at collection time | policy (negative) | provenance-less module under `tests/regression/` makes `pytest tests/regression` exit non-zero | ❌ W0 | ⬜ pending |
+| 01-05/T1 | 01-05 | 3 | QUAL-01, QUAL-02, OBS-03, CICD-03, CICD-04 | T-01-23, T-01-28 | Every gate observed rejecting a bad sample and accepting a good one | meta | `uv run --frozen pytest tests/policy/test_gates_actually_fail.py -q` | ❌ W0 | ⬜ pending |
+| 01-05/T2 | 01-05 | 3 | CICD-02, CICD-03, CICD-04 | T-01-24, T-01-25 | CI delegates to make; pins agree; print-ban scope fixed | policy | `uv run --frozen pytest tests/policy/test_ci_invokes_make_only.py tests/policy/test_ci_calls_make_ci.py tests/policy/test_pinned_tool_versions_agree.py tests/policy/test_print_ban_scope.py -q` | ❌ W0 | ⬜ pending |
+| 01-05/T3 | 01-05 | 3 | SEC-02, SEC-10 | T-01-26, T-01-27 | Full-depth scan; mandatory redaction; empty secret set | policy | `uv run --frozen pytest tests/policy/test_secret_scan_depth.py tests/policy/test_workflow_secrets.py -q` | ❌ W0 | ⬜ pending |
+| 01-06/T1 | 01-06 | 3 | QUAL-08 | T-01-29 | New capability disturbs no existing byte | integration | `make fixtures-verify && git diff --exit-code tests/fixtures/CORPUS.sha256` | ❌ W0 | ⬜ pending |
+| 01-06/T2 | 01-06 | 3 | QUAL-08 | T-01-30, T-01-31 | Encoding and mark semantics asserted, not assumed | unit | `uv run --frozen pytest tests/unit/test_corpus_byte_level_fixtures.py -q` | ❌ W0 | ⬜ pending |
+| 01-06/T3 | 01-06 | 3 | QUAL-08 | T-01-32, T-01-33 | Deterministic archive and multipart output | integration + unit | `make fixtures && make fixtures-verify` + the byte-level module | ❌ W0 | ⬜ pending |
+| 01-07/T1 | 01-07 | 4 | QUAL-08 | T-01-35, T-01-36 | No ad-hoc generator special cases; detection declines rather than guesses | integration | `make fixtures-verify` + `git diff --stat tools/corpus/` empty | ❌ W0 | ⬜ pending |
+| 01-07/T2 | 01-07 | 4 | QUAL-08 | T-01-34 | Header layout declared, degenerate files distinguishable | integration | manifest count assertion + `make fixtures-verify` | ❌ W0 | ⬜ pending |
+| 01-07/T3 | 01-07 | 4 | QUAL-08 | T-01-34, T-01-37 | Row-shape anomalies asserted structurally | unit | `uv run --frozen pytest tests/unit/test_corpus_structural_fixtures.py -q` | ❌ W0 | ⬜ pending |
+| 01-08/T1 | 01-08 | 5 | QUAL-08 | T-01-38, T-01-40 | Unrecoverable damage declared as rejection; exact decimal expectations | integration | manifest count assertion + `make fixtures-verify` | ❌ W0 | ⬜ pending |
+| 01-08/T2 | 01-08 | 5 | QUAL-08 | T-01-39 | Explicit formats only; real zone transitions | unit | zone-resolution assertion + `uv run --frozen pytest tests/unit/test_corpus_semantic_fixtures.py -q` | ❌ W0 | ⬜ pending |
+| 01-08/T3 | 01-08 | 5 | QUAL-08 | T-01-41, T-01-42 | Corpus complete at 69 names, no gaps or inventions | unit | completeness assertion in `tests/unit/test_corpus_semantic_fixtures.py` | ❌ W0 | ⬜ pending |
+| 01-09/T1 | 01-09 | 6 | CICD-02, SEC-02 | T-01-43, T-01-44, T-01-45, T-01-46 | Required checks enforce the gate; no force push; scan green before publication | config read-back | `gh api "repos/{owner}/{repo}/branches/main/protection" --jq '.required_status_checks.contexts'` | ❌ W0 | ⬜ pending |
+| 01-09/T2 | 01-09 | 6 | CICD-01, SEC-10 | T-01-47 | A real run observed green with both jobs present | end-to-end | `gh run list --branch main --workflow CI --limit 1 --json conclusion` | ❌ W0 | ⬜ pending |
+| 01-09/T2 (manual) | 01-09 | 6 | CICD-02 | T-01-43 | A failing required check blocks the merge, not only the build | human-check | none — deliberately manual; see Manual-Only Verifications | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+
+**Requirement coverage:** QUAL-01 (01-01/T1, 01-05/T1) · QUAL-02 (01-01/T1, 01-05/T1) ·
+QUAL-07 (01-01/T1-LOAD-12, 01-04/T1-T3) · QUAL-08 (01-03/T1-T3, 01-06, 01-07, 01-08) ·
+CICD-01 (01-01/T3, 01-09/T2) · CICD-02 (01-01/T3, 01-05/T2, 01-09/T1) · CICD-03 (01-01/T1, 01-05/T1-T2) ·
+CICD-04 (01-01/T1, 01-05/T1-T2) · SEC-02 (01-02/T1, 01-02/T3, 01-05/T3, 01-09/T1) ·
+SEC-10 (01-01/T3, 01-02/T3, 01-05/T3, 01-09/T2) · SEC-11 (01-02/T2) · OBS-03 (01-01/T1, 01-05/T1).
 
 ---
 
@@ -93,8 +128,16 @@ Condensed from `01-RESEARCH.md` § Validation Architecture. Full detail lives th
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Branch protection requires the CI checks | CICD-02, success criterion 1 | GitHub repository setting, not a repo file — CI is advisory without it | Repo → Settings → Branches → require `check` status before merge; confirm a failing PR cannot be merged |
-| CI log contains no secret values | SEC-10 | General form undecidable; needs human read of a real run's logs | Open the most recent Actions run, confirm no job echoes a credential |
+| A failing required check blocks the **merge**, not only the build | CICD-02, success criterion 1 | The rule's *contents* are now read back automatically (plan 01-09 task 1), but only a human can confirm the merge button is actually blocked on a real pull request | Push a throwaway branch whose commit fails the gate, open a pull request, confirm the merge is blocked by the failing required check rather than merely marked red; close the PR and delete the branch |
+| CI log contains no secret values | SEC-10 | General form undecidable; needs human read of a real run's logs | Open the most recent Actions run, confirm no job echoes a credential. This phase's structural claim — the workflow references no secret at all — is automated by `tests/policy/test_workflow_secrets.py`; the general form is re-audited when the first secret is introduced (Phase 11) |
+| Docstring *content* quality | QUAL-02 | Presence is mechanical (`D` rules + `D417`); purpose, assumptions, exceptions and side effects are not | Review-time, via the pull-request template checkbox. Do not mark this green on the strength of a passing lint run |
+| Whether a given bug warranted a regression test | QUAL-07 | "Important" is a judgement no linter can make; the directory convention and the provenance marker are the mechanical half | Review-time, via the pull-request template checkbox |
+
+**Note on branch protection:** RESEARCH.md assumption A4 is **resolved** — the developer made the
+repository public during planning, which unlocks the setting that previously returned a permission
+error on a private personal-account repository. Plan 01-09 configures it through the API and
+records the applying and removing commands in `docs/ci-branch-protection.md`, so it is reproducible
+from the repository rather than from memory.
 
 ---
 
