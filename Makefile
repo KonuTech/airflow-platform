@@ -37,7 +37,12 @@ uv-guard:                      ## Fail if the installed uv is not the pinned ver
 	fi
 
 install: uv-guard              ## Create the venv from the lockfile
-	$(UV) sync
+	# --locked, never bare `uv sync`: a bare sync REWRITES uv.lock when it is
+	# stale, and CI runs `make install` before `make check`. That ordering made
+	# `lock-check` inspect a lockfile this target had just refreshed, so a pull
+	# request could change a dependency without regenerating the lock and still
+	# go green on an unreviewed resolution. --locked fails instead of resolving.
+	$(UV) sync --locked
 
 lock-check:                    ## Fail if uv.lock is stale vs the pyproject files
 	$(UV) lock --check

@@ -153,11 +153,29 @@ def test_the_installer_verifies_before_it_extracts() -> None:
     fail-closed path itself was observed by hand in plan 01-02 (a PATH-shimmed
     curl corrupting the tarball: exit 1, nothing extracted) and still has no
     committed behavioural coverage.
+
+    Comments are stripped before the search, and that is load-bearing rather
+    than tidiness. A plain `text.find("sha256sum -c")` matched the PROSE above
+    the verification, which sits above `tar -xzf` unconditionally — so the
+    assertion held no matter where the real verification lived, and the guard
+    was vacuous. Moving the genuine check below the extraction was observed
+    passing this test before this fix. Search executable lines only.
     """
     text = (REPO_ROOT / INSTALLER).read_text(encoding="utf-8")
-    verify = text.find("sha256sum -c")
-    extract = text.find("tar -xzf")
-    assert verify != -1, f"{INSTALLER} no longer verifies a checksum"
+
+    # Blank out comment bodies while preserving byte offsets, so the indices
+    # below still correspond to positions in the real file.
+    executable = "\n".join(
+        line.split("#", 1)[0] if line.lstrip().startswith("#") else line
+        for line in text.splitlines()
+    )
+
+    verify = executable.find("sha256sum -c")
+    extract = executable.find("tar -xzf")
+    assert verify != -1, (
+        f"{INSTALLER} no longer verifies a checksum in executable code "
+        "(a mention inside a comment does not count)"
+    )
     assert extract != -1, f"{INSTALLER} no longer extracts an archive"
     assert verify < extract, (
         f"{INSTALLER} extracts the archive before verifying its checksum — the "
