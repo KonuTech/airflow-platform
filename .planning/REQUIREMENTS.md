@@ -167,7 +167,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 - [ ] **OBS-01**: Data freshness is tracked — last received, last successful processing, expected frequency and processing delay — *(DoD 59)*
 - [ ] **OBS-02**: All Python code uses structured application logging that works in local, Docker, Kubernetes and Airflow task-pod contexts — *(DoD 74)*
-- [ ] **OBS-03**: No `print()` is used for operational logging — enforced in CI — *(DoD 75)*
+- [x] **OBS-03**: No `print()` is used for operational logging — enforced in CI — *(DoD 75)*
 - [ ] **OBS-04**: Logs carry contextual fields — filename, object path, dataset, stage, row number, schema version, validation status, duration and Airflow identifiers — *(DoD 76)*
 - [ ] **OBS-05**: Passwords, keys, tokens, secrets, unnecessary PII and whole sensitive records are never logged — *(DoD 77)*
 - [ ] **OBS-06**: Operational runbooks document symptoms, diagnosis, recovery, reprocessing and verification for each §89 scenario — *(DoD 112)*
@@ -178,8 +178,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### QUAL — Engineering Standards and Test Coverage
 
-- [ ] **QUAL-01**: Type hints are used consistently across arguments, returns, classes, public APIs, configuration and data models, verified by mypy in CI — *(DoD 71)*
-- [ ] **QUAL-02**: Public classes, functions and methods carry docstrings describing purpose, parameters, returns, assumptions, exceptions and side effects — *(DoD 72)*
+- [x] **QUAL-01**: Type hints are used consistently across arguments, returns, classes, public APIs, configuration and data models, verified by mypy in CI — *(DoD 71)*
+- [x] **QUAL-02**: Public classes, functions and methods carry docstrings describing purpose, parameters, returns, assumptions, exceptions and side effects — *(DoD 72)*
 - [ ] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
 - [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [ ] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
@@ -200,8 +200,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 - [ ] **CICD-01**: GitHub Actions provides CI/CD — *(DoD 103)*
 - [ ] **CICD-02**: Pull requests automatically run the full quality gate — *(DoD 104)*
-- [ ] **CICD-03**: Linting runs automatically via ruff — *(DoD 105)*
-- [ ] **CICD-04**: Type checking runs automatically via mypy — *(DoD 106)*
+- [x] **CICD-03**: Linting runs automatically via ruff — *(DoD 105)*
+- [x] **CICD-04**: Type checking runs automatically via mypy — *(DoD 106)*
 - [ ] **CICD-05**: Unit, integration and E2E tests run automatically with coverage reporting — *(DoD 107)*
 - [ ] **CICD-06**: Container images build automatically and are tagged by git SHA — *(DoD 108)*
 - [ ] **CICD-07**: Kubernetes manifests and Helm charts are validated in CI — *(DoD 109)*
@@ -384,7 +384,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SCD-12 | Phase 10 | Pending |
 | OBS-01 | Phase 7 | Pending |
 | OBS-02 | Phase 3 | Pending |
-| OBS-03 | Phase 1 | Pending |
+| OBS-03 | Phase 1 | Complete |
 | OBS-04 | Phase 3 | Pending |
 | OBS-05 | Phase 3 | Pending |
 | OBS-06 | Phase 11 | Pending |
@@ -392,8 +392,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | OBS-08 | Phase 7 | Pending |
 | OBS-09 | Phase 7 | Pending |
 | OBS-10 | Phase 7 | Pending |
-| QUAL-01 | Phase 1 | Pending |
-| QUAL-02 | Phase 1 | Pending |
+| QUAL-01 | Phase 1 | Complete |
+| QUAL-02 | Phase 1 | Complete |
 | QUAL-03 | Phase 3 | Pending |
 | QUAL-04 | Phase 6 | Pending |
 | QUAL-05 | Phase 4 | Pending |
@@ -411,8 +411,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-17 | Phase 6 | Pending |
 | CICD-01 | Phase 1 | Pending |
 | CICD-02 | Phase 1 | Pending |
-| CICD-03 | Phase 1 | Pending |
-| CICD-04 | Phase 1 | Pending |
+| CICD-03 | Phase 1 | Complete |
+| CICD-04 | Phase 1 | Complete |
 | CICD-05 | Phase 11 | Pending |
 | CICD-06 | Phase 11 | Pending |
 | CICD-07 | Phase 2 | Pending |
