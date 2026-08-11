@@ -1771,3 +1771,290 @@ fixtures:
       column_count: 5
       data_rows: 3
       rejected_rows: 0
+
+  # --- dates: the format is declared, never inferred ------------------------
+  # 22 and 23 are a pair, and the pairing IS the specification: both files
+  # carry THE SAME THREE DATES, written under opposite conventions. Row 2 is
+  # the one that matters — `01/02/2026` and `02/01/2026` are the same day,
+  # 2026-02-01, and each is the other's misreading. A parser handed the wrong
+  # format returns a valid date for the wrong day and raises nothing.
+  #
+  # Every declaration names its format string. `dateutil.parser.parse` would
+  # guess between them and is forbidden in the load path for exactly that
+  # reason; it is permitted only in schema profiling, to SUGGEST a format to a
+  # human who then writes it into the contract.
+  - name: "22_eu_dates.csv"
+    covers: [CSV-09, CSV-10]
+    generator: literal
+    encoding: utf-8
+    content: 'id,event_date,note\n1,31/12/2026,day exceeds twelve so this row is self-evidencing\n2,01/02/2026,the first of February under this format\n3,15/08/2026,mid August\n'
+    expect:
+      detected_delimiter: ","
+      date_format: "%d/%m/%Y"
+      convention: day-first
+      format_is_declared_never_inferred: true
+      raw_values: ["31/12/2026", "01/02/2026", "15/08/2026"]
+      iso_values: ["2026-12-31", "2026-02-01", "2026-08-15"]
+      row_1_is_self_evidencing_because_the_day_exceeds_twelve: true
+      row_2_is_not_self_evidencing_and_needs_the_declared_format: true
+      row_2_would_be_2026_01_02_under_the_month_first_format: true
+      denotes_the_same_dates_as: "23_us_dates.csv"
+      contract_parameter: "csv.date_format"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # The counterpart: the same three dates, month-first.
+  - name: "23_us_dates.csv"
+    covers: [CSV-09, CSV-10]
+    generator: literal
+    encoding: utf-8
+    content: 'id,event_date,note\n1,12/31/2026,second component exceeds twelve so this row is self-evidencing\n2,02/01/2026,the first of February under this format\n3,08/15/2026,mid August\n'
+    expect:
+      detected_delimiter: ","
+      date_format: "%m/%d/%Y"
+      convention: month-first
+      format_is_declared_never_inferred: true
+      raw_values: ["12/31/2026", "02/01/2026", "08/15/2026"]
+      iso_values: ["2026-12-31", "2026-02-01", "2026-08-15"]
+      row_1_is_self_evidencing_because_the_second_component_exceeds_twelve: true
+      row_2_is_not_self_evidencing_and_needs_the_declared_format: true
+      row_2_would_be_2026_01_02_under_the_day_first_format: true
+      denotes_the_same_dates_as: "22_eu_dates.csv"
+      the_two_files_prove_the_rendering_carries_no_evidence_of_its_own_format: true
+      contract_parameter: "csv.date_format"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # --- dates: genuinely undecidable ----------------------------------------
+  # EVERY component of every value is twelve or below, so the data itself
+  # cannot decide the format. This is the deliberate construction: 22 and 23
+  # each contain a self-evidencing row, and this file contains none.
+  #
+  # Both readings are valid dates, so NEITHER RAISES. A detector's only correct
+  # behaviour here is to DECLINE; the format must come from the contract. A
+  # guess produces a plausible wrong date — the worst available outcome,
+  # because an error is visible and a wrong date is not.
+  - name: "52_date_ambiguous_dm_vs_md.csv"
+    covers: [CSV-09, CSV-05]
+    generator: literal
+    encoding: utf-8
+    content: 'id,event_date\n1,03/04/2026\n2,01/02/2026\n3,12/11/2026\n4,05/06/2026\n'
+    expect:
+      detected_delimiter: ","
+      every_component_is_twelve_or_below: true
+      max_first_component: 12
+      max_second_component: 11
+      the_data_cannot_decide_the_format: true
+      no_row_is_self_evidencing: true
+      detection_must_decline: true
+      detected_date_format: null
+      # The two formats are named even though neither may be chosen: the file
+      # is ambiguous BETWEEN THESE TWO specifically, and Phase 6's detector has
+      # to try exactly them and then decline. "Declines" is a decision about a
+      # named candidate set, not a shrug.
+      candidate_formats: ["%d/%m/%Y", "%m/%d/%Y"]
+      the_ambiguity_is_between_two_named_formats_not_an_open_question: true
+      format_must_come_from_the_contract: true
+      contract_parameter: "csv.date_format"
+      raw_values: ["03/04/2026", "01/02/2026", "12/11/2026", "05/06/2026"]
+      under_day_first:
+        ["2026-04-03", "2026-02-01", "2026-11-12", "2026-06-05"]
+      under_month_first:
+        ["2026-03-04", "2026-01-02", "2026-12-11", "2026-05-06"]
+      both_readings_are_valid_dates_so_neither_raises: true
+      guessing_produces_a_plausible_wrong_date_not_an_error: true
+      a_wrong_date_is_invisible_downstream_where_an_error_would_not_be: true
+      dateutil_parser_would_guess_and_is_forbidden_in_the_load_path: true
+      dateutil_is_permitted_only_to_suggest_a_format_to_a_human: true
+      header_row_index: 0
+      column_count: 2
+      data_rows: 4
+      rejected_rows: 0
+
+  # A two-digit year cannot be completed without a PIVOT, and the pivot is a
+  # contract decision rather than something a reader may invent.
+  #
+  # The observation that makes this concrete: under CPython's inherited POSIX
+  # pivot, `68` and `69` — adjacent two-digit years — land NINETY-NINE YEARS
+  # APART, in 2068 and 1969. VERIFIED on CPython 3.12.3. A dataset spanning
+  # that boundary is silently torn in half by a default nobody chose.
+  - name: "53_two_digit_year.csv"
+    covers: [CSV-09]
+    generator: literal
+    encoding: utf-8
+    content: 'id,event_date,note\n1,11/08/26,recent\n2,11/08/68,just below the inherited pivot\n3,11/08/69,just above the inherited pivot\n4,11/08/99,last century\n'
+    expect:
+      detected_delimiter: ","
+      date_format: "%d/%m/%y"
+      year_is_two_digits: true
+      format_is_declared_never_inferred: true
+      pivot_must_be_declared_in_the_contract: true
+      contract_parameter: "csv.two_digit_year_pivot"
+      raw_values: ["11/08/26", "11/08/68", "11/08/69", "11/08/99"]
+      python_strptime_inherited_pivot:
+        { "00-68": "2000-2068", "69-99": "1969-1999" }
+      iso_values_under_the_inherited_pivot:
+        ["2026-08-11", "2068-08-11", "1969-08-11", "1999-08-11"]
+      adjacent_years_68_and_69_land_ninety_nine_years_apart: true
+      the_inherited_pivot_is_an_accident_not_a_decision: true
+      a_pivot_the_reader_invents_silently_dates_a_record_a_century_away: true
+      two_digit_years_are_ambiguous_by_construction_not_by_damage: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # Spreadsheet serial dates: bare integers that are not numbers and not dates
+  # until an EPOCH is declared. The same integer denotes dates four years apart
+  # under the two systems Excel actually ships, and the column carries no
+  # evidence of which one produced it.
+  #
+  # Row 2 is the famous one. The 1900 system contains a leap day that does not
+  # exist — 1900 was not a leap year — because Lotus 1-2-3 had the bug and
+  # Excel kept it for compatibility. So serial 60 denotes 1900-02-29, a date
+  # that never happened, and the naive offset arithmetic below is only correct
+  # for serials of 61 and above.
+  - name: "54_excel_serial_dates.csv"
+    covers: [CSV-09, SCHEMA-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,serial_date,note\n1,45880,an ordinary recent date\n2,60,the phantom leap day of the 1900 system\n3,1,the first day of the 1900 system\n'
+    expect:
+      detected_delimiter: ","
+      values_are_integers_not_dates: true
+      values_must_not_be_loaded_as_numbers: true
+      # A serial carries no strftime format because it is not a rendered date.
+      # The EPOCH is what plays the format's role here: it is the declared
+      # parameter without which the characters in the file do not denote a day.
+      serial_is_not_a_formatted_date: true
+      epoch_is_the_analogue_of_a_format_for_this_encoding: true
+      date_format_of_the_converted_value: "%Y-%m-%d"
+      epoch_must_be_declared_never_assumed: true
+      contract_parameter: "csv.spreadsheet_epoch"
+      raw_values: ["45880", "60", "1"]
+      epoch_1900_offset_date: "1899-12-30"
+      epoch_1900_offset_is_valid_only_for_serials_of_61_and_above: true
+      epoch_1904_offset_date: "1904-01-01"
+      serial_45880_under_the_1900_system: "2025-08-11"
+      serial_45880_under_the_1904_system: "2029-08-12"
+      the_two_systems_differ_by_days: 1462
+      choosing_the_wrong_epoch_misdates_every_row_by_four_years: true
+      a_bare_integer_column_carries_no_evidence_of_its_epoch: true
+      serial_60_denotes: "1900-02-29"
+      nineteen_hundred_was_not_a_leap_year: true
+      serial_60_is_a_date_that_never_existed: true
+      the_phantom_leap_day_is_inherited_from_lotus_1_2_3: true
+      naive_offset_arithmetic_yields_for_serial_60: "1900-02-28"
+      naive_offset_arithmetic_yields_for_serial_1: "1899-12-31"
+      excel_shows_for_serial_1: "1900-01-01"
+      serials_below_61_are_off_by_one_under_the_naive_offset: true
+      outcome_for_the_phantom_leap_day: rejected-record
+      quarantine_reason: "spreadsheet-serial-date-does-not-exist"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+
+  # --- time: the daylight-saving edges CSV-09 and QUAL-17 mandate -----------
+  # The transition instants below were VERIFIED against zoneinfo rather than
+  # assumed: Europe/Warsaw springs forward at 2026-03-29T01:00:00Z, where local
+  # 01:59:59 (+01:00) is followed immediately by 03:00:00 (+02:00), and falls
+  # back at 2026-10-25T01:00:00Z, where local 02:59:59 (+02:00) is followed by
+  # 02:00:00 (+01:00).
+  #
+  # So the wall-clock time 02:30:00 is NONEXISTENT on 29 March and AMBIGUOUS on
+  # 25 October. The same six characters, in the same column, in the same file,
+  # with opposite failure modes — which is why a single "parse the timestamp"
+  # code path cannot be correct for both.
+  #
+  # The classification method is stated because it is not obvious: comparing
+  # UTC offsets across fold=0 and fold=1 identifies BOTH cases and distinguishes
+  # neither. A local time is nonexistent when it does not survive a round trip
+  # through UTC (02:30 comes back as 03:30); it is ambiguous when it does
+  # survive but the two folds resolve to different instants.
+  - name: "55_dst_gap_and_overlap.csv"
+    covers: [QUAL-17, CSV-09, SCD-06]
+    generator: literal
+    encoding: utf-8
+    content: 'event_id,ts_local\n1,2026-03-29 02:30:00\n2,2026-10-25 02:30:00\n3,2026-01-15 12:00:00\n'
+    expect:
+      detected_delimiter: ","
+      timezone: "Europe/Warsaw"
+      timestamp_format: "%Y-%m-%d %H:%M:%S"
+      format_is_declared_never_inferred: true
+      values_are_naive_local_times: true
+      naive_local_times_require_a_declared_zone: true
+      contract_parameter: "csv.timezone"
+      raw_values:
+        ["2026-03-29 02:30:00", "2026-10-25 02:30:00", "2026-01-15 12:00:00"]
+      row_1_classification: nonexistent
+      row_2_classification: ambiguous
+      row_3_classification: unambiguous
+      the_gap_and_the_overlap_share_the_same_wall_clock_time: "02:30:00"
+      spring_forward_instant_utc: "2026-03-29T01:00:00+00:00"
+      spring_forward_local_before: "01:59:59"
+      spring_forward_local_after: "03:00:00"
+      autumn_overlap_instant_utc: "2026-10-25T01:00:00+00:00"
+      autumn_overlap_local_before: "02:59:59"
+      autumn_overlap_local_after: "02:00:00"
+      row_1_utc_under_fold_0: "2026-03-29T01:30:00+00:00"
+      row_1_utc_under_fold_1: "2026-03-29T00:30:00+00:00"
+      row_1_round_trips_through_utc_to: "2026-03-29 03:30:00"
+      row_1_does_not_survive_a_round_trip_through_utc: true
+      row_2_utc_under_fold_0: "2026-10-25T00:30:00+00:00"
+      row_2_utc_under_fold_1: "2026-10-25T01:30:00+00:00"
+      row_2_survives_the_round_trip_but_the_two_folds_differ: true
+      row_2_fold_choice_changes_the_instant_by_one_hour: true
+      row_3_utc: "2026-01-15T11:00:00+00:00"
+      classification_method: "nonexistent when the local time does not survive a round trip through UTC; ambiguous when it survives but fold=0 and fold=1 resolve to different instants"
+      comparing_utc_offsets_across_folds_does_not_distinguish_the_two_cases: true
+      outcome_row_1: rejected-record
+      quarantine_reason_row_1: "nonexistent-local-time"
+      outcome_row_2: requires-a-declared-fold-policy
+      contract_parameter_fold: "csv.ambiguous_time_policy"
+      an_ambiguous_time_must_not_silently_take_the_first_fold: true
+      header_row_index: 0
+      column_count: 2
+      data_rows: 3
+
+  # Three timestamps in ONE column that all render the same wall-clock time,
+  # 12:00:00, and denote two different instants and one unknown. That is the
+  # trap: they look alike, sort alike as strings, and are not the same moment.
+  #
+  # The naive value must not inherit the offset of the row above it, must not
+  # default to UTC, and must not default to the server's zone — three separate
+  # ways to invent an instant the file never stated.
+  - name: "56_mixed_timezone_offsets.csv"
+    covers: [QUAL-17, CSV-09, SCD-06]
+    generator: literal
+    encoding: utf-8
+    content: 'event_id,ts,form\n1,2026-06-30T12:00:00+02:00,explicit offset\n2,2026-06-30T12:00:00Z,zero-offset designator\n3,2026-06-30T12:00:00,naive\n'
+    expect:
+      detected_delimiter: ","
+      timestamp_format_with_offset: "%Y-%m-%dT%H:%M:%S%z"
+      timestamp_format_naive: "%Y-%m-%dT%H:%M:%S"
+      format_is_declared_never_inferred: true
+      row_1_form: explicit-offset
+      row_2_form: zero-offset-designator
+      row_3_form: naive
+      all_three_render_the_same_wall_clock_time: "12:00:00"
+      three_rows_that_look_alike_denote_two_instants_and_one_unknown: true
+      row_1_utc: "2026-06-30T10:00:00+00:00"
+      row_2_utc: "2026-06-30T12:00:00+00:00"
+      row_3_utc: null
+      row_3_requires_a_declared_zone: true
+      contract_parameter: "csv.naive_timestamp_zone"
+      the_naive_value_must_not_inherit_the_offset_of_the_row_above_it: true
+      the_naive_value_must_not_default_to_utc: true
+      the_naive_value_must_not_default_to_the_server_zone: true
+      Z_is_a_zero_offset_designator_not_a_timezone: true
+      a_zero_offset_does_not_tell_you_where_the_event_happened: true
+      sorting_these_as_strings_does_not_sort_them_as_instants: true
+      outcome_row_3: rejected-record-unless-a-zone-is-declared
+      quarantine_reason_row_3: "naive-timestamp-without-a-declared-zone"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
