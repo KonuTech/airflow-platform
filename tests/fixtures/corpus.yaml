@@ -916,3 +916,241 @@ fixtures:
       column_count: 3
       data_rows: 2
       rejected_rows: 0
+
+  # --- header, metadata and footer layout (CSV-07, CSV-08) ------------------
+  # Every fixture in this group declares a header row index, INCLUDING the
+  # cases where there is none — `header_row_index: null` is a different
+  # statement from `header_row_index: 0`, and a pipeline that cannot tell them
+  # apart will name a column after a customer.
+  #
+  # Each also declares the contract parameter that overrides detection, because
+  # CSV-07/CSV-08 say the answer is configurable *or* detected, and a detector
+  # with no override is a detector you cannot correct at 03:00.
+
+  # No header at all. Row 0 has the same shape and the same field types as every
+  # row below it, which is the evidence — there is nothing about it that reads
+  # as a name. Consuming it as a header silently drops a record and renames the
+  # columns to one customer's data.
+  - name: "11_no_header.csv"
+    covers: [CSV-07, SCHEMA-02]
+    generator: literal
+    encoding: utf-8
+    content: '000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\n000004,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      has_header: false
+      header_row_index: null
+      header_is_absent_not_at_row_zero: true
+      first_row_is_data: true
+      detection_evidence: "row 0 has the same field count and the same field types as every row below it"
+      column_names_must_come_from_the_contract: true
+      contract_parameter: "csv.header_row"
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # A report preamble: three comment lines, then a blank line, then the header
+  # at row index 4. The preamble is also a dialect hazard — `# Generated:
+  # 2026-01-15` contains a colon, and the colon is one of CSV-04's five
+  # dialects. So the preamble must be excluded BEFORE delimiter detection runs,
+  # not after; a detector sampling from byte zero lets three comment lines vote
+  # on the dialect of a file they are not part of.
+  - name: "12_metadata_before_header.csv"
+    covers: [CSV-07, CSV-08]
+    generator: literal
+    encoding: utf-8
+    content: '# Export from System X\n# Generated: 2026-01-15\n# Rows: 4\n\nid,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\n000004,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      has_header: true
+      header_row_index: 4
+      preamble_row_count: 4
+      preamble_row_indices: [0, 1, 2, 3]
+      preamble_includes_a_blank_line: true
+      preamble_contains_a_colon_which_is_itself_a_candidate_delimiter: true
+      preamble_must_be_excluded_before_dialect_detection: true
+      data_starts_at_row_index: 5
+      detection_evidence: "the first row whose field count equals the modal field count of the rows below it"
+      header_row_index_is_configurable_or_detected: true
+      contract_parameter: "csv.header_row"
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # Trailing rows that are not records: a blank separator, a totals line and a
+  # sign-off. None of them has the modal field count, and none may be loaded.
+  # 64 is the harder sibling — there the footer is a single row that looks
+  # almost like data.
+  - name: "13_footer.csv"
+    covers: [CSV-08, VALID-06]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\n\nTotal: 7037.01\nEnd of report\n'
+    expect:
+      detected_delimiter: ","
+      has_header: true
+      header_row_index: 0
+      modal_field_count: 3
+      footer_row_count: 3
+      footer_row_indices: [4, 5, 6]
+      footer_field_counts: [0, 1, 1]
+      footer_rows_must_not_be_loaded_as_records: true
+      footer_carries_a_control_total: "7037.01"
+      control_total_equals_the_sum_of_the_amount_column: true
+      contract_parameter: "csv.skip_footer_rows"
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # Zero bytes. The twin of 19, and the pair is the point: an operator told
+  # "0 rows loaded" cannot act, because the two causes need opposite responses.
+  # Here NOTHING arrived — not the schema, not a record — so the file is
+  # evidence of a broken export, not of a quiet day.
+  - name: "18_empty.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: ''
+    expect:
+      byte_length: 0
+      has_header: false
+      header_row_index: null
+      schema_is_unknown: true
+      record_count_including_header: 0
+      physical_line_count: 0
+      data_rows: 0
+      outcome: empty-file
+      distinguishable_from_header_only: true
+      must_not_be_reported_as_zero_rows_against_a_known_schema: true
+      quarantine_reason: "empty-file"
+
+  # A header and nothing else. The twin of 18: the schema DID arrive and it is
+  # correct; there were simply no records. That is a legitimate quiet day for an
+  # incremental feed and must not raise. The two fixtures differ in their
+  # declared meaning, not merely in their size.
+  - name: "19_only_header.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n'
+    expect:
+      detected_delimiter: ","
+      byte_length_is_nonzero: true
+      has_header: true
+      header_row_index: 0
+      header: [id, name, amount]
+      schema_is_known: true
+      record_count_including_header: 1
+      physical_line_count: 1
+      data_rows: 0
+      outcome: header-only-no-records
+      distinguishable_from_empty: true
+      is_a_valid_empty_increment_not_an_error: true
+      column_count: 3
+
+  # `Name` and `name` are not the same string, so an exact-duplicate check
+  # passes and a case-insensitive one does not. That is the whole fixture: the
+  # collision only exists once names are folded — which they must be, because
+  # PostgreSQL folds unquoted identifiers to lower case and both columns would
+  # land on one target column.
+  #
+  # The declared outcome is a REJECTION. A silent rename (`name_1`) invents a
+  # column the contract never declared; a silent last-wins discards a column of
+  # real data with nothing recording that it happened.
+  - name: "48_duplicate_header_names_case_variant.csv"
+    covers: [CSV-07, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,Name,name,amount\n1,Kowalski,Jan,1234.56\n2,Nowak,Anna,2345.67\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      raw_header: [id, Name, name, amount]
+      colliding_names: [Name, name]
+      collision_is_case_insensitive_only: true
+      exact_duplicates_present: false
+      the_two_columns_carry_different_values: true
+      outcome: rejected-file
+      must_not_silently_rename: true
+      must_not_silently_last_wins: true
+      quarantine_reason: "duplicate-header-names"
+      contract_parameter: "csv.header_case_sensitive"
+      column_count: 4
+      data_rows: 2
+
+  # Padded header names. Both the raw and the trimmed forms are declared, so a
+  # reader that trims and one that preserves are distinguishable rather than
+  # both "passing". `amount` is the clean control — without it a test could not
+  # tell "trims every name" from "returns a fixed trimmed list".
+  #
+  # The stdlib's `skipinitialspace` strips LEADING whitespace only, so a reader
+  # that leans on it still carries `customer_id ` with its trailing space and
+  # every contract lookup misses.
+  - name: "49_header_with_leading_trailing_spaces.csv"
+    covers: [CSV-07, SCHEMA-02]
+    generator: literal
+    encoding: utf-8
+    content: ' customer_id , Name ,amount\n1,Kowalski,1234.56\n2,Nowak,2345.67\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      raw_header: [" customer_id ", " Name ", "amount"]
+      trimmed_header: ["customer_id", "Name", "amount"]
+      clean_control_column: "amount"
+      trimming_is_a_declared_normalisation_not_a_parser_default: true
+      stdlib_skipinitialspace_strips_leading_only: true
+      contract_lookup_against_the_raw_names_misses: true
+      contract_parameter: "csv.header_trim"
+      column_count: 3
+      data_rows: 2
+      rejected_rows: 0
+
+  # A concatenated export: two files joined, so the header line reappears at row
+  # index 3. Loaded as a record it becomes a row whose `amount` is the literal
+  # string "amount" — a type error if you are lucky and a NULL if you are not.
+  # The declared record count EXCLUDES the repeat, and the repeat's row index is
+  # named so the finding is locatable rather than a count discrepancy.
+  - name: "63_repeated_header_mid_file.csv"
+    covers: [CSV-08, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\nid,name,amount\n000003,Wiśniewski,3456.78\n000004,Wójcik,4567.89\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      repeated_header_row_indices: [3]
+      repeated_header_occurrences: 1
+      detection_evidence: "a row whose values are exactly the header row's values"
+      data_rows: 4
+      data_rows_if_the_repeat_is_loaded: 5
+      the_repeat_must_not_be_loaded_as_a_record: true
+      cause: "concatenated export"
+      column_count: 3
+      rejected_rows: 0
+
+  # The footer that is hardest to spot: one trailing row, no blank line before
+  # it, values that look like data. What identifies it is its COLUMN COUNT — two
+  # fields against a modal three. A reader that pads it to the modal count
+  # loads a customer called TOTAL whose amount is the sum of every other row,
+  # and every aggregate downstream is exactly doubled.
+  - name: "64_footer_totals_with_different_column_count.csv"
+    covers: [CSV-08, VALID-06]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,amount\n000001,Kowalski,1234.56\n000002,Nowak,2345.67\n000003,Wiśniewski,3456.78\nTOTAL,7037.01\n'
+    expect:
+      detected_delimiter: ","
+      header_row_index: 0
+      modal_field_count: 3
+      footer_row_count: 1
+      footer_row_indices: [4]
+      footer_field_count: 2
+      footer_is_identified_by_its_differing_column_count: true
+      footer_must_not_be_padded_to_the_modal_count: true
+      footer_control_total: "7037.01"
+      control_total_equals_the_sum_of_the_amount_column: true
+      padding_it_would_double_every_aggregate: true
+      contract_parameter: "csv.skip_footer_rows"
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
