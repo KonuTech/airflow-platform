@@ -1,10 +1,27 @@
 # Branch protection on the default branch
 
-**Status: NOT YET APPLIED.** This document specifies the rule; it does not assert that the rule
-exists. At the time of writing, `gh api "repos/KonuTech/airflow-platform/branches/main/protection"`
-returns `404 Branch not protected`. See [Applying the rule](#applying-the-rule) for the one command
-that changes that, and [Why this is not applied yet](#why-this-is-not-applied-yet) for what blocked
-it.
+**Status: APPLIED and OBSERVED ENFORCING (2026-08-11).** The rule specified below exists on `main`
+and has been verified to refuse a merge, not merely to report one red.
+
+Both check names were read verbatim from a real reported run (run `31531101283`, both jobs green)
+rather than guessed — see [rot path 2](#rot-path-2-the-check-names-are-coupled-to-job-display-names)
+for why that distinction is load-bearing. All six [read-back assertions](#reading-the-rule-back)
+were then run and matched.
+
+Enforcement was proved by a deliberate negative test: a throwaway branch carrying a `print()` in
+`packages/dataplat/src/dataplat/version.py` (a T201 / OBS-03 violation) was pushed and opened as
+PR #1. The result was:
+
+| Field | Value | What it proves |
+|---|---|---|
+| `Quality gate` | `failure` | The gate caught the violation on a clean runner |
+| `mergeable` | `true` | The branch has no merge *conflict* |
+| `mergeable_state` | `blocked` | GitHub **refused the merge** |
+
+`mergeable: true` alongside `mergeable_state: blocked` is the pair that matters: the refusal comes
+from the failing required check, not from a conflict or an unrelated obstruction. A rule built on
+guessed context names would have reported `clean` here and merged through a red build. PR #1 was
+closed and its branch deleted; the probe commit is not in `main`'s history.
 
 The rule exists so that ROADMAP success criterion 1 is fully true. Without it, a failing check makes
 the build red but does not stop the merge — the gate is advisory. Required status checks are what
@@ -160,21 +177,31 @@ path instead, and that query fails for a reason unrelated to the gate.
 
 ---
 
-## Why this is not applied yet
+## How this came to be applied
 
-Plan 01-09 executed in an environment whose permission layer denied both `git push` to the remote
-and `gh run list`. Two consequences, in order:
+Plan 01-09 executed in an environment whose permission layer denied both `git push` and
+`gh run list`. That left the repository with **no workflow run history**, and therefore no check
+names to read. Because the plan prohibits guessing a required check name — a name matching nothing
+produces a rule that blocks nothing — the plan halted and specified the rule rather than applying
+it. That halt was correct, and it is why the names in the table above are observed rather than
+inferred.
 
-1. The repository has **no workflow run history** — `origin/main` is still at the last planning
-   commit, which predates `.github/workflows/ci.yml`. The workflow has therefore never reported a
-   check, and there are no names to read.
-2. The plan explicitly prohibits guessing a required check name, because a name that matches
-   nothing produces a rule that blocks nothing. With no run to read from, applying the rule would
-   have meant violating that prohibition.
+The blockage was cleared by the repository owner publishing the phase, after which the sequence
+below was executed and each step observed:
 
-So the rule was specified rather than applied. The names in the table above are derived from the
-workflow file and are the *expected* values — they are not observed values, and the
-`gh run view --json jobs` step above is what turns one into the other.
+| # | Step | Observed result |
+|---|---|---|
+| 1 | Owner pushed `main`, triggering the first CI run | run `31531101283` |
+| 2 | Read job names from that run | `Quality gate`, `Secret scan (full history)` — both `success` |
+| 3 | Applied the `PUT` with those verbatim names | rule created |
+| 4 | Ran all six read-back assertions | all matched |
+| 5 | Negative test via PR #1 | `mergeable_state: blocked` (see the status header) |
+| 6 | Direct push to `main` after the rule was live | succeeded — `enforce_admins: false` holds |
+
+Step 6 is not a formality. GSD runs this repository with `branching_strategy: "none"`, so phases 2
+through 11 commit straight to `main`. Had the rule blocked the owner's own push, it would have
+stopped the project rather than protected it — which is precisely the failure
+[rot path 1](#rot-path-1-tightening-enforce_admins-stops-the-project) describes.
 
 ### What the repository owner needs to do
 
@@ -200,16 +227,21 @@ the full history (54 commits scanned, no leaks). Publication is the irreversible
 and the green full-history scan is its gate — a leaked credential in a public history cannot be
 recalled, only rotated.
 
-### The one claim that stays human-owned regardless
+### The claim that could only be settled against the live repository
 
 That a failing required check blocks the **merge** and not merely the build cannot be established
-from the working tree, and is not established by the read-back either. Confirm it once, by hand:
+from the working tree, and is not established by the read-back either. It was settled by
+observation, using exactly the procedure this section previously prescribed:
 
-1. Branch off `main`, add a commit that fails the gate — for example a bare `print()` in
-   `packages/dataplat/src/dataplat/version.py`, which trips ruff `T201`.
-2. Push the branch and open a pull request.
-3. On the pull request page, confirm the merge button is **blocked by the failing required check**,
-   rather than the check merely showing a red mark beside an enabled button.
-4. Close the pull request and delete the branch.
+1. Branched off `main` with a bare `print()` in `packages/dataplat/src/dataplat/version.py`
+   (ruff `T201`), confirmed failing locally first.
+2. Pushed the branch and opened PR #1.
+3. Read the decision from the API rather than the rendered page, because a red mark beside an
+   enabled button and a genuinely disabled button look similar and report differently:
+   `mergeable: true`, `mergeable_state: blocked`, `Quality gate: failure`.
+4. Closed the pull request and deleted the branch; the probe commit is not in `main`'s history.
 
-Recorded in `01-VALIDATION.md` § Manual-Only Verifications as `01-09/T2 (manual)`.
+**Re-verify this after any change to either job's `name:`**, since that is the one edit that can
+silently un-require a check while leaving this document looking correct.
+
+Recorded in `01-VALIDATION.md` § Manual-Only Verifications as `01-09/T2`.

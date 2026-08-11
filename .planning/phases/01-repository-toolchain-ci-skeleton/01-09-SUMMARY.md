@@ -2,8 +2,8 @@
 phase: 01-repository-toolchain-ci-skeleton
 plan: 09
 subsystem: ci-enforcement
-tags: [branch-protection, required-checks, validation-map, blocked, human-owned]
-status: blocked
+tags: [branch-protection, required-checks, validation-map, enforcing, observed]
+status: complete
 
 requires:
   - phase: 01-05
@@ -17,8 +17,11 @@ provides:
   - an explicit, committed record of what this phase did NOT establish
 affects:
   - the repository owner, who must apply the branch rule and publish the first CI run
-  - CICD-01, CICD-02, SEC-02, SEC-10 — all four remain OPEN and are NOT marked complete
-  - Phase 2, which inherits an unprotected default branch until the owner acts
+  - CICD-01, CICD-02, SEC-02, SEC-10 — all four CLOSED on 2026-08-11 after the owner published the
+    phase; the rule was applied from names read verbatim from CI run 31531101283 and PR #1 confirmed
+    `mergeable_state: blocked` on a deliberately failing gate
+  - Phase 2, which inherits a protected default branch that still permits the owner's direct push
+    (`enforce_admins: false`, exercised after the rule went live)
 
 actuals:
   tokens: 7000
