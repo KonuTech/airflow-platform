@@ -189,4 +189,35 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-11 after initialization*
+
+## Current State
+
+**Phase 1 complete (2026-08-11)** — Repository, Toolchain & CI Skeleton.
+
+Every commit is now gated by ruff, mypy strict, pytest and gitleaks, and the
+gate is *enforcing* rather than advisory: branch protection on `main` requires
+both CI jobs, and a pull request carrying a deliberate `print()` was observed
+being refused (`mergeable_state: blocked`), not merely marked red.
+
+Validated in Phase 1: QUAL-01, QUAL-02, QUAL-07, QUAL-08, CICD-01, CICD-02,
+CICD-03, CICD-04, SEC-02, SEC-10, SEC-11, OBS-03 — 12/12.
+
+Standing facts later phases inherit:
+- `make` is the only gate definition; CI calls it and nothing else, so the local
+  and CI gates cannot drift. `make check` is offline; `make ci` adds the secret
+  scan.
+- The 69-declaration CSV corpus regenerates byte-identically from a seed and is
+  never committed. It is the specification Phase 6's engine is measured against.
+- `enforce_admins: false` is deliberate — GSD commits directly to `main`, so
+  admin enforcement would self-lockout the project (T-01-43b).
+- `.planning/WINDOWS.md` carries 5 open defects, none blocking. Phase 3 owes
+  wiring `tests/property`/`integration`/`e2e` into a target that can run them:
+  `make check` names test paths explicitly, so a new test directory is silently
+  uncollected until named. That exact defect made QUAL-07 partial.
+
+Phase 1 found five defects *after* all nine plans reported success — four of
+them gates that passed on broken input. Review and verification earned their
+place as steps separate from execution.
+
+---
+*Last updated: 2026-08-11 after Phase 1*
