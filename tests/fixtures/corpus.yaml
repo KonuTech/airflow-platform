@@ -27,6 +27,22 @@
 # distinct capability they need exists now rather than being discovered in
 # Phase 6 — where adding it would mean re-baselining every digest.
 #
+# Plan 01-07 adds the thirty-one structural cases: dialect and quoting traps,
+# header/metadata/footer layouts, and row-shape anomalies. They are declarations
+# only — not one byte of `tools/corpus/` changed to admit them, which is the
+# prediction 01-06 made and this plan is the test of.
+#
+# CONVENTION for the literal fixtures added by 01-07: their `content:` is a
+# SINGLE-quoted YAML scalar, whereas 32 and 39 above use the double-quoted form.
+# Both end at the same bytes; what differs is which layer resolves the escape.
+# A single-quoted scalar gets no YAML escape processing at all, so `\n` reaches
+# the manifest loader as the two characters backslash-n and the loader's own
+# resolution (`_decode_content`) turns it into a newline — and, decisively, a
+# `"` is just a `"`. CSV content is mostly quotes; spelling every one of them
+# as `\"` inside a double-quoted scalar is how a fixture acquires a quote
+# nobody meant to write. A literal backslash is still written `\\`, because the
+# loader's escape resolution runs either way.
+#
 # Declaration order is append-friendly on purpose. Existing entries are never
 # moved: a fixture inserted between two others adds one line to CORPUS.sha256,
 # whereas reordering them rewrites the oracle and makes review impossible.
@@ -601,4 +617,302 @@ fixtures:
       comma_is_not_the_delimiter: true
       header_row_index: 0
       data_rows: 10
+      rejected_rows: 0
+
+  # ==========================================================================
+  # PLAN 01-07 — the structural core of README §73 (dialect, header, row shape)
+  # ==========================================================================
+
+  # --- dialect: the delimiter is a parameter, never an assumption -----------
+  # 02/03/04 are the plain cases. They look trivial and they are, which is the
+  # point: CSV-04 names five dialects, and a corpus that only ever exercises the
+  # comma lets a hard-coded `,` survive every test in the suite.
+  - name: "02_semicolon.csv"
+    covers: [CSV-04, CSV-05]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ";"
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, amount]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: ";"
+      contains_no_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 8
+      rejected_rows: 0
+
+  # The pipe is a regular-expression metacharacter. Any detector or splitter
+  # that builds a pattern from the delimiter without escaping it turns `|` into
+  # alternation and matches the empty string everywhere.
+  - name: "03_pipe.csv"
+    covers: [CSV-04, CSV-05]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: "|"
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, amount]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      amount: { kind: decimal, min: "100.00", max: "99999.99", scale: 2 }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: "|"
+      delimiter_is_a_regex_metacharacter: true
+      delimiter_must_be_escaped_before_use_in_a_pattern: true
+      contains_no_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 8
+      rejected_rows: 0
+
+  # Tab-separated is NOT whitespace-separated, and the `notatka` column exists
+  # to make the difference observable: its values contain ASCII spaces, so a
+  # reader that splits on generic whitespace produces extra fields on every row
+  # while a reader that splits on `\t` does not.
+  - name: "04_tab.csv"
+    covers: [CSV-04, CSV-05]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: "\t"
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, name, notatka]
+    rows: 8
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+      notatka:
+        {
+          kind: pick,
+          values: ["do sprawdzenia", "ok", "brak danych", "zwrot do korekty"],
+        }
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: "\t"
+      is_tab_separated_not_whitespace_separated: true
+      values_contain_ascii_spaces: true
+      splitting_on_generic_whitespace_would_split_values: true
+      contains_no_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 8
+      rejected_rows: 0
+
+  # --- quoting --------------------------------------------------------------
+  # Every field quoted, including the numeric ones. Quoting is a transport
+  # convention, not a type declaration: `"1234.56"` is still a number and
+  # `"000001"` is still an identifier whose leading zeros are data (SCHEMA-01).
+  # The quotes themselves are never part of the value.
+  - name: "08_quoted_fields.csv"
+    covers: [CSV-06, SCHEMA-01]
+    generator: literal
+    encoding: utf-8
+    content: '"id","name","amount"\n"000001","Kowalski","1234.56"\n"000002","Nowak","2345.67"\n"000003","Wiśniewski","3456.78"\n'
+    expect:
+      detected_delimiter: ","
+      quotechar: '"'
+      every_field_is_quoted: true
+      quotes_are_not_part_of_the_value: true
+      quoting_does_not_imply_string_type: true
+      leading_zeros_are_preserved: "000001"
+      value_row_1: ["000001", "Kowalski", "1234.56"]
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # The delimiter appears INSIDE quoted fields, which is the case a string
+  # split cannot survive — CSV-06 forbids string splitting for exactly this
+  # reason. `naive_split_field_counts` is the damage a `line.split(",")` does,
+  # stated as a number so the difference is measurable rather than asserted.
+  - name: "09_embedded_commas.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,name,address\n1,"Kowalski, Jan","ul. Główna 12, 00-001 Warszawa"\n2,"Nowak, Anna","ul. Kwiatowa 3, 30-002 Kraków"\n3,Prosty,"Bez przecinka"\n'
+    expect:
+      detected_delimiter: ","
+      delimiter_occurs_inside_quoted_fields: true
+      correct_field_count_per_record: 3
+      naive_split_field_counts: [3, 5, 5, 3]
+      value_row_1_name: "Kowalski, Jan"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # A record is not a line. Two of the three records span several physical
+  # lines, so line count (7) and record count (4) disagree — which is precisely
+  # why CSV-13 requires chunking in *records* and never by lines or byte
+  # offsets. A reader that chunks by line splits row 1 in half and reports two
+  # malformed records that do not exist in the source.
+  - name: "10_embedded_newlines.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,note\n1,"first line\nsecond line"\n2,ok\n3,"a\nb\nc"\n'
+    expect:
+      detected_delimiter: ","
+      physical_line_count: 7
+      record_count_including_header: 4
+      line_count_is_not_record_count: true
+      records_spanning_multiple_lines: [1, 3]
+      value_row_1_note: "first line\nsecond line"
+      chunking_by_line_fabricates_malformed_records: true
+      header_row_index: 0
+      column_count: 2
+      data_rows: 3
+      rejected_rows: 0
+
+  # A quote character inside a field that was never quoted. `5" pipe` is an
+  # inches mark, not a transport quote, and the stdlib parser preserves it —
+  # VERIFIED on CPython 3.12.3. So the declared outcome is a parsed record with
+  # the quote retained, NOT a rejection: treating a bare `"` as a parse error
+  # would quarantine every measurement in an engineering feed.
+  - name: "35_quote_in_unquoted_field.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,code,note\n1,ab"cd,plain\n2,5" pipe,inches\n3,normal,plain\n'
+    expect:
+      detected_delimiter: ","
+      quotechar_appears_inside_an_unquoted_field: true
+      affected_row_indices: [1, 2]
+      the_quote_is_data_because_the_field_is_not_quoted: true
+      value_row_1_code: 'ab"cd'
+      value_row_2_code: '5" pipe'
+      outcome: parsed-with-the-quote-preserved
+      parser_raises: false
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # Two escape conventions, one file. This fixture uses the RFC-4180 doubled
+  # quote; the backslash is ordinary data everywhere it appears.
+  #
+  # Row 2 is the whole point. Under the doubled convention the `"` after the
+  # backslash CLOSES the quoted field, so the value is `a\b"`. Under a
+  # backslash convention the same eight bytes read as `a"b`. Neither reading
+  # raises — the file parses either way — so choosing the wrong convention is a
+  # DATA CORRUPTION that no exception announces. That is why the convention has
+  # to be a declared contract parameter rather than a detector's guess.
+  - name: "36_doubled_vs_backslash_escape.csv"
+    covers: [CSV-06, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'id,value,convention\n1,"He said ""hello""",doubled-quote-escape\n2,"a\\"b",backslash-would-escape\n3,"path\\dir\\file",backslash-is-data\n'
+    expect:
+      detected_delimiter: ","
+      escape_convention: doubled-quote
+      backslash_is_data_never_an_escape_in_this_file: true
+      value_row_1: 'He said "hello"'
+      value_row_2_under_the_doubled_convention: 'a\b"'
+      value_row_2_under_a_backslash_convention: 'a"b'
+      value_row_3: 'path\dir\file'
+      misreading_the_convention_is_corruption_not_a_parse_error: true
+      convention_must_be_declared_in_the_contract: true
+      contract_parameter: "csv.escapechar"
+      parser_raises: false
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 0
+
+  # The classic dialect-sniffer trap: the header row's delimiter frequencies
+  # disagree with the body's. The header carries three commas and two
+  # semicolons because one column name is itself a comma-separated list; every
+  # body row carries zero commas and two semicolons.
+  #
+  # A frequency heuristic that reads the first line picks `,`. The correct
+  # answer is `;`, and the evidence for it is in the BODY: with `;` every row
+  # including the header has three fields, whereas with `,` the header has four
+  # fields and each body row has one. Consistency across records is the signal;
+  # first-line frequency is noise (STACK.md §F — this is why csv.Sniffer is
+  # rejected and a consistency-measure detector is used instead).
+  - name: "37_delimiter_frequency_differs_header_vs_body.csv"
+    covers: [CSV-04, CSV-05]
+    generator: literal
+    encoding: utf-8
+    content: 'id;first,middle,last,suffix;amount\n1;Kowalski;1234.56\n2;Nowak;2345.67\n3;Wiśniewski;3456.78\n4;Wójcik;4567.89\n5;Kamiński;5678.90\n'
+    expect:
+      correct_delimiter: ";"
+      decision_must_come_from_the_body_not_the_first_line: true
+      header_delimiter_counts: { ",": 3, ";": 2 }
+      body_delimiter_counts_per_row: { ",": 0, ";": 2 }
+      first_line_frequency_heuristic_picks: ","
+      field_count_with_the_correct_delimiter: 3
+      header_field_count_if_comma_is_chosen: 4
+      body_field_count_if_comma_is_chosen: 1
+      header_row_index: 0
+      column_count: 3
+      data_rows: 5
+      rejected_rows: 0
+
+  # Nothing to detect. There is no delimiter in this file, so the only correct
+  # behaviour is to DECLINE — a guessed delimiter here splits a reference code
+  # into pieces and every downstream key is wrong, silently.
+  #
+  # The stdlib sniffer does not decline: it raises `_csv.Error: Could not
+  # determine delimiter` — VERIFIED on CPython 3.12.3. An exception is not the
+  # same as a clean "single column, no delimiter" answer, and a reader that
+  # catches it and falls back to `,` has turned a refusal into a guess.
+  - name: "38_single_column_no_delimiter.csv"
+    covers: [CSV-05, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'customer_reference\nCUST-000001\nCUST-000002\nCUST-000003\nCUST-000004\nCUST-000005\n'
+    expect:
+      detection_declines: true
+      detected_delimiter: null
+      a_guessed_delimiter_is_a_silent_corruption_source: true
+      stdlib_sniffer_raises: true
+      stdlib_sniffer_error: "Could not determine delimiter"
+      candidate_delimiters_absent: [",", ";", "|", "\t"]
+      resolution: "one column; the contract declares it, the detector never invents one"
+      header_row_index: 0
+      column_count: 1
+      data_rows: 5
+      rejected_rows: 0
+
+  # All three hazards in ONE field: the delimiter, a newline and a doubled-quote
+  # escape, simultaneously. Each is covered alone by 09, 10 and 36; a reader can
+  # pass all three of those and still fail here, because handling them together
+  # is a different problem from handling them in sequence.
+  #
+  # The exact parsed values are declared, so failure is visible rather than
+  # approximate.
+  - name: "66_triple_nasty.csv"
+    covers: [CSV-06, CSV-13]
+    generator: literal
+    encoding: utf-8
+    content: 'id,payload,note\n1,"a,b\nc""d",all three at once\n2,plain,control\n'
+    expect:
+      detected_delimiter: ","
+      contains_delimiter_inside_a_quoted_field: true
+      contains_newline_inside_a_quoted_field: true
+      contains_a_doubled_quote_escape_in_the_same_field: true
+      all_three_hazards_occur_in_one_field: true
+      value_row_1: ["1", "a,b\nc\"d", "all three at once"]
+      value_row_1_payload: "a,b\nc\"d"
+      physical_line_count: 4
+      record_count_including_header: 3
+      a_reader_that_handles_each_hazard_alone_still_fails_here: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 2
       rejected_rows: 0
