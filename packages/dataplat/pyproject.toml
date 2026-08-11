@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dataplat"
+version = "0.1.0"
+description = "Source-agnostic ETL platform core"
+requires-python = ">=3.12,<3.13"
+dependencies = ["PyYAML>=6"]
+
+# NOTE: no dependency on csv-processor, in either direction of this file.
+# The absence here is the packaging half of the guarantee; the import-linter
+# contract in setup.cfg is the other half.
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dataplat"]

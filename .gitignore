@@ -1,3 +1,23 @@
 
 # GSD research search cache (ephemeral)
 .planning/research/.cache/
+
+# QUAL-08 / ROADMAP criterion 2: the CSV corpus is generated from a committed
+# seed, never committed. The manifest is the specification and CORPUS.sha256 is
+# the oracle; both stay tracked.
+tests/fixtures/csv/
+!tests/fixtures/corpus.yaml
+!tests/fixtures/CORPUS.sha256
+
+# Environment and downloaded tooling
+.venv/
+tools/bin/
+
+# Tool caches and coverage output
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+__pycache__/
+.coverage
+.coverage.*

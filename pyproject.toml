@@ -1,0 +1,126 @@
+[project]
+name = "airflow-platform"
+version = "0.0.0"
+description = "Airflow ETL Platform — workspace root (not a distribution)"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.uv]
+package = false                        # virtual root: never built or installed
+
+[tool.uv.workspace]
+# Explicit, never a glob: a future member (e.g. an Airflow DAG package) must not
+# be able to join the workspace by accident and drag Airflow's ~600 constraint
+# pins into this lockfile. See 01-RESEARCH.md Pitfall 9.
+members = ["packages/dataplat", "packages/csv-processor"]
+
+[tool.uv.sources]
+dataplat = { workspace = true }
+csv-processor = { workspace = true }
+
+[dependency-groups]
+# Both workspace members are listed here on purpose. On a virtual workspace root
+# a bare `uv sync` installs no member unless something in the root depends on
+# one, and ROADMAP success criterion 4 is worded `uv sync && make check`. Listing
+# them in the default group makes the bare command sufficient; `make install`
+# runs the same bare sync so the two cannot diverge.
+dev = [
+  "dataplat",
+  "csv-processor",
+  "pytest>=9.1,<10",
+  "pytest-cov>=7.1,<8",
+  "pytest-xdist>=3.8,<4",
+  "hypothesis>=6.165,<7",
+  "ruff==0.16.2",                      # pinned exactly: this is a gate
+  "mypy==2.3.0",                       # pinned exactly: this is a gate
+  "import-linter>=2.13,<3",
+  "pre-commit>=4.6,<5",
+  "PyYAML>=6",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/dataplat/src", "packages/csv-processor/src", "tools", "tests", "airflow/dags"]
+# Deliberately-broken sample files for the meta-tests (plan 01-05) must never be
+# linted: their whole purpose is to fail a gate on demand.
+#
+# `*.md` is excluded because ruff 0.16 formats Python code blocks inside Markdown.
+# README.md is this project's 3,386-line specification and .planning/ holds GSD
+# artifacts; neither is source, and a formatter rewriting a spec's illustrative
+# snippets would corrupt the document the whole project is measured against.
+extend-exclude = ["tests/policy/badsamples", "*.md", ".planning"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "D203", "D213",      # mutually exclusive with D211/D212 — pick one side
+  "COM812", "ISC001",  # conflict with `ruff format`
+  "ANN401",            # Any in **kwargs is sometimes correct
+  "FIX", "TD",         # TODO comments are allowed
+  "CPY001",            # fires on EVERY file under select=ALL (01-RESEARCH.md Pitfall 2)
+]
+# T20 must never appear above. OBS-03 is the print() ban; it is relaxed only by
+# path, below, and never globally.
+
+# D417 (undocumented parameter) is already on under `convention = "google"` —
+# verified by probe. It is restated here so that changing the convention cannot
+# silently drop QUAL-02's parameter half without touching this line.
+# Known limit: D417 fires only when an `Args:` section exists and omits a
+# parameter. A docstring with no `Args:` section at all is not flagged, so
+# "documents every parameter" stays partly a review-time rule.
+extend-select = ["D417"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**"        = ["S101", "PLR2004", "ANN", "D"]   # asserts + magic numbers are fine
+"airflow/dags/**" = ["INP001"]                        # DAG folder is not a package
+"scripts/**"      = ["T20", "INP001"]                 # OBS-03 carve-out — scripts only
+"tools/corpus/__main__.py" = ["T20"]                  # CLI entry point may print
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false          # Decimal / CSV boundaries need some Any
+mypy_path = ["packages/dataplat/src", "packages/csv-processor/src"]
+exclude = ["tests/policy/badsamples/"]
+
+# `strict = false` in a per-module override is SILENTLY IGNORED by mypy 2.3.0 —
+# it is accepted without warning and the module stays fully strict
+# (01-RESEARCH.md Pitfall 1). The individual flags must be enumerated.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = ["clevercsv.*", "hvac.*", "chardet.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "slow: generates or reads a large fixture",
+  "regression: permanent test for a specific fixed bug (QUAL-07)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["dataplat", "csv_processor"]
+
+[tool.coverage.report]
+show_missing = true
+# No fail_under: CICD-05 lands in Phase 11, and a threshold over a tree that is
+# mostly configuration is a number people game.
