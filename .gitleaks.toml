@@ -1,0 +1,55 @@
+# Secret-scanner configuration (SEC-02, SEC-10, SEC-11).
+#
+# Read this before widening anything below.
+#
+# The synthetic CSV corpus is high-entropy by construction: account numbers,
+# IBANs, long identifiers and token-shaped strings. gitleaks' generic
+# high-entropy rules fire on them. The obvious "fix" is a repository-wide
+# pattern allowlist, and six months later a real key ships past a control that
+# everyone believes is on. Every allowlist here is therefore scoped by path AND
+# by the synthetic-value prefix at the same time, so the prefix buys silence
+# only inside the fixture tree. `tools/security/gitleaks_selftest.py` asserts
+# exactly that: a SYNTH_-prefixed value under packages/ is still reported.
+#
+# Consumed by `make gitleaks` (full history + working tree) and by the
+# `Secret scan (full history)` CI job. Every invocation carries --redact, so a
+# finding never reaches a log with its value intact (SEC-10).
+
+title = "airflow-platform"
+
+[extend]
+# Inherit the full upstream ruleset. This project adds no rules of its own:
+# a hand-maintained subset of gitleaks' detections is a control that silently
+# rots as the upstream ruleset grows.
+useDefault = true
+
+[[allowlists]]
+description = """
+Generated synthetic CSV corpus (tests/fixtures/). Every credential-shaped value
+in the corpus carries the SYNTH_ prefix by construction — the generator emits
+it, it is not a naming convention anyone has to remember.
+
+condition = "AND" is load-bearing: it requires BOTH the path and the regex to
+match. With gitleaks' default OR, this single entry would allowlist the SYNTH_
+prefix across the entire repository, which is the global-pattern failure this
+config exists to avoid. Do not remove the condition, and do not add a path
+outside the fixture tree. A real secret dropped into this tree is still
+reported, because it will not carry the prefix.
+"""
+paths = ['''^tests/fixtures/.*''']
+regexTarget = "line"
+regexes = ['''SYNTH_[A-Za-z0-9]{8,}''']
+condition = "AND"
+
+[[allowlists]]
+description = """
+The committed corpus manifest. tests/fixtures/csv/ is generated and gitignored,
+so it is seen only by the working-tree scan; corpus.yaml is tracked and
+therefore also seen by the full-history scan, carrying the same SYNTH_-prefixed
+literals as its declared expectations. Same conjunction, same reasoning: the
+path alone silences nothing and the prefix alone silences nothing.
+"""
+paths = ['''^tests/fixtures/corpus\.yaml$''']
+regexTarget = "line"
+regexes = ['''SYNTH_[A-Za-z0-9]{8,}''']
+condition = "AND"

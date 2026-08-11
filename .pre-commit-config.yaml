@@ -1,0 +1,48 @@
+# Local courtesy hooks — NOT the gate.
+#
+# CI is the gate (`make ci`), and it is the only thing that can block a merge.
+# A pre-commit hook is bypassable with `--no-verify` and is not installed on a
+# fresh clone until someone runs `pre-commit install`, so nothing here may be
+# relied upon for SEC-02, QUAL-* or CICD-*.
+#
+# What these hooks are for: catching a credential BEFORE it enters git history.
+# Once a secret is committed, the remedy is rotation plus a history rewrite,
+# and the full-history scan in CI will keep reporting it until the rewrite
+# happens. Ten seconds at commit time buys back an afternoon.
+#
+# Install once per clone:  uv run pre-commit install
+#
+# Versions are pinned and must be kept in step with the pyproject dev group:
+# ruff here is 0.16.2 (== the dev-group pin), gitleaks is 8.30.1 (== the
+# GITLEAKS_VERSION in .github/workflows/ci.yml and in
+# tools/security/install_gitleaks.sh). A drifting local hook that passes while
+# CI fails is worse than no hook at all.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      # Runs `gitleaks git --pre-commit --redact --staged --verbose`, so it
+      # reads this repository's .gitleaks.toml and inherits the same
+      # path-AND-prefix allowlists CI uses. --redact is part of the upstream
+      # hook entry, so a finding is reported without its value (SEC-10).
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # The CSV corpus is generated and gitignored (QUAL-08). A large staged
+      # file usually means someone bypassed that and is about to commit
+      # fixtures; 512 KB is comfortably above every legitimate source file here.
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      # Overlaps with gitleaks by design: this one is cheap, offline, and has
+      # no ruleset that can drift.
+      - id: detect-private-key

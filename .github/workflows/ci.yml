@@ -21,7 +21,9 @@ concurrency:
 
 env:
   UV_VERSION: "0.12.3"
-  # Consumed by the `Secret scan (full history)` job that plan 01-02 adds.
+  # Consumed by the `Secret scan (full history)` job below and read by
+  # tools/security/install_gitleaks.sh, so the workflow and a developer machine
+  # install the identical, checksum-verified binary.
   GITLEAKS_VERSION: "8.30.1"
 
 jobs:
@@ -44,3 +46,63 @@ jobs:
       # the single definition of the gate, and plan 01-05 adds the policy test
       # that enforces it.
       - run: make check
+
+  # SEC-02 / SEC-11. This job holds the claim that no credential has ever been
+  # committed to this repository, which is the claim that has to be true before
+  # the repository becomes public: once it is, any credential in any reachable
+  # commit is world-readable and rotation is the only remedy.
+  #
+  # SEC-10, stated honestly: the general form — "no CI job ever echoes a secret"
+  # — is undecidable once a job interpolates one, because a `curl -v` with a
+  # bearer header leaks through verbose output and matches no grep. What IS
+  # decidable, and is what this phase claims, is the stronger structural fact
+  # that this workflow references no repository secret at all. `grep -Ec
+  # 'secrets\.' .github/workflows/ci.yml` is 0 and plan 01-05 keeps it there.
+  # The first job to interpolate a secret (Phase 11, publishing images) owes a
+  # re-audit of that claim — it cannot simply inherit this one.
+  secrets:
+    name: Secret scan (full history)
+    runs-on: ubuntu-latest
+    # Measured at ~150 ms over this repository's history. The generous ceiling
+    # is for runner and download variance, not for the scan.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Load-bearing. actions/checkout defaults to depth 1, and
+          # `gitleaks git --log-opts="--all"` over a depth-1 checkout examines a
+          # single commit and reports "no leaks found" — a green build that
+          # proves nothing. Verified by execution: a depth-1 checkout logs
+          # "1 commits scanned". gitleaks prints that count on every run, so a
+          # future regression here is visible in the job log, and plan 01-05's
+          # test_secret_scan_depth.py fails the build if this line disappears.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      # The self-test runs through `uv run --frozen`, so this job needs the
+      # locked environment just as the quality gate does.
+      - run: make install
+      # Downloads the pinned binary and verifies its published SHA-256 before
+      # extracting it, failing closed on mismatch (T-01-09). The binary lands in
+      # the gitignored tools/bin/ and is never committed.
+      - run: tools/security/install_gitleaks.sh
+      # Both scans run through the Makefile — never a direct scanner invocation
+      # — so the gate CI enforces and the gate a developer runs cannot drift.
+      # --redact lives inside the target, so a finding never reaches this log
+      # with its value intact.
+      #
+      # The full-history scan runs on every pull request. That is affordable on
+      # a public repository with unmetered Actions minutes, and it degrades
+      # gradually and visibly rather than suddenly. If this job ever exceeds
+      # roughly a minute, the remedy is to scan only the pull-request diff range
+      # on PRs and keep the all-refs scan on `main` plus a schedule. Do not
+      # implement that split pre-emptively — the diff-range form cannot prove
+      # criterion 5 on its own.
+      - run: make gitleaks
+      # SEC-11: proves the scanner is live rather than merely configured, by
+      # watching it exit 1 on a disposable repository. Nothing is written to
+      # this repository's history.
+      - run: make gitleaks-selftest
