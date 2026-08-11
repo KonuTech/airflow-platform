@@ -60,7 +60,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. A developer clones the repo and runs `uv sync && make check` successfully with no cluster, no credentials and no network services.
   5. A scan of full git history reports zero secrets, and no CI job echoes a secret value into its log.
 
-**Plans**: 4/9 plans executed in 7 waves
+**Plans**: 5/9 plans executed in 7 waves
 
 Plans:
 **Wave 1**
@@ -75,7 +75,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-05-PLAN.md — Policy tests: every gate observed to fail, CI/local parity, gate-strength drift
+- [x] 01-05-PLAN.md — Policy tests: every gate observed to fail, CI/local parity, gate-strength drift
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -477,7 +477,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Repository, Toolchain & CI Skeleton | 4/9 | In Progress|  |
+| 1. Repository, Toolchain & CI Skeleton | 5/9 | In Progress|  |
 | 2. kind Cluster & Core Infrastructure | 0/TBD | Not started | - |
 | 3. `dataplat` Core Library & Metadata Control Plane | 0/TBD | Not started | - |
 | 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/TBD | Not started | - |
