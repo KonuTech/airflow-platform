@@ -203,6 +203,34 @@ fixtures:
       diacritics_survive_round_trip: true
       data_rows: 12
 
+  # --- field size, deliberately on the safe side of the limit ---------------
+  # The twin of 67_row_exceeding_field_size_limit.csv. Both declare their width
+  # as a parameter rather than arriving at it by accident, and this one sits
+  # below the standard parser's 131 072-byte default so it exercises bounded
+  # memory on wide values without tripping the limit. A pair is the point: a
+  # single oversized fixture cannot distinguish "the limit works" from "wide
+  # fields are broken".
+  - name: "28_large_fields.csv"
+    covers: [CSV-06, LOAD-07]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, note]
+    rows: 2
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      note: { kind: repeat, char: "x", length: 100000 }
+    expect:
+      data_rows: 2
+      max_field_bytes: 100000
+      stdlib_default_field_size_limit: 131072
+      exceeds_stdlib_default_field_size_limit: false
+      parses_without_raising: true
+      rejected_rows: 0
+
   # --- tabular, large profile ----------------------------------------------
   # Generated on every gate run, never cached. A cache would be the only
   # artifact in this system whose staleness could invalidate the reproducibility
@@ -231,6 +259,56 @@ fixtures:
       approx_bytes: 293000000
       rlimit_as_bytes: 134217728
       data_rows: 11000000
+
+  # --- line terminators ------------------------------------------------------
+  # Both forms in one file, alternating per record. This is what a file
+  # assembled from two sources looks like, and it defeats the common shortcut
+  # of sniffing the first line's terminator and applying it to the whole file.
+  # The reader must open with newline="" and let the parser decide per record;
+  # anything else either loses a row or gains a stray \r at the end of a field.
+  - name: "30_crlf_lf_mixed.csv"
+    covers: [CSV-06, CSV-13]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminators: ["\r\n", "\n"]
+    header: [id, name]
+    rows: 5
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+    expect:
+      data_rows: 5
+      terminators_present: ["\r\n", "\n"]
+      terminator_is_uniform: false
+      detected_line_terminator: mixed
+      rejected_rows: 0
+
+  # A bare carriage return throughout — the classic early-Macintosh and
+  # mainframe export. Read in text mode with universal newlines this parses
+  # fine by accident; read as bytes and split on \n it is ONE row of 6 fields
+  # * 5. There is no line feed anywhere in the file, which is the assertion.
+  - name: "31_cr_only.csv"
+    covers: [CSV-06, CSV-13]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\r"
+    header: [id, name]
+    rows: 5
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      name: { kind: pick, values: ["Kowalski", "Nowak", "Wiśniewski", "Wójcik"] }
+    expect:
+      data_rows: 5
+      detected_line_terminator: "\r"
+      contains_line_feed: false
+      splitting_on_line_feed_yields_one_row: true
+      rejected_rows: 0
 
   # --- literal --------------------------------------------------------------
   # VERIFIED on CPython 3.12.3: the stdlib CSV reader parses an embedded NUL
@@ -422,6 +500,64 @@ fixtures:
     expect:
       decompresses_to: "01_simple.csv"
       data_rows: 20
+
+  # --- delivery shape: one logical dataset across several objects -----------
+  # Spark-style output: `part-00000`, `part-00001`, header in the first part
+  # only. The failure this fixture exists to catch is a reader that treats each
+  # object as a file: part-00001's first row is DATA, and consuming it as a
+  # header silently drops a record and renames every column to a customer's
+  # name. Discovery (§40) must group the parts into one dataset before parsing.
+  #
+  # A part is a byte range and nothing else: no archive header, so unlike gzip
+  # there is no timestamp and no embedded source filename that could differ
+  # between two runs (R5's concern, satisfied by construction).
+  - name: "62_multipart_split"
+    covers: [CSV-11, LOAD-01]
+    generator: multipart
+    wraps: "01_simple.csv"
+    encoding: utf-8
+    line_terminator: "\n"
+    parts: 2
+    expect:
+      parts: 2
+      part_names: ["part-00000", "part-00001"]
+      header_in_first_part_only: true
+      one_logical_dataset: true
+      data_rows: 20
+      second_part_first_row_is_data: true
+
+  # --- field size, deliberately past the limit -------------------------------
+  # The twin of 28_large_fields.csv, on the other side of the line. The stdlib
+  # parser raises `_csv.Error: field larger than field limit` and ABORTS the
+  # whole iteration, so the naive reading is "this file is unparseable".
+  #
+  # That is not the outcome declared here. STACK.md §F requires the limit to be
+  # an explicit contract parameter, and §51 requires a bad record to be
+  # rejected with a reason rather than taking the file down with it. So the
+  # expectation is a rejected record, and the reader owes a field-size guard
+  # that produces one — the parser default is a trap, not a specification.
+  - name: "67_row_exceeding_field_size_limit.csv"
+    covers: [CSV-06, VALID-01, VALID-03]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [id, blob]
+    rows: 2
+    row_spec:
+      id: { kind: zero_padded_int, width: 6, start: 1 }
+      blob: { kind: repeat, char: "y", length: 200000 }
+    expect:
+      data_rows: 2
+      max_field_bytes: 200000
+      stdlib_default_field_size_limit: 131072
+      exceeds_stdlib_default_field_size_limit: true
+      contract_parameter: "csv.max_field_bytes"
+      outcome: rejected-record
+      quarantine_reason: "field-exceeds-max-field-bytes"
+      parser_aborts_whole_file: false
 
   # --- the most common real export shape in this project's domain -----------
   # A Polish Excel "Save as CSV" produces all three of these at once: a UTF-8
