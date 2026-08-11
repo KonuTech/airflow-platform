@@ -71,6 +71,7 @@ fixtures-verify:               ## QUAL-08: prove byte-identity against the oracl
 	                                     $(FIXTURES_FAST)
 
 gitleaks:                      ## SEC-02/SEC-11: full history + working tree [plan 01-02]
+	@tools/security/install_gitleaks.sh
 	./tools/bin/gitleaks git --log-opts="--all" --redact --no-banner --exit-code 1 .
 	./tools/bin/gitleaks dir  --redact --no-banner --exit-code 1 .
 
