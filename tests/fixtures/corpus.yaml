@@ -1464,3 +1464,310 @@ fixtures:
       column_count_is_below_the_postgres_limit: true
       data_rows: 2
       rejected_rows: 0
+
+  # ==========================================================================
+  # PLAN 01-08 — semantic damage: numbers, dates, nulls and booleans
+  # ==========================================================================
+  #
+  # These are the cases where a value arrives ALREADY DESTROYED by the system
+  # that exported it. What matters is not parsing them but declaring — before
+  # any normaliser exists — which ones are recoverable and which must be
+  # rejected. An expectation that coerces a corrupted identifier into a
+  # plausible number legitimises data corruption as correct behaviour, and no
+  # test written afterwards can undo that.
+  #
+  # Two rules govern every declaration below.
+  #
+  # NUMBERS ARE EXACT DECIMAL LITERALS, IN QUOTES. A binary floating-point
+  # expectation inside a corpus whose purpose is numeric fidelity would be
+  # self-defeating: 0.1 + 0.2 is not 0.3, and the one place that must never be
+  # true is the specification.
+  #
+  # DATES NAME THEIR FORMAT. Not one declaration below infers a format from its
+  # data. CSV-09 forbids guessing, and the reason is that a guessing parser
+  # reading a day-first value as month-first produces a PLAUSIBLE WRONG DATE
+  # rather than an error — the worst available outcome, because nothing
+  # downstream has any way to notice.
+
+  # --- numeric: the separator is a declared locale profile ------------------
+  # 20 and 21 are a pair, and the pairing is the specification: both files
+  # carry the SAME four quantities, written under different profiles. A reader
+  # that gets one right and the other wrong is not "mostly correct" — it is a
+  # reader that silently changes numbers by a factor of a thousand.
+  #
+  # Separator handling is a contract-declared locale profile, never
+  # `locale.setlocale` — which is process-global and not thread-safe, so one
+  # dataset's profile would leak into every other dataset parsed concurrently.
+  - name: "20_decimal_comma.csv"
+    covers: [CSV-10, CSV-05]
+    generator: literal
+    encoding: utf-8
+    content: 'id;kwota;opis\n1;1234,56;wartosc standardowa\n2;-99,99;wartosc ujemna\n3;0,00;zero\n4;1234567,89;bez separatora tysiecy\n'
+    expect:
+      detected_delimiter: ";"
+      locale_profile: "pl-PL"
+      decimal_separator: ","
+      thousands_separator_absent: true
+      delimiter_is_not_the_decimal_separator: true
+      raw_values: ["1234,56", "-99,99", "0,00", "1234567,89"]
+      normalised_values: ["1234.56", "-99.99", "0.00", "1234567.89"]
+      values_are_exact_decimals_never_binary_floats: true
+      profile_must_be_declared_never_inferred: true
+      contract_parameter: "csv.locale_profile"
+      # The structural protection, stated here because it is the whole reason
+      # this file uses a semicolon: dialect detection runs BEFORE numeric
+      # normalisation, and a contract whose delimiter equals a column's decimal
+      # separator is refused at contract-validation time. Were the delimiter a
+      # comma, every amount below would be split in half into two fields.
+      reading_this_file_with_a_comma_delimiter_splits_every_amount_in_half: true
+      header_field_count_if_comma_is_chosen: 1
+      body_field_count_if_comma_is_chosen: 2
+      row_1_fields_if_comma_is_chosen: ["1;1234", "56;wartosc standardowa"]
+      header_row_index: 0
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # The counterpart. Same four quantities, point separator, comma delimiter.
+  #
+  # Note what this file CANNOT contain: a grouping comma. `1,234,567.89` under
+  # a comma delimiter is three fields, not one number. That is not an oversight
+  # in the fixture — it is the constraint itself, and it is why a grouping
+  # separator is part of the locale profile rather than a formatting detail.
+  - name: "21_decimal_point.csv"
+    covers: [CSV-10, CSV-05]
+    generator: literal
+    encoding: utf-8
+    content: 'id,amount,note\n1,1234.56,standard value\n2,-99.99,negative value\n3,0.00,zero\n4,1234567.89,no grouping separator\n'
+    expect:
+      detected_delimiter: ","
+      locale_profile: "en-US"
+      decimal_separator: "."
+      thousands_separator_absent: true
+      delimiter_is_not_the_decimal_separator: true
+      raw_values: ["1234.56", "-99.99", "0.00", "1234567.89"]
+      normalised_values: ["1234.56", "-99.99", "0.00", "1234567.89"]
+      values_are_exact_decimals_never_binary_floats: true
+      profile_must_be_declared_never_inferred: true
+      contract_parameter: "csv.locale_profile"
+      denotes_the_same_quantities_as: "20_decimal_comma.csv"
+      a_grouping_comma_cannot_appear_unquoted_because_the_delimiter_is_a_comma: true
+      header_row_index: 0
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # --- numeric: UNRECOVERABLE spreadsheet damage ----------------------------
+  # THE MOST IMPORTANT DECLARATION IN THIS PLAN.
+  #
+  # A fifteen-digit identifier that a spreadsheet rendered in exponent form has
+  # LOST DIGITS. `1.23457E+14` carries six significant digits; the original
+  # carried fifteen. Nine digits are simply not in the file any more, and no
+  # rule, contract or heuristic can restore them — expanding the exponent form
+  # yields 123457000000000, which is a DIFFERENT customer.
+  #
+  # So the declared outcome is a REJECTION WITH A REASON, not a coercion. This
+  # is the decision that has to be pinned before anyone writes a normaliser,
+  # because the tempting implementation — "it looks numeric, parse it as a
+  # number" — produces a valid-looking identifier that silently points at the
+  # wrong record, and every join downstream inherits it.
+  #
+  # Row 3 is the clean control: the same fifteen digits, intact, because that
+  # column was formatted as text. Without it a reader could pass this fixture
+  # by rejecting every long number, which is the other way to lose data.
+  - name: "50_excel_scientific_notation_ids.csv"
+    covers: [CSV-10, SCHEMA-01, VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: 'row_id,customer_id,note\n1,1.23457E+14,damaged by the spreadsheet\n2,9.87654E+14,damaged by the spreadsheet\n3,123456789012345,intact - the column was formatted as text\n'
+    expect:
+      detected_delimiter: ","
+      original_value_row_1: "123456789012345"
+      rendered_value_row_1: "1.23457E+14"
+      original_value_row_2: "987654321098765"
+      rendered_value_row_2: "9.87654E+14"
+      significant_digits_original: 15
+      significant_digits_rendered: 6
+      digits_lost: 9
+      expanding_the_rendered_form_yields_row_1: "123457000000000"
+      expanding_the_rendered_form_yields_row_2: "987654000000000"
+      expansion_differs_from_the_original: true
+      damage_is_unrecoverable: true
+      reason: "the rendered form carries six significant digits and the original carried fifteen; the missing nine are not in the file, so no rule can restore them"
+      outcome: rejected-record
+      quarantine_reason: "scientific-notation-identifier-unrecoverable"
+      must_not_be_coerced_to_a_number: true
+      must_not_be_expanded_and_treated_as_the_original: true
+      expanding_it_produces_a_valid_looking_identifier_for_a_different_record: true
+      affected_row_indices: [1, 2]
+      clean_control_row_index: 3
+      clean_control_value: "123456789012345"
+      control_is_accepted_not_rejected: true
+      identifier_columns_are_strings_never_numbers: true
+      contract_parameter: "csv.reject_scientific_notation_in_identifier_columns"
+      header_row_index: 0
+      column_count: 3
+      data_rows: 3
+      rejected_rows: 2
+
+  # The same class of damage, one step subtler. A postcode whose leading zero a
+  # spreadsheet stripped when it decided the column was a number.
+  #
+  # The difference from 50 is worth being precise about, because it is the
+  # difference between "impossible" and "must not". Here the missing characters
+  # are DETERMINISTIC for a declared fixed-width column — left-padding to five
+  # would produce the original. That is exactly why the declared outcome is
+  # still a rejection: padding manufactures a digit that is NOT IN THE FILE, on
+  # the assumption that the loss was leading zeros and not a genuinely shorter
+  # identifier. The assumption is usually right, which is what makes it
+  # dangerous to apply silently. It is available as a DECLARED repair that is
+  # RECORDED as a repair; it is never a parser default.
+  - name: "51_excel_leading_zero_stripped.csv"
+    covers: [CSV-10, SCHEMA-01, VALID-01, VALID-03]
+    generator: literal
+    encoding: utf-8
+    content: 'row_id,postcode,city,note\n1,1234,Warszawa,one leading zero stripped\n2,234,Krakow,two leading zeros stripped\n3,12345,Gdansk,intact - nothing to lose\n'
+    expect:
+      detected_delimiter: ","
+      declared_width: 5
+      original_value_row_1: "01234"
+      damaged_value_row_1: "1234"
+      original_value_row_2: "00234"
+      damaged_value_row_2: "234"
+      difference_is_the_leading_zeros_alone: true
+      rendered_width_row_1: 4
+      rendered_width_row_2: 3
+      the_lost_characters_are_not_in_the_file: true
+      padding_would_manufacture_a_digit_the_file_does_not_contain: true
+      outcome: rejected-record
+      quarantine_reason: "fixed-width-identifier-below-declared-width"
+      reason: "the column is declared as a fixed-width string; a value narrower than the declared width lost characters upstream and the file carries no evidence of what they were"
+      left_padding_is_a_declared_repair_never_a_parser_default: true
+      a_repair_must_be_recorded_as_a_repair: true
+      must_not_be_typed_as_an_integer: true
+      typing_it_as_an_integer_is_what_caused_the_damage_upstream: true
+      affected_row_indices: [1, 2]
+      clean_control_row_index: 3
+      clean_control_value: "12345"
+      control_is_accepted_not_rejected: true
+      contract_parameter: "csv.fixed_width_columns"
+      header_row_index: 0
+      column_count: 4
+      data_rows: 3
+      rejected_rows: 2
+
+  # --- numeric: accounting conventions --------------------------------------
+  # Both negative conventions in ONE file, plus the ordinary form and a
+  # positive control. A fixture carrying only one convention passes a reader
+  # that handles only one.
+  #
+  # The failure mode is not a parse error, it is a SIGN FLIP. A normaliser that
+  # "cleans" a value by stripping non-numeric characters turns `(123.45)` and
+  # `123.45-` into `123.45` — the correct magnitude with the wrong sign, which
+  # every aggregate downstream then doubles the error of.
+  - name: "57_negative_parentheses_and_trailing_minus.csv"
+    covers: [CSV-10, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'row_id,amount,convention\n1,(123.45),accounting parentheses\n2,123.45-,trailing minus\n3,-123.45,leading minus\n4,123.45,positive control\n'
+    expect:
+      detected_delimiter: ","
+      raw_values: ["(123.45)", "123.45-", "-123.45", "123.45"]
+      normalised_values: ["-123.45", "-123.45", "-123.45", "123.45"]
+      values_are_exact_decimals_never_binary_floats: true
+      the_first_three_rows_denote_the_same_quantity: "-123.45"
+      negative_style_must_be_declared: true
+      contract_parameter: "csv.negative_style"
+      negative_styles_present: [parentheses, trailing-minus, leading-minus]
+      stripping_non_numeric_characters_yields_a_sign_flip: true
+      sign_flip_is_the_failure_mode_not_a_parse_error: true
+      values_stripped_naively_would_be: ["123.45", "123.45", "123.45", "123.45"]
+      a_sign_flip_is_invisible_to_every_row_count_and_checksum: true
+      positive_control_row_index: 4
+      header_row_index: 0
+      column_count: 3
+      data_rows: 4
+      rejected_rows: 0
+
+  # Symbols before and after the value, a grouping separator, and percentages.
+  #
+  # The decision this file pins: `1.234,56` is ONE THOUSAND two hundred
+  # thirty-four, and reading its grouping dot as a decimal point yields
+  # `1.234` — a value wrong BY A FACTOR OF A THOUSAND that is still a
+  # perfectly valid decimal, so nothing raises and nothing looks wrong until
+  # someone reconciles a total.
+  - name: "58_currency_and_percent.csv"
+    covers: [CSV-10, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'row_id;kwota;udzial;opis\n1;€1.234,56;12,5 %;symbol z przodu\n2;1.234,56 zł;7,25 %;symbol z tylu\n3;1234,56;100 %;bez symbolu i bez grupowania\n'
+    expect:
+      detected_delimiter: ";"
+      locale_profile: "pl-PL"
+      decimal_separator: ","
+      thousands_separator: "."
+      currency_symbols_present: ["€", "zł"]
+      symbol_is_prefixed_in_row: 1
+      symbol_is_suffixed_in_row: 2
+      strip_currency: ["€", "zł"]
+      raw_amounts: ["€1.234,56", "1.234,56 zł", "1234,56"]
+      normalised_amounts: ["1234.56", "1234.56", "1234.56"]
+      all_three_amounts_denote_the_same_quantity: "1234.56"
+      values_are_exact_decimals_never_binary_floats: true
+      the_grouping_dot_is_not_a_decimal_point: true
+      misreading_the_grouping_dot_as_a_decimal_point_yields: "1.234"
+      that_misreading_is_wrong_by_a_factor_of: 1000
+      the_misreading_is_still_a_valid_decimal_so_nothing_raises: true
+      raw_percentages: ["12,5 %", "7,25 %", "100 %"]
+      percent_is_separated_from_the_number_by_a_space: true
+      percent_as_fraction: true
+      normalised_percentages: ["0.125", "0.0725", "1"]
+      percent_handling_must_be_declared_because_0_125_and_12_5_are_both_defensible: true
+      contract_parameter: "csv.locale_profile"
+      header_row_index: 0
+      column_count: 4
+      data_rows: 3
+      rejected_rows: 0
+
+  # Numeric and date values that conventionally mean "absent". Every one of
+  # them is a CONTRACT DECLARATION, never a universal rule — `-1` is a sentinel
+  # in one dataset and a legitimate balance in the next, and row 2 carries a
+  # genuine negative amount so the two are distinguishable.
+  #
+  # `0000-00-00` earns its place: it is MySQL's zero date, it is not a date at
+  # all, and `strptime` refuses it — VERIFIED on CPython 3.12.3, which is why
+  # the expectation below says it must never be parsed rather than hoping it
+  # will fail somewhere.
+  - name: "59_numeric_null_sentinels.csv"
+    covers: [CSV-10, CSV-09, VALID-01]
+    generator: literal
+    encoding: utf-8
+    content: 'row_id,amount,valid_to,quantity,note\n1,-1,9999-12-31,-1,sentinels in every column\n2,-1.50,2026-06-30,3,a genuine negative amount and a real date\n3,0,0000-00-00,0,zero is a value and the date is a sentinel\n'
+    expect:
+      detected_delimiter: ","
+      declared_sentinels:
+        {
+          amount: ["-1"],
+          valid_to: ["9999-12-31", "0000-00-00"],
+          quantity: ["-1"],
+        }
+      sentinel_meaning: absent
+      row_1_normalises_to_absent_in_every_column: true
+      row_2_amount_is_a_real_value_not_a_sentinel: "-1.50"
+      row_3_zero_is_a_value_not_a_sentinel: "0"
+      values_are_exact_decimals_never_binary_floats: true
+      a_sentinel_is_a_contract_declaration_not_a_universal_rule: true
+      minus_one_is_a_sentinel_only_because_the_contract_says_so: true
+      a_reader_that_hardcodes_minus_one_as_absent_destroys_a_legitimate_balance: true
+      high_date_is_a_sentinel_not_a_real_expiry: "9999-12-31"
+      zero_date_is_not_a_valid_date_at_all: "0000-00-00"
+      strptime_refuses_the_zero_date: true
+      zero_date_must_never_be_parsed_as_a_date: true
+      outcome_for_a_sentinel: normalised-to-absent
+      must_not_be_loaded_as_the_literal_value: true
+      loading_the_high_date_literally_dates_a_record_eight_thousand_years_out: true
+      contract_parameter: "csv.null_sentinels"
+      header_row_index: 0
+      column_count: 5
+      data_rows: 3
+      rejected_rows: 0
