@@ -1,0 +1,31 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. Any fourth divergence axis needs an
+# argument in review. This file and helm/values/local/cnpg-operator.yaml must
+# otherwise be identical in shape.
+#
+# D-12: CI's rendered manifests are summed by
+# tests/policy/test_manifest_resources.py against the GitHub-hosted runner's
+# 4 CPU / 16 GB budget, so the sizes below are load-bearing, not decorative.
+#
+# No credential literal of any kind appears in this file.
+
+crds:
+  create: true
+
+replicaCount: 1
+
+# Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
+# other pod the CI job renders. Still non-empty — see 02-RESEARCH.md
+# Pitfall 5, the chart's own default is `{}` (BestEffort, evicted first).
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Monitoring disabled in CI — the third D-06 axis. kube-prometheus-stack is
+# Phase 7 and is never deployed in this phase's CI job anyway.
+monitoring:
+  podMonitorEnabled: false

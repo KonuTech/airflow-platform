@@ -1,0 +1,61 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. Any fourth divergence axis needs an
+# argument in review. This file and helm/values/local/cnpg-analytics.yaml
+# must otherwise be identical in shape.
+#
+# Namespace `data` — same as cnpg-airflow.yaml (D-13).
+#
+# D-12: CI's rendered manifests are summed by
+# tests/policy/test_manifest_resources.py against the GitHub-hosted runner's
+# 4 CPU / 16 GB budget, so the sizes below are load-bearing, not decorative.
+#
+# No credential literal of any kind appears in this file.
+
+type: postgresql
+mode: standalone
+fullnameOverride: analytics-db
+
+version:
+  postgresql: "18"
+
+cluster:
+  instances: 1
+  enablePDB: false
+
+  storage:
+    size: 5Gi
+
+  # Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
+  # other pod the CI job renders, including the metadata cluster and MinIO.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  affinity:
+    nodeSelector:
+      airflow-platform/role: analytics
+    topologyKey: kubernetes.io/hostname
+
+  postgresql:
+    # See helm/values/local/cnpg-analytics.yaml — NOT optional, prevents
+    # `spec.postgresql: null` (02-RESEARCH.md Pitfall 3).
+    parameters:
+      max_wal_size: "2GB"
+      work_mem: "32MB"
+
+  initdb:
+    database: analytics
+    owner: analytics_owner
+    postInitApplicationSQL:
+      - CREATE ROLE etl_app LOGIN;
+
+  # Monitoring disabled in CI — the third D-06 axis.
+  monitoring:
+    enabled: false
+
+backups:
+  enabled: false

@@ -1,0 +1,74 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. Any fourth divergence axis needs an
+# argument in review. This file and helm/values/ci/cnpg-analytics.yaml must
+# otherwise be identical in shape.
+#
+# Namespace `data` — same as cnpg-airflow.yaml (D-13). fullnameOverride is
+# required: without it the release name "analytics-db" gets "-cluster"
+# appended by the chart's fullname template.
+#
+# No credential literal of any kind appears in this file — CloudNativePG
+# generates the `analytics-db-app` Secret itself (D-14).
+
+type: postgresql
+mode: standalone
+fullnameOverride: analytics-db
+
+version:
+  # Nothing constrains the analytical major (unlike Airflow metadata, which
+  # is capped at 17). PG 18 brings uuidv7(), OLD/NEW in RETURNING for MERGE,
+  # and PRIMARY KEY ... WITHOUT OVERLAPS that later phases depend on. The
+  # chart default is "16" and silently gives you PostgreSQL 16 if omitted.
+  postgresql: "18"
+
+cluster:
+  instances: 1
+  enablePDB: false
+
+  storage:
+    size: 20Gi
+
+  # The chart's own default is `{}` — see cnpg-airflow.yaml for why this
+  # matters. Sized larger than the metadata cluster: this is where the heavy
+  # COPY-into-staging-then-MERGE workload (README §45/§46, §27, §55) lands.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  affinity:
+    # D-03: worker-2 hosts the analytical cluster ALONE — kept off the node
+    # serving object storage (MinIO, worker-1) so the heaviest workload in
+    # this platform never contends with it for disk/CPU. Never left to the
+    # scheduler; local-path PVs are node-bound.
+    nodeSelector:
+      airflow-platform/role: analytics
+    topologyKey: kubernetes.io/hostname
+
+  postgresql:
+    # NOT optional/cosmetic — see cnpg-airflow.yaml and 02-RESEARCH.md
+    # Pitfall 3 for the `spec.postgresql: null` failure this prevents.
+    # max_wal_size and work_mem are genuinely useful for the bulk-COPY +
+    # MERGE workload this cluster exists for, not arbitrary placeholders.
+    parameters:
+      max_wal_size: "2GB"
+      work_mem: "32MB"
+
+  initdb:
+    database: analytics
+    owner: analytics_owner
+    # D-15: a database, an owner role, a least-privileged application role
+    # with grants — and nothing else. No schema: every schema is Alembic's
+    # (Phase 3). LOGIN only, no superuser, no ownership — the grants
+    # themselves are Alembic's to issue once objects exist to grant on.
+    postInitApplicationSQL:
+      - CREATE ROLE etl_app LOGIN;
+
+  monitoring:
+    enabled: false
+
+backups:
+  enabled: false

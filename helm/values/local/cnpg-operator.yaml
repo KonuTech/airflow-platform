@@ -1,0 +1,38 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. Any fourth divergence axis needs an
+# argument in review. This file and helm/values/ci/cnpg-operator.yaml must
+# otherwise be identical in shape.
+#
+# The chart ships 11 CRDs under templates/crds/, gated by crds.create — they
+# must exist before any Cluster CR (helm/values/{local,ci}/cnpg-{airflow,
+# analytics}.yaml) is installed. scripts/stages/40-cnpg-operator.sh waits for
+# clusters.postgresql.cnpg.io to reach condition=established AND for this
+# Deployment to reach condition=Available before any Cluster CR is applied —
+# see that script for why the second wait is the one that actually matters
+# (02-RESEARCH.md Pattern 3).
+#
+# No credential literal of any kind appears in this file.
+
+crds:
+  create: true
+
+replicaCount: 1
+
+# The chart's `resources: {}` default is empty — see 02-RESEARCH.md Pitfall 5
+# ("the CNPG operator's `resources` key defaults to empty"). An unrequested
+# container is QoS BestEffort and is evicted first, exactly when its data is
+# needed to explain the incident. Sized generously for the local host; the CI
+# profile sizes the same keys to fit the 4 CPU / 16 GB runner budget.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Phase 7 owns metrics (kube-prometheus-stack is not deployed until then, and
+# podMonitorEnabled requires the Prometheus Operator CRDs this phase never
+# installs) — the third D-06 axis, disabled in both profiles for now.
+monitoring:
+  podMonitorEnabled: false
