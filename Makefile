@@ -137,6 +137,9 @@ cluster-up: doctor             ## Create/update the kind cluster and every stage
 cluster-down:                  ## Delete the kind cluster if it exists, else no-op [plan 02-01]
 	scripts/cluster-down.sh
 
+cluster-rebuild: doctor        ## D-04: destroy+recreate, timed per-stage, warns past budget [plan 02-02]
+	scripts/cluster-rebuild.sh
+
 cluster-verify:                 ## D-16: run tests/e2e/cluster against the live cluster [plan 02-02]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
 	# deliberately excluded from `dev` and from every uv default-group set, so
