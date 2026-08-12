@@ -100,8 +100,20 @@ nodes:
   - role: worker
     image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
     kubeadmConfigPatches:
+      # [Rule 1 fix, plan 02-03] Worker nodes join via `kubeadm join`, not
+      # `kubeadm init` — kind only applies an `InitConfiguration` patch to the
+      # node that actually runs `kubeadm init` (the control-plane). On a
+      # `role: worker` node this patch silently matched nothing: live
+      # verification found `KUBELET_KUBEADM_ARGS="--node-labels="` (EMPTY) in
+      # /var/lib/kubelet/kubeadm-flags.env on both workers, while the
+      # control-plane correctly carried `--node-labels=ingress-ready=true`.
+      # `airflow-platform/role` was never set on any node, so every
+      # `cluster.affinity.nodeSelector` in this plan's Cluster CRs (D-03) sat
+      # Pending forever. `JoinConfiguration.nodeRegistration.kubeletExtraArgs`
+      # is the correct object for a joining node — same key shape as
+      # InitConfiguration's.
       - |
-        kind: InitConfiguration
+        kind: JoinConfiguration
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "airflow-platform/role=storage"
@@ -127,8 +139,11 @@ nodes:
   - role: worker
     image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
     kubeadmConfigPatches:
+      # [Rule 1 fix, plan 02-03] Same JoinConfiguration correction as the
+      # other worker node above — see its comment for the full explanation
+      # and the live evidence.
       - |
-        kind: InitConfiguration
+        kind: JoinConfiguration
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "airflow-platform/role=analytics"

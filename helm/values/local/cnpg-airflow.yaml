@@ -1,0 +1,81 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. Any fourth divergence axis needs an
+# argument in review. This file and helm/values/ci/cnpg-airflow.yaml must
+# otherwise be identical in shape.
+#
+# D-13 CORRECTION: this Cluster CR lives in namespace `data`, not `airflow`.
+# Both STACK.md's example and 02-RESEARCH.md's architecture diagram place
+# `airflow-db` in the `airflow` namespace — D-13 is the authority and
+# supersedes both. This is a direct consequence for plan 02-06's metadata-
+# Secret adapter: it must read the CNPG-generated `airflow-db-app` Secret
+# ACROSS namespaces (from `data` into `airflow`), not within one namespace.
+#
+# fullnameOverride is required: without it the release name "airflow-db"
+# gets "-cluster" appended by the chart's fullname template.
+#
+# No credential literal of any kind appears in this file — CloudNativePG
+# generates the `airflow-db-app` Secret itself (D-14).
+
+type: postgresql
+mode: standalone
+fullnameOverride: airflow-db
+
+version:
+  # Airflow 3.3.0 supports PostgreSQL 13-17 only (STACK.md); the chart
+  # default is "16" and silently gives you PostgreSQL 16 if this is omitted.
+  postgresql: "17"
+
+cluster:
+  instances: 1
+  # "mainly useful for ... single-instance clusters" (chart's own comment).
+  enablePDB: false
+
+  storage:
+    size: 10Gi
+
+  # The chart's own default is `{}` — an unrequested/unlimited container is
+  # QoS BestEffort and is evicted first, exactly when its data is needed to
+  # explain the incident (02-RESEARCH.md Pitfall 5's warning generalizes to
+  # every chart in this phase, not only the Airflow chart itself).
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  affinity:
+    # D-03: worker-1 (kind/cluster.yaml) hosts Airflow metadata PG + MinIO.
+    # Never left to the scheduler — local-path PVs are node-bound, so a
+    # rescheduled stateful pod sits Pending with a volume node affinity
+    # conflict, which reads as a scheduler bug rather than a placement
+    # decision.
+    nodeSelector:
+      airflow-platform/role: storage
+    # kind nodes carry no zone label; hostname is the only real topology key.
+    topologyKey: kubernetes.io/hostname
+
+  postgresql:
+    # NOT optional/cosmetic — 02-RESEARCH.md Pitfall 3: the chart renders the
+    # `postgresql:` key unconditionally, and an EMPTY value renders
+    # `spec.postgresql: null`, which strict schema validation rejects. Any
+    # single real parameter fixes it; max_connections is a genuinely useful
+    # one for a database this cluster's whole purpose is metadata contention
+    # on. Do not delete this thinking it is decorative.
+    parameters:
+      max_connections: "100"
+
+  initdb:
+    database: airflow
+    owner: airflow_owner
+    # D-15: a database, an owner role, and nothing else. No schema and no
+    # postInitApplicationSQL — every schema is Alembic's (Phase 3). A schema
+    # that exists here but in no migration is how CI and local begin to
+    # disagree.
+
+  monitoring:
+    enabled: false
+
+backups:
+  enabled: false
