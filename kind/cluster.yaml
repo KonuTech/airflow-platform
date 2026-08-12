@@ -100,8 +100,19 @@ nodes:
   - role: worker
     image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
     kubeadmConfigPatches:
+      # [Rule 1 fix, plan 02-04] Worker nodes join the cluster via
+      # `kubeadm join`, never `kubeadm init` — `InitConfiguration` is a
+      # no-op for `nodeRegistration.kubeletExtraArgs` on a worker; only the
+      # control-plane node consumes it. `JoinConfiguration` is the patch
+      # kind that actually reaches a worker's kubeadm-flags.env. Verified
+      # against a live cluster booted from the (wrong) InitConfiguration
+      # form: `docker exec <worker> cat /var/lib/kubelet/kubeadm-flags.env`
+      # showed `--node-labels=` empty on both workers while the
+      # control-plane's own `ingress-ready=true` (correctly under
+      # InitConfiguration there) was present — D-03's placement silently
+      # never took effect since this file was first committed in plan 02-01.
       - |
-        kind: InitConfiguration
+        kind: JoinConfiguration
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "airflow-platform/role=storage"
@@ -127,8 +138,10 @@ nodes:
   - role: worker
     image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
     kubeadmConfigPatches:
+      # [Rule 1 fix, plan 02-04] See the sibling worker's comment above —
+      # same JoinConfiguration correction, same reason.
       - |
-        kind: InitConfiguration
+        kind: JoinConfiguration
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "airflow-platform/role=analytics"

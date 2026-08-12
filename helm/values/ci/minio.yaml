@@ -1,0 +1,118 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. This file and
+# helm/values/local/minio.yaml must otherwise be identical in shape. MinIO's
+# `metrics.serviceMonitor.enabled` chart default is already `false` (no
+# kube-prometheus-stack exists until Phase 7), so the monitoring axis needs no
+# override in either profile here.
+#
+# D-12: CI's rendered manifests are summed by the manifest-resources policy
+# test against the GitHub-hosted runner's 4 CPU / 16 GB budget, so the sizes
+# below are load-bearing, not decorative.
+#
+# INFRA-05 / D-08 / D-14: five buckets (`raw` versioned, the rest not), a
+# single IAM policy allowing the pipeline's reads/writes on its working
+# buckets while denying it any delete against `raw`, and every credential
+# referenced by Secret NAME only. No credential literal of any kind appears
+# in this file.
+
+mode: standalone
+replicas: 1
+
+image:
+  repository: pgsty/minio
+  # Must match MINIO_IMAGE_TAG in helm/versions.env.
+  tag: "RELEASE.2026-08-04T00-00-00Z"
+
+existingSecret: minio-root
+
+nodeSelector:
+  airflow-platform/role: storage
+
+# Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
+# other pod the CI job renders.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+buckets:
+  - name: raw
+    policy: none
+    purge: false
+    versioning: true
+    objectlocking: false
+  - name: validated
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+  - name: processed
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+  - name: quarantine
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+  - name: metadata
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+
+policies:
+  - name: etl-app
+    statements:
+      - effect: Allow
+        resources: ["arn:aws:s3:::raw", "arn:aws:s3:::validated"]
+        actions: ["s3:ListBucket"]
+      - effect: Allow
+        resources: ["arn:aws:s3:::raw/*", "arn:aws:s3:::validated/*"]
+        actions: ["s3:GetObject", "s3:PutObject"]
+      - effect: Deny
+        resources: ["arn:aws:s3:::raw/*"]
+        actions: ["s3:DeleteObject", "s3:DeleteObjectVersion"]
+
+users:
+  - accessKey: etl-app
+    existingSecret: minio-app
+    existingSecretKey: secretKey
+    policy: etl-app
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts:
+    - minio.localtest.me
+
+makeBucketJob:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 50m
+      memory: 128Mi
+
+makePolicyJob:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 50m
+      memory: 128Mi
+
+makeUserJob:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 50m
+      memory: 128Mi
