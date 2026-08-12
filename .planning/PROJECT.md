@@ -20,7 +20,13 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 
 <!-- Shipped and confirmed valuable. -->
 
-(None yet — greenfield. Ship to validate.)
+**Infrastructure** (Phase 2, 2026-08-12)
+
+- [x] Reproducible multi-node kind cluster, destroyable and recreatable from the repo — INFRA-01, INFRA-09
+- [x] Airflow 3.x deployed via upstream Helm chart (API server, scheduler, DAG processor, triggerer) — INFRA-02
+- [x] Dedicated Airflow metadata PostgreSQL, strictly separate from analytical PostgreSQL — INFRA-03, INFRA-04
+- [x] MinIO providing S3-compatible object storage with `raw/validated/processed/quarantine/metadata` layers — INFRA-05
+- [x] Infrastructure defined as code; no manual `kubectl` surgery; CI-sized values profile validated in CI — INFRA-07, INFRA-10, CICD-07
 
 ### Active
 
@@ -28,13 +34,9 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 
 **Infrastructure**
 
-- [ ] Reproducible multi-node kind cluster, destroyable and recreatable from the repo
-- [ ] Airflow 3.x deployed via upstream Helm chart (API server, scheduler, DAG processor, triggerer)
-- [ ] Dedicated Airflow metadata PostgreSQL, strictly separate from analytical PostgreSQL
 - [ ] Analytical PostgreSQL with staging / warehouse / analytics separation
-- [ ] MinIO providing S3-compatible object storage with `raw/validated/processed/quarantine/metadata` layers
 - [ ] HashiCorp Vault deployed in-cluster as the secrets manager
-- [ ] All infrastructure defined as code; containers reproducible, versioned, non-root
+- [ ] Containers reproducible, versioned by git SHA, never `:latest` — INFRA-08
 
 **Secrets & Security**
 
@@ -192,32 +194,49 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**Phase 1 complete (2026-08-11)** — Repository, Toolchain & CI Skeleton.
+**Phase 2 complete (2026-08-12)** — kind Cluster & Core Infrastructure.
 
-Every commit is now gated by ruff, mypy strict, pytest and gitleaks, and the
-gate is *enforcing* rather than advisory: branch protection on `main` requires
-both CI jobs, and a pull request carrying a deliberate `print()` was observed
-being refused (`mergeable_state: blocked`), not merely marked red.
+A production-like Kubernetes data platform now exists and is destroyable/
+recreatable from committed files: a 3-node kind cluster, CloudNativePG
+Postgres 17 (Airflow metadata) and 18 (analytical) as physically separate
+clusters, MinIO with five buckets and a server-enforced deny-delete on `raw`,
+and Airflow 3.3.0 running as four separate workloads reachable through
+ingress. All verified live, not just read from code — including a full cold
+`make cluster-rebuild` exercised twice mid-phase.
 
-Validated in Phase 1: QUAL-01, QUAL-02, QUAL-07, QUAL-08, CICD-01, CICD-02,
-CICD-03, CICD-04, SEC-02, SEC-10, SEC-11, OBS-03 — 12/12.
+Validated in Phase 2: INFRA-01, INFRA-02, INFRA-03, INFRA-04, INFRA-05,
+INFRA-07, INFRA-09, INFRA-10, CICD-07 — 9/9.
 
 Standing facts later phases inherit:
-- `make` is the only gate definition; CI calls it and nothing else, so the local
-  and CI gates cannot drift. `make check` is offline; `make ci` adds the secret
-  scan.
-- The 69-declaration CSV corpus regenerates byte-identically from a seed and is
-  never committed. It is the specification Phase 6's engine is measured against.
-- `enforce_admins: false` is deliberate — GSD commits directly to `main`, so
-  admin enforcement would self-lockout the project (T-01-43b).
-- `.planning/WINDOWS.md` carries 5 open defects, none blocking. Phase 3 owes
-  wiring `tests/property`/`integration`/`e2e` into a target that can run them:
-  `make check` names test paths explicitly, so a new test directory is silently
-  uncollected until named. That exact defect made QUAL-07 partial.
+- The execution host's real capacity (12 CPU / 32GiB laptop, WSL2 capped to
+  24GiB) is well under the "32-core/47-GiB" figure STACK.md assumed
+  throughout. `kind/cluster.yaml`'s kubelet reservations are tuned to this
+  host's actual capacity, summed across all 3 nodes (they share one physical
+  kernel, so each node's advertised allocatable must not sum to more than the
+  real host total — the exact failure mode INFRA-09 exists to prevent).
+  Revisit sizing if profiling later phases shows it's tight.
+- Docker Desktop on this host needed `%UserProfile%\.wslconfig`'s
+  `kernelCommandLine = cgroup_no_v1=all` to get cgroup v2 — a WSL distro's own
+  `systemd=true` setting does not reach Docker Desktop's separate internal VM.
+- ADR-0006 records a human-accepted risk: `pgsty/minio`, `ingress-nginx
+  controller:v1.15.1` and `quay.io/minio/mc` are all unmaintained-upstream
+  artifacts. The ingress controller carries an unpatched CVE (T-02-21, high
+  severity, disposition `accept`) — safe only because the ingress is
+  loopback-only. If this platform is ever exposed beyond the local machine,
+  that acceptance no longer holds and the Gateway API migration ADR-0006
+  names becomes required, not optional.
+- Vault is deliberately not in this phase (D3) — arrives in Phase 5 behind the
+  `SecretsResolver` seam. Secrets today (MinIO credentials, the Airflow
+  metadata connection) are generated directly into Kubernetes Secrets via
+  `scripts/{minio-credentials,airflow-metadata-secret}.sh`.
 
-Phase 1 found five defects *after* all nine plans reported success — four of
-them gates that passed on broken input. Review and verification earned their
-place as steps separate from execution.
+Phase 2 found and fixed three real bugs live during execution: a worker
+node-label config bug (`InitConfiguration` vs `JoinConfiguration`) that
+silently broke D-03 physical placement since the phase's first commit; a
+Helm 4 `--wait=watcher` deadlock against the Airflow chart's post-install-hook
+shape; and kubelet reservations sized for hardware this session's actual host
+doesn't have. All three are fixed in committed files and re-proven by cold
+cluster rebuilds, not just live-patched.
 
 ---
-*Last updated: 2026-08-11 after Phase 1*
+*Last updated: 2026-08-12 after Phase 2*
