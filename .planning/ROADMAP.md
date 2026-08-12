@@ -33,7 +33,7 @@ first (D4); observability as an explicit stage (D5).
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Repository, Toolchain & CI Skeleton** - Gated repo from day one: uv, ruff, mypy, pytest, gitleaks in GitHub Actions, plus a seed-generated CSV fixture corpus (completed 2026-08-11)
-- [ ] **Phase 2: kind Cluster & Core Infrastructure** - A destroyable/recreatable 3-node kind cluster running MinIO, two separate PostgreSQL clusters and Airflow 3.3, all from committed files
+- [x] **Phase 2: kind Cluster & Core Infrastructure** - A destroyable/recreatable 3-node kind cluster running MinIO, two separate PostgreSQL clusters and Airflow 3.3, all from committed files (completed 2026-08-12)
 - [ ] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster
 - [ ] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows
 - [ ] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests
@@ -133,7 +133,7 @@ Plans:
 - [x] 02-05-PLAN.md — ADR-0006 (three unmaintained upstream artifacts) and ADR-0007 (Helm 4 over Helm 3) (wave 3)
 - [x] 02-06-PLAN.md — Airflow 3.3.0 with four separate workloads on the metadata cluster, reachable through the ingress (wave 4)
 - [x] 02-07-PLAN.md — Offline manifest validation: render both profiles, vendored CNPG CRD schemas, `kubeconform -strict` in CI (wave 5)
-- [ ] 02-08-PLAN.md — The D-12 sizing and QoS tests, the divergence-axis rule, and the infrastructure-as-code and credential-literal detectors (wave 6)
+- [x] 02-08-PLAN.md — The D-12 sizing and QoS tests, the divergence-axis rule, and the infrastructure-as-code and credential-literal detectors (wave 6)
 
 **Research stage**: S1 + S2. **Use `/gsd-plan-phase --research-phase`** — SUMMARY flags this phase: the Helm 4.2.3-against-Helm-3-charts call is the MEDIUM-confidence judgement in STACK.md, and the MinIO fork image plus CNPG chart defaults must be read off *pinned chart values*, not documentation.
 
