@@ -131,7 +131,7 @@ Plans:
 - [x] 02-03-PLAN.md — CloudNativePG operator and two physically separate PostgreSQL clusters, 17 for Airflow metadata and 18 for analytics (wave 3)
 - [x] 02-04-PLAN.md — MinIO with five buckets, versioning on `raw`, and a server-enforced deny-delete for the application credential (wave 3)
 - [x] 02-05-PLAN.md — ADR-0006 (three unmaintained upstream artifacts) and ADR-0007 (Helm 4 over Helm 3) (wave 3)
-- [ ] 02-06-PLAN.md — Airflow 3.3.0 with four separate workloads on the metadata cluster, reachable through the ingress (wave 4)
+- [x] 02-06-PLAN.md — Airflow 3.3.0 with four separate workloads on the metadata cluster, reachable through the ingress (wave 4)
 - [ ] 02-07-PLAN.md — Offline manifest validation: render both profiles, vendored CNPG CRD schemas, `kubeconform -strict` in CI (wave 5)
 - [ ] 02-08-PLAN.md — The D-12 sizing and QoS tests, the divergence-axis rule, and the infrastructure-as-code and credential-literal detectors (wave 6)
 
