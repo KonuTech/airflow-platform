@@ -50,13 +50,17 @@ jobs:
   # CICD-07 / INFRA-10. Offline of any cluster (D-12): `helm template` both
   # values profiles for all five pinned charts, `kubeconform -strict` against
   # the pinned Kubernetes version, `helm lint` against every profile's values
-  # file. Needs the network (pinned chart tarballs), which is why it is a
-  # separate job from `check` rather than folded into it — `check` stays
-  # runnable on a clone with no network reachable (ROADMAP criterion 4).
-  # `make install` is needed because the render script and the targets built
-  # on it run through `uv run --frozen`. Task 3 repoints this job's second
-  # call at `make manifest-policy` once that target has tests to run; left
-  # on `make manifests` here so this task's tree is green on its own.
+  # file, then the non-vacuity proof that the gate actually discriminates
+  # (tests/policy/test_manifest_validation_fails_closed.py). Needs the
+  # network (pinned chart tarballs), which is why it is a separate job from
+  # `check` rather than folded into it — `check` stays runnable on a clone
+  # with no network reachable (ROADMAP criterion 4).
+  # `make install` is needed because `manifest-policy`'s pytest step (plan
+  # 02-07 Task 3) runs through `uv run --frozen`, same as `manifests` itself.
+  # `manifest-policy`'s own `manifests` prerequisite covers everything Task 2
+  # needed this job to do; `chain(manifest-policy)` in
+  # tests/policy/test_ci_calls_make_ci.py covers both `manifests` and
+  # `helm-lint`.
   manifests:
     name: Manifest validation (offline of any cluster)
     runs-on: ubuntu-latest
@@ -69,7 +73,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       - run: make install
-      - run: make manifests
+      - run: make manifest-policy
 
   # SEC-02 / SEC-11. This job holds the claim that no credential has ever been
   # committed to this repository, which is the claim that has to be true before

@@ -1,0 +1,20 @@
+# Trips: kubeconform -strict (schema helm/schemas/cnpg/cluster_v1.json) — at
+#        '/spec/postgresql': got null, want object
+# Proves: tests/policy/test_manifest_validation_fails_closed.py::test_the_invalid_sample_is_rejected
+#
+# 02-RESEARCH.md Pitfall 3, made concrete: `spec.postgresql: null` is not a
+# contrived typo. The `cnpg/cluster` chart's templates/cluster.yaml renders the
+# literal key `postgresql:` unconditionally, so ANY values file that sets
+# nothing under `cluster.postgresql` — which reads as "nothing to configure
+# here, leave it out" — produces exactly this document. It is the failure a
+# future contributor is most likely to reintroduce by deleting a parameter
+# that looks decorative (every committed helm/values/*/cnpg-*.yaml carries an
+# inline comment warning against exactly that).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: sample-cluster
+  namespace: data
+spec:
+  instances: 1
+  postgresql: null
