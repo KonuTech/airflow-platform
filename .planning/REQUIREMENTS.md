@@ -29,7 +29,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### INFRA — Cluster, Services, Infrastructure as Code
 
-- [ ] **INFRA-01**: A multi-node kind cluster (control-plane + 2 workers) can be destroyed and recreated reproducibly from a committed `kind/cluster.yaml` — *(DoD 1)*
+- [x] **INFRA-01**: A multi-node kind cluster (control-plane + 2 workers) can be destroyed and recreated reproducibly from a committed `kind/cluster.yaml` — *(DoD 1)*
 - [x] **INFRA-02**: Airflow 3.x runs in Kubernetes with API server, scheduler, DAG processor and triggerer as separate workloads — *(DoD 2)*
 - [x] **INFRA-03**: A PostgreSQL instance dedicated exclusively to Airflow metadata is deployed and used by nothing else — *(DoD 3)*
 - [x] **INFRA-04**: A physically separate PostgreSQL instance serves analytical workloads — *(DoD 4)*
@@ -37,7 +37,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **INFRA-06**: HashiCorp Vault is deployed in-cluster as the secrets manager and survives cluster restart without manual data loss — *(DoD 6)*
 - [x] **INFRA-07**: All infrastructure is defined as code — cluster config, Helm values and manifests are committed and no step requires manual `kubectl` surgery — *(DoD 7)*
 - [ ] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
-- [ ] **INFRA-09**: Kubelet reservations, `maxPods` and `extraMounts` are set in the kind config at creation time, because changing them later requires destroying the cluster — *(PITFALLS #10, #11)*
+- [x] **INFRA-09**: Kubelet reservations, `maxPods` and `extraMounts` are set in the kind config at creation time, because changing them later requires destroying the cluster — *(PITFALLS #10, #11)*
 - [x] **INFRA-10**: Two Helm values profiles (`values-local.yaml`, `values-ci.yaml`) exist from the first infrastructure commit, since the full stack does not fit a 4 CPU / 16 GB CI runner — *(PROJECT.md constraint)*
 - [ ] **INFRA-11**: Configurable retention policies are enforced for raw files, processed files, quarantine, validation reports, ingestion metadata and logs, separately from processing logic — *(Gap 11)*
 
@@ -279,7 +279,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | META-01 | Phase 3 | Pending |
 | META-02 | Phase 3 | Pending |
 | META-03 | Phase 4 | Pending |
-| INFRA-01 | Phase 2 | Pending |
+| INFRA-01 | Phase 2 | Complete |
 | INFRA-02 | Phase 2 | Complete |
 | INFRA-03 | Phase 2 | Complete |
 | INFRA-04 | Phase 2 | Complete |
@@ -287,7 +287,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-06 | Phase 5 | Pending |
 | INFRA-07 | Phase 2 | Complete |
 | INFRA-08 | Phase 3 | Pending |
-| INFRA-09 | Phase 2 | Pending |
+| INFRA-09 | Phase 2 | Complete |
 | INFRA-10 | Phase 2 | Complete |
 | INFRA-11 | Phase 11 | Pending |
 | SEC-01 | Phase 5 | Pending |
