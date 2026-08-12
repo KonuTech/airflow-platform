@@ -33,7 +33,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **INFRA-02**: Airflow 3.x runs in Kubernetes with API server, scheduler, DAG processor and triggerer as separate workloads — *(DoD 2)*
 - [ ] **INFRA-03**: A PostgreSQL instance dedicated exclusively to Airflow metadata is deployed and used by nothing else — *(DoD 3)*
 - [ ] **INFRA-04**: A physically separate PostgreSQL instance serves analytical workloads — *(DoD 4)*
-- [ ] **INFRA-05**: MinIO provides S3-compatible object storage with `raw`, `validated`, `processed`, `quarantine` and `metadata` layers — *(DoD 5)*
+- [x] **INFRA-05**: MinIO provides S3-compatible object storage with `raw`, `validated`, `processed`, `quarantine` and `metadata` layers — *(DoD 5)*
 - [ ] **INFRA-06**: HashiCorp Vault is deployed in-cluster as the secrets manager and survives cluster restart without manual data loss — *(DoD 6)*
 - [ ] **INFRA-07**: All infrastructure is defined as code — cluster config, Helm values and manifests are committed and no step requires manual `kubectl` surgery — *(DoD 7)*
 - [ ] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
@@ -283,7 +283,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-02 | Phase 2 | Pending |
 | INFRA-03 | Phase 2 | Pending |
 | INFRA-04 | Phase 2 | Pending |
-| INFRA-05 | Phase 2 | Pending |
+| INFRA-05 | Phase 2 | Complete |
 | INFRA-06 | Phase 5 | Pending |
 | INFRA-07 | Phase 2 | Pending |
 | INFRA-08 | Phase 3 | Pending |

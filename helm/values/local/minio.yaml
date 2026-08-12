@@ -1,0 +1,161 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. This file and
+# helm/values/ci/minio.yaml must otherwise be identical in shape. MinIO's
+# `metrics.serviceMonitor.enabled` chart default is already `false` (no
+# kube-prometheus-stack exists until Phase 7), so the monitoring axis needs no
+# override in either profile here.
+#
+# INFRA-05 / D-08 / D-14: five buckets (`raw` versioned, the rest not), a
+# single IAM policy allowing the pipeline's reads/writes on its working
+# buckets while denying it any delete against `raw`, and every credential
+# referenced by Secret NAME only (scripts/minio-credentials.sh, plan 02-04
+# Task 1). No credential literal of any kind appears in this file.
+
+# `mode: distributed` / `replicas: 16` / `resources.requests.memory: 16Gi` are
+# the chart's stock defaults (verified minio/values.yaml) and would make a
+# kind node unschedulable (02-RESEARCH.md Anti-Patterns). `standalone` +
+# `replicas: 1` is the only shape D-03's single storage worker can host.
+mode: standalone
+replicas: 1
+
+image:
+  repository: pgsty/minio
+  # Must match MINIO_IMAGE_TAG in helm/versions.env — the maintained
+  # community fork (minio/minio was archived 2026-04-25; the Pigsty fork
+  # rebuilds the last known-good source, restores the admin console, and
+  # applies CVE patches). ADR-0006 records the risk acceptance.
+  tag: "RELEASE.2026-08-04T00-00-00Z"
+
+# scripts/minio-credentials.sh (Task 1) creates this Secret with keys
+# `rootUser`/`rootPassword` — the chart's own existingSecret contract
+# (verified against templates/secrets.yaml). No value here, ever.
+existingSecret: minio-root
+
+# D-03: keep MinIO off the node serving the analytical database (PG 18 COPY
+# is the heaviest workload in this cluster). worker-1 carries this label.
+nodeSelector:
+  airflow-platform/role: storage
+
+# Pitfall 5: the chart's only non-empty default `resources` key requests
+# 16Gi and nothing else — completely unschedulable on this host. Sized for a
+# single standalone instance holding a synthetic corpus, not a production
+# data lake.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+buckets:
+  # `objectlocking: false` on every bucket, D-08: WORM retention was
+  # considered and rejected because retained test objects cannot be cleaned
+  # up in place; Phase 11 (rebuild-from-raw, ephemeral environment) is the
+  # named place to revisit it. `versioning: true` on `raw` alone is what
+  # makes a correction a new version instead of an overwrite (§63).
+  #
+  # `policy: none` here is the bucket's ANONYMOUS access policy
+  # (`mc anonymous set none|download|upload|public`) — unrelated to the
+  # `policies:` IAM list below (Pitfall 8's naming trap). Every bucket is
+  # private; access is granted only through IAM.
+  - name: raw
+    policy: none
+    purge: false
+    versioning: true
+    objectlocking: false
+  - name: validated
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+  - name: processed
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+  - name: quarantine
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+  - name: metadata
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+
+# Pitfall 8: users[].policy takes exactly ONE policy name, so D-08's
+# allow-plus-deny must be a single document, not two attached policies. The
+# chart's policy helper defaults an unspecified `effect` to "Allow"
+# (templates/_helper_policy.tpl), so the deny statement's effect is written
+# explicitly — leaving it implicit here would silently grant delete.
+policies:
+  - name: etl-app
+    statements:
+      # HeadBucket/ListObjectsV2 need s3:ListBucket evaluated against the
+      # BUCKET arn (no /*); Get/Put need OBJECT arns (with /*). `raw` and
+      # `validated` are the pipeline's working buckets — `processed`,
+      # `quarantine` and `metadata` are reached by the admin credential only
+      # in this phase (tests/e2e/cluster/test_minio_buckets.py, plan 02-04
+      # Task 3), matching how each later Phase writes to those layers.
+      - effect: Allow
+        resources: ["arn:aws:s3:::raw", "arn:aws:s3:::validated"]
+        actions: ["s3:ListBucket"]
+      - effect: Allow
+        resources: ["arn:aws:s3:::raw/*", "arn:aws:s3:::validated/*"]
+        actions: ["s3:GetObject", "s3:PutObject"]
+      # §63 immutability, enforced by the server — not by convention. The
+      # admin credential (used by no workload, only by `cluster-rebuild` and
+      # fixture reseeding) is not attached to this policy and retains delete.
+      - effect: Deny
+        resources: ["arn:aws:s3:::raw/*"]
+        actions: ["s3:DeleteObject", "s3:DeleteObjectVersion"]
+
+users:
+  - accessKey: etl-app
+    # scripts/minio-credentials.sh (Task 1) creates this Secret with key
+    # `secretKey` — secret NAME only, no value in git (D-14).
+    existingSecret: minio-app
+    existingSecretKey: secretKey
+    policy: etl-app
+
+# D-07: same *.localtest.me convention as ingress-nginx.yaml (plan 02-01) —
+# resolves to 127.0.0.1 with no /etc/hosts edit. Host-side tools and tests
+# reach MinIO here; in-cluster pods use the ClusterIP service DNS instead, so
+# no address is hardcoded anywhere (S3_ENDPOINT_URL is resolved per context).
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hosts:
+    - minio.localtest.me
+
+# Pitfall 5: each of these three post-install-Job containers defaults to
+# `requests.memory: 128Mi` with no CPU request and no limits at all — an
+# unrequested/unlimited container is QoS BestEffort and is evicted first.
+makeBucketJob:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
+
+makePolicyJob:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
+
+makeUserJob:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
