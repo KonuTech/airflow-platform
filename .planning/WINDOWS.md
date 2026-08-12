@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 6
+open_count: 7
 waived_count: 0
 fixed_count: 2
-total_count: 8
-last_updated: 2026-08-11T21:01:17.971Z
+total_count: 9
+last_updated: 2026-08-12T05:14:19.705Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,7 @@ last_updated: 2026-08-11T21:01:17.971Z
 | 6 | 01 | fixme | tools/corpus/generators.py |  | CR-review WR: _decimal_renderer renders negative decimals incorrectly (-1234 -> -13.66), affecting generated numeric fixture content. | open |  | 2026-08-11T20:28:31.541Z |  |
 | 7 | 01 | todo | .gitignore |  | CR-review WR-04: .gsd/ is untracked and unignored; it holds a run-scoped dispatch sentinel that will be swept into a commit during phase 2. Add .gsd/ to .gitignore. | open |  | 2026-08-11T20:28:31.616Z |  |
 | 8 | 01 | todo | Makefile |  | Phase 3 must wire tests/property, tests/integration and tests/e2e into a target that can provide testcontainers or a live cluster. make check names test paths explicitly, so a new test directory is silently uncollected until named — the defect that made QUAL-07 partial. Do not assume make check collects them. | open |  | 2026-08-11T20:40:04.033Z |  |
+| 9 | 02 | todo | Makefile |  | CONTEXT.md D-Claude's-discretion: 'make clean-images' pruning each kind node's containerd image store was left unplanned for Phase 2 (orthogonal to all five success criteria). PITFALLS A3 flags this as the cleanup step everyone forgets and the reason WSL2 disk keeps climbing after a 'cleanup' — pruning the host Docker daemon does NOT touch images already loaded into node containerd stores. Build it when disk pressure first bites, via: docker exec <node> crictl rmi --prune across all nodes. | open |  | 2026-08-12T05:14:19.705Z |  |
 
 ````json
 [
@@ -120,6 +121,18 @@ last_updated: 2026-08-11T21:01:17.971Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-11T20:40:04.033Z",
+    "resolved_at": null
+  },
+  {
+    "id": 9,
+    "kind": "todo",
+    "phase": "02",
+    "file": "Makefile",
+    "line": null,
+    "description": "CONTEXT.md D-Claude's-discretion: 'make clean-images' pruning each kind node's containerd image store was left unplanned for Phase 2 (orthogonal to all five success criteria). PITFALLS A3 flags this as the cleanup step everyone forgets and the reason WSL2 disk keeps climbing after a 'cleanup' — pruning the host Docker daemon does NOT touch images already loaded into node containerd stores. Build it when disk pressure first bites, via: docker exec <node> crictl rmi --prune across all nodes.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-12T05:14:19.705Z",
     "resolved_at": null
   }
 ]
