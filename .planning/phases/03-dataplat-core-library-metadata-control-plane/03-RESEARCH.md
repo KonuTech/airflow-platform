@@ -802,7 +802,11 @@ dataplat = "dataplat.cli:main"
 or [CITED] from the already-adjudicated ARCHITECTURE.md/PITFALLS.md/STACK.md/CONTEXT.md, none of
 which are themselves flagged `[ASSUMED]` at the specific claims this document relies on.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All three questions below were resolved during planning — each recommendation was adopted as
+written, and all three land in plan `03-02-PLAN.md` Task 1. Left in place as a record of the
+reasoning; see the plan for the implementing detail.
 
 1. **Should the `cluster` dependency-group's scope and its `pyproject.toml`/Makefile comments be
    updated explicitly in this phase's plan, or left as a known-stale comment for a later cleanup?**
@@ -813,6 +817,8 @@ which are themselves flagged `[ASSUMED]` at the specific claims this document re
      behavior change) or accepts the drift silently until someone notices.
    - Recommendation: make it an explicit, small task — it costs minutes now, and the alternative is
      a future contributor trusting a comment that is actively wrong about what `make check` does.
+   - **Resolved:** `03-02-PLAN.md` Task 1 rewrites the `cluster` group's comment so it no longer
+     claims boto3/psycopg importability is gated by group membership.
 
 2. **Does `_record_hash_version` belong in this phase's migration, or is D-05's two-column list
    exhaustive by design?**
@@ -824,6 +830,9 @@ which are themselves flagged `[ASSUMED]` at the specific claims this document re
      or incidental (D-05 simply wasn't thinking about the `normalized` schema when it wrote the list).
    - Recommendation: add it — the cost of an unused column is near zero; the cost of needing it later
      without it is the exact DATA CORRUPTION scenario the entire pitfall exists to prevent.
+   - **Resolved:** `03-02-PLAN.md` Task 1 adds `_record_hash_version smallint NOT NULL DEFAULT 1` to
+     `normalized.customers` in `migrations/versions/0005_normalized_customers.py`, alongside the six
+     embedded lineage columns. CONTEXT.md D-05's citation was updated to name this explicitly.
 
 3. **Where exactly should `alembic`/`sqlalchemy` live in the dependency graph** — root `dev` group
    (this document's recommendation), a new dedicated group, or actually inside `dataplat`'s runtime
@@ -835,6 +844,11 @@ which are themselves flagged `[ASSUMED]` at the specific claims this document re
    - Recommendation: keep it out of runtime deps now (matches ADR-0004's slim-image goal and
      STACK.md's stated migration-execution model); this is cheap to revisit later since it's an
      additive change, not a structural one.
+   - **Resolved:** `03-02-PLAN.md` Task 1 adds `alembic`/`sqlalchemy` to the root `dev` group (not
+     `dataplat`'s runtime deps), as recommended. `testcontainers[postgres,minio]` was separately
+     corrected during pattern-mapping/planning to live in `cluster`, not `dev` (this document's own
+     Installation code block was stale on that point — `dev` must stay Docker-free per CONTEXT.md
+     D-04; `hypothesis` was already correctly placed in `dev`).
 
 ## Environment Availability
 
