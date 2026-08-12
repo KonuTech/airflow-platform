@@ -45,7 +45,7 @@ FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha2
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
-        minio-creds
+        minio-creds helm-lint manifests manifest-policy
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -98,7 +98,13 @@ test:                          ## unit + regression tests, coverage report, no t
 	$(RUN) pytest tests/unit tests/regression -q --cov --cov-report=term-missing
 
 policy:                        ## repository policy tests (LOAD-12 ban, CI/Make parity)
-	$(RUN) pytest tests/policy -q
+	# `-m "not manifests"` deselects tests/policy/test_manifest_validation_
+	# fails_closed.py: it needs the network-installed kubeconform binary and
+	# helm/schemas/cnpg/-derived rendered output, both absent on a fresh
+	# clone with no network. Deselection, not a skip — a skip is a green line
+	# nobody reads, and a test that skips in the only gate that collects it
+	# has failed to be a gate. Those tests run under `manifest-policy` below.
+	$(RUN) pytest tests/policy -q -m "not manifests"
 
 fixtures:                      ## (re)generate the corpus + rewrite CORPUS.sha256 (FAST=1 skips the large profile)
 	$(RUN) python -m tools.corpus generate --out tests/fixtures/csv \
@@ -180,13 +186,85 @@ stage-%:                       ## Run exactly one scripts/stages/<name>.sh (no p
 	set -a; . helm/versions.env; set +a; \
 	PROFILE=$(PROFILE) KUBECTL_CONTEXT="kind-$$CLUSTER_NAME" "$$script"
 
+helm-lint:                      ## CICD-07: helm lint all five pinned charts against every values profile [plan 02-07]
+	# No version literal here — every version comes from helm/versions.env,
+	# the same rule test_the_makefile_scanner_target_defers_to_the_pinned_
+	# installer already enforces for the gitleaks target. `helm lint` wants a
+	# local chart directory, not a repo/chart reference, so each chart is
+	# `helm pull --untar`-ed into a throwaway directory first (cleaned up on
+	# exit) rather than duplicating scripts/render-manifests.sh's `helm
+	# template` output, which this target does not depend on.
+	@set -a; . helm/versions.env; set +a; \
+	tools/k8s/install_helm.sh >/dev/null; \
+	helm_bin="$(CURDIR)/tools/bin/helm"; \
+	"$${helm_bin}" repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null 2>&1 || true; \
+	"$${helm_bin}" repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null 2>&1 || true; \
+	"$${helm_bin}" repo add minio https://charts.min.io >/dev/null 2>&1 || true; \
+	"$${helm_bin}" repo add apache-airflow https://airflow.apache.org >/dev/null 2>&1 || true; \
+	"$${helm_bin}" repo update >/dev/null; \
+	workdir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$workdir"' EXIT; \
+	failed=0; \
+	lint_chart() { \
+	  release="$$1"; chart_ref="$$2"; version="$$3"; values_basename="$$4"; \
+	  chart_dir="$${workdir}/$${release}"; \
+	  "$${helm_bin}" pull "$${chart_ref}" --version "$${version}" \
+	    --untar --destination "$${workdir}" --untardir "$${release}" >/dev/null; \
+	  for profile in local ci; do \
+	    echo "==> helm lint [$${profile}] $${chart_ref} ($${values_basename})"; \
+	    "$${helm_bin}" lint "$${chart_dir}"/*/ \
+	      -f "helm/values/$${profile}/$${values_basename}.yaml" || failed=1; \
+	  done; \
+	}; \
+	lint_chart ingress-nginx ingress-nginx/ingress-nginx "$${INGRESS_NGINX_CHART_VERSION}" ingress-nginx; \
+	lint_chart cnpg-operator cnpg/cloudnative-pg "$${CNPG_OPERATOR_CHART_VERSION}" cnpg-operator; \
+	lint_chart airflow-db cnpg/cluster "$${CNPG_CLUSTER_CHART_VERSION}" cnpg-airflow; \
+	lint_chart analytics-db cnpg/cluster "$${CNPG_CLUSTER_CHART_VERSION}" cnpg-analytics; \
+	lint_chart minio minio/minio "$${MINIO_CHART_VERSION}" minio; \
+	lint_chart airflow apache-airflow/airflow "$${AIRFLOW_CHART_VERSION}" airflow; \
+	exit $$failed
+
+manifests: helm-lint             ## CICD-07/INFRA-10: render + kubeconform -strict, both profiles, all five charts [plan 02-07]
+	# Installs the two binaries it needs as its own first lines — exactly like
+	# the gitleaks target calls tools/security/install_gitleaks.sh — so this
+	# target (and therefore the CI job that calls it) never assumes a
+	# developer has run an installer by hand. Both installers are idempotent
+	# by digest, so this costs a stat on a warm tree.
+	@tools/k8s/install_helm.sh
+	@tools/k8s/install_kubeconform.sh
+	scripts/render-manifests.sh
+
+manifest-policy: manifests       ## CICD-07: the manifests marker, with the render ordered ahead of it [plan 02-07]
+	# `manifests` is a declared PREREQUISITE, not just a step that happens to
+	# run earlier in `ci`'s list — under `make -j` a list position guarantees
+	# nothing, a prerequisite edge does. This is what makes the render
+	# complete before tests/policy/test_manifest_validation_fails_closed.py
+	# reads build/manifests/.
+	#
+	# REQUIRE_RENDERED_MANIFESTS=1 is the anti-vacuity switch: a test under
+	# the `manifests` marker that would otherwise skip because its inputs
+	# (build/manifests/) are absent must fail instead when this is set — see
+	# test_the_rendered_cluster_manifests_validate's docstring. Because
+	# `manifests` already ran as a prerequisite above, that failure path is
+	# never actually reached here; the switch matters for someone invoking
+	# `pytest -m manifests` directly, without going through this target.
+	#
+	# pytest exits 5 when a marker selection collects nothing (the second,
+	# free anti-vacuity property here) — an emptied `manifests` selection
+	# therefore fails this target rather than reporting a vacuous green.
+	REQUIRE_RENDERED_MANIFESTS=1 $(RUN) pytest tests/policy -q -m manifests
+
 # `check` must never need the network: ROADMAP success criterion 4 is a clone
 # followed by `uv sync && make check` with no services running. That is why
 # `gitleaks` (which needs a downloaded binary) lives in `ci` and not here.
+# `manifest-policy` (transitively: helm-lint + manifests + the manifests-
+# marked tests) is exactly the same case — `helm template`/`helm pull`/`helm
+# repo add` all fetch pinned charts over the network — so it joins `ci`, not
+# `check`, for the identical reason.
 # `fixtures-verify` regenerates the whole corpus into a temporary directory and
 # compares against the committed oracle — the QUAL-08 mechanism, on every run.
 check: uv-guard lock-check lint format typecheck imports policy test fixtures-verify  ## Local gate
-ci: check gitleaks gitleaks-selftest                                  ## CI gate (superset)
+ci: check manifest-policy gitleaks gitleaks-selftest                  ## CI gate (superset)
 
 clean:                         ## Remove the venv and every tool cache
 	rm -rf .venv .mypy_cache .pytest_cache .ruff_cache tests/fixtures/csv

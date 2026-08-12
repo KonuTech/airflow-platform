@@ -1,0 +1,19 @@
+# Trips: nothing — this is the valid twin.
+# Proves: tests/policy/test_manifest_validation_fails_closed.py::test_the_valid_twin_is_accepted
+#         tests/policy/test_manifest_validation_fails_closed.py::test_the_crd_schema_is_load_bearing
+#
+# The fix for cluster_null_postgresql.yaml: setting any real parameter under
+# `spec.postgresql.parameters` makes the rendered key a genuine object instead
+# of null — exactly what every committed helm/values/*/cnpg-*.yaml does
+# (max_wal_size for the analytical cluster, max_connections for the metadata
+# cluster).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: sample-cluster
+  namespace: data
+spec:
+  instances: 1
+  postgresql:
+    parameters:
+      max_wal_size: "2GB"
