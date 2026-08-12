@@ -44,7 +44,8 @@ FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha2
 
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
-        install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify
+        install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
+        minio-creds
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -139,6 +140,10 @@ cluster-down:                  ## Delete the kind cluster if it exists, else no-
 
 cluster-rebuild: doctor        ## D-04: destroy+recreate, timed per-stage, warns past budget [plan 02-02]
 	scripts/cluster-rebuild.sh
+
+minio-creds:                   ## D-14: print live MinIO credentials, shell-sourceable [plan 02-04]
+	@set -a; . helm/versions.env; set +a; \
+	KUBECTL_CONTEXT="kind-$$CLUSTER_NAME" scripts/minio-credentials.sh show
 
 cluster-verify:                 ## D-16: run tests/e2e/cluster against the live cluster [plan 02-02]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
