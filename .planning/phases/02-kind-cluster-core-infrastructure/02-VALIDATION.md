@@ -39,7 +39,7 @@ get its own target and must **not** join `make check`, which is contractually of
 ## Sampling Rate
 
 - **After every task commit:** `make policy` — static, sub-second, needs no cluster and no network
-- **After every plan wave:** `make check` — the full offline gate, including `make manifests` once wired in
+- **After every plan wave:** `make check` — the full offline gate. **`make manifests` does NOT join `check`**: it fetches pinned charts over the network, and `check` must stay runnable on a fresh clone with nothing running (Phase 1 success criterion 4). `manifests` joins `ci`, following the `gitleaks` precedent exactly — and must be ordered *ahead of* `policy` in the `ci` chain, or the rendered-manifest tests skip and the sizing gate measures nothing.
 - **Phase gate:** `make cluster-up && make cluster-verify` green, then `make cluster-rebuild && make cluster-verify` green a **second** time. One pass proves it works; two passes prove it is reproducible, which is what INFRA-01 actually claims.
 - **Before `/gsd-verify-work`:** full suite green
 - **Max feedback latency:** < 5 s for the per-commit gate
