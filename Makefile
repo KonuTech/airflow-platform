@@ -172,7 +172,7 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster against the live 
 # the thing that bootstraps from nothing; this rule runs exactly one stage
 # and bootstraps nothing.
 stage-%:                       ## Run exactly one scripts/stages/<name>.sh (no prerequisite chain)
-	@script="$$(find scripts/stages -maxdepth 1 -type f -name '*-$**.sh')"; \
+	@script="$$(find scripts/stages -maxdepth 1 -type f -name '*-$*.sh')"; \
 	if [ -z "$$script" ]; then \
 	  echo "ERROR: no scripts/stages/*-$*.sh matching stage-$*" >&2; \
 	  exit 1; \

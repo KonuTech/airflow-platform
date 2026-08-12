@@ -1,0 +1,140 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. This file and
+# helm/values/local/airflow.yaml must otherwise be identical in shape.
+#
+# FOURTH DIVERGENCE AXIS, ARGUED: the EXECUTOR also differs here —
+# LocalExecutor in CI, KubernetesExecutor locally — see
+# helm/values/local/airflow.yaml's header comment for the full argument.
+# D-08's profile-divergence test (plan 02-08) must allowlist `executor` by
+# name, deliberately, rather than by accident.
+#
+# D-12: CI's rendered manifests are summed by
+# tests/policy/test_manifest_resources.py against the GitHub-hosted runner's
+# 4 CPU / 16 GB budget, so the sizes below are load-bearing, not decorative.
+#
+# postgresql.enabled MUST stay false — see helm/values/local/airflow.yaml.
+# No credential literal of any kind appears in this file.
+
+airflowVersion: "3.3.0"
+defaultAirflowRepository: apache/airflow
+defaultAirflowTag: "3.3.0"
+
+# LocalExecutor in CI — see helm/values/local/airflow.yaml's header comment
+# for the argument (image-pull + disk, not CPU, is the binding constraint on
+# a 4 CPU / 16 GB runner).
+executor: LocalExecutor
+
+postgresql:
+  enabled: false
+
+data:
+  metadataSecretName: airflow-metadata
+
+fernetKeySecretName: airflow-fernet-key
+
+# See helm/values/local/airflow.yaml — apiSecretKeySecretName is the correct
+# Airflow 3+ key, not the deprecated webserverSecretKeySecretName.
+apiSecretKeySecretName: airflow-api-secret-key
+
+# Monitoring disabled in CI — the third D-06 axis.
+statsd:
+  enabled: false
+
+triggerer:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  logGroomerSidecar:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+ingress:
+  apiServer:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - name: airflow.localtest.me
+
+# Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
+# other pod the CI job renders. See helm/values/local/airflow.yaml for the
+# key-set rationale (02-RESEARCH.md Pitfall 5) — unchanged here.
+apiServer:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+scheduler:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  logGroomerSidecar:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+dagProcessor:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  logGroomerSidecar:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+migrateDatabaseJob:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+createUserJob:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+workers:
+  kubernetes:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi

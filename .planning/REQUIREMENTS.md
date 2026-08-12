@@ -30,7 +30,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 ### INFRA — Cluster, Services, Infrastructure as Code
 
 - [ ] **INFRA-01**: A multi-node kind cluster (control-plane + 2 workers) can be destroyed and recreated reproducibly from a committed `kind/cluster.yaml` — *(DoD 1)*
-- [ ] **INFRA-02**: Airflow 3.x runs in Kubernetes with API server, scheduler, DAG processor and triggerer as separate workloads — *(DoD 2)*
+- [x] **INFRA-02**: Airflow 3.x runs in Kubernetes with API server, scheduler, DAG processor and triggerer as separate workloads — *(DoD 2)*
 - [x] **INFRA-03**: A PostgreSQL instance dedicated exclusively to Airflow metadata is deployed and used by nothing else — *(DoD 3)*
 - [x] **INFRA-04**: A physically separate PostgreSQL instance serves analytical workloads — *(DoD 4)*
 - [x] **INFRA-05**: MinIO provides S3-compatible object storage with `raw`, `validated`, `processed`, `quarantine` and `metadata` layers — *(DoD 5)*
@@ -280,7 +280,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | META-02 | Phase 3 | Pending |
 | META-03 | Phase 4 | Pending |
 | INFRA-01 | Phase 2 | Pending |
-| INFRA-02 | Phase 2 | Pending |
+| INFRA-02 | Phase 2 | Complete |
 | INFRA-03 | Phase 2 | Complete |
 | INFRA-04 | Phase 2 | Complete |
 | INFRA-05 | Phase 2 | Complete |
