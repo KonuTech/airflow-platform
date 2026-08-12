@@ -125,7 +125,8 @@ Plans:
 **Plans**: 8 plans in 6 waves
 
 Plans:
-- [ ] 02-01-PLAN.md — Tracer: create, reach over `:80`, and destroy a 3-node kind cluster with a local registry, the five namespaces and ingress-nginx (wave 1)
+
+- [x] 02-01-PLAN.md — Tracer: create, reach over `:80`, and destroy a 3-node kind cluster with a local registry, the five namespaces and ingress-nginx (wave 1)
 - [ ] 02-02-PLAN.md — `make doctor` fail-closed preflight, the `tests/e2e/cluster/` harness, and timed `cluster-rebuild` (wave 2)
 - [ ] 02-03-PLAN.md — CloudNativePG operator and two physically separate PostgreSQL clusters, 17 for Airflow metadata and 18 for analytics (wave 3)
 - [ ] 02-04-PLAN.md — MinIO with five buckets, versioning on `raw`, and a server-enforced deny-delete for the application credential (wave 3)
