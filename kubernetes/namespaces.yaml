@@ -1,0 +1,36 @@
+# The five D-13 namespaces, owned by this manifest ALONE. No Helm release in
+# this repository may pass --create-namespace: two releases must never manage
+# the same Kubernetes object (a Phase 2 truth this plan's must_haves assert).
+#
+# cnpg-system    the CloudNativePG operator
+# data           both CNPG Cluster CRs + MinIO
+# airflow        the Airflow chart's components
+# etl            task pods and KubernetesPodOperator pods (empty until Phase 4;
+#                created now so the Phase 5 Vault role for
+#                system:serviceaccount:etl:<name> is never widened after the
+#                fact to cover a namespace invented later)
+# ingress-nginx  the ingress controller
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: airflow
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: etl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
