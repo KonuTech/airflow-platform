@@ -66,7 +66,7 @@ the planner must attach each row to a task and `validate-phase` completes the ID
 | INFRA-05 / §63 | the application credential is **refused** on `DeleteObject` against `raw`; the admin credential is not | e2e (negative) | `…::test_raw_delete_is_denied_for_app_credential -x` | ❌ W0 | ⬜ pending |
 | INFRA-07 | no `kubectl create/edit/patch/apply` outside committed manifests in any script | policy | `pytest tests/policy/test_no_manual_kubectl_surgery.py -x` | ❌ W0 | ⬜ pending |
 | INFRA-09 | reservations + `maxPods` present in `cluster.yaml`; live node allocatable below a declared ceiling | policy + e2e | `test_kind_cluster_config.py` and `tests/e2e/cluster/test_node_capacity.py` | ❌ W0 | ⬜ pending |
-| INFRA-10 | both profiles render; they differ on **only** replicas, resources and monitoring | policy | `pytest tests/policy/test_values_profiles.py -x` | ❌ W0 | ⬜ pending |
+| INFRA-10 | both profiles render; they differ on **only** the four permitted axes — replicas, resources, monitoring, and executor (the argued fourth axis under D-06, KubernetesExecutor local / LocalExecutor CI, allowlisted by name with its written argument); a fifth axis is reported | policy | `pytest tests/policy/test_values_profiles.py -x` | ❌ W0 | ⬜ pending |
 | CICD-07 | `kubeconform -strict` passes on both rendered profiles and **fails** on a deliberately broken manifest | policy (non-vacuity, `manifests` marker — ci-only, needs the downloaded binary) | `make manifest-policy` | ❌ W0 | ⬜ pending |
 | CICD-07 / D-12 #1 | summed container requests over the CI profile ≤ 4 CPU / 16 GB, **including** CNPG `Cluster` CRs | policy (`manifests` marker — runs after the render, fails rather than skips without it) | `make manifest-policy` | ❌ W0 | ⬜ pending |
 | CICD-07 / D-12 #2 | every container in both profiles has CPU + memory requests and limits | policy | `…::test_every_container_is_sized -x` | ❌ W0 | ⬜ pending |
@@ -87,9 +87,9 @@ the planner must attach each row to a task and `validate-phase` completes the ID
 - [ ] `tests/policy/test_no_manual_kubectl_surgery.py` — INFRA-07
 - [ ] `tests/e2e/cluster/conftest.py` — shared fixtures: kube client / `kubectl` shell helper, boto3 client built from `make minio-creds`, the `cluster` marker, skip-if-no-cluster
 - [ ] `tests/e2e/cluster/{test_airflow_workloads,test_postgres_topology,test_minio_buckets,test_ingress,test_node_capacity}.py`
-- [ ] Makefile targets: `doctor`, `cluster-up`, `cluster-down`, `cluster-rebuild`, `cluster-verify`, `minio-creds`, `manifests`, `helm-lint`; wire `manifests` into `check`, and `cluster-verify` into **nothing**
-- [ ] Root dependency group `cluster = ["boto3", "psycopg[binary]"]` + `uv lock` — **cross-phase coordination point, see RESEARCH Open Question 1**
-- [ ] `markers` entry for `cluster` in `[tool.pytest.ini_options]` (required by `--strict-markers`)
+- [ ] Makefile targets: `doctor`, `cluster-up`, `cluster-down`, `cluster-rebuild`, `cluster-verify`, `minio-creds`, `manifests`, `manifest-policy`, `helm-lint`, `install-cluster`; wire `manifests` into **`ci` via the `manifest-policy: manifests` prerequisite edge — never into `check`** (it fetches charts and needs the downloaded binaries), and `cluster-verify` into **nothing**
+- [ ] Root dependency group `cluster = ["boto3", "psycopg[binary]"]` + `uv lock` — **cross-phase coordination point, see RESEARCH Open Question 1**. `[tool.uv]` sets no `default-groups`, so uv's default is `dev` alone: every e2e invocation needs `--group cluster` (additive — never `--only-group`, which drops pytest), and the group must **not** be folded into `dev` or `default-groups`
+- [ ] `markers` entries for **both** `cluster` and `manifests` in `[tool.pytest.ini_options]` (required by `--strict-markers`)
 
 ---
 
