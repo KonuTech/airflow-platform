@@ -32,6 +32,43 @@ A fourth is asserted because the first would otherwise overstate its own
 strength: `GITHUB_TOKEN` is injected into every workflow whether or not anything
 references `secrets.*`, so "this workflow holds no credential" is only true
 while its permissions stay read-only.
+
+## D-14 widening: a second scanned surface, additive only
+
+Everything above is the Phase 1 workflow-scoped claim, UNCHANGED. `ALLOWED_
+SECRETS` stays empty for the reason its own comment gives — this phase adds
+no CI secret, and widening that set is a separate, deliberate obligation this
+plan does not take on.
+
+D-14 needs a DIFFERENT claim over a DIFFERENT surface: no credential literal
+may appear anywhere under `helm/`, `kubernetes/`, `kind/` or `scripts/`.
+MinIO's and Airflow's credentials are generated during `cluster-up` and live
+only in the cluster (02-CONTEXT.md D-14); every committed file references one
+by Secret NAME — `existingSecret`, `existingSecretKey`, `metadataSecretName`,
+`fernetKeySecretName`, `webserverSecretKeySecretName`, `apiSecretKeySecretName`
+— never by value. Two decidable structural checks back that claim:
+
+1. **A forbidden literal-holding key carries a value.** `rootPassword`,
+   `fernetKey` and `webserverSecretKeySecretName`'s un-suffixed sibling
+   `webserverSecretKey` are the exact keys 02-RESEARCH.md names (Project
+   Constraints table, Anti-Patterns) as the ones a chart accepts a literal
+   value for where this repository has a reference form instead. Checked by
+   EXACT leaf-key equality after flattening parsed YAML — not substring
+   matching — so `fernetKeySecretName` (the permitted reference form) is
+   never mistaken for `fernetKey` (the forbidden literal form) merely
+   because one contains the other as a prefix.
+2. **A committed `kind: Secret` document carries a `data:`/`stringData:`
+   block.** Every Secret in this platform is generated at `cluster-up`
+   (`scripts/minio-credentials.sh`, `scripts/airflow-metadata-secret.sh`) and
+   applied via `kubectl apply -f -` on stdin — never written to a file this
+   repository commits. A committed Secret manifest carrying real data is
+   therefore always a violation, full stop.
+
+`scripts/` is YAML-free, so the same two checks run there as a plain-text
+regex over `key: value` / `key=value` assignments instead of a parsed-YAML
+walk — forward-looking, since nothing in the current tree matches it (every
+credential in every script is either a Secret NAME or the output of
+`_random_hex`/a `kubectl get` read, never a literal).
 """
 
 from __future__ import annotations
@@ -230,3 +267,186 @@ def test_a_widened_permission_is_reported() -> None:
     mutated = copy.deepcopy(workflow)
     next(iter(mutated["jobs"].values()))["permissions"] = {"contents": "write"}
     assert permission_problems(mutated), "a job widening permissions was not reported"
+
+
+# ===========================================================================
+# D-14: the widened, whole-infrastructure-tree scanned surface (additive —
+# see module docstring). Nothing above this line is touched by D-14.
+# ===========================================================================
+
+INFRA_YAML_DIRS = (REPO_ROOT / "helm", REPO_ROOT / "kubernetes", REPO_ROOT / "kind")
+INFRA_SCRIPT_DIR = REPO_ROOT / "scripts"
+
+# The exact keys 02-RESEARCH.md names as accepting a literal credential VALUE
+# where this repository has a Secret-NAME reference alternative. Adding an
+# entry here is a structural claim — verify the corresponding *SecretName /
+# existingSecret* reference form actually exists in the pinned chart before
+# widening this set.
+FORBIDDEN_LITERAL_KEYS: frozenset[str] = frozenset(
+    {"rootPassword", "fernetKey", "webserverSecretKey"},
+)
+
+SECRET_DATA_FIELDS: tuple[str, ...] = ("data", "stringData")
+
+
+def _flatten_keys(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.update(_flatten_keys(child, path))
+        return out
+    return {prefix: value}
+
+
+def forbidden_literal_key_problems(doc: dict[str, Any], label: str) -> list[str]:
+    """Report every leaf whose KEY exactly matches a forbidden literal-holding name."""
+    problems: list[str] = []
+    for path, value in _flatten_keys(doc).items():
+        leaf = path.rsplit(".", 1)[-1]
+        if leaf in FORBIDDEN_LITERAL_KEYS and isinstance(value, str) and value.strip():
+            problems.append(
+                f"{label}: {path} holds a literal value — use the "
+                "*SecretName / existingSecret reference form instead (D-14)",
+            )
+    return problems
+
+
+def inline_secret_data_problems(doc: dict[str, Any], label: str) -> list[str]:
+    """Report a committed `kind: Secret` document carrying real data."""
+    if doc.get("kind") != "Secret":
+        return []
+    return [
+        f"{label}: kind: Secret carries a committed `{field}:` block — "
+        "every Secret in this platform is generated at cluster-up "
+        "(D-14), never committed"
+        for field in SECRET_DATA_FIELDS
+        if doc.get(field)
+    ]
+
+
+_SCRIPT_LITERAL_KEY_ASSIGNMENT = re.compile(
+    r"\b(?P<key>rootPassword|fernetKey|webserverSecretKey)\s*[:=]\s*"
+    r"(?P<value>[\"']?[^\s\"'$`][^\n]*)",
+)
+
+
+def script_literal_key_problems(text: str, label: str) -> list[str]:
+    """The scripts/ analogue of forbidden_literal_key_problems, over raw text.
+
+    scripts/ is not YAML, so this is a plain-text regex rather than a parsed
+    flatten — forward-looking: nothing in the current tree matches it.
+    """
+    problems: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        problems.extend(
+            f"{label}:{lineno}: {match.group('key')} assigned a literal "
+            "value — use a Secret NAME reference instead (D-14)"
+            for match in _SCRIPT_LITERAL_KEY_ASSIGNMENT.finditer(stripped)
+        )
+    return problems
+
+
+def _infra_yaml_paths() -> list[Path]:
+    paths: list[Path] = []
+    for directory in INFRA_YAML_DIRS:
+        if directory.is_dir():
+            paths.extend(sorted(directory.rglob("*.yaml")))
+            paths.extend(sorted(directory.rglob("*.yml")))
+    return paths
+
+
+def infrastructure_credential_problems() -> list[str]:
+    problems: list[str] = []
+    for path in _infra_yaml_paths():
+        label = str(path.relative_to(REPO_ROOT))
+        try:
+            docs = [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8")) if d]
+        except yaml.YAMLError:
+            continue
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            problems += forbidden_literal_key_problems(doc, label)
+            problems += inline_secret_data_problems(doc, label)
+    if INFRA_SCRIPT_DIR.is_dir():
+        for path in sorted(INFRA_SCRIPT_DIR.rglob("*.sh")):
+            problems += script_literal_key_problems(
+                path.read_text(encoding="utf-8"),
+                str(path.relative_to(REPO_ROOT)),
+            )
+    return problems
+
+
+def test_no_infrastructure_file_holds_a_credential_literal() -> None:
+    problems = infrastructure_credential_problems()
+    assert not problems, (
+        "D-14: every credential must be generated at cluster-up and "
+        "referenced by Secret name only:\n" + "\n".join(problems)
+    )
+
+
+def test_a_literal_credential_key_is_reported() -> None:
+    """Non-vacuity: injecting a forbidden key into an in-memory copy of a real file."""
+    path = REPO_ROOT / "helm" / "values" / "local" / "minio.yaml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    mutated = copy.deepcopy(doc)
+    mutated["rootPassword"] = "hunter2"
+    assert mutated != doc, "the scratch mutation did not apply — this test proves nothing"
+    assert forbidden_literal_key_problems(mutated, "scratch"), (
+        "an injected literal `rootPassword` was not reported"
+    )
+
+
+def test_secret_reference_keys_are_not_reported() -> None:
+    """False-positive control: the permitted *SecretName / existingSecret forms."""
+    doc = {
+        "fernetKeySecretName": "airflow-fernet-key",
+        "webserverSecretKeySecretName": "airflow-api-secret-key",
+        "apiSecretKeySecretName": "airflow-api-secret-key",
+        "existingSecret": "minio-root",
+        "existingSecretKey": "secretKey",
+        "metadataSecretName": "airflow-metadata",
+    }
+    assert not forbidden_literal_key_problems(doc, "scratch"), (
+        "a permitted Secret-reference key was mistaken for a literal-holding one"
+    )
+
+
+def test_a_committed_secret_data_block_is_reported() -> None:
+    doc = {"kind": "Secret", "metadata": {"name": "x"}, "data": {"password": "aHVudGVyMg=="}}
+    assert inline_secret_data_problems(doc, "scratch"), (
+        "a committed Secret with a data: block was not reported"
+    )
+
+
+def test_a_namespace_document_is_not_reported() -> None:
+    """False-positive control: kubernetes/namespaces.yaml's own Namespace kind."""
+    doc = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "data"}}
+    assert not inline_secret_data_problems(doc, "scratch")
+
+
+def test_a_literal_credential_in_a_script_is_reported() -> None:
+    text = 'fernetKey="a-hardcoded-value-not-derived-from-anything"\n'
+    assert script_literal_key_problems(text, "scratch"), (
+        "a hardcoded fernetKey= assignment in a script was not reported"
+    )
+
+
+def test_a_generated_credential_in_a_script_is_not_reported() -> None:
+    """False-positive control mirroring scripts/minio-credentials.sh's real shape."""
+    text = '"rootPassword=$(_random_hex 32)"\n'
+    assert not script_literal_key_problems(text, "scratch"), (
+        "a command-substitution-derived value was mistaken for a literal"
+    )
+
+
+def test_the_allowed_secrets_set_is_unchanged_by_d14() -> None:
+    """D-14 must not touch Phase 1's SEC-10 claim — see the module docstring."""
+    assert frozenset() == ALLOWED_SECRETS, (
+        "ALLOWED_SECRETS is no longer empty — see this module's docstring "
+        "before widening it; D-14 adds no CI secret"
+    )
