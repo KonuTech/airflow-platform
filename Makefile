@@ -7,6 +7,18 @@ UV ?= uv
 UV_REQUIRED_VERSION := 0.12.3
 RUN := $(UV) run --frozen
 
+# D-06/PROFILE: `local` (3-node, full sizing) or `ci` (single-node, trimmed).
+# Every stage script and helm_install call resolves its values file from this.
+PROFILE ?= local
+
+# The `cluster` dependency group (boto3, psycopg[binary]) is deliberately NOT
+# in `dev` and NOT in any uv default-groups set, so `make install` /
+# `uv sync --locked` never pulls it into the offline gate's environment. Every
+# target that touches a live cluster must name the group explicitly — this
+# variable is that one place. Plan 02-02's `cluster-verify` is its first
+# consumer; it stays otherwise unused here (no target has tests yet).
+RUN_CLUSTER := $(RUN) --group cluster
+
 # `tools/` arrives with the corpus generator in plan 01-03. $(wildcard) keeps
 # this target honest until then rather than hard-failing on a path that does not
 # exist yet.
@@ -22,10 +34,13 @@ FIXTURES_FAST  := $(if $(FAST),--fast,)
 FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha256)
 
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
-        fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean
+        fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
+        install-cluster cluster-up cluster-down
 
+# `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
+# discoverable too, without changing which concrete targets match.
 help:                          ## Show targets
-	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
+	@grep -E '^[a-z%-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
 
 uv-guard:                      ## Fail if the installed uv is not the pinned version
 	@have="$$($(UV) --version 2>/dev/null | head -n1 | awk '{print $$2}')"; \
@@ -92,6 +107,42 @@ gitleaks:                      ## SEC-02/SEC-11: full history + working tree [pl
 
 gitleaks-selftest:             ## SEC-11: prove the scanner actually fails a build [plan 01-02]
 	$(RUN) python -m tools.security.gitleaks_selftest ./tools/bin/gitleaks
+
+install-cluster: uv-guard      ## Install the `cluster` dependency group (boto3, psycopg) [plan 02-01]
+	# Explicit install path for the group `dev`/default-groups deliberately
+	# excludes. `--locked`, same reason `install` uses it.
+	$(UV) sync --locked --group cluster
+
+cluster-up:                    ## Create/update the kind cluster and every stage [plan 02-01]
+	# The only bootstrap entry point (D-09) — delegates to scripts/cluster-up.sh
+	# and names no chart/tool version literal here; helm/versions.env is the
+	# single source (tests/policy/test_pinned_tool_versions_agree.py enforces
+	# agreement between it and every installer's PINNED_VERSION).
+	PROFILE=$(PROFILE) scripts/cluster-up.sh
+
+cluster-down:                  ## Delete the kind cluster if it exists, else no-op [plan 02-01]
+	scripts/cluster-down.sh
+
+# D-09 substitution, recorded rather than silent: D-09 asks for "one target
+# per component, ordered by Make prerequisites". What is built instead is an
+# ordered stage runner (scripts/cluster-up.sh over scripts/stages/*.sh in
+# LC_ALL=C order) plus this pattern rule, which gives a reviewer one
+# invocable unit per component without every component plan editing this
+# file. Determinism and explicit ordering survive — numeric filename
+# prefixes are the order and are readable in one `ls`. What is lost is
+# composability: there is no prerequisite chain behind `stage-%`, so
+# `make stage-airflow` against a bare cluster fails at its first missing
+# dependency instead of building the stages before it. `make cluster-up` is
+# the thing that bootstraps from nothing; this rule runs exactly one stage
+# and bootstraps nothing.
+stage-%:                       ## Run exactly one scripts/stages/<name>.sh (no prerequisite chain)
+	@script="$$(find scripts/stages -maxdepth 1 -type f -name '*-$**.sh')"; \
+	if [ -z "$$script" ]; then \
+	  echo "ERROR: no scripts/stages/*-$*.sh matching stage-$*" >&2; \
+	  exit 1; \
+	fi; \
+	set -a; . helm/versions.env; set +a; \
+	PROFILE=$(PROFILE) KUBECTL_CONTEXT="kind-$$CLUSTER_NAME" "$$script"
 
 # `check` must never need the network: ROADMAP success criterion 4 is a clone
 # followed by `uv sync && make check` with no services running. That is why

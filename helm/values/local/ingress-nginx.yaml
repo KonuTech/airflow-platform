@@ -1,0 +1,87 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. Any fourth divergence axis needs an
+# argument in review. This file and helm/values/ci/ingress-nginx.yaml must
+# otherwise be identical in shape.
+#
+# ADR-0006 (owed by this phase) records that registry.k8s.io/ingress-nginx/
+# controller was archived read-only 2026-03-24; chart 4.15.1 / controller
+# 1.15.1 is the final release. No nginx-specific Ingress annotations are used
+# anywhere in this repository so a future migration is an `ingressClassName`
+# change, not a rewrite.
+#
+# No credential literal of any kind appears in this file.
+
+controller:
+  replicaCount: 1
+
+  # D-05: host :80/:443 map to the node labelled ingress-ready via kind's
+  # extraPortMappings (kind/cluster.yaml). hostPort is how the controller pod
+  # actually binds those container ports.
+  hostPort:
+    enabled: true
+    ports:
+      http: 80
+      https: 443
+
+  # ClusterIP, not the chart's LoadBalancer default: kind has no cloud
+  # controller to satisfy a LoadBalancer Service, and hostPort already
+  # publishes the ports we need.
+  service:
+    type: ClusterIP
+
+  # Pin the controller pod to the node kind/cluster.yaml labelled
+  # ingress-ready=true. Helm merges this map with the chart's own default
+  # (`kubernetes.io/os: linux`) rather than replacing it.
+  nodeSelector:
+    ingress-ready: "true"
+
+  # The chart's default nodeSelector still lands the pod on a schedulable
+  # node; the control-plane's NoSchedule taint is what actually needs
+  # tolerating. Lists are NOT merged by Helm (unlike maps), so this must be
+  # the complete list.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+  # Process Ingress objects that carry no ingressClassName/annotation — the
+  # single ingress class in this cluster should be the implicit default.
+  watchIngressWithoutClass: true
+
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true
+
+  # The chart's only non-empty default is `requests` at 100m/90Mi with no
+  # limits — an unrequested/unlimited container is QoS BestEffort and is
+  # evicted first. Sized generously for the local 32-CPU/47-GiB host; the CI
+  # profile sizes the same keys to fit the 4-CPU/16-GB runner budget.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 90Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  metrics:
+    enabled: true
+
+  admissionWebhooks:
+    createSecretJob:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 20Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+    patchWebhookJob:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 20Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi

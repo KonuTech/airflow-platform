@@ -39,6 +39,10 @@ PRE_COMMIT = REPO_ROOT / ".pre-commit-config.yaml"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 MAKEFILE = REPO_ROOT / "Makefile"
 INSTALLER = REPO_ROOT / "tools" / "security" / "install_gitleaks.sh"
+VERSIONS_ENV = REPO_ROOT / "helm" / "versions.env"
+KIND_INSTALLER = REPO_ROOT / "tools" / "k8s" / "install_kind.sh"
+HELM_INSTALLER = REPO_ROOT / "tools" / "k8s" / "install_helm.sh"
+KUBECONFORM_INSTALLER = REPO_ROOT / "tools" / "k8s" / "install_kubeconform.sh"
 
 EXACTLY_PINNED = ("ruff", "mypy")
 
@@ -115,6 +119,34 @@ def _installer_default_version() -> str:
     return match.group(1)
 
 
+def _versions_env_variable(name: str) -> str:
+    """Read a `KEY=value` line from `helm/versions.env`.
+
+    Phase 2's single source of chart, tool and image version pins — the same
+    role `UV_REQUIRED_VERSION` plays in the Makefile for `uv`.
+    """
+    match = re.search(rf"^{name}=(.+)$", VERSIONS_ENV.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, f"helm/versions.env no longer defines {name}"
+    return match.group(1).strip()
+
+
+def _installer_pinned_version(installer: Path) -> str:
+    """Read the `PINNED_VERSION="..."` trust-anchor constant from a tools/k8s installer.
+
+    Distinct from `_installer_default_version()`, which reads gitleaks's
+    `TOOL_VERSION="${TOOL_VERSION:-default}"` shape. The tools/k8s installers
+    read their required version from `helm/versions.env` first and instead
+    name a separate `PINNED_VERSION` constant that the committed
+    `PINNED_SHA256_*` digests are captured against — comparing that constant
+    to `helm/versions.env` is what proves the digests and the requested
+    version cannot silently drift apart.
+    """
+    text = installer.read_text(encoding="utf-8")
+    match = re.search(r'PINNED_VERSION="([^"]+)"', text)
+    assert match, f"{installer.name} no longer carries a PINNED_VERSION constant"
+    return match.group(1)
+
+
 def ruff_readings() -> dict[str, str]:
     return {
         "pyproject dev group": _dev_group_pins().get("ruff", ""),
@@ -145,11 +177,35 @@ def uv_readings() -> dict[str, str]:
     }
 
 
+def kind_readings() -> dict[str, str]:
+    return {
+        "helm/versions.env": _versions_env_variable("KIND_VERSION"),
+        "tools/k8s/install_kind.sh": _installer_pinned_version(KIND_INSTALLER),
+    }
+
+
+def helm_readings() -> dict[str, str]:
+    return {
+        "helm/versions.env": _versions_env_variable("HELM_VERSION"),
+        "tools/k8s/install_helm.sh": _installer_pinned_version(HELM_INSTALLER),
+    }
+
+
+def kubeconform_readings() -> dict[str, str]:
+    return {
+        "helm/versions.env": _versions_env_variable("KUBECONFORM_VERSION"),
+        "tools/k8s/install_kubeconform.sh": _installer_pinned_version(KUBECONFORM_INSTALLER),
+    }
+
+
 ALL_READINGS = {
     "ruff": ruff_readings,
     "mypy": mypy_readings,
     "gitleaks": gitleaks_readings,
     "uv": uv_readings,
+    "kind": kind_readings,
+    "helm": helm_readings,
+    "kubeconform": kubeconform_readings,
 }
 
 

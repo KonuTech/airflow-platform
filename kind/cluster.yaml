@@ -1,0 +1,129 @@
+# The ENTIRE creation-time-only surface for this platform lives here and
+# nowhere else (Pattern 1, 02-RESEARCH.md): node count/roles, node labels,
+# host port mappings, host bind mounts, kubeadm config patches, and the
+# containerd registry-mirror config below. Every one of these fields is
+# accepted only at `kind create cluster` time; changing any of them later
+# requires `kind delete cluster` (INFRA-09).
+#
+# Checkpoint decision (plan 02-01, human-confirmed): kubelet reservations sized
+# by the "fair-share" option — host total minus this node's fair share of a
+# 32-CPU / 47 GiB host, NOT the PITFALLS-proposed 500m/1Gi (measured in
+# 02-RESEARCH.md Pitfall 2 to remove only 3% of a node's advertised
+# allocatable, which would let three nodes collectively lie about having ~93
+# CPU / ~133 GiB on a 32-CPU/47-GiB host and hand arbitration to the host OOM
+# killer instead of Kubernetes eviction).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: airflow-platform
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
+    kubeadmConfigPatches:
+      # v1beta3 MAP form — correct for Kubernetes 1.23-1.35 (kind translates
+      # map->list automatically were the target ever v1beta4 / 1.36+; the list
+      # form some docs show is the v1beta4 shape and is wrong here).
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+      - |
+        kind: KubeletConfiguration
+        systemReserved:
+          cpu: "11"
+          memory: "8Gi"
+        kubeReserved:
+          cpu: "10"
+          memory: "7Gi"
+        evictionHard:
+          memory.available: "500Mi"
+          nodefs.available: "10%"
+          nodefs.inodesFree: "5%"
+        maxPods: 60
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+    extraMounts:
+      # D-02: the DAG directory is declared on every node now, wired (mounted
+      # into the scheduler/dag-processor pods) in Phase 4. WSL ext4 only —
+      # never /mnt/c; the DAG processor's periodic re-stat loop over a 9p
+      # mount would be pathological.
+      - hostPath: /home/konutec/projects/airflow-platform/airflow/dags
+        containerPath: /mnt/dags
+        readOnly: true
+      # D-01: persistence is declared but deliberately left UNBOUND. The
+      # local-path-provisioner's default path is /var/local-path-provisioner
+      # (verified via the live `local-path-config` ConfigMap in
+      # 02-RESEARCH.md Pattern 2) — mounting at a DIFFERENT container path
+      # means this host directory exists at cluster-creation time but nothing
+      # reads from it. Adopting persistence later is a values/ConfigMap patch
+      # (`local-path-config`'s `paths` key), not a cluster rebuild. Mounting
+      # directly at /var/local-path-provisioner would make persistence active
+      # immediately, the opposite of D-01's intent.
+      - hostPath: /home/konutec/.local/share/airflow-platform/pv
+        containerPath: /mnt/persist
+  - role: worker
+    image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "airflow-platform/role=storage"
+      - |
+        kind: KubeletConfiguration
+        systemReserved:
+          cpu: "11"
+          memory: "8Gi"
+        kubeReserved:
+          cpu: "10"
+          memory: "7Gi"
+        evictionHard:
+          memory.available: "500Mi"
+          nodefs.available: "10%"
+          nodefs.inodesFree: "5%"
+        maxPods: 60
+    extraMounts:
+      - hostPath: /home/konutec/projects/airflow-platform/airflow/dags
+        containerPath: /mnt/dags
+        readOnly: true
+      - hostPath: /home/konutec/.local/share/airflow-platform/pv
+        containerPath: /mnt/persist
+  - role: worker
+    image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "airflow-platform/role=analytics"
+      - |
+        kind: KubeletConfiguration
+        systemReserved:
+          cpu: "11"
+          memory: "8Gi"
+        kubeReserved:
+          cpu: "10"
+          memory: "7Gi"
+        evictionHard:
+          memory.available: "500Mi"
+          nodefs.available: "10%"
+          nodefs.inodesFree: "5%"
+        maxPods: 60
+    extraMounts:
+      - hostPath: /home/konutec/projects/airflow-platform/airflow/dags
+        containerPath: /mnt/dags
+        readOnly: true
+      - hostPath: /home/konutec/.local/share/airflow-platform/pv
+        containerPath: /mnt/persist
+containerdConfigPatches:
+  # Points every node's containerd at a per-registry hosts.toml directory, so
+  # the local registry stage (scripts/stages/10-registry.sh) can write
+  # localhost:5001/hosts.toml without any further node-level config (Pattern 5).
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
