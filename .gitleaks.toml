@@ -53,3 +53,23 @@ paths = ['''^tests/fixtures/corpus\.yaml$''']
 regexTarget = "line"
 regexes = ['''SYNTH_[A-Za-z0-9]{8,}''']
 condition = "AND"
+
+[[allowlists]]
+description = """
+build/manifests/ (plan 02-07, CICD-07) — `helm template` output, gitignored,
+seen only by the working-tree scan. Path-only, unlike the two allowlists
+above, because the directory itself cannot hold a real secret: it is rendered
+from committed helm/values/*.yaml files, and D-08/D-14/D-15 already establish
+that those files reference every credential by Kubernetes Secret NAME, never
+by value — MinIO/CNPG/Airflow credentials are generated at `cluster-up` time
+and live only in the cluster. tests/policy/test_workflow_secrets.py polices
+helm/, kubernetes/, kind/ and scripts/ for exactly that property, so this
+directory's only possible contents are (a) Helm's own `checksum/*-secret`
+annotations — sha256 digests of a chart's default (often empty) Secret
+content, matched by gitleaks' generic-api-key rule purely because a 64-hex-
+character string looks key-shaped — and (b) chart-default placeholder values
+neither this repository nor its values files ever supplied. Re-verified by
+inspection this session: every one of 42 findings here was one of those two
+shapes, none traceable to any committed configuration.
+"""
+paths = ['''^build/manifests/''']
