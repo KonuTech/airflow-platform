@@ -22,13 +22,16 @@ created: 2026-08-12
 |----------|-------|
 | **Framework** | pytest 9.1.x (`minversion = "9.0"`, `addopts = "-ra --strict-markers --strict-config"`) |
 | **Config file** | `pyproject.toml` (`[tool.pytest.ini_options]`, `testpaths = ["tests"]`) |
-| **Quick run command** | `make policy` → `uv run --frozen pytest tests/policy -q` |
-| **Full suite command** | `make check` (offline, cluster-free); `make ci` adds the secret scan |
-| **Live-cluster suite** | `make cluster-verify` → `uv run --frozen pytest tests/e2e/cluster -q` — **deliberately wired into neither `check` nor `ci`** |
+| **Quick run command** | `make policy` → `uv run --frozen pytest tests/policy -q -m "not manifests"` — the deselected tests need rendered output and the network-installed helm/kubeconform binaries, and run under `make manifest-policy` |
+| **Full suite command** | `make check` (offline, cluster-free); `make ci` adds `manifest-policy` and the secret scan |
+| **Render-dependent suite** | `make manifest-policy` (declares `manifests` as a prerequisite) → `REQUIRE_RENDERED_MANIFESTS=1 uv run --frozen pytest tests/policy -q -m manifests` — in `ci`, never in `check` |
+| **Live-cluster suite** | `make cluster-verify` → `uv run --frozen --group cluster pytest tests/e2e/cluster -q` — **deliberately wired into neither `check` nor `ci`**. The `--group cluster` is load-bearing: `boto3` and `psycopg` live in a non-default dependency group so the offline gate cannot import them |
 | **Estimated runtime** | `make policy` sub-second · `make check` seconds · `make cluster-verify` requires a live cluster |
 
-**New marker required:** `cluster: requires a live kind cluster` must be added to `markers` in
-`[tool.pytest.ini_options]`, or `--strict-markers` rejects it.
+**New markers required:** `cluster: requires a live kind cluster` and `manifests: requires rendered
+manifests under build/ and the pinned helm and kubeconform binaries` must both be added to `markers`
+in `[tool.pytest.ini_options]`, or `--strict-markers` rejects them. Both are registered in plan
+02-01 so the registry lands in one commit.
 
 **WINDOWS #8 applies:** `make check` names test paths explicitly, so a new test directory is
 silently uncollected until named. `tests/policy/` is already collected; `tests/e2e/cluster/` must
@@ -39,7 +42,7 @@ get its own target and must **not** join `make check`, which is contractually of
 ## Sampling Rate
 
 - **After every task commit:** `make policy` — static, sub-second, needs no cluster and no network
-- **After every plan wave:** `make check` — the full offline gate. **`make manifests` does NOT join `check`**: it fetches pinned charts over the network, and `check` must stay runnable on a fresh clone with nothing running (Phase 1 success criterion 4). `manifests` joins `ci`, following the `gitleaks` precedent exactly — and must be ordered *ahead of* `policy` in the `ci` chain, or the rendered-manifest tests skip and the sizing gate measures nothing.
+- **After every plan wave:** `make check` — the full offline gate. **`make manifests` does NOT join `check`**: it fetches pinned charts over the network, and `check` must stay runnable on a fresh clone with nothing running (Phase 1 success criterion 4). `manifests` joins `ci`, following the `gitleaks` precedent exactly — and must be ordered *ahead of* `policy` in the `ci` chain, or the rendered-manifest tests skip and the sizing gate measures nothing. The plans realize that ordering as a prerequisite edge rather than as list position (`manifest-policy: manifests`), because position guarantees nothing under `make -j`; and the render-dependent tests fail rather than skip when `REQUIRE_RENDERED_MANIFESTS` is set, so "green" cannot mean "measured nothing".
 - **Phase gate:** `make cluster-up && make cluster-verify` green, then `make cluster-rebuild && make cluster-verify` green a **second** time. One pass proves it works; two passes prove it is reproducible, which is what INFRA-01 actually claims.
 - **Before `/gsd-verify-work`:** full suite green
 - **Max feedback latency:** < 5 s for the per-commit gate
@@ -64,8 +67,8 @@ the planner must attach each row to a task and `validate-phase` completes the ID
 | INFRA-07 | no `kubectl create/edit/patch/apply` outside committed manifests in any script | policy | `pytest tests/policy/test_no_manual_kubectl_surgery.py -x` | ❌ W0 | ⬜ pending |
 | INFRA-09 | reservations + `maxPods` present in `cluster.yaml`; live node allocatable below a declared ceiling | policy + e2e | `test_kind_cluster_config.py` and `tests/e2e/cluster/test_node_capacity.py` | ❌ W0 | ⬜ pending |
 | INFRA-10 | both profiles render; they differ on **only** replicas, resources and monitoring | policy | `pytest tests/policy/test_values_profiles.py -x` | ❌ W0 | ⬜ pending |
-| CICD-07 | `kubeconform -strict` passes on both rendered profiles and **fails** on a deliberately broken manifest | policy (non-vacuity) | `make manifests` + `pytest tests/policy/test_manifest_validation_fails_closed.py -x` | ❌ W0 | ⬜ pending |
-| CICD-07 / D-12 #1 | summed container requests over the CI profile ≤ 4 CPU / 16 GB, **including** CNPG `Cluster` CRs | policy | `pytest tests/policy/test_manifest_resources.py::test_ci_profile_fits_runner -x` | ❌ W0 | ⬜ pending |
+| CICD-07 | `kubeconform -strict` passes on both rendered profiles and **fails** on a deliberately broken manifest | policy (non-vacuity, `manifests` marker — ci-only, needs the downloaded binary) | `make manifest-policy` | ❌ W0 | ⬜ pending |
+| CICD-07 / D-12 #1 | summed container requests over the CI profile ≤ 4 CPU / 16 GB, **including** CNPG `Cluster` CRs | policy (`manifests` marker — runs after the render, fails rather than skips without it) | `make manifest-policy` | ❌ W0 | ⬜ pending |
 | CICD-07 / D-12 #2 | every container in both profiles has CPU + memory requests and limits | policy | `…::test_every_container_is_sized -x` | ❌ W0 | ⬜ pending |
 | D-10 | `doctor` exits non-zero on each failure class it claims to block | policy (fault injection) | `pytest tests/policy/test_doctor_fails_closed.py -x` | ❌ W0 | ⬜ pending |
 | D-14 | no credential literal in any values file, manifest or script | policy | widen `tests/policy/test_workflow_secrets.py` to `helm/`, `kubernetes/`, `kind/`, `scripts/` | ⚠️ exists, needs widening | ⬜ pending |

@@ -1,0 +1,5 @@
+No external API integration: this phase *deploys* MinIO (which serves the S3 API) and Airflow via pinned upstream Helm charts — it writes no client code against an external API surface. The detector fired on the phrase "over the S3 API" in success criterion 4, which describes what the deployed store offers, not a capability surface this phase integrates against.
+
+The S3 client integration proper belongs to later phases: `boto3` behind the storage abstraction lands in Phase 3 (`dataplat` core library), and the first real read/write path lands in Phase 4 (vertical slice). The only S3 client code in Phase 2 is `tests/e2e/cluster/test_minio_buckets.py`, which asserts bucket reachability and that the application credential is refused on `DeleteObject` against `raw` — verification of a deployment, not an integration whose capability surface needs enumerating and deciding.
+
+When Phase 3 or Phase 4 integrates the S3 API for real, that phase produces the coverage matrix from a full-coverage baseline.
