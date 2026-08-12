@@ -12,19 +12,37 @@
 # more CPU/memory than the host actually has and hand arbitration to the host
 # OOM killer instead of Kubernetes eviction).
 #
-# Rescaled post-checkpoint (same session) for actual execution-host capacity:
-# STACK.md/RESEARCH assumed a 32-CPU/47-GiB workstation: the original
-# fair-share numbers (systemReserved cpu=11/mem=8Gi + kubeReserved
-# cpu=10/mem=7Gi = 21 cores/15Gi reserved) made kubelet refuse to start
-# outright on this developer's actual laptop (12 CPU / 32 GiB total, WSL2
-# capped to 15.44Gi by default) — "invalid Node Allocatable configuration:
-# capacity of 12 but reservation of 21". The user develops across two
-# machines (a 12-CPU/32Gi laptop and a 64Gi PC) and confirmed: raise the WSL2
-# memory cap to 24Gi (.wslconfig `[wsl2] memory=24GB`) and rescale reservations
-# to fit — systemReserved cpu=2/mem=3Gi + kubeReserved cpu=2/mem=2Gi, leaving
-# ~8 CPU/~19Gi allocatable per node. Conservative enough to also work
-# unmodified on the 64Gi PC (just leaves extra headroom there); revisit if
-# profiling later phases (Postgres×2 + MinIO + Airflow) shows it's too tight.
+# Rescaled post-checkpoint (same session, plan 02-01) for actual
+# execution-host capacity: STACK.md/RESEARCH assumed a 32-CPU/47-GiB
+# workstation: the original fair-share numbers (systemReserved cpu=11/mem=8Gi
+# + kubeReserved cpu=10/mem=7Gi = 21 cores/15Gi reserved) made kubelet refuse
+# to start outright on this developer's actual laptop (12 CPU / 32 GiB total,
+# WSL2 capped to 15.44Gi by default) — "invalid Node Allocatable
+# configuration: capacity of 12 but reservation of 21". The user develops
+# across two machines (a 12-CPU/32Gi laptop and a 64Gi PC) and confirmed:
+# raise the WSL2 memory cap to 24Gi (.wslconfig `[wsl2] memory=24GB`).
+#
+# [Rule 1 fix, plan 02-02] The FIRST rescale (systemReserved cpu=2/mem=3Gi +
+# kubeReserved cpu=2/mem=2Gi, ~8 CPU/~19Gi allocatable per node) fixed the
+# boot failure but reintroduced exactly the bug 02-RESEARCH.md Pitfall 2
+# exists to prevent: it applied fair-share arithmetic for the WRONG host
+# (deriving from "won't boot" pressure, not from `(host / node_count)`). Three
+# nodes at ~8 CPU/~19Gi each sum to ~24 CPU/~57Gi advertised allocatable — on
+# a host that only has 12 CPU/~23.5Gi (per `status.capacity`, which every kind
+# node reports as the FULL host, since containers on one host are not
+# statically partitioned). `tests/e2e/cluster/test_node_capacity.py` (plan
+# 02-02) asserts exactly this cluster-wide, live-node invariant and would
+# fail red against that first rescale. Recomputed correctly this time,
+# following the fair-share formula verbatim: allocatable_target ≈ (C/N) −
+# headroom = (12/3) − 1 ≈ 3 CPU/node, memory ≈ (23.5Gi/3) − ~1.8Gi ≈ 6Gi/node.
+# reserved_total = C − allocatable_target ⇒ systemReserved cpu=5/mem=9Gi +
+# kubeReserved cpu=4/mem=8Gi, leaving ~3 CPU/~6Gi allocatable per node — sum
+# across 3 nodes ≈ 9 CPU/~18Gi, safely under the host's real 12 CPU/~23.5Gi
+# (≈25% headroom on both axes). Still comfortably above kubelet's own
+# capacity>=reservation boot requirement (12 ≥ 9). Revisit if profiling later
+# phases (Postgres×2 + MinIO + Airflow) shows 3 CPU/6Gi per node too tight —
+# the fix then is raising the host floor in docs/wsl/wslconfig.example, not
+# quietly reintroducing this over-commit bug.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: airflow-platform
@@ -43,11 +61,11 @@ nodes:
       - |
         kind: KubeletConfiguration
         systemReserved:
-          cpu: "2"
-          memory: "3Gi"
+          cpu: "5"
+          memory: "9Gi"
         kubeReserved:
-          cpu: "2"
-          memory: "2Gi"
+          cpu: "4"
+          memory: "8Gi"
         evictionHard:
           memory.available: "500Mi"
           nodefs.available: "10%"
@@ -90,11 +108,11 @@ nodes:
       - |
         kind: KubeletConfiguration
         systemReserved:
-          cpu: "2"
-          memory: "3Gi"
+          cpu: "5"
+          memory: "9Gi"
         kubeReserved:
-          cpu: "2"
-          memory: "2Gi"
+          cpu: "4"
+          memory: "8Gi"
         evictionHard:
           memory.available: "500Mi"
           nodefs.available: "10%"
@@ -117,11 +135,11 @@ nodes:
       - |
         kind: KubeletConfiguration
         systemReserved:
-          cpu: "2"
-          memory: "3Gi"
+          cpu: "5"
+          memory: "9Gi"
         kubeReserved:
-          cpu: "2"
-          memory: "2Gi"
+          cpu: "4"
+          memory: "8Gi"
         evictionHard:
           memory.available: "500Mi"
           nodefs.available: "10%"

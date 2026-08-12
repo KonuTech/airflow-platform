@@ -137,6 +137,20 @@ cluster-up: doctor             ## Create/update the kind cluster and every stage
 cluster-down:                  ## Delete the kind cluster if it exists, else no-op [plan 02-01]
 	scripts/cluster-down.sh
 
+cluster-verify:                 ## D-16: run tests/e2e/cluster against the live cluster [plan 02-02]
+	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
+	# deliberately excluded from `dev` and from every uv default-group set, so
+	# the offline gate's own environment can never import them. Reachable from
+	# NEITHER `check` nor `ci` (WINDOWS #8) — it needs a live cluster, and a
+	# gate that needs a cluster is a gate people disable. `uv run` syncs the
+	# environment exactly on every invocation, so alternating this with
+	# `make check` removes and reinstalls boto3/psycopg each time; that is
+	# cheap from cache and is the honest cost of an offline gate whose
+	# environment provably cannot import them. `make install-cluster` is the
+	# standalone install path when you want the environment prepared without
+	# running the suite.
+	$(RUN_CLUSTER) pytest tests/e2e/cluster -q
+
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
 # ordered stage runner (scripts/cluster-up.sh over scripts/stages/*.sh in
