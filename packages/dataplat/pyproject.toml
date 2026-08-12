@@ -7,7 +7,14 @@ name = "dataplat"
 version = "0.1.0"
 description = "Source-agnostic ETL platform core"
 requires-python = ">=3.12,<3.13"
-dependencies = ["PyYAML>=6"]
+dependencies = [
+  "PyYAML>=6",
+  "psycopg[binary,pool]>=3.3.4,<4",
+  "boto3>=1.43.68,<2",
+  "pydantic>=2.13,<3",
+  "structlog>=26,<27",
+  "click>=8.4,<9",
+]
 
 # NOTE: no dependency on csv-processor, in either direction of this file.
 # The absence here is the packaging half of the guarantee; the import-linter
