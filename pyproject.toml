@@ -37,6 +37,19 @@ dev = [
   "pre-commit>=4.6,<5",
   "PyYAML>=6",
 ]
+# Cross-phase coordination point with Phase 3 (02-RESEARCH.md Open Question 1):
+# `tests/e2e/cluster/` (D-16) and Phase 3's Alembic/psycopg work both need these
+# two packages. Deliberately NOT folded into `dev` and NOT added to
+# `[tool.uv] default-groups` (this repo sets none, so the default set is `dev`
+# alone) — either would put boto3 into the environment `make check`'s offline
+# gate builds. Every invocation that needs boto3 or psycopg must name this group
+# explicitly with `--group cluster` (never `--only-group`, which would also drop
+# pytest out of the resulting environment). `make install-cluster` (plan 02-01
+# Task 2) is the install path; `RUN_CLUSTER` is the Makefile invocation path.
+cluster = [
+  "boto3>=1.43,<2",
+  "psycopg[binary]>=3.3,<4",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -114,6 +127,8 @@ addopts = "-ra --strict-markers --strict-config"
 markers = [
   "slow: generates or reads a large fixture",
   "regression: permanent test for a specific fixed bug (QUAL-07)",
+  "cluster: requires a live kind cluster",
+  "manifests: requires rendered manifests under build/ and the pinned helm and kubeconform binaries; excluded from the offline gate",
 ]
 
 [tool.coverage.run]

@@ -13,6 +13,10 @@ tests/fixtures/csv/
 .venv/
 tools/bin/
 
+# GSD run-scoped dispatch sentinel (WINDOWS #7) — must be ignored before any
+# infrastructure file lands, or it is swept into this phase's first commit.
+.gsd/
+
 # Tool caches and coverage output
 .mypy_cache/
 .pytest_cache/
