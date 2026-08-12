@@ -164,7 +164,32 @@ Plans:
   4. A processor run resolves its database credential from an opaque reference (`env://…`, `file://…`) and no code path names Vault or Kubernetes Secrets.
   5. Every library log line is structured JSON carrying dataset, stage, object path and run identifiers; a credential passed through the resolver never appears in any log; and a bad value on row 41,203 surfaces as a `ValidationResult` value rather than an exception.
 
-**Plans**: TBD
+**Plans**: 8 plans in 5 waves
+
+Plans:
+
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — Core data contracts: exception hierarchy, frozen value objects, the psycopg connection-pool factory (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-02-PLAN.md — Metadata schema migrations, testcontainers harness, `make test-integration` (wave 2)
+- [ ] 03-03-PLAN.md — Structured logging (JSON/console, contextvars, redaction) and the SecretsResolver (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 03-04-PLAN.md — Config-not-code: DatasetConfig, canonical-JSON hashing, ConfigRegistry (wave 3)
+- [ ] 03-05-PLAN.md — ObjectStore (StreamingBody bridge) and MetadataRepository (wave 3)
+- [ ] 03-07-PLAN.md — CLI (--version, catch-once error boundary) and the csv-processor Docker image (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 03-06-PLAN.md — PipelineContext, Source/Publisher protocols, the sequencing engine, ADR-0008 (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 03-08-PLAN.md — csv_processor's minimal Source: record-ordinal CSV chunking (wave 5)
 
 **Research stage**: S3. **Skip `--research-phase`** — pure Python over a fixture corpus; STACK.md has already chosen every library and rejected the alternatives with reasons.
 
