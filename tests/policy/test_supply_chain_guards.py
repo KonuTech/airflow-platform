@@ -15,6 +15,26 @@ verification, and each carries `@pytest.mark.regression` so
 `pytest -m regression` is an honest inventory of what this project has promised
 not to reintroduce.
 
+## Image-pin agreement (extended for this phase)
+
+A fourth, unrelated thing is asserted here for the same reason as the first
+three: an image a values file selects is itself part of the supply chain, and
+`helm/versions.env` is this repository's single declared source for it
+(§77, INFRA-08 precedent — the same "pinned versions live in exactly one
+place" rule `tests/policy/test_pinned_tool_versions_agree.py` already
+enforces for tool binaries and chart versions, generalised here to container
+image tags). Two properties, following that module's load-bearing-source
+model exactly:
+
+* every image tag a values file selects agrees with `helm/versions.env`'s
+  own pin (`MINIO_IMAGE_TAG`, `AIRFLOW_IMAGE_TAG`) — a reader per source,
+  each perturbed in turn to prove none is silently ignored;
+* no values file selects a mutable tag (`latest`, `main`, `master`, `edge`,
+  `nightly`, or an empty string) for ANY image field, not only the two
+  sources above — a chart pinned by version can still be handed a floating
+  image tag, which is precisely the gap `imagePullPolicy: IfNotPresent`
+  makes silent (02-RESEARCH.md PITFALLS A5).
+
 SEC-02: the secret scan must see the whole history, not one commit.
 
 This is not a style rule. `actions/checkout` defaults to `fetch-depth: 1`, and
@@ -289,3 +309,163 @@ def test_the_installer_trusts_only_an_in_repo_digest() -> None:
         "it — a planted binary that lies about its version is then trusted "
         "forever and never re-verified (CR-03)"
     )
+
+
+# ===========================================================================
+# Image-pin agreement (see module docstring) — helm/versions.env is the one
+# declared source; every values file selecting an image tag must agree.
+# ===========================================================================
+
+VERSIONS_ENV = REPO_ROOT / "helm" / "versions.env"
+VALUES_LOCAL_DIR = REPO_ROOT / "helm" / "values" / "local"
+VALUES_CI_DIR = REPO_ROOT / "helm" / "values" / "ci"
+
+MUTABLE_TAG_VALUES = frozenset({"", "latest", "main", "master", "edge", "nightly"})
+
+
+def _versions_env_variable(name: str) -> str:
+    match = re.search(rf"^{name}=(.+)$", VERSIONS_ENV.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, f"helm/versions.env no longer defines {name}"
+    return match.group(1).strip()
+
+
+def _values_field(path: Path, *keys: str) -> str:
+    node: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    for key in keys:
+        if not isinstance(node, dict) or key not in node:
+            return ""
+        node = node[key]
+    return str(node)
+
+
+def minio_image_readings() -> dict[str, str]:
+    return {
+        "helm/versions.env": _versions_env_variable("MINIO_IMAGE_TAG"),
+        "helm/values/local/minio.yaml": _values_field(
+            VALUES_LOCAL_DIR / "minio.yaml",
+            "image",
+            "tag",
+        ),
+        "helm/values/ci/minio.yaml": _values_field(
+            VALUES_CI_DIR / "minio.yaml",
+            "image",
+            "tag",
+        ),
+    }
+
+
+def airflow_image_readings() -> dict[str, str]:
+    return {
+        "helm/versions.env": _versions_env_variable("AIRFLOW_IMAGE_TAG"),
+        "helm/values/local/airflow.yaml": _values_field(
+            VALUES_LOCAL_DIR / "airflow.yaml",
+            "defaultAirflowTag",
+        ),
+        "helm/values/ci/airflow.yaml": _values_field(
+            VALUES_CI_DIR / "airflow.yaml",
+            "defaultAirflowTag",
+        ),
+    }
+
+
+IMAGE_TAG_READINGS: dict[str, Any] = {
+    "minio": minio_image_readings,
+    "airflow": airflow_image_readings,
+}
+
+
+def image_tag_disagreements(image: str, readings: dict[str, str]) -> list[str]:
+    """Mirrors test_pinned_tool_versions_agree.py's disagreements() exactly."""
+    problems: list[str] = []
+    blank = sorted(source for source, tag in readings.items() if not tag)
+    if blank:
+        problems.append(f"{image}: no tag could be read from {blank}")
+    distinct = {tag for tag in readings.values() if tag}
+    if len(distinct) > 1:
+        rendered = ", ".join(f"{src}={tag!r}" for src, tag in sorted(readings.items()))
+        problems.append(f"{image}: tags disagree -> {rendered}")
+    return problems
+
+
+def test_every_image_tag_agrees_with_versions_env() -> None:
+    problems: list[str] = []
+    for image, reader in IMAGE_TAG_READINGS.items():
+        problems += image_tag_disagreements(image, reader())
+    assert not problems, (
+        "an image tag has drifted from helm/versions.env, the single "
+        "declared source (§77, INFRA-08 precedent):\n" + "\n".join(problems)
+    )
+
+
+def test_every_image_tag_source_is_load_bearing() -> None:
+    """Perturbing any single source must produce a disagreement (§77)."""
+    for image, reader in IMAGE_TAG_READINGS.items():
+        readings = reader()
+        assert len(readings) >= 2, f"{image}: only one source, nothing to compare"
+        for source in readings:
+            mutated = dict(readings)
+            mutated[source] = "0.0.0-scratch"
+            assert image_tag_disagreements(image, mutated), (
+                f"changing {source} alone for {image} was not reported as drift"
+            )
+
+
+def _flatten_for_image_scan(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.update(_flatten_for_image_scan(child, path))
+        return out
+    return {prefix: value}
+
+
+def mutable_tag_problems(doc: dict[str, Any], label: str) -> list[str]:
+    """Report any `tag`-shaped leaf holding a mutable value, anywhere in `doc`.
+
+    Broader than the two named sources above on purpose: a chart pinned by
+    VERSION can still be handed a floating IMAGE tag, and
+    `imagePullPolicy: IfNotPresent` makes that silent (02-RESEARCH.md
+    PITFALLS A5) rather than loud.
+    """
+    problems: list[str] = []
+    for path, value in _flatten_for_image_scan(doc).items():
+        leaf = path.rsplit(".", 1)[-1]
+        if leaf.lower() != "tag" and leaf != "defaultAirflowTag":
+            continue
+        if isinstance(value, str) and value.strip().lower() in MUTABLE_TAG_VALUES:
+            problems.append(f"{label}: {path} selects a mutable tag ({value!r})")
+    return problems
+
+
+def _all_values_paths() -> list[Path]:
+    paths: list[Path] = []
+    for directory in (VALUES_LOCAL_DIR, VALUES_CI_DIR):
+        paths.extend(sorted(directory.glob("*.yaml")))
+    return paths
+
+
+def test_no_values_file_selects_a_mutable_image_tag() -> None:
+    problems: list[str] = []
+    for path in _all_values_paths():
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        problems += mutable_tag_problems(doc, str(path.relative_to(REPO_ROOT)))
+    assert not problems, "a mutable image tag was selected:\n" + "\n".join(problems)
+
+
+def test_replacing_a_tag_with_a_mutable_one_is_reported() -> None:
+    """Non-vacuity: perturbing a real values file's tag on an in-memory copy."""
+    path = VALUES_LOCAL_DIR / "minio.yaml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    mutated = copy.deepcopy(doc)
+    mutated["image"]["tag"] = "latest"
+    assert mutated != doc, "the scratch mutation did not apply — this test proves nothing"
+    assert mutable_tag_problems(mutated, "scratch"), (
+        "replacing helm/values/local/minio.yaml's image tag with 'latest' was not reported"
+    )
+
+
+def test_a_pinned_tag_is_not_reported() -> None:
+    """False-positive control: the real, pinned tags produce no messages."""
+    doc = yaml.safe_load((VALUES_LOCAL_DIR / "minio.yaml").read_text(encoding="utf-8")) or {}
+    assert not mutable_tag_problems(doc, "scratch")
