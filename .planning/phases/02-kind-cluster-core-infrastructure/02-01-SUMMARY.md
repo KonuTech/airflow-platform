@@ -51,7 +51,8 @@ key-files:
     - Makefile
 
 key-decisions:
-  - "Checkpoint (human-confirmed): fair-share kubelet reservations — systemReserved {cpu: 11, memory: 8Gi}, kubeReserved {cpu: 10, memory: 7Gi}, evictionHard {memory.available: 500Mi, nodefs.available: 10%, nodefs.inodesFree: 5%}, maxPods: 60 — over the PITFALLS-proposed 500m/1Gi, which 02-RESEARCH.md measured as removing only 3% of a node's allocatable"
+  - "Checkpoint (human-confirmed): fair-share kubelet reservations, originally systemReserved {cpu: 11, memory: 8Gi}, kubeReserved {cpu: 10, memory: 7Gi} — over the PITFALLS-proposed 500m/1Gi, which 02-RESEARCH.md measured as removing only 3% of a node's allocatable"
+  - "Post-checkpoint rescale (same session, human-confirmed): the original fair-share numbers assumed a 32-CPU/47-GiB host and made kubelet refuse to start on this developer's actual 12-CPU/32-GiB laptop (capacity < reservation). Rescaled to systemReserved {cpu: 2, memory: 3Gi}, kubeReserved {cpu: 2, memory: 2Gi}, same evictionHard/maxPods: 60, plus a WSL2 memory cap bump (.wslconfig [wsl2] memory=24GB) to give the VM headroom above the default ~50%-of-host allocation"
   - "maxPods and both extraMounts host paths confirmed as proposed: airflow/dags -> /mnt/dags (ro, D-02), $HOME/.local/share/airflow-platform/pv -> /mnt/persist (declared-but-unbound, D-01)"
   - "Rule 2 addition: tools/k8s/install_kubeconform.sh, not named in the plan's Task 1 file list, added because the plan's own acceptance criteria require a working kubeconform_readings() case in test_pinned_tool_versions_agree.py now, which needs a second live source beyond helm/versions.env"
   - "Rule 3 addition: installed uv 0.12.3 via the official installer (was entirely absent on this machine) before running uv lock, per the Makefile's own uv-guard remediation text"
@@ -59,19 +60,19 @@ key-decisions:
 requirements-completed: [INFRA-01, INFRA-07, INFRA-09]
 
 # Metrics
-duration: ~2h10m active work (Task 1 ~55min, human checkpoint decision, Task 2 ~75min); excludes idle time waiting on the checkpoint
+duration: ~2h10m active work (Task 1 ~55min, human checkpoint decision, Task 2 ~75min) plus a follow-up session resolving two host-environment blockers (cgroup v1, kubelet reservation sizing) and completing live verification
 completed: 2026-08-12
 ---
 
 # Phase 2 Plan 1: kind Cluster Bootstrap Spine Summary
 
-**Committed the entire Phase 2 creation-time cluster surface, pinned-tool installers, and the D-09 stage-runner bootstrap path (kind + local registry + namespaces + ingress-nginx); live `make cluster-up` verification could not complete on this execution host because its kubelet's cgroup v1 configuration is refused outright by the kindest/node image, confirmed independent of any file in this plan.**
+**Committed the entire Phase 2 creation-time cluster surface, pinned-tool installers, and the D-09 stage-runner bootstrap path (kind + local registry + namespaces + ingress-nginx). Live `make cluster-up` verification initially could not complete on this execution host — first blocked by Docker Desktop running cgroup v1, then by kubelet reservations sized for a 32-CPU/47-GiB host that exceeded this 12-CPU/32-GiB laptop's real capacity. Both were host-environment issues, not plan defects; both are now resolved and the plan's full automated `<verify>` block passes.**
 
 ## Performance
 
-- **Duration:** ~2h10m of active execution across two sessions, separated by the human checkpoint decision on kubelet sizing
-- **Tasks:** 2/2 addressed (Task 1 fully verified; Task 2 file-complete and statically verified, live cluster verification blocked — see Known Issues)
-- **Files modified:** 21 (8 in Task 1, 13 in Task 2, including 4 `.gitkeep` deletions)
+- **Duration:** ~2h10m of active execution across two sessions, separated by the human checkpoint decision on kubelet sizing, plus a follow-up session to resolve host-environment blockers and complete live verification
+- **Tasks:** 2/2 complete and fully verified, including the live cluster tracer
+- **Files modified:** 22 (8 in Task 1, 13 in Task 2 including 4 `.gitkeep` deletions, plus `kind/cluster.yaml` rescaled post-checkpoint)
 
 ## Accomplishments
 
@@ -87,9 +88,10 @@ completed: 2026-08-12
 ## Task Commits
 
 1. **Task 1: Land the cross-phase dependency, close WINDOWS #7, install pinned kind/helm binaries** - `420cc51` (feat)
-2. **Task 2: End-to-end tracer — cluster-up path** - `eecfed0` (feat) — files complete and statically verified; live `make cluster-up` verification blocked, see Known Issues
+2. **Task 2: End-to-end tracer — cluster-up path** - `eecfed0` (feat)
+3. **Fix: rescale kubelet reservations for real host capacity** - `9cdf4e5`+ (fix) — see Deviations/Issues below
 
-_No plan-metadata commit yet — see "Next Phase Readiness" for why this SUMMARY documents an incomplete verification state rather than closing the plan._
+Live verification complete: `make cluster-down && make cluster-up && make cluster-up` all succeed, 3 nodes `Ready`, all 5 namespaces `Active`, ingress-nginx controller `Available`, `tracer.localtest.me` returns `404` — the exact command sequence and expected output from the plan's Task 2 `<verify><automated>` block.
 
 ## Files Created/Modified
 
@@ -140,34 +142,37 @@ _No plan-metadata commit yet — see "Next Phase Readiness" for why this SUMMARY
 - **Verification:** `git status` clean; directories still populated
 - **Committed in:** `eecfed0`
 
+**4. [Rule 1 - Bug/consistency] Rescaled kubelet reservations to fit the actual execution host**
+- **Found during:** live verification, after the host's cgroup v1 issue (below) was resolved
+- **Issue:** The checkpoint-approved fair-share numbers (`systemReserved` cpu=11/mem=8Gi + `kubeReserved` cpu=10/mem=7Gi = 21 cores/15Gi reserved) were sized for the 32-CPU/47-GiB host assumed throughout STACK.md/02-RESEARCH.md. This developer's actual laptop has 12 CPU/32GiB total (WSL2 defaulting to ~15.44GiB of that). kubelet refused to start on **every** node: `"invalid Node Allocatable configuration... capacity of 12 but reservation of 21... Expected capacity >= reservation"`.
+- **Fix:** confirmed with the human (same session): raised the WSL2 memory cap to 24GiB via `%UserProfile%\.wslconfig` (`[wsl2] memory=24GB`), and rescaled `kind/cluster.yaml`'s three `KubeletConfiguration` patches to `systemReserved: {cpu: "2", memory: "3Gi"}`, `kubeReserved: {cpu: "2", memory: "2Gi"}` — same `evictionHard`/`maxPods: 60` as approved. ~8 CPU/~19GiB allocatable per node; conservative enough to also work unmodified on the user's other dev machine (a 64GiB PC).
+- **Files modified:** `kind/cluster.yaml`
+- **Verification:** full plan `<verify><automated>` block passes (see Issues Encountered)
+- **Committed in:** fix commit following `9cdf4e5` (the earlier worktree merge)
+
 ---
 
-**Total deviations:** 3 (1 Rule 3, 1 Rule 2, 1 Rule 1)
-**Impact on plan:** All three were necessary for correctness/completeness of what the plan itself asks for; no scope creep beyond the plan's own stated acceptance criteria.
+**Total deviations:** 4 (1 Rule 3, 1 Rule 2, 2 Rule 1)
+**Impact on plan:** All four were necessary for correctness/completeness of what the plan itself asks for; no scope creep beyond the plan's own stated acceptance criteria.
 
 ## Issues Encountered
 
-**Live `make cluster-up` could not be verified on this execution host.** Two independent attempts (the plan's actual `kind/cluster.yaml`, and a fully vanilla `kind create cluster` with zero custom configuration) both failed identically at the `kubeadm init` step with `connection refused` to the API server on `:6443`. Diagnosis (via a `--retain`ed control-plane container's `journalctl -u kubelet`):
+**Two host-environment blockers, both now resolved, in sequence:**
 
-```
-kubelet[...]: E... "command failed" err="failed to validate kubelet configuration, error: kubelet is
-configured to not run on a host using cgroup v1. cgroup v1 support is unsupported and will be removed
-in a future release, ..."
-```
+**1. cgroup v1 (resolved).** Two independent attempts (the plan's actual `kind/cluster.yaml`, and a fully vanilla `kind create cluster` with zero custom configuration) both failed identically at `kubeadm init` because Docker Desktop's engine ran cgroup v1 (`kubelet: "cgroup v1 support is unsupported"`) — confirmed via a `--retain`ed control-plane container's `journalctl -u kubelet`. Root cause traced past the obvious guess (WSL distro systemd — already correctly enabled) to Docker Desktop's *separate* internal VM, which mounts a hybrid legacy-cgroup layout at boot regardless of any individual distro's systemd state. **Fix:** `%UserProfile%\.wslconfig` → `[wsl2] kernelCommandLine = cgroup_no_v1=all`, then `wsl --shutdown` from Windows. Verified: `docker info` now reports `Cgroup Version: 2` and `/sys/fs/cgroup/cgroup.controllers` is the unified hierarchy.
 
-`docker info` on this host confirms `Cgroup Version: 1` (`Cgroup Driver: cgroupfs`), and `free -h` / `nproc` report **12 CPUs / 15 GiB RAM total** — sharply smaller than PROJECT.md's documented "32 CPUs, 47 GB RAM" environment that 02-RESEARCH.md's live verification ran against, and on cgroup v1 rather than the cgroup v2 02-RESEARCH.md assumed. The `kindest/node` kubelet build refuses to start on cgroup v1 **unconditionally**, before any of this plan's `KubeletConfiguration` patch (reservations, `maxPods`, `evictionHard`) is ever evaluated — the vanilla-config probe proves this is not caused by anything committed in this plan.
+**2. Kubelet reservation sizing (resolved).** See Deviation 4 above — the approved fair-share numbers exceeded this host's real capacity outright.
 
-This is exactly the class of problem CONTEXT.md's D-11 anticipated: `docs/wsl/wslconfig.example` and the WSL2-side fix are explicitly scoped as "a deliberate human act — it needs `wsl --shutdown` and lives on the Windows side," which is outside what any agent running inside this WSL2 distro can perform. No file change in this repository can fix a cgroup v1 kubelet host.
-
-**Resolution status:** unresolved, requires human action. Cleaned up all probe clusters/containers (`kind delete cluster` ×3, confirmed `kind get clusters` reports none, confirmed no leftover `kind-registry` container). The `kind` Docker network created by kind's own bootstrap remains (harmless, kind's normal behavior across cluster create/delete cycles).
+Both fixes were applied and confirmed working in the same session; see Deviations and the frontmatter `key-decisions` for exact values. A memory note was recorded (outside this repo) documenting the user's two dev machines (12-CPU/32GiB laptop, 64GiB PC) so future work sizes config against real hardware rather than STACK.md's assumed 32-CPU/47-GiB box.
 
 ## User Setup Required
 
-**To unblock live verification of this plan, the host's WSL2 distro needs cgroup v2.** This is the same remediation CONTEXT.md's D-11 already names:
-1. On the Windows side, edit (or create) `%UserProfile%\.wslconfig` — Phase 2's own `docs/wsl/wslconfig.example` (not yet written; a later plan's deliverable per D-11) is the intended reference, but the load-bearing setting here specifically is enabling **systemd** support (WSL2 defaults to cgroup v2 once systemd is enabled in `/etc/wsl.conf`'s `[boot] systemd=true`, or via a newer WSL2 kernel with cgroup v2 as default) — verify against current Microsoft WSL2 documentation, since the exact mechanism has moved between WSL versions.
-2. Run `wsl --shutdown` from PowerShell/cmd (not from inside the distro).
-3. Re-open the WSL2 terminal and confirm with `docker info | grep -i cgroup` → expect `Cgroup Version: 2`.
-4. Re-run `make cluster-down && make cluster-up && make cluster-up` (the plan's tracer `<verify>` block) to complete this plan's live verification.
+None remaining — both blockers above were resolved with the user's confirmation in this session. `%UserProfile%\.wslconfig` now reads:
+```ini
+[wsl2]
+kernelCommandLine = cgroup_no_v1=all
+memory = 24GB
+```
 
 ## Known Stubs
 
@@ -175,15 +180,13 @@ None. Every file this plan commits is the real, intended implementation — noth
 
 ## Next Phase Readiness
 
-**File-level implementation is complete and statically verified**: `kind/cluster.yaml` parses correctly with exactly 3 nodes each carrying a `KubeletConfiguration` patch; both ingress-nginx values profiles render cleanly under `helm template`; `make install-cluster` installs `boto3`/`psycopg` under `--group cluster` and they import successfully; the full `pytest tests/policy -q` suite (58 tests) passes; `make -n install-cluster` and the `RUN_CLUSTER` Makefile variable both name `--group cluster`; the `stage-%` D-09-substitution comment is in place.
+**Fully verified, file-level and live.** `kind/cluster.yaml` parses correctly with exactly 3 nodes each carrying a `KubeletConfiguration` patch sized to this host's real capacity; both ingress-nginx values profiles render cleanly under `helm template`; `make install-cluster` installs `boto3`/`psycopg` under `--group cluster` and they import successfully; the full `pytest tests/policy -q` suite (58 tests) passes; the plan's Task 2 `<verify><automated>` block passes in full — `make cluster-down && make cluster-up && make cluster-up` (idempotence proven on the second `cluster-up`), all 5 namespaces `Active`, all 3 nodes `Ready`, ingress-nginx controller `Available`, and `tracer.localtest.me` returns the expected `404`.
 
-**Blocked**: the plan's `<done>` criterion ("A single `make cluster-up` on a machine with only Docker produces a 3-node cluster...") and the tracer task's `<verify>` automated block (which asserts `kubectl get nodes` reports 3 `Ready` nodes, the registry hosts.toml is wired, and the ingress returns HTTP 404) could not be exercised end-to-end in this session — not because of anything wrong in the committed files, but because this execution host's Docker/WSL2 runs cgroup v1, which every `kindest/node` kubelet build refuses outright.
-
-**Recommendation:** either (a) re-run this plan's live verification (`make cluster-down && make cluster-up && make cluster-up`, then the curl/kubectl assertions from the tracer task's `<verify>` block) on a cgroup v2 host before treating plan 02-01 as fully done, or (b) have a human apply the WSL2 fix above and re-run. Plans 02-02 through 02-08 all build on the assumption that `make cluster-up` produces a real, reachable cluster — none of them should be attempted until this is confirmed working on whatever host will run them.
+Plans 02-02 through 02-08 can proceed — the cluster this phase builds on is confirmed reachable and correctly sized on the actual execution host.
 
 ---
 *Phase: 02-kind-cluster-core-infrastructure*
-*Completed: 2026-08-12 (file-level; live verification pending — see Next Phase Readiness)*
+*Completed: 2026-08-12*
 
 ## Self-Check: PASSED
 

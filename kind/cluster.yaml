@@ -6,12 +6,25 @@
 # requires `kind delete cluster` (INFRA-09).
 #
 # Checkpoint decision (plan 02-01, human-confirmed): kubelet reservations sized
-# by the "fair-share" option — host total minus this node's fair share of a
-# 32-CPU / 47 GiB host, NOT the PITFALLS-proposed 500m/1Gi (measured in
+# by the "fair-share" option — NOT the PITFALLS-proposed 500m/1Gi (measured in
 # 02-RESEARCH.md Pitfall 2 to remove only 3% of a node's advertised
-# allocatable, which would let three nodes collectively lie about having ~93
-# CPU / ~133 GiB on a 32-CPU/47-GiB host and hand arbitration to the host OOM
-# killer instead of Kubernetes eviction).
+# allocatable, which would let three nodes collectively lie about having far
+# more CPU/memory than the host actually has and hand arbitration to the host
+# OOM killer instead of Kubernetes eviction).
+#
+# Rescaled post-checkpoint (same session) for actual execution-host capacity:
+# STACK.md/RESEARCH assumed a 32-CPU/47-GiB workstation: the original
+# fair-share numbers (systemReserved cpu=11/mem=8Gi + kubeReserved
+# cpu=10/mem=7Gi = 21 cores/15Gi reserved) made kubelet refuse to start
+# outright on this developer's actual laptop (12 CPU / 32 GiB total, WSL2
+# capped to 15.44Gi by default) — "invalid Node Allocatable configuration:
+# capacity of 12 but reservation of 21". The user develops across two
+# machines (a 12-CPU/32Gi laptop and a 64Gi PC) and confirmed: raise the WSL2
+# memory cap to 24Gi (.wslconfig `[wsl2] memory=24GB`) and rescale reservations
+# to fit — systemReserved cpu=2/mem=3Gi + kubeReserved cpu=2/mem=2Gi, leaving
+# ~8 CPU/~19Gi allocatable per node. Conservative enough to also work
+# unmodified on the 64Gi PC (just leaves extra headroom there); revisit if
+# profiling later phases (Postgres×2 + MinIO + Airflow) shows it's too tight.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: airflow-platform
@@ -30,11 +43,11 @@ nodes:
       - |
         kind: KubeletConfiguration
         systemReserved:
-          cpu: "11"
-          memory: "8Gi"
+          cpu: "2"
+          memory: "3Gi"
         kubeReserved:
-          cpu: "10"
-          memory: "7Gi"
+          cpu: "2"
+          memory: "2Gi"
         evictionHard:
           memory.available: "500Mi"
           nodefs.available: "10%"
@@ -77,11 +90,11 @@ nodes:
       - |
         kind: KubeletConfiguration
         systemReserved:
-          cpu: "11"
-          memory: "8Gi"
+          cpu: "2"
+          memory: "3Gi"
         kubeReserved:
-          cpu: "10"
-          memory: "7Gi"
+          cpu: "2"
+          memory: "2Gi"
         evictionHard:
           memory.available: "500Mi"
           nodefs.available: "10%"
@@ -104,11 +117,11 @@ nodes:
       - |
         kind: KubeletConfiguration
         systemReserved:
-          cpu: "11"
-          memory: "8Gi"
+          cpu: "2"
+          memory: "3Gi"
         kubeReserved:
-          cpu: "10"
-          memory: "7Gi"
+          cpu: "2"
+          memory: "2Gi"
         evictionHard:
           memory.available: "500Mi"
           nodefs.available: "10%"
