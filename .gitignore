@@ -13,6 +13,10 @@ tests/fixtures/csv/
 .venv/
 tools/bin/
 
+# D-04: scripts/cluster-rebuild.sh's last-run per-stage timing breakdown —
+# a record of one run, not a build artifact anyone commits.
+build/
+
 # GSD run-scoped dispatch sentinel (WINDOWS #7) — must be ignored before any
 # infrastructure file lands, or it is swept into this phase's first commit.
 .gsd/

@@ -1,0 +1,58 @@
+# docs/wsl/wslconfig.example — the host floor `make doctor` asserts (D-11)
+#
+# Applying this file is a DELIBERATE HUMAN ACT, not something `make doctor` or
+# any script in this repository can do for you: it lives on the WINDOWS side
+# of the WSL2 boundary, and taking effect requires closing every WSL terminal
+# and running `wsl --shutdown` from PowerShell/cmd.exe, then reopening WSL.
+#
+# Copy this file to  C:\Users\<you>\.wslconfig  (note: NOT inside the WSL
+# filesystem — the literal Windows path, no extension change), edit the
+# values for your machine if it is larger than the floor below, then:
+#
+#   wsl --shutdown
+#
+# from a Windows PowerShell/cmd.exe prompt, and reopen your WSL distro.
+#
+# `make doctor` asserts a FLOOR against the numbers below (DOCTOR_MIN_CPUS,
+# DOCTOR_MIN_MEM_GB), never exact equality — a larger machine is never
+# punished for being larger (D-11). It cannot verify this file has actually
+# been applied on the Windows side; that is exactly the one thing it prints
+# as an advisory rather than a blocking failure.
+
+[wsl2]
+# Memory ceiling for the whole WSL2 VM, shared across every distro. This
+# repository's 3-node kind cluster needs enough headroom above kubelet's
+# per-node systemReserved+kubeReserved (kind/cluster.yaml) that the scheduler
+# is not lying about capacity (02-RESEARCH.md Pitfall 2). 24GB is the floor
+# `make doctor`'s DOCTOR_MIN_MEM_GB=20 default is derived from (leaving
+# headroom below the VM ceiling for the WSL2 VM's own overhead).
+memory=24GB
+
+# Not set here deliberately: WSL2 gives a VM access to every host logical CPU
+# by default, and capping `processors` below the host's real count would
+# silently shrink DOCTOR_MIN_CPUS's floor along with it. Set this only if you
+# need to reserve host CPUs for something outside WSL2.
+# processors=12
+
+# Swap headroom. kubelet's evictionHard thresholds are what should reclaim
+# memory under pressure — swap is a second line of defense, not a substitute
+# for right-sizing the reservations in kind/cluster.yaml.
+swap=6GB
+
+# WSL2's ext4.vhdx is a sparse-on-creation but NOT sparse-on-delete virtual
+# disk by default: deleting files inside WSL does not shrink the .vhdx file
+# on the Windows host filesystem, so free space measured by `df` inside WSL
+# can be far larger than what Windows actually has available. `sparseVhd`
+# makes the VHDX reclaim space as files are deleted, which is the difference
+# between `make doctor`'s DOCTOR_MIN_FREE_GB check meaning something and it
+# silently drifting from reality after a few `make cluster-rebuild` cycles
+# (02-RESEARCH.md / PITFALLS A3).
+sparseVhd=true
+
+# kind v0.32.0 warns on (and kubelet fails to start under) a cgroup v1
+# engine. Docker Desktop's internal VM can mount a hybrid legacy-cgroup
+# layout at boot regardless of any individual WSL distro's own systemd
+# state (see 02-01-SUMMARY.md, Deviation "cgroup v1" for exactly this
+# failure mode measured on this host). This line forces the unified cgroup
+# v2 hierarchy that `make doctor` checks via `docker info`'s CgroupVersion.
+kernelCommandLine = cgroup_no_v1=all

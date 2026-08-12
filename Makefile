@@ -19,6 +19,15 @@ PROFILE ?= local
 # consumer; it stays otherwise unused here (no target has tests yet).
 RUN_CLUSTER := $(RUN) --group cluster
 
+# D-10: the paths `make doctor` reads a kind/helm/kubectl version from.
+# Absolute via $(CURDIR) so `scripts/doctor.sh` resolves them the same way
+# regardless of the caller's own cwd. Overridable (`make doctor KIND=...`) so
+# a fault-injection test can point at a nonexistent binary without touching
+# the real pinned install — mirrors uv-guard's `UV=` override.
+KIND ?= $(CURDIR)/tools/bin/kind
+HELM ?= $(CURDIR)/tools/bin/helm
+KUBECTL ?= kubectl
+
 # `tools/` arrives with the corpus generator in plan 01-03. $(wildcard) keeps
 # this target honest until then rather than hard-failing on a path that does not
 # exist yet.
@@ -35,7 +44,7 @@ FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha2
 
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
-        install-cluster cluster-up cluster-down
+        install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -113,15 +122,37 @@ install-cluster: uv-guard      ## Install the `cluster` dependency group (boto3,
 	# excludes. `--locked`, same reason `install` uses it.
 	$(UV) sync --locked --group cluster
 
-cluster-up:                    ## Create/update the kind cluster and every stage [plan 02-01]
+doctor:                        ## D-10: fail-closed host preflight; cluster-up cannot skip it [plan 02-02]
+	KIND=$(KIND) HELM=$(HELM) KUBECTL=$(KUBECTL) scripts/doctor.sh
+
+cluster-up: doctor             ## Create/update the kind cluster and every stage [plan 02-01]
 	# The only bootstrap entry point (D-09) — delegates to scripts/cluster-up.sh
 	# and names no chart/tool version literal here; helm/versions.env is the
 	# single source (tests/policy/test_pinned_tool_versions_agree.py enforces
-	# agreement between it and every installer's PINNED_VERSION).
+	# agreement between it and every installer's PINNED_VERSION). `doctor` is a
+	# hard prerequisite (D-10): a broken host must never reach ten minutes of
+	# image pulls before failing.
 	PROFILE=$(PROFILE) scripts/cluster-up.sh
 
 cluster-down:                  ## Delete the kind cluster if it exists, else no-op [plan 02-01]
 	scripts/cluster-down.sh
+
+cluster-rebuild: doctor        ## D-04: destroy+recreate, timed per-stage, warns past budget [plan 02-02]
+	scripts/cluster-rebuild.sh
+
+cluster-verify:                 ## D-16: run tests/e2e/cluster against the live cluster [plan 02-02]
+	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
+	# deliberately excluded from `dev` and from every uv default-group set, so
+	# the offline gate's own environment can never import them. Reachable from
+	# NEITHER `check` nor `ci` (WINDOWS #8) — it needs a live cluster, and a
+	# gate that needs a cluster is a gate people disable. `uv run` syncs the
+	# environment exactly on every invocation, so alternating this with
+	# `make check` removes and reinstalls boto3/psycopg each time; that is
+	# cheap from cache and is the honest cost of an offline gate whose
+	# environment provably cannot import them. `make install-cluster` is the
+	# standalone install path when you want the environment prepared without
+	# running the suite.
+	$(RUN_CLUSTER) pytest tests/e2e/cluster -q
 
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
