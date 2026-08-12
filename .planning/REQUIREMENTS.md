@@ -35,7 +35,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **INFRA-04**: A physically separate PostgreSQL instance serves analytical workloads — *(DoD 4)*
 - [x] **INFRA-05**: MinIO provides S3-compatible object storage with `raw`, `validated`, `processed`, `quarantine` and `metadata` layers — *(DoD 5)*
 - [ ] **INFRA-06**: HashiCorp Vault is deployed in-cluster as the secrets manager and survives cluster restart without manual data loss — *(DoD 6)*
-- [ ] **INFRA-07**: All infrastructure is defined as code — cluster config, Helm values and manifests are committed and no step requires manual `kubectl` surgery — *(DoD 7)*
+- [x] **INFRA-07**: All infrastructure is defined as code — cluster config, Helm values and manifests are committed and no step requires manual `kubectl` surgery — *(DoD 7)*
 - [ ] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
 - [ ] **INFRA-09**: Kubelet reservations, `maxPods` and `extraMounts` are set in the kind config at creation time, because changing them later requires destroying the cluster — *(PITFALLS #10, #11)*
 - [x] **INFRA-10**: Two Helm values profiles (`values-local.yaml`, `values-ci.yaml`) exist from the first infrastructure commit, since the full stack does not fit a 4 CPU / 16 GB CI runner — *(PROJECT.md constraint)*
@@ -285,7 +285,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-04 | Phase 2 | Complete |
 | INFRA-05 | Phase 2 | Complete |
 | INFRA-06 | Phase 5 | Pending |
-| INFRA-07 | Phase 2 | Pending |
+| INFRA-07 | Phase 2 | Complete |
 | INFRA-08 | Phase 3 | Pending |
 | INFRA-09 | Phase 2 | Pending |
 | INFRA-10 | Phase 2 | Complete |
