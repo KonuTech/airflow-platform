@@ -10,6 +10,7 @@ sites (D-03). Secret redaction (OBS-05) and its end-to-end pairing with
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 import structlog
@@ -17,9 +18,12 @@ import structlog
 from dataplat.observability import logging as dataplat_logging
 from dataplat.observability import metrics, tracing
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 
 @pytest.fixture(autouse=True)
-def _clear_bound_context() -> None:
+def _clear_bound_context() -> Iterator[None]:
     """Reset bound contextvars after every test.
 
     contextvars are process-global within a thread, so a bind left over from
