@@ -43,6 +43,20 @@
 # `--no-editable` makes uv install the workspace members as real, self-
 # contained packages under `.venv/site-packages`, which is what makes copying
 # only `.venv` into `runtime` correct.
+#
+# `configs/` (plan 04-05): the `dataplat discover --dataset <name>` CLI
+# command resolves `configs/datasets/<name>.yaml` + `configs/defaults.yaml`
+# as paths relative to the process's own working directory, via
+# `dataplat.config.loader.load_config`. `ingest` never reads `configs/` at
+# all -- it resolves its `DatasetConfig` from `meta.config_versions` by ID
+# instead (`ConfigRegistry.get_by_id`), so this image ships `configs/`
+# purely for `discover`'s benefit. `COPY configs/ configs/` is copied AFTER
+# the dependency-resolution layer (it is not a `uv sync` input) but still
+# inside the `builder` stage, then copied again into `runtime` alongside
+# `/app/.venv` -- and `runtime` now declares `WORKDIR /app` explicitly
+# (previously absent: without it, the container's default working directory
+# is `/`, and `discover`'s relative `Path("configs/...")` would resolve to
+# `/configs/...`, not `/app/configs/...`, even though the files are present).
 ARG GIT_SHA=unknown
 
 FROM ghcr.io/astral-sh/uv:0.12.3 AS uv
@@ -65,10 +79,18 @@ COPY packages/ packages/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --all-packages --no-dev --no-editable
 
+# Not a uv sync input -- copied after the dependency-resolution layer so a
+# configs-only change never invalidates that layer's cache. See the header
+# comment block above for why discover needs this and runtime needs a
+# matching WORKDIR.
+COPY configs/ configs/
+
 FROM python:3.12-slim-bookworm AS runtime
 ARG GIT_SHA
 RUN groupadd -r app -g 1000 && useradd -r -g app -u 1000 -m app
+WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /app/configs /app/configs
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 # T-03-15 / INFRA-08 replayability: which commit built this image, answerable

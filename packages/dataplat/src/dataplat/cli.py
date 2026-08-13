@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.metadata import entry_points
 
 import click
 import structlog
@@ -76,6 +77,25 @@ def main(argv: list[str] | None = None) -> int:
     Any other exception is not caught by this boundary and propagates to the
     caller.
 
+    Before dispatching, this function also loads every installed
+    ``dataplat.plugins`` entry point (e.g. ``csv_processor.cli``). This is
+    the ONLY place ``dataplat`` ever causes ``csv_processor`` code to load.
+    ADR-0002's Decision Outcome states plainly that the CSV plugin
+    "registers via an entry point"; ``setup.cfg``'s import-linter contract 1
+    (``dataplat core must not depend on the CSV plugin``) is a HARD gate
+    that fails the build on a static ``import csv_processor`` anywhere under
+    ``dataplat`` -- including a lazy, conditional, or function-body import,
+    since import-linter's analysis is a static AST scan, not a runtime
+    trace. ``importlib.metadata.entry_points()`` sidesteps that entirely: it
+    resolves an installed distribution's advertised entry point by NAME, at
+    runtime, from package metadata -- no ``import csv_processor`` token
+    exists anywhere in this module's (or any ``dataplat`` module's) source,
+    so import-linter has nothing to flag, while ``ep.load()`` still imports
+    and executes ``csv_processor.cli``'s module body, running its
+    ``@cli.command()`` decorators against the very same ``cli`` group object
+    this function dispatches to below. A broken installed plugin raising on
+    load is a genuine startup failure and is not swallowed here.
+
     Args:
         argv: Argument vector. Defaults to ``None``, in which case click
             reads ``sys.argv[1:]`` itself.
@@ -89,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     if not structlog.is_configured():
         configure(in_cluster=_log_json_enabled())
     log = get_logger()
+
+    for entry_point in entry_points(group="dataplat.plugins"):
+        entry_point.load()
 
     try:
         cli.main(args=argv, prog_name="dataplat", standalone_mode=False)

@@ -349,11 +349,15 @@ name = "csv-processor"
 version = "0.1.0"
 source = { editable = "packages/csv-processor" }
 dependencies = [
+    { name = "click" },
     { name = "dataplat" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "dataplat", editable = "packages/dataplat" }]
+requires-dist = [
+    { name = "click", specifier = ">=8.4,<9" },
+    { name = "dataplat", editable = "packages/dataplat" },
+]
 
 [[package]]
 name = "dataplat"

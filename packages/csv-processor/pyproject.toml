@@ -7,10 +7,25 @@ name = "csv-processor"
 version = "0.1.0"
 description = "CSV source plugin for dataplat"
 requires-python = ">=3.12,<3.13"
-dependencies = ["dataplat"]
+# click is already a transitive dependency of dataplat (already audited,
+# already in uv.lock) -- csv_processor.cli now imports click directly, and a
+# direct import should be a direct dependency, not merely transitive through
+# dataplat. Adding it here changes no resolved version (confirmed via
+# `uv lock --check`) and introduces no new package into the lockfile.
+dependencies = ["dataplat", "click>=8.4,<9"]
 
 [tool.uv.sources]
 dataplat = { workspace = true }        # resolves to the local member, editable
+
+# ADR-0002's Decision Outcome: csv_processor "registers via an entry point".
+# dataplat.cli.main() iterates importlib.metadata.entry_points(group=
+# "dataplat.plugins") and calls .load() on each -- a runtime, string-based
+# lookup that triggers csv_processor.cli's import (and therefore its
+# @cli.command() decorators) without dataplat's source ever containing an
+# `import csv_processor` token, which is what keeps setup.cfg's import-linter
+# contract 1 (dataplat core must not depend on the CSV plugin) green.
+[project.entry-points."dataplat.plugins"]
+csv_processor = "csv_processor.cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/csv_processor"]
