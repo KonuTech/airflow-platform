@@ -36,19 +36,42 @@ dev = [
   "import-linter>=2.13,<3",
   "pre-commit>=4.6,<5",
   "PyYAML>=6",
+  "alembic>=1.19.1,<2",                # migrations/ (plan 03-02) — hand-written revisions only
+  "sqlalchemy>=2.0.51,<3",             # Alembic's engine only; never for row loading (STACK.md)
+  "boto3-stubs[s3]>=1.43,<2",          # mypy stubs for dataplat.storage.objectstore's boto3 use
 ]
-# Cross-phase coordination point with Phase 3 (02-RESEARCH.md Open Question 1):
-# `tests/e2e/cluster/` (D-16) and Phase 3's Alembic/psycopg work both need these
-# two packages. Deliberately NOT folded into `dev` and NOT added to
-# `[tool.uv] default-groups` (this repo sets none, so the default set is `dev`
-# alone) — either would put boto3 into the environment `make check`'s offline
-# gate builds. Every invocation that needs boto3 or psycopg must name this group
-# explicitly with `--group cluster` (never `--only-group`, which would also drop
-# pytest out of the resulting environment). `make install-cluster` (plan 02-01
-# Task 2) is the install path; `RUN_CLUSTER` is the Makefile invocation path.
+# UPDATED (plan 03-02): this group's original justification — "keeps boto3/
+# psycopg out of the environment `make check`'s offline gate builds" — is no
+# longer true and has not been since plan 03-01: `packages/dataplat/pyproject.
+# toml` lists `psycopg[binary,pool]` and `boto3` as real `[project.
+# dependencies]`, and `dev` already installs `dataplat` as a workspace member.
+# boto3/psycopg are therefore importable inside `make check`'s own environment
+# today, and that is expected, not a regression — the offline claim that
+# actually matters is narrower: no `tests/unit/` test may *open a live
+# connection*. `make check` stays network/service-free because nothing under
+# `tests/unit`, `tests/regression` or `tests/policy` instantiates a real
+# boto3 client or psycopg connection; only `tests/integration/` (gated by
+# `make test-integration`, D-04) does that.
+#
+# This group's surviving, real purpose is narrower and different:
+# `testcontainers[postgres,minio]` — a Docker-orchestrating dependency `make
+# check` must still never need, regardless of whether boto3/psycopg
+# themselves are importable — is deliberately NOT in `dev` and NOT in
+# `[tool.uv] default-groups` (this repo sets none, so the default set is
+# `dev` alone). Every invocation that needs it must name this group
+# explicitly with `--group cluster` (never `--only-group`, which would also
+# drop pytest out of the resulting environment). `boto3`/`psycopg[binary]`
+# stay listed here too (rather than being removed now that `dataplat` also
+# depends on them) because `tests/e2e/cluster/` (D-16, plan 02-04) imports
+# them directly at its own conftest module level, independent of whichever
+# `dataplat` version resolved them — removing them here would couple that
+# test tier's install requirement to `dataplat`'s dependency list by
+# accident. `make install-cluster` (plan 02-01 Task 2) is the install path;
+# `RUN_CLUSTER` is the Makefile invocation path.
 cluster = [
   "boto3>=1.43,<2",
   "psycopg[binary]>=3.3,<4",
+  "testcontainers[postgres,minio]>=4.15,<5",
 ]
 
 [tool.ruff]
@@ -89,6 +112,12 @@ extend-select = ["D417"]
 "airflow/dags/**" = ["INP001"]                        # DAG folder is not a package
 "scripts/**"      = ["T20", "INP001"]                 # OBS-03 carve-out — scripts only
 "tools/corpus/__main__.py" = ["T20"]                  # CLI entry point may print
+# migrations/ is Alembic's own module-loading mechanism (env.py execs each
+# versions/*.py by file path, never `import migrations.versions...`) — never a
+# real Python package, same reasoning as airflow/dags/**. Revision filenames
+# are Alembic's own `<rev>_<slug>.py` convention (leading digits); ruff's N999
+# does not fire on non-package modules, so no separate carve-out is needed for it.
+"migrations/**"   = ["INP001"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
