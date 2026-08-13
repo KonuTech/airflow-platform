@@ -42,10 +42,17 @@ FAST ?=
 FIXTURES_FAST  := $(if $(FAST),--fast,)
 FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha256)
 
+# D-14/plan 04-09: the local CSV path `make ingest-demo` uploads. No default —
+# `ingest-demo`'s own recipe guard fails loudly (stage-%'s own explicit-
+# failure style) rather than silently picking a fixture the caller did not ask
+# for.
+FILE ?=
+
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
-        minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor
+        minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
+        ingest-demo
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -151,7 +158,11 @@ minio-creds:                   ## D-14: print live MinIO credentials, shell-sour
 	@set -a; . helm/versions.env; set +a; \
 	KUBECTL_CONTEXT="kind-$$CLUSTER_NAME" scripts/minio-credentials.sh show
 
-cluster-verify:                 ## D-16: run tests/e2e/cluster against the live cluster [plan 02-02]
+ingest-demo:                    ## D-14: upload FILE and wait for the real sensor-driven pipeline [plan 04-09]
+	@if [ -z "$(FILE)" ]; then echo "ERROR: FILE is required, e.g. make ingest-demo FILE=tests/fixtures/csv/01_simple.csv" >&2; exit 1; fi
+	$(RUN_CLUSTER) python scripts/ingest-demo.py --file $(FILE)
+
+cluster-verify:                 ## D-16: run tests/e2e/cluster and tests/e2e/slice against the live cluster [plan 02-02, extended 04-09]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
 	# deliberately excluded from `dev` and from every uv default-group set, so
 	# the offline gate's own environment can never import them. Reachable from
@@ -162,8 +173,9 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster against the live 
 	# cheap from cache and is the honest cost of an offline gate whose
 	# environment provably cannot import them. `make install-cluster` is the
 	# standalone install path when you want the environment prepared without
-	# running the suite.
-	$(RUN_CLUSTER) pytest tests/e2e/cluster -q
+	# running the suite. tests/e2e/slice (plan 04-08) joins tests/e2e/cluster
+	# here so this one target collects this phase's whole E2E suite.
+	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice -q
 
 test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — migrations, dataplat [plan 03-02]
 	# $(RUN_CLUSTER), same reasoning as cluster-verify above: testcontainers
