@@ -234,8 +234,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 04-05-PLAN.md — run_ingest orchestration and the discover/ingest CLI wiring (entry-point plugin fix)
-- [ ] 04-06-PLAN.md — Integration tests: discovery rerun, publish atomicity/concurrency/lineage
+- [x] 04-05-PLAN.md — run_ingest orchestration and the discover/ingest CLI wiring (entry-point plugin fix)
+- [x] 04-06-PLAN.md — Integration tests: discovery rerun, publish atomicity/concurrency/lineage
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
