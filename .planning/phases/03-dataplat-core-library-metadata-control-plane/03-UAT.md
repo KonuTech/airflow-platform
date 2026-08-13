@@ -1,5 +1,5 @@
 ---
-status: complete
+status: diagnosed
 phase: 03-dataplat-core-library-metadata-control-plane
 source: [03-01-SUMMARY.md, 03-02-SUMMARY.md, 03-03-SUMMARY.md, 03-04-SUMMARY.md, 03-05-SUMMARY.md, 03-06-SUMMARY.md, 03-07-SUMMARY.md, 03-08-SUMMARY.md]
 started: 2026-08-13T09:49:35Z
@@ -87,7 +87,13 @@ blocked: 0
   reason: "Claude reported: tests/integration/test_metadata_repository.py::test_full_slice_round_trip fails with psycopg.errors.UniqueViolation on uq_config_versions_dataset_version (dataset_id, version)=(1, 1) — a cross-file test-isolation collision between test_config_registry.py (03-04) and test_metadata_repository.py (03-05), both of which independently create a 'customers' dataset + version-1 config_versions row against the same session-scoped Postgres fixture, never exercised together until this run."
   severity: blocker
   test: 1
-  root_cause: ""
-  artifacts: []
-  missing: []
+  root_cause: "test_metadata_repository.py::_insert_config_version() hardcodes version=1 with no ON CONFLICT/version derivation, and test_full_slice_round_trip reuses the literal dataset name \"customers\" that test_config_registry.py also creates. Both files share one session-scoped Postgres fixture (tests/integration/conftest.py, by deliberate design). pytest's default alphabetical file collection always runs test_config_registry.py before test_metadata_repository.py (no ordering plugin configured), so test_config_registry.py deterministically creates (dataset_id=1, version=1) first every time, and test_metadata_repository.py's hardcoded version=1 insert always collides. get_or_create_dataset() itself is correct (idempotent ON CONFLICT DO UPDATE) and is not the bug."
+  artifacts:
+    - path: "tests/integration/test_metadata_repository.py"
+      issue: "_insert_config_version() (lines 33-53) hardcodes version=1 with no conflict handling; test_full_slice_round_trip (line 79) reuses dataset name \"customers\" shared with test_config_registry.py"
+    - path: "tests/integration/test_config_registry.py"
+      issue: "creates the real \"customers\" dataset + version-1 config_versions row (lines 61-82) — not itself buggy, but the source of the pre-existing row the other file collides with"
+  missing:
+    - "test_metadata_repository.py should use a dataset name that cannot collide with any other file's fixture data (e.g. \"customers_slice_proof\") instead of \"customers\""
+    - "_insert_config_version() should derive the next version for dataset_id (e.g. COALESCE(MAX(version), 0) + 1) instead of hardcoding version=1"
   debug_session: ""
