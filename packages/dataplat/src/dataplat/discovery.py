@@ -227,9 +227,23 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
             continue  # D-13 skip policy: no batch, no run, no assignment document
 
         batch_key = f"{dataset_name}:{content_sha256_hex[:16]}"
-        batch_id = metadata.create_batch(dataset_id=dataset_id, batch_key=batch_key, status="OPEN")
+        # get_or_create_batch, NEVER create_batch: batch_key is a pure
+        # function of content_sha256, so a rerun over an unchanged object
+        # reaches this line with the SAME batch_key every time (this is a
+        # rediscovery, not a genuinely new batch -- the same reasoning as
+        # create_file's own idempotent upsert above). create_batch's plain
+        # INSERT would raise UniqueViolation against
+        # uq_batches_dataset_batch_key on exactly this rerun path.
+        batch_id = metadata.get_or_create_batch(
+            dataset_id=dataset_id,
+            batch_key=batch_key,
+            status="OPEN",
+        )
         # One-file-one-batch: this phase's documented simplification
-        # (03-RESEARCH.md) -- sequence_no is always 1.
+        # (03-RESEARCH.md) -- sequence_no is always 1. link_batch_file is
+        # itself idempotent (ON CONFLICT DO NOTHING on its composite PK),
+        # so re-linking the same (batch_id, file_id) pair on a rerun is
+        # harmless.
         metadata.link_batch_file(batch_id=batch_id, file_id=file_id, sequence_no=1)
 
         idempotency_key = hashlib.sha256(

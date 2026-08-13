@@ -92,6 +92,27 @@ orphaning the previous batch (only the run's original `batch_id`, set once at fi
   (keyed on `batch_key`, mirroring `create_file`/`get_or_create_ingestion_run`'s
   upsert pattern) or reordering `discover_files` to only create a batch on a run's
   first-ever allocation.
+- **RESOLVED by 04-06** (commit `36ca08a`): confirmed empirically —
+  `tests/integration/test_discover_files.py::test_rerun_produces_identical_manifest`
+  reproduced this exact bug as a real `psycopg.errors.UniqueViolation` against
+  `uq_batches_dataset_batch_key` on a real Postgres (the fake repository
+  `tests/unit/test_discovery.py` uses never enforced the real constraint, so
+  the gap was invisible at the unit level). Fixed exactly per this note's own
+  suggestion: added `MetadataRepository.get_or_create_batch` (Protocol +
+  `PostgresMetadataRepository`, mirroring `get_or_create_dataset`'s
+  `INSERT ... ON CONFLICT DO UPDATE` idiom, `status` excluded from the
+  conflict `SET` clause so a rediscovery can never clobber a batch that
+  already progressed past `OPEN`), switched `discover_files` to call it
+  instead of `create_batch`, and made `link_batch_file` idempotent
+  (`ON CONFLICT (batch_id, file_id) DO NOTHING`) so its own composite PK
+  does not collide on the same rerun path. `create_batch` itself is
+  untouched — still a plain, raising `INSERT ... RETURNING` — since
+  04-06 Task 2's own `test_duplicate_batch_key_rejected` depends on that
+  exact raising behavior to prove `uq_batches_dataset_batch_key` is real.
+  In scope for 04-06 (unlike 04-03/04-04): this plan's own must-have truth
+  is "discovery rerun over an unchanged object set... creates zero
+  additional meta.files/meta.ingestion_runs rows", which cannot be proven
+  true while this bug crashes the second `discover_files` call outright.
 
 04-03 also independently reproduced the `tests/policy/test_gates_actually_fail.py`
 import-linter output-format drift documented above (same root cause, same two
@@ -110,3 +131,68 @@ main therefore produced content conflicts in `metadata/repository.py`,
 Resolved by keeping 04-01's original implementations (already covered by 04-01's
 own tests) and layering 04-03's additional discovery-specific test coverage on
 top where it tested something 04-01's suite didn't.
+
+## From Plan 04-06
+
+### `tests/unit/test_discovery.py` — pre-existing mypy structural-typing gap, unrelated to 04-06
+
+- **Found during:** Task 1 verification (`uv run mypy tests/unit/test_discovery.py`,
+  run manually while checking the discovery bug fix for regressions — this
+  file is outside `Makefile`'s `TYPECHECK_PATHS`, so `make typecheck`/`make check`
+  never exercises it).
+- **Symptom:** 9 `mypy --strict` errors, all `Argument "metadata" to
+  "discover_files" has incompatible type "_FakeMetadataRepository"; expected
+  "MetadataRepository"` — the fake in that file implements only the subset of
+  the `MetadataRepository` Protocol `discover_files` actually calls (by its
+  own docstring's design), not the full Protocol (missing
+  `create_ingestion_run`, `claim_ingestion_run`, `finalize_publication`,
+  `update_ingestion_run_status`), so it fails `Protocol` structural typing.
+- **Confirmed pre-existing and unrelated to 04-06's diff:** reproduced
+  identically (same 9 errors, same message, only line numbers shifted) via
+  `git stash` back to this plan's own pre-edit base — 04-06 only renamed the
+  fake's `create_batch` method to `get_or_create_batch` (required to keep the
+  fake in sync with the real `get_or_create_batch` fix above); it did not
+  introduce this gap.
+- **Not part of the enforced gate:** `Makefile`'s `TYPECHECK_PATHS := packages/dataplat/src
+  packages/csv-processor/src $(wildcard tools)` excludes `tests/` entirely, so
+  this has never failed `make check`/CI.
+- **Status:** Deferred — out of scope for 04-06 (pre-existing, not part of the
+  enforced gate, and not on this plan's own file list).
+- **Suggested fix:** Either narrow the fake to only the subset Protocol
+  `discover_files` actually needs (a `Protocol` subset type, not the full
+  `MetadataRepository`), or add no-op stub implementations of the four
+  missing methods for structural conformance.
+
+### `test_advisory_lock_serializes_concurrent_publishers` — the negative-case check did not fail as anticipated
+
+- **Found during:** Task 2's own required development-time negative-case
+  check (this plan's acceptance criteria: "confirm this negative case once
+  during development... observe the test either flakes or raises a
+  constraint violation, then restore it").
+- **Finding:** With both `pg_advisory_xact_lock` calls temporarily removed
+  from the test, `test_advisory_lock_serializes_concurrent_publishers` still
+  PASSED, reproducibly across repeated runs — no flake, no constraint
+  violation. Root cause (confirmed by tracing `MergePublisher`'s
+  `_PUBLISH_SQL`): it arbitrates on exactly one unique index (`customer_id`)
+  via a single `INSERT ... SELECT ... ORDER BY customer_id ...` statement, so
+  PostgreSQL's own unique-index insert-conflict handling already forces a
+  second concurrent writer to block on the same row until the first
+  transaction resolves — deterministically, with no deadlock possible,
+  because every caller's statement processes any overlapping keys in the
+  same fixed order. This is not a bug: it is the documented reason
+  `INSERT ... ON CONFLICT` (unlike literal SQL `MERGE`, PostgreSQL BUG
+  #18279) was chosen for this publisher (`merge.py`'s own module docstring,
+  PITFALLS.md C1).
+- **Not fixed / not treated as a defect:** this is not a failing property to
+  correct — it is an accurate characterization of the current, single-target-
+  table, single-statement `MergePublisher` recorded directly in the test's
+  own docstring (`tests/integration/test_publish_merge.py`), not deferred
+  elsewhere. The advisory lock is kept in the test and in the documented
+  `merge.py` caller contract regardless, both because it is what a real
+  caller (`run_ingest`, plan 04-05) is specified to do and as defense-in-depth
+  per PITFALLS.md C1's own recommendation ("far more robust than reasoning
+  about isolation levels") — it becomes load-bearing the moment a future
+  change adds a second arbiter index or a second statement to the
+  publication path.
+- **Status:** Documented (in the test's own docstring and here), not a
+  deferred fix — there is nothing to fix.

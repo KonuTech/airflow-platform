@@ -193,6 +193,32 @@ class PostgresMetadataRepository(MetadataRepository):
                 raise RuntimeError(msg)
             return int(row[0])
 
+    def get_or_create_batch(self, *, dataset_id: int, batch_key: str, status: str) -> int:
+        """See `MetadataRepository.get_or_create_batch`.
+
+        Implemented as a single atomic ``INSERT ... ON CONFLICT DO UPDATE``
+        (the `get_or_create_dataset` idiom above), never a separate
+        ``SELECT`` followed by an ``INSERT`` -- same TOCTOU reasoning as
+        `get_or_create_dataset`'s own docstring. ``status`` is deliberately
+        absent from the conflict ``SET`` clause so an existing batch's real
+        status (e.g. ``PUBLISHED``) is never clobbered by a rediscovery.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO meta.batches (dataset_id, batch_key, status)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (dataset_id, batch_key) DO UPDATE
+                    SET batch_key = EXCLUDED.batch_key
+                RETURNING batch_id
+                """,
+                (dataset_id, batch_key, status),
+            ).fetchone()
+            if row is None:  # pragma: no cover - RETURNING always yields a row here
+                msg = "INSERT ... ON CONFLICT ... RETURNING batch_id returned no row"
+                raise RuntimeError(msg)
+            return int(row[0])
+
     def link_batch_file(self, *, batch_id: int, file_id: int, sequence_no: int) -> None:
         """See `MetadataRepository.link_batch_file`."""
         with self._pool.connection() as conn:
@@ -200,6 +226,7 @@ class PostgresMetadataRepository(MetadataRepository):
                 """
                 INSERT INTO meta.batch_files (batch_id, file_id, sequence_no)
                 VALUES (%s, %s, %s)
+                ON CONFLICT (batch_id, file_id) DO NOTHING
                 """,
                 (batch_id, file_id, sequence_no),
             )
