@@ -44,10 +44,23 @@ def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
             INSERT INTO meta.config_versions (
                 dataset_id, version, config_hash, config_document,
                 config_schema_version, valid_from
-            ) VALUES (%s, %s, %s, %s::jsonb, %s, now())
+            ) VALUES (
+                %(dataset_id)s,
+                (
+                    SELECT COALESCE(MAX(version), 0) + 1
+                    FROM meta.config_versions
+                    WHERE dataset_id = %(dataset_id)s
+                ),
+                %(config_hash)s, %(config_document)s::jsonb, %(config_schema_version)s, now()
+            )
             RETURNING config_version_id
             """,
-            (dataset_id, 1, "synthetic-hash-for-test", json.dumps({"synthetic": True}), 1),
+            {
+                "dataset_id": dataset_id,
+                "config_hash": "synthetic-hash-for-test",
+                "config_document": json.dumps({"synthetic": True}),
+                "config_schema_version": 1,
+            },
         ).fetchone()
         assert row is not None
         return int(row[0])
@@ -76,8 +89,8 @@ def repository(migrated_dsn: str) -> Iterator[PostgresMetadataRepository]:
 
 
 def test_full_slice_round_trip(repository: PostgresMetadataRepository, migrated_dsn: str) -> None:
-    dataset_id_first = repository.get_or_create_dataset("customers")
-    dataset_id_second = repository.get_or_create_dataset("customers")
+    dataset_id_first = repository.get_or_create_dataset("customers_slice_proof")
+    dataset_id_second = repository.get_or_create_dataset("customers_slice_proof")
     assert dataset_id_first == dataset_id_second
 
     content_sha256 = hashlib.sha256(b"synthetic customers file content").digest()
