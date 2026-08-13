@@ -179,9 +179,9 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 03-04-PLAN.md — Config-not-code: DatasetConfig, canonical-JSON hashing, ConfigRegistry (wave 3)
-- [ ] 03-05-PLAN.md — ObjectStore (StreamingBody bridge) and MetadataRepository (wave 3)
-- [ ] 03-07-PLAN.md — CLI (--version, catch-once error boundary) and the csv-processor Docker image (wave 3)
+- [x] 03-04-PLAN.md — Config-not-code: DatasetConfig, canonical-JSON hashing, ConfigRegistry (wave 3)
+- [x] 03-05-PLAN.md — ObjectStore (StreamingBody bridge) and MetadataRepository (wave 3)
+- [x] 03-07-PLAN.md — CLI (--version, catch-once error boundary) and the csv-processor Docker image (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
