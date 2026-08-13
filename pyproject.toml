@@ -39,6 +39,25 @@ dev = [
   "alembic>=1.19.1,<2",                # migrations/ (plan 03-02) — hand-written revisions only
   "sqlalchemy>=2.0.51,<3",             # Alembic's engine only; never for row loading (STACK.md)
   "boto3-stubs[s3]>=1.43,<2",          # mypy stubs for dataplat.storage.objectstore's boto3 use
+  # plan 04-07: DAG-authoring/testing only. NEVER installed into the
+  # csv-processor runtime image (its Dockerfile passes `--no-dev` to every
+  # `uv sync` call, so this group never reaches that image regardless — see
+  # docker/csv-processor/Dockerfile) and NEVER a `[tool.uv.workspace]` member
+  # (that stays exactly `dataplat`/`csv-processor`, per this file's own
+  # comment on why) — so ADR-0004's "two images, two dependency sets" holds:
+  # this only makes `airflow` importable inside the shared *dev/test tooling*
+  # venv, for `DagBag`-based structural tests (STACK.md "Testing Airflow 3
+  # DAGs"), the same venv the `dev` group already builds for ruff/mypy/pytest.
+  # Airflow itself is deployed via the pinned upstream Helm chart against the
+  # official `apache/airflow:3.3.0-python3.12` image (STACK.md); this repo
+  # never builds a custom Airflow image, so no runtime image is affected by
+  # this addition either way. Versions match STACK.md's pinned matrix exactly.
+  "apache-airflow==3.3.0",
+  "apache-airflow-providers-cncf-kubernetes==10.19.0",
+  "apache-airflow-providers-amazon",   # S3KeySensor -- unpinned like STACK.md's own
+                                        # providers-postgres/-standard entries; the
+                                        # resolver picks the version compatible with
+                                        # apache-airflow==3.3.0's own constraints.
 ]
 # UPDATED (plan 03-02): this group's original justification — "keeps boto3/
 # psycopg out of the environment `make check`'s offline gate builds" — is no

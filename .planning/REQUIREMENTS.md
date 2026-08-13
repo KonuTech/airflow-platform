@@ -61,15 +61,15 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### ORCH — Airflow Orchestration
 
-- [ ] **ORCH-01**: DAGs are written with the TaskFlow API (`@dag`, `@task`) — *(DoD 9)*
-- [ ] **ORCH-02**: ETL workloads execute in Kubernetes task pods via `KubernetesPodOperator`, never in the scheduler or DAG processor — *(DoD 10)*
-- [ ] **ORCH-03**: Dynamic Task Mapping fans work across pods, with a bounded map length — *(DoD 11)*
-- [ ] **ORCH-04**: DAGs declare explicit retry and failure behaviour, and support backfill — *(DoD 12)*
-- [ ] **ORCH-05**: DAGs derive their processing window from logical date and data interval, never wall-clock time — and tolerate `logical_date` being `None` in asset-triggered runs — *(DoD 13)*
-- [ ] **ORCH-06**: DAG files stay under ~150 lines and contain no parsing, validation, typing or database writes — *(DoD 14)*
-- [ ] **ORCH-07**: Dataset dependencies are expressed in Airflow via Assets or sensors, not hidden inside Python — *(DoD 58)*
+- [x] **ORCH-01**: DAGs are written with the TaskFlow API (`@dag`, `@task`) — *(DoD 9)*
+- [x] **ORCH-02**: ETL workloads execute in Kubernetes task pods via `KubernetesPodOperator`, never in the scheduler or DAG processor — *(DoD 10)*
+- [x] **ORCH-03**: Dynamic Task Mapping fans work across pods, with a bounded map length — *(DoD 11)*
+- [x] **ORCH-04**: DAGs declare explicit retry and failure behaviour, and support backfill — *(DoD 12)*
+- [x] **ORCH-05**: DAGs derive their processing window from logical date and data interval, never wall-clock time — and tolerate `logical_date` being `None` in asset-triggered runs — *(DoD 13)*
+- [x] **ORCH-06**: DAG files stay under ~150 lines and contain no parsing, validation, typing or database writes — *(DoD 14)*
+- [x] **ORCH-07**: Dataset dependencies are expressed in Airflow via Assets or sensors, not hidden inside Python — *(DoD 58)*
 - [x] **ORCH-08**: Dynamic Task Mapping expands over a frozen manifest, never a live object-storage listing, so reruns and backfills produce identical work — *(PITFALLS #4)*
-- [ ] **ORCH-09**: Every task pod declares CPU and memory requests and limits, configurable per workload and dataset — *(Gap 15)*
+- [x] **ORCH-09**: Every task pod declares CPU and memory requests and limits, configurable per workload and dataset — *(Gap 15)*
 
 ### CSV — Parsing, Detection and Normalization
 
@@ -305,15 +305,15 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SEC-13 | Phase 5 | Pending |
 | SEC-14 | Phase 5 | Pending |
 | SEC-15 | Phase 3 | Complete |
-| ORCH-01 | Phase 4 | Pending |
-| ORCH-02 | Phase 4 | Pending |
-| ORCH-03 | Phase 4 | Pending |
-| ORCH-04 | Phase 4 | Pending |
-| ORCH-05 | Phase 4 | Pending |
-| ORCH-06 | Phase 4 | Pending |
-| ORCH-07 | Phase 4 | Pending |
+| ORCH-01 | Phase 4 | Complete |
+| ORCH-02 | Phase 4 | Complete |
+| ORCH-03 | Phase 4 | Complete |
+| ORCH-04 | Phase 4 | Complete |
+| ORCH-05 | Phase 4 | Complete |
+| ORCH-06 | Phase 4 | Complete |
+| ORCH-07 | Phase 4 | Complete |
 | ORCH-08 | Phase 4 | Complete |
-| ORCH-09 | Phase 4 | Pending |
+| ORCH-09 | Phase 4 | Complete |
 | CSV-01 | Phase 6 | Pending |
 | CSV-02 | Phase 6 | Pending |
 | CSV-03 | Phase 6 | Pending |
