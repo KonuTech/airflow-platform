@@ -14,7 +14,12 @@ Every ID here is a plain ``int`` — the database surrogate key — not a
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from psycopg import Connection
 
 
 class MetadataRepository(Protocol):
@@ -44,11 +49,24 @@ class MetadataRepository(Protocol):
         size_bytes: int,
         filename: str,
         status: str,
+        duplicate_of_file_id: int | None = None,
     ) -> int:
-        """Insert one row into `meta.files`.
+        """Idempotently insert (or resolve) one row in `meta.files`.
 
-        Maps to ``meta.files(dataset_id, object_uri, content_sha256,
-        hash_version, size_bytes, filename, status)``.
+        Maps to ``INSERT INTO meta.files (..., duplicate_of_file_id) VALUES
+        (...) ON CONFLICT (dataset_id, object_uri, content_sha256) DO UPDATE
+        SET filename = EXCLUDED.filename, duplicate_of_file_id =
+        EXCLUDED.duplicate_of_file_id RETURNING file_id``, against the real
+        `uq_files_dataset_uri_content` UNIQUE constraint (migration 0002) --
+        not a plain ``INSERT ... RETURNING``, which raises `UniqueViolation`
+        on a repeat call with the same business identity.
+
+        Calling this twice with the identical `(dataset_id, object_uri,
+        content_sha256)` business identity returns the SAME `file_id` both
+        times and leaves exactly one row in `meta.files` -- the
+        duplicate-file-content `skip` policy (CONTEXT.md D-13) depends on
+        this: re-uploading the same bytes under the same `object_uri` must
+        never create a second row.
 
         Args:
             dataset_id: The owning dataset's `meta.datasets.dataset_id`.
@@ -59,9 +77,12 @@ class MetadataRepository(Protocol):
             size_bytes: Size of the file, in bytes.
             filename: The file's base name, independent of its full URI.
             status: The file's processing status.
+            duplicate_of_file_id: The `file_id` of an earlier file this one
+                is a known duplicate of, when applicable. `None` when this
+                file is not a known duplicate.
 
         Returns:
-            The newly inserted row's `file_id`.
+            The row's `file_id`, whether newly inserted or already present.
         """
         ...
 
@@ -149,6 +170,138 @@ class MetadataRepository(Protocol):
 
         Returns:
             The newly inserted row's `run_id`.
+        """
+        ...
+
+    def get_or_create_ingestion_run(  # noqa: PLR0913 -- matches ingestion_runs' identity/FK column set
+        self,
+        *,
+        idempotency_key: str,
+        dataset_id: int,
+        config_version_id: int,
+        processor_version: str,
+        processor_image_digest: str,
+        file_id: int | None = None,
+        batch_id: int | None = None,
+    ) -> tuple[int, str]:
+        """Idempotently pre-allocate one `meta.ingestion_runs` row, discovery-time.
+
+        Maps to ``INSERT INTO meta.ingestion_runs (...) VALUES (...,
+        'PENDING') ON CONFLICT (idempotency_key) DO UPDATE SET
+        idempotency_key = EXCLUDED.idempotency_key RETURNING run_id,
+        status``.
+
+        Distinct from `claim_ingestion_run` below (Pitfall 5): this method
+        is a no-op upsert meant for discovery-time pre-allocation, called
+        every time a unit is discovered regardless of whether it has run
+        before -- tolerating repeat calls is the whole point, since a
+        discovery pass must be safe to repeat. `claim_ingestion_run` is a
+        conditional `UPDATE ... WHERE` meant for pod-startup-time exclusive
+        claiming. These are two different SQL statements doing two
+        different jobs and must never be conflated or implemented as the
+        same query.
+
+        Args:
+            idempotency_key: The unique key that makes retries free (Q7).
+            dataset_id: The dataset this run processes.
+            config_version_id: The `meta.config_versions` row this run was
+                configured by.
+            processor_version: The `dataplat` distribution version that will
+                execute this run.
+            processor_image_digest: The container image digest that will
+                execute this run.
+            file_id: The single file this run processes, when applicable.
+            batch_id: The batch this run processes, when applicable.
+
+        Returns:
+            A `(run_id, status)` tuple: `run_id` is stable across repeat
+            calls with the same `idempotency_key`; `status` is the row's
+            CURRENT status after this call (e.g. `"PENDING"` on the first
+            call, whatever it already was on a repeat call) -- the caller
+            uses this to decide whether to include the unit in a
+            Dynamic-Task-Mapping expand list.
+        """
+        ...
+
+    def claim_ingestion_run(
+        self,
+        *,
+        idempotency_key: str,
+        try_number: int,
+        pod_name: str,
+    ) -> tuple[int, str] | None:
+        """Exclusively claim one `meta.ingestion_runs` row for execution, pod-startup-time.
+
+        Maps to ``UPDATE meta.ingestion_runs SET status='RUNNING', ...
+        WHERE idempotency_key = ... AND (status IN ('PENDING','FAILED') OR
+        (status='RUNNING' AND lease_expires_at < now())) RETURNING run_id,
+        status``.
+
+        Distinct from `get_or_create_ingestion_run` above (Pitfall 5): this
+        method enforces exclusivity via a conditional `UPDATE ... WHERE` --
+        it never inserts a row -- while `get_or_create_ingestion_run` is a
+        no-op upsert. These are two different SQL statements doing two
+        different jobs and must never be conflated or implemented as the
+        same query.
+
+        Args:
+            idempotency_key: The run to claim.
+            try_number: This attempt's 1-based try number.
+            pod_name: The Kubernetes pod name claiming this run.
+
+        Returns:
+            `(run_id, "RUNNING")` when the claim succeeds -- the row's
+            status was `PENDING`/`FAILED`, or `RUNNING` with an expired
+            `lease_expires_at`. `None` when the claim is correctly refused:
+            the row's status is `SUCCEEDED`, the row is `RUNNING` with a
+            still-live lease (a concurrent claim is in progress), or no row
+            matches `idempotency_key` at all (nothing to claim yet). All
+            three are expected outcomes, not invariant violations.
+        """
+        ...
+
+    def finalize_publication(  # noqa: PLR0913 -- matches the files/batches/ingestion_runs field set this updates
+        self,
+        *,
+        conn: Connection[Any],
+        run_id: int,
+        file_id: int,
+        batch_id: int,
+        rows_loaded: int,
+        finished_at: datetime,
+        report_uri: str,
+    ) -> None:
+        """Mark a file, batch and run SUCCEEDED, inside the caller's own open transaction.
+
+        Maps to three sequential UPDATEs -- ``meta.files.status =
+        'PROCESSED'``, ``meta.batches.status = 'PUBLISHED'``,
+        ``meta.ingestion_runs`` (``status = 'SUCCEEDED'``, `finished_at`,
+        `rows_loaded`, `report_uri`) -- all issued against `conn`.
+
+        The one exception on this Protocol: every other method opens its
+        own connection from the pool; this one never does. `conn` must
+        already be open, inside an already-open transaction, and this
+        method must never commit or roll it back itself (same contract as
+        `Publisher.publish`) -- it must land inside the SAME transaction as
+        the `Publisher`'s own `INSERT ... ON CONFLICT`, which is META-03's
+        atomicity requirement: a file/batch/run only ever flips to
+        published/succeeded atomically with the data becoming visible,
+        never before and never separately. `conn` must never be supplied by
+        anything other than this phase's own trusted publication
+        orchestration code -- never exposed to a call site outside the
+        publication transaction (T-04-06).
+
+        Args:
+            conn: An already-open connection, inside an already-open
+                transaction -- the same one `Publisher.publish` is running
+                its own `INSERT ... ON CONFLICT` against.
+            run_id: The run to mark `SUCCEEDED`.
+            file_id: The file to mark `PROCESSED`.
+            batch_id: The batch to mark `PUBLISHED`.
+            rows_loaded: The row count to record on the run.
+            finished_at: The run's completion timestamp.
+            report_uri: The object-store URI of this run's validation
+                report.
         """
         ...
 
