@@ -25,7 +25,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 - [x] **META-01**: A single coherent `meta` schema in analytical PostgreSQL is designed up front and migrated via Alembic, covering datasets, config versions, files, batches, ingestion runs, run stages, schema versions, watermarks, dedup audit, validation results and reconciliation results — *(Gap 1)*
 - [x] **META-02**: Every stored content hash carries a `hash_version` column, so the hash recipe can change without invalidating history or making every dimension appear to change at once — *(PITFALLS #1 cheap-now decision)*
-- [ ] **META-03**: Data rows, watermark advancement and run status commit inside a single publication transaction, or none of them do — *(ARCHITECTURE claim 4)*
+- [x] **META-03**: Data rows, watermark advancement and run status commit inside a single publication transaction, or none of them do — *(ARCHITECTURE claim 4)*
 
 ### INFRA — Cluster, Services, Infrastructure as Code
 
@@ -114,12 +114,12 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **LOAD-01**: Re-running any DAG, task, file, batch or record produces no duplicate or corrupted data — across Airflow retries, pod restarts, DAG reruns, backfills, manual reprocessing and re-uploaded files — *(DoD 34)*
 - [ ] **LOAD-02**: An Airflow retry mid-load creates no duplicate rows, proven by test — *(DoD 35)*
 - [ ] **LOAD-03**: Reprocessing an identical file is a no-op, identified by content checksum rather than filename — *(DoD 36)*
-- [ ] **LOAD-04**: File identity, batch identity, record identity and target-row identity are modelled distinctly and never conflated — *(DoD 37)*
+- [x] **LOAD-04**: File identity, batch identity, record identity and target-row identity are modelled distinctly and never conflated — *(DoD 37)*
 - [ ] **LOAD-05**: Loads are transactional — staging table, validation, then atomic publication — so consumers never observe a partially loaded dataset — *(DoD 52)*
 - [ ] **LOAD-06**: After a partial failure the platform determines what succeeded, what remains, and whether retry or rollback is required, without manual log inspection — *(DoD 53)*
 - [ ] **LOAD-07**: Files larger than container memory process in bounded memory with configurable batch size and maximum field/row length — *(DoD 54)*
-- [ ] **LOAD-08**: A batch ledger with `UNIQUE (dataset, batch_key)` plus run-scoped identity (`run_id`, `attempt`) on every staged and loaded row exists from the vertical slice onward — *(PITFALLS #3, research deviation D1)*
-- [ ] **LOAD-09**: Publication is single-writer via `pg_advisory_xact_lock` per dataset, using `INSERT … ON CONFLICT` arbitrating on the natural key — `MERGE` is not concurrency-safe — *(Gap 10, PITFALLS #14)*
+- [x] **LOAD-08**: A batch ledger with `UNIQUE (dataset, batch_key)` plus run-scoped identity (`run_id`, `attempt`) on every staged and loaded row exists from the vertical slice onward — *(PITFALLS #3, research deviation D1)*
+- [x] **LOAD-09**: Publication is single-writer via `pg_advisory_xact_lock` per dataset, using `INSERT … ON CONFLICT` arbitrating on the natural key — `MERGE` is not concurrency-safe — *(Gap 10, PITFALLS #14)*
 - [ ] **LOAD-10**: File integrity is verified before processing — checksum, size, extension, object metadata, transfer completion and optional control file — so partially uploaded files are never ingested — *(Gap 4)*
 - [ ] **LOAD-11**: Optional batch manifests and completion markers (`_BATCH_COMPLETE`) are supported, and the manifest may be the authoritative input to a run — *(Gap 5)*
 - [ ] **LOAD-12**: The ETL processor is the only component that parses CSV — PostgreSQL `COPY … FORMAT csv` on raw input is prohibited, since it would load rows validation never saw — *(PITFALLS #9)*
@@ -278,7 +278,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 |-------------|-------|--------|
 | META-01 | Phase 3 | Complete |
 | META-02 | Phase 3 | Complete |
-| META-03 | Phase 4 | Pending |
+| META-03 | Phase 4 | Complete |
 | INFRA-01 | Phase 2 | Complete |
 | INFRA-02 | Phase 2 | Complete |
 | INFRA-03 | Phase 2 | Complete |
@@ -346,12 +346,12 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | LOAD-01 | Phase 4 | Pending |
 | LOAD-02 | Phase 4 | Pending |
 | LOAD-03 | Phase 4 | Pending |
-| LOAD-04 | Phase 4 | Pending |
+| LOAD-04 | Phase 4 | Complete |
 | LOAD-05 | Phase 4 | Pending |
 | LOAD-06 | Phase 9 | Pending |
 | LOAD-07 | Phase 6 | Pending |
-| LOAD-08 | Phase 4 | Pending |
-| LOAD-09 | Phase 4 | Pending |
+| LOAD-08 | Phase 4 | Complete |
+| LOAD-09 | Phase 4 | Complete |
 | LOAD-10 | Phase 8 | Pending |
 | LOAD-11 | Phase 8 | Pending |
 | LOAD-12 | Phase 4 | Pending |

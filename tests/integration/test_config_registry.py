@@ -20,6 +20,7 @@ import pytest
 
 from dataplat.config.loader import load_config
 from dataplat.config.registry import ConfigRegistry
+from dataplat.errors import StorageError
 from dataplat.storage.db import create_pool
 
 if TYPE_CHECKING:
@@ -119,3 +120,20 @@ def test_sync_versions_on_changed_config(
     closed_rows = [row for row in rows if row[2] is not None]
     assert len(closed_rows) == 1
     assert closed_rows[0][1] == 1
+
+
+def test_get_by_id_returns_the_exact_config_that_was_synced(
+    registry: ConfigRegistry,
+    customers_config: DatasetConfig,
+) -> None:
+    """The reprocessing seam: resolve a historical config by id, never by reading YAML."""
+    record = registry.sync("get_by_id_round_trip", customers_config)
+
+    resolved = registry.get_by_id(record.config_version_id)
+
+    assert resolved == customers_config
+
+
+def test_get_by_id_raises_storage_error_for_an_unknown_id(registry: ConfigRegistry) -> None:
+    with pytest.raises(StorageError):
+        registry.get_by_id(999_999_999)

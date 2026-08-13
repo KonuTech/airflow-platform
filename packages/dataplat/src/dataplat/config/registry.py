@@ -38,13 +38,12 @@ from typing import TYPE_CHECKING, Any
 from psycopg.types.json import Jsonb
 
 from dataplat.config.hashing import hash_config
+from dataplat.config.model import DatasetConfig
 from dataplat.errors import StorageError
 
 if TYPE_CHECKING:
     from psycopg import Cursor
     from psycopg_pool import ConnectionPool
-
-    from dataplat.config.model import DatasetConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +183,40 @@ class ConfigRegistry:
             config_hash=config_hash,
             is_new=True,
         )
+
+    def get_by_id(self, config_version_id: int) -> DatasetConfig:
+        """Re-resolve one dataset's config exactly as it was at a specific version.
+
+        This is the mechanism that lets historical reprocessing resolve a
+        file's config EXACTLY as it was at ingestion time, without ever
+        reading ``configs/*.yaml`` from disk: the pod that calls this (a
+        later plan's ``ingest`` CLI) does not have ``configs/`` mounted or
+        baked in -- only ``discover`` does.
+
+        Args:
+            config_version_id: The ``meta.config_versions.config_version_id``
+                to resolve.
+
+        Returns:
+            The ``DatasetConfig`` this version's ``config_document``
+            validates as.
+
+        Raises:
+            StorageError: No ``meta.config_versions`` row matches
+                ``config_version_id``.
+        """
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            row = cur.execute(
+                "SELECT config_document FROM meta.config_versions WHERE config_version_id = %s",
+                (config_version_id,),
+            ).fetchone()
+        found = _require_row(
+            row,
+            f"no meta.config_versions row for config_version_id={config_version_id}",
+        )
+        # The JSONB column already round-trips through psycopg as a Python
+        # dict -- no json.loads needed (see module docstring).
+        return DatasetConfig.model_validate(found[0])
 
     @staticmethod
     def _resolve_dataset_id(cur: Cursor[Any], dataset_name: str) -> int:
