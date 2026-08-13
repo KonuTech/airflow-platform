@@ -4,13 +4,20 @@
 ``packages/dataplat/pyproject.toml``'s ``[project.scripts]`` (Cluster O) and
 the pod ``ENTRYPOINT`` this plan's Dockerfile builds. It configures structured
 logging exactly once, then dispatches to the ``cli`` click group inside a
-single ``try/except DataPlatformError`` block. A ``DataPlatformError`` raised
-by any subcommand's callback is logged with its structured ``context`` and
-turned into exit code ``1`` -- never a raw Python traceback. Any OTHER
-exception is deliberately NOT caught here (ARCHITECTURE.md Sec 4.5 bans a
-blanket catch-all clause anywhere outside this scoped boundary) and
-propagates to the process, because it is a bug to surface loudly, not a
-condition this boundary should paper over.
+``try/except`` block scoped to two well-defined exception families. A
+``DataPlatformError`` raised by any subcommand's callback is logged with its
+structured ``context`` and turned into exit code ``1`` -- never a raw Python
+traceback. Click's own control-flow/usage-error family
+(``click.exceptions.ClickException``, ``.Exit``, ``.Abort`` -- raised by
+``no_args_is_help``, an unknown option, an unknown subcommand, ``--version``,
+etc. with ``standalone_mode=False``) is converted the same way
+``standalone_mode=True`` would have: the message is shown and the matching
+exit code returned (CR-01 -- a usage error is the single most expected form
+of user/operator error a CLI has to handle, not a bug). Any OTHER exception
+is deliberately NOT caught here (ARCHITECTURE.md Sec 4.5 bans a blanket
+catch-all clause anywhere outside this scoped boundary) and propagates to the
+process, because it is a bug to surface loudly, not a condition this
+boundary should paper over.
 
 This phase's only subcommand is the ``--version`` flag on the group itself;
 ``ingest`` (Phase 4) and later subcommands attach to the same ``cli`` group
@@ -61,16 +68,23 @@ def main(argv: list[str] | None = None) -> int:
     the ``cli`` click group, so every present and future subcommand inherits
     it without reconfiguring. A ``DataPlatformError`` raised by any
     subcommand is caught exactly once here (D-06), logged with structured
-    context, and turned into exit code ``1``. Any other exception is not
-    caught by this boundary and propagates to the caller.
+    context, and turned into exit code ``1``. Click's own usage/control-flow
+    exceptions (``ClickException`` and subclasses -- e.g. a bare invocation,
+    an unknown option, an unknown subcommand -- plus ``Exit`` and ``Abort``)
+    are converted to the matching exit code instead of propagating, since
+    ``standalone_mode=False`` disables click's own handling of them (CR-01).
+    Any other exception is not caught by this boundary and propagates to the
+    caller.
 
     Args:
         argv: Argument vector. Defaults to ``None``, in which case click
             reads ``sys.argv[1:]`` itself.
 
     Returns:
-        Process exit status: ``0`` on success, ``1`` when a
-        ``DataPlatformError`` was raised and caught.
+        Process exit status: ``0`` on success; ``1`` when a
+        ``DataPlatformError`` was raised and caught, or on ``Abort``;
+        otherwise the exit code carried by the click ``Exit``/
+        ``ClickException`` that was caught (e.g. ``2`` for a usage error).
     """
     if not structlog.is_configured():
         configure(in_cluster=_log_json_enabled())
@@ -88,6 +102,28 @@ def main(argv: list[str] | None = None) -> int:
             error_message=str(exc),
             **exc.context,
         )
+        return 1
+    except click.exceptions.Exit as exc:
+        # Raised by click's own eager options (e.g. --version) and by any
+        # future explicit ctx.exit() call. standalone_mode=True would
+        # translate this into sys.exit(exc.exit_code); replicate that exit
+        # code here instead of letting a bare RuntimeError subclass escape
+        # (CR-01).
+        return exc.exit_code
+    except click.exceptions.ClickException as exc:
+        # Click's own usage-error family (NoArgsIsHelpError, NoSuchOption,
+        # NoSuchCommand, missing/invalid arguments, ...). With
+        # standalone_mode=False, click does NOT print or exit for these --
+        # it re-raises them to the caller instead. Show the same message
+        # standalone mode would have printed and exit with the same code,
+        # so a usage error -- the single most expected form of user/operator
+        # error a CLI has to handle -- never surfaces as a raw traceback
+        # (CR-01).
+        exc.show()
+        return exc.exit_code
+    except click.exceptions.Abort:
+        # EOF/Ctrl-C during a prompt. standalone_mode=True would print
+        # "Aborted!" and exit 1; mirror the exit code here (CR-01).
         return 1
     return 0
 

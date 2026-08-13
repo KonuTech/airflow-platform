@@ -69,11 +69,33 @@ def test_an_undeclared_exception_is_not_caught_and_propagates() -> None:
         main(["raise-plain-exception"])
 
 
-def test_zero_arguments_does_not_crash() -> None:
+def test_zero_arguments_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
     """``no_args_is_help=True`` turns a bare invocation into click's own
     controlled usage/help exit (``NoArgsIsHelpError``, exit code 2 -- the
     standard Unix usage-error convention), never an unhandled Python
     traceback.
+
+    Calls ``main()`` directly (CR-01), not ``CliRunner.invoke()``:
+    ``CliRunner`` has its own independent exception-catching wrapper around
+    click's dispatch, so it observes a controlled ``exit_code`` regardless of
+    what ``main()`` itself does with the underlying
+    ``click.exceptions.ClickException`` -- exactly the gap that let CR-01's
+    raw-traceback regression go undetected by this test previously.
+    """
+    exit_code = main([])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "Usage" in captured.err
+
+
+def test_zero_arguments_via_cli_runner_still_exits_two() -> None:
+    """The ``cli`` group's own ``no_args_is_help`` behavior, exercised the
+    original way (``CliRunner.invoke()``) -- kept alongside the ``main()``
+    -level test above since it proves a different thing: ``cli`` itself, not
+    ``main()``'s error boundary around it.
     """
     runner = CliRunner()
 
@@ -82,6 +104,36 @@ def test_zero_arguments_does_not_crash() -> None:
     assert result.exit_code == 2
     assert "Traceback" not in result.output
     assert "Usage" in result.output
+
+
+def test_unknown_option_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
+    """An unrecognized option raises click's ``NoSuchOption`` (a
+    ``ClickException``/``UsageError`` subclass), not a ``DataPlatformError``
+    -- ``main()`` must still convert it to a controlled exit, never a raw
+    Python traceback (CR-01).
+    """
+    exit_code = main(["--bogus-option"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "No such option" in captured.err
+
+
+def test_unknown_command_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
+    """An unrecognized subcommand raises click's ``NoSuchCommand`` (a
+    ``ClickException``/``UsageError`` subclass), not a ``DataPlatformError``
+    -- ``main()`` must still convert it to a controlled exit, never a raw
+    Python traceback (CR-01).
+    """
+    exit_code = main(["no-such-command"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "No such command" in captured.err
 
 
 def test_main_returns_zero_on_a_successful_invocation(
