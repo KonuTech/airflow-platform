@@ -66,6 +66,47 @@ executor's scope-boundary rule rather than fixed inline.
   `tests/policy/test_no_manual_kubectl_surgery.py` mask quoted spans before
   matching), or pin `import-linter`'s output mode.
 
-**Both plans independently confirm the same underlying issue** (import-linter
+**All three plans independently confirm the same underlying issue** (import-linter
 output-format drift breaking a plain-substring assertion in a Phase 1 policy
-test) — two independent characterizations of the same drift, not two bugs.
+test) — three independent characterizations of the same drift, not separate bugs.
+See 04-03's confirmation below.
+
+## From Plan 04-03
+
+`discover_files` calls `metadata.create_batch(...)` unconditionally on every
+non-duplicate object, every call — including on re-discovery of an already-`PENDING`
+or already-`SUCCEEDED` run. `create_batch` is not idempotent (plain `INSERT ...
+RETURNING`, no `ON CONFLICT`), so a batch row is created on every re-discovery,
+orphaning the previous batch (only the run's original `batch_id`, set once at first
+`INSERT`, stays linked to `meta.ingestion_runs`; later batches get a
+`meta.batch_files` row but no `ingestion_runs` reference).
+
+- **Found during:** Task 2 verification.
+- **Impact:** Does not affect this plan's own behavior guarantees (file identity,
+  dedup, run re-offering/exclusion, and the fan-out cap are all unaffected — proven
+  by `tests/unit/test_discovery.py`), but is a real, silently-accumulating metadata
+  inefficiency worth fixing before batches carry more meaning (e.g. multi-file
+  batches in a later phase).
+- **Status:** Deferred (design gap inherited from 04-01-PLAN.md's interface).
+- **Suggested fix:** Either an idempotent `create_batch`/`get_or_create_batch`
+  (keyed on `batch_key`, mirroring `create_file`/`get_or_create_ingestion_run`'s
+  upsert pattern) or reordering `discover_files` to only create a batch on a run's
+  first-ever allocation.
+
+04-03 also independently reproduced the `tests/policy/test_gates_actually_fail.py`
+import-linter output-format drift documented above (same root cause, same two
+tests, confirmed unrelated to this plan's diff).
+
+## Merge note (orchestrator, wave 2)
+
+04-03's worktree forked from a stale pre-wave-1 base (a worktree-provisioning
+quirk) and so never saw 04-01's `get_or_create_ingestion_run`, duplicate-aware
+`create_file`, `ObjectStore.list_objects`/`put_object`. Per its scope-boundary
+rule, 04-03 reimplemented that subset itself from 04-01-PLAN.md's spec verbatim
+(with its own integration tests) so Task 2 could proceed. Merging 04-03 back into
+main therefore produced content conflicts in `metadata/repository.py`,
+`metadata/postgres.py`, `storage/objectstore.py`, and
+`tests/integration/test_objectstore.py` against 04-01's already-merged originals.
+Resolved by keeping 04-01's original implementations (already covered by 04-01's
+own tests) and layering 04-03's additional discovery-specific test coverage on
+top where it tested something 04-01's suite didn't.

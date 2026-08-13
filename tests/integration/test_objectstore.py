@@ -84,6 +84,7 @@ def test_list_objects_yields_every_object_under_the_prefix(
     expected_keys = {f"{prefix}a.csv", f"{prefix}b.csv", f"{prefix}c.csv"}
     for key in expected_keys:
         s3_client.put_object(Bucket=scratch_bucket, Key=key, Body=b"x")
+    s3_client.put_object(Bucket=scratch_bucket, Key="outside-the-prefix.csv", Body=b"x")
 
     summaries = list(object_store.list_objects(scratch_bucket, prefix))
 

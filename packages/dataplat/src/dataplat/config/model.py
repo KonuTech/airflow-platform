@@ -38,6 +38,11 @@ class SourceConfig(BaseModel):
         path: Prefix within ``bucket`` the source discovers files under.
         change_semantics: How the source signals change, e.g.
             ``"snapshot"`` or ``"cdc"``.
+        duplicate_policy: What ``dataplat.discovery.discover_files`` does
+            when a newly-listed object's content hash already exists for
+            this dataset under a different ``object_uri`` (D-13, a locked
+            decision). Plain ``str``, matching this file's own convention
+            — the only value this phase defines is ``"skip"``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -46,6 +51,7 @@ class SourceConfig(BaseModel):
     bucket: str
     path: str
     change_semantics: str
+    duplicate_policy: str
 
 
 class DeduplicationConfig(BaseModel):
@@ -82,6 +88,22 @@ class LoadConfig(BaseModel):
     target: str
 
 
+class BatchingConfig(BaseModel):
+    """How many discovery units one ``discover_files`` call may hand to Dynamic Task Mapping.
+
+    Attributes:
+        max_units_per_run: The maximum number of discovered units
+            ``dataplat.discovery.discover_files`` returns in one call
+            (ORCH-03). Required, never defaulted — a missing cap must fail
+            config validation loudly instead of silently defaulting to an
+            unbounded fan-out.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_units_per_run: int
+
+
 class DatasetConfig(BaseModel):
     """The complete, validated configuration for one dataset.
 
@@ -99,6 +121,8 @@ class DatasetConfig(BaseModel):
         source: Where and how source files arrive.
         deduplication: How duplicate records are collapsed.
         load: How records are published to their target table.
+        batching: The cap on how many units one ``discover_files`` call may
+            hand to Dynamic Task Mapping in a single run (ORCH-03).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -108,3 +132,4 @@ class DatasetConfig(BaseModel):
     source: SourceConfig
     deduplication: DeduplicationConfig
     load: LoadConfig
+    batching: BatchingConfig
