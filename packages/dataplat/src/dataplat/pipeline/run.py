@@ -77,7 +77,6 @@ _CUSTOMERS_TARGET_COLUMNS: tuple[str, ...] = (
 )
 
 
-
 class _Progress:
     """A small, mutable holder for the heartbeat's live row counts.
 
@@ -134,10 +133,7 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
     elif status == "RUNNING":
         receipt_status = "SKIPPED_CONCURRENT"
     else:
-        msg = (
-            "claim_ingestion_run refused the claim but no SUCCEEDED/RUNNING "
-            "row explains why"
-        )
+        msg = "claim_ingestion_run refused the claim but no SUCCEEDED/RUNNING row explains why"
         raise DataPlatformError(
             msg,
             context={
