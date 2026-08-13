@@ -10,6 +10,15 @@
 # Shape follows ARCHITECTURE.md's worked `transactions.yaml` example (Q4.4,
 # lines 526-541), adapted to normalized.customers's columns (CONTEXT.md D-02:
 # customer_id, name, country, birth_date, event_ts).
+#
+# 04-03-PLAN.md Task 1 adds two fields dataplat.discovery.discover_files
+# depends on: source.duplicate_policy (D-13, a locked decision -- a
+# re-uploaded file whose content hash is already known for this dataset is
+# recorded but never assigned a run) and batching.max_units_per_run
+# (ORCH-03 -- the hard cap on how many units one discovery run hands to
+# Dynamic Task Mapping; 100 is comfortably below Airflow's platform-level
+# max_map_length default of 1024 and far above this phase's actual test
+# file counts).
 
 dataset: customers
 config_schema_version: 1
@@ -18,6 +27,7 @@ source:
   bucket: raw
   path: customers/
   change_semantics: snapshot
+  duplicate_policy: skip
 deduplication:
   strategy: business_key_latest
   keys: [customer_id]
@@ -25,3 +35,5 @@ deduplication:
 load:
   strategy: merge
   target: normalized.customers
+batching:
+  max_units_per_run: 100

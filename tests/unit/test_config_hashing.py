@@ -29,6 +29,7 @@ _CUSTOMERS_DOCUMENT = {
         "bucket": "raw",
         "path": "customers/",
         "change_semantics": "snapshot",
+        "duplicate_policy": "skip",
     },
     "deduplication": {
         "strategy": "business_key_latest",
@@ -36,6 +37,7 @@ _CUSTOMERS_DOCUMENT = {
         "order_by": ["event_ts desc"],
     },
     "load": {"strategy": "merge", "target": "normalized.customers"},
+    "batching": {"max_units_per_run": 100},
 }
 
 # Same document, deliberately reordered at every dict level: dataplat.config.
@@ -44,6 +46,7 @@ _CUSTOMERS_DOCUMENT = {
 # element order/content stays identical, which is what isolates "key order"
 # as the only variable.
 _CUSTOMERS_DOCUMENT_REORDERED = {
+    "batching": {"max_units_per_run": 100},
     "load": {"target": "normalized.customers", "strategy": "merge"},
     "deduplication": {
         "order_by": ["event_ts desc"],
@@ -51,6 +54,7 @@ _CUSTOMERS_DOCUMENT_REORDERED = {
         "strategy": "business_key_latest",
     },
     "source": {
+        "duplicate_policy": "skip",
         "change_semantics": "snapshot",
         "path": "customers/",
         "bucket": "raw",
