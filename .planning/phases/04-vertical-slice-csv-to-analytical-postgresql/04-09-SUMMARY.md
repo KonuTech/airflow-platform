@@ -129,3 +129,13 @@ None - no external service configuration required. (When a developer next has ex
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
+
+## Self-Check: PASSED
+
+- FOUND: `scripts/ingest-demo.py`
+- FOUND: commit `8cd1e1a` (Task 1)
+- FOUND: commit `d7d6b6e` (Task 2)
+- FOUND: commit `02bef2f` (SUMMARY.md + deferred-items.md)
+- FOUND: `ingest-demo:` target in `Makefile`
+- FOUND: `tests/e2e/cluster tests/e2e/slice` in `Makefile`'s `cluster-verify` recipe
+- FOUND: `## From Plan 04-09` section in `deferred-items.md`
