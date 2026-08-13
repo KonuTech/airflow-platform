@@ -133,3 +133,14 @@ None - no external service configuration required. All Secrets are dev-only, gen
 - Every `must_haves.truths` claim in this plan's frontmatter is live-verified true: etl RBAC scoped correctly, `etl_app` DSN authenticates, MinIO credentials reachable from `etl` and wired into Airflow's own connection, `/opt/airflow/dags` visible via the hostPath mount in every component that needs it, and `make image-csv-processor` pushes + registers the image.
 - Plan 04-07 (DAG + KPO wiring) can proceed directly: it names the exact Secret/RBAC/Variable identifiers this plan created (`csv-processor-db`, `csv-processor-s3`, `csv_processor_image`, ServiceAccount `csv-processor`, namespace `etl`) without needing to re-derive or guess any of them.
 - No blockers. The two deferred `test_gates_actually_fail.py` failures are pre-existing, unrelated to this plan's subsystem, and do not block DAG authoring.
+
+## Self-Check: PASSED
+
+- FOUND: `kubernetes/rbac-etl.yaml`
+- FOUND: `scripts/etl-secrets.sh`
+- FOUND: `scripts/stages/75-etl.sh`
+- FOUND: `.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/deferred-items.md`
+- FOUND commit: `6d86cb8`
+- FOUND commit: `87d7ee4`
+- FOUND commit: `22406b4`
+- Full `tests/policy` suite (`-m "not manifests"`) re-run after all edits: 111 passed, 2 failed (both pre-existing/unrelated, logged in `deferred-items.md`), 10 deselected. `-m manifests` suite (after `make manifests`): 10 passed.
