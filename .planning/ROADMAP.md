@@ -224,8 +224,8 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — Migration 0006 (UNIQUE constraint) and the metadata/objectstore/config-registry interface contracts
-- [ ] 04-02-PLAN.md — etl namespace RBAC, dev-only credential Secrets, Helm DAG-mount wiring, image build/push
+- [x] 04-01-PLAN.md — Migration 0006 (UNIQUE constraint) and the metadata/objectstore/config-registry interface contracts
+- [x] 04-02-PLAN.md — etl namespace RBAC, dev-only credential Secrets, Helm DAG-mount wiring, image build/push
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
