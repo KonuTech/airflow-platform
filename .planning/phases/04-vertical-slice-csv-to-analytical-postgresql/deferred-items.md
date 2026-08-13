@@ -296,3 +296,76 @@ run: 116 passed, 2 failed (both this pre-existing issue), 10 deselected, 130.83s
   `kubectl port-forward` from the host (outside `tests/e2e/cluster/`, which
   already only ever opens one connection per tunnel) knows to open one
   tunnel per connection rather than rediscovering this the same way.
+
+## From Plan 04-08
+
+### BLOCKING (reported prominently in 04-08-SUMMARY.md too): stale `/mnt/dags` hostPath mount on both worker nodes
+
+- **Found during:** Task 1, attempting the first live DAG trigger.
+- **Symptom:** `kubectl exec deploy/airflow-dag-processor -- ls -la /opt/airflow/dags`
+  (and the scheduler/api-server/triggerer's own mounts) is EMPTY on all
+  three kind nodes, even though the host path it is bound from
+  (`/home/konutec/projects/airflow-platform/airflow/dags`, confirmed via
+  `docker inspect`'s `Source` field — the exact literal path `kind/
+  cluster.yaml`'s `extraMounts` declares) has held both real DAG files
+  since plan 04-07 (`csv_ingest_customers.py`, `smoke_kubernetes_pod.py`)
+  since before this plan started. `airflow dags list-import-errors`
+  reports "No data found" and `airflow dags list` likewise -- not because
+  the DAGs have import errors, but because the DAG processor's own
+  filesystem view of `dags/` is empty.
+- **Root cause, confirmed live:** `docker exec airflow-platform-worker cat
+  /proc/self/mountinfo | grep dags` shows the node's `/mnt/dags` is bound
+  from `/docker-desktop-bind-mounts/Ubuntu/<hash>` on `tmpfs` -- Docker
+  Desktop's WSL2 bind-mount indirection layer. This snapshot was taken when
+  the node containers were created (~27h before this plan ran, per pod
+  `AGE`), before the DAG files existed, and does not reflect files added to
+  the real host directory afterward (confirmed: even `.gitkeep`, present
+  since before node creation, is invisible inside the mount -- the listing
+  is frozen, not merely missing recent additions).
+- **Fix identified, NOT applied:** `docker restart airflow-platform-worker
+  airflow-platform-worker2` (the control-plane node is tainted `NoSchedule`
+  and runs no workload needing this mount, so it does not need restarting)
+  forces Docker to re-resolve the bind mount on container start. This was
+  attempted and explicitly DENIED by the sandbox's auto-mode permission
+  classifier as a destructive action against shared live infrastructure
+  (both PostgreSQL clusters and MinIO also run on these two nodes, and
+  04-09-PLAN.md runs concurrently against the same cluster). Not worked
+  around by any alternate tool, per the classifier denial's own guidance.
+- **Impact:** every live-cluster assertion in `tests/e2e/slice/` is
+  unverified as a direct consequence -- the DAGs this whole plan depends on
+  cannot be parsed, scheduled or triggered until this is fixed. See
+  04-08-SUMMARY.md's own "Verification Status" section for the full
+  accounting of what was and was not proven.
+- **Status:** Blocking, unresolved. **Suggested owner:** the orchestrator
+  or the user, outside this sandbox's permission boundary -- run `docker
+  restart airflow-platform-worker airflow-platform-worker2`, wait for all
+  pods in `airflow`/`data` namespaces to report `Running`/`Ready` again
+  (a full restart of both PostgreSQL clusters and MinIO; expect roughly
+  1-3 minutes), then re-run `uv run --group cluster pytest tests/e2e/slice -x -q --timeout=900`.
+
+### `DATAPLAT_PROCESSOR_IMAGE` is never set on the `ingest`/`discover` KPO pod spec
+
+- **Found during:** Task 1, while designing `test_idempotent_reupload`'s
+  idempotency-key correlation and discovering it could not be predicted
+  client-side.
+- **Symptom:** `csv_processor.cli.discover`'s call to `discover_files`
+  passes `processor_image=os.environ.get("DATAPLAT_PROCESSOR_IMAGE",
+  "unknown")`, but `airflow/dags/_common/kpo.py`'s `common_kpo_kwargs`
+  only sets `DATAPLAT_DB_DSN`/`DATAPLAT_S3_ACCESS_KEY`/
+  `DATAPLAT_S3_SECRET_KEY`/`DATAPLAT_S3_ENDPOINT_URL` as pod env vars —
+  `DATAPLAT_PROCESSOR_IMAGE` is never wired. Every `meta.ingestion_runs.
+  processor_image_digest` value this vertical slice ever writes will
+  therefore be the literal string `"unknown"`, regardless of which image
+  actually ran.
+- **Impact:** Does not affect this plan's own correctness assertions (idempotency-
+  key computation still works, just with a constant `"unknown"` term instead
+  of a real image digest) but is a real, silently-present gap in this
+  phase's own stated traceability goal ("which processor version produced
+  this row" — README §62, this project's Core Value statement). Out of
+  scope for 04-08 (`airflow/dags/_common/kpo.py` is not in this plan's file
+  list, and fixing it would touch the DAG's own KPO pod-spec construction,
+  04-02/04-07's territory).
+- **Status:** Deferred. **Suggested fix:** add a `k8s.V1EnvVar(name=
+  "DATAPLAT_PROCESSOR_IMAGE", value=Variable.get("csv_processor_image"))`
+  to `common_kpo_kwargs`'s `env_vars` list, mirroring how `image=` itself
+  is already resolved from the same Variable two lines above it.

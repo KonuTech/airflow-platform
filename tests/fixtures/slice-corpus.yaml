@@ -1,0 +1,349 @@
+# tests/fixtures/slice-corpus.yaml — COMMITTED. A SEPARATE manifest from
+# tests/fixtures/corpus.yaml, deliberately.
+#
+# corpus.yaml is the EDGE-CASE corpus: it specifies pathological, byte-level
+# constructions (bad encodings, mixed terminators, malformed quoting) that
+# the universal CSV engine (Phase 6+) must survive or diagnose. This file is
+# the opposite: realistic, UNIFORM, well-formed data for the vertical slice's
+# E2E suite (04-08-PLAN.md), which proves unattended delivery, idempotency,
+# crash-recovery and publish atomicity against the REAL deployed platform —
+# none of which has anything to do with CSV edge cases. Mixing the two
+# manifests would make "which corpus does fixture N belong to" a judgement
+# call instead of a fact, and would couple this phase's E2E fixtures to
+# Phase 1's byte-level regression suite for no reason.
+#
+# `master_seed` is DELIBERATELY DIFFERENT from corpus.yaml's
+# "airflow-platform/corpus/v1": per-fixture random streams are derived from
+# `sha256(master_seed | fixture_name)` (tools/corpus/generators.py R1) — a
+# shared seed string would not corrupt anything numerically (fixture names
+# still differ), but it WOULD couple this corpus's random stream namespace to
+# the edge-case corpus's for no reason, and a future rename collision between
+# the two files becomes thinkable instead of structurally impossible.
+#
+# Both fixtures use the EXISTING `zero_padded_int`/`pick` ColumnSpec kinds —
+# no new generator kind, no change to tools/corpus/manifest.py or
+# generators.py. `pick` over a deterministic, pre-written list of realistic
+# full names / ISO 3166-1 alpha-2 country codes / birth dates / event
+# timestamps is Faker-*style* (varied, realistic-looking data) while staying
+#100% within R1-R10's determinism rules (STACK.md's own verdict: "no new
+# ColumnSpec kind is needed for customer_id/name/country/birth_date/
+# event_ts"). Generate via the already-generic CLI:
+#   python -m tools.corpus generate --manifest tests/fixtures/slice-corpus.yaml --out <dir>
+# tools/corpus/__main__.py's --manifest/--out flags already accept any
+# manifest path; no code change was needed there either.
+#
+# Column shape matches normalized.customers (migrations 0005/0006) and
+# MergePublisher's hardcoded target-column list (packages/dataplat/src/
+# dataplat/load/publish/merge.py): customer_id::int, name, country,
+# birth_date::date, event_ts::timestamptz. Header order MUST match
+# dataplat.pipeline.run._CUSTOMERS_TARGET_COLUMNS exactly — this phase's
+# CsvSource has no header-to-column name mapping, only positional
+# correspondence (04-04-SUMMARY.md's own documented pattern).
+
+version: 1
+master_seed: "airflow-platform/slice-corpus/v1"
+
+fixtures:
+  # --- the ~50-200 row fixture (D-07): unattended delivery, idempotent
+  # reupload, and the concurrent-SELECT-during-publish proof all use this
+  # one. 120 rows keeps a real publish transaction observable (not
+  # instantaneous) without paying the large-profile's minutes-long ingest.
+  - name: "customers_small.csv"
+    covers: [LOAD-01, LOAD-02, LOAD-03, QUAL-06, QUAL-09]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [customer_id, name, country, birth_date, event_ts]
+    rows: 120
+    profile: default
+    row_spec:
+      customer_id: { kind: zero_padded_int, width: 6, start: 1 }
+      name:
+        kind: pick
+        values:
+          - "Anna Kowalski"
+          - "Piotr Nowak"
+          - "Maria Wisniewska"
+          - "Jan Wojcik"
+          - "Emily Johnson"
+          - "James Smith"
+          - "Sophie Muller"
+          - "Lukas Schmidt"
+          - "Chiara Rossi"
+          - "Marco Bianchi"
+          - "Fatima Al-Sayed"
+          - "Ahmed Hassan"
+          - "Yuki Tanaka"
+          - "Haruto Sato"
+          - "Wei Zhang"
+          - "Li Chen"
+          - "Olga Ivanova"
+          - "Dmitri Petrov"
+          - "Lucas Silva"
+          - "Ana Santos"
+          - "Erik Andersson"
+          - "Freja Nielsen"
+          - "Noah Van Dijk"
+          - "Emma Jansen"
+          - "Liam O'Brien"
+          - "Aoife Murphy"
+          - "Carlos Garcia"
+          - "Sofia Fernandez"
+          - "Priya Sharma"
+          - "Raj Patel"
+          - "Grace Kim"
+          - "Minjun Lee"
+          - "Isabella Rodriguez"
+          - "Diego Martinez"
+          - "Amara Okafor"
+      country:
+        kind: pick
+        values:
+          ["PL", "US", "GB", "DE", "FR", "ES", "IT", "NL", "SE", "NO",
+           "DK", "FI", "JP", "CN", "BR", "IN", "CA", "AU"]
+      birth_date:
+        kind: pick
+        values:
+          - "1950-03-14"
+          - "1952-07-22"
+          - "1954-11-05"
+          - "1956-01-30"
+          - "1958-09-18"
+          - "1960-04-02"
+          - "1962-12-25"
+          - "1964-06-11"
+          - "1966-08-29"
+          - "1968-02-17"
+          - "1970-05-06"
+          - "1972-10-23"
+          - "1974-03-19"
+          - "1976-07-08"
+          - "1978-01-14"
+          - "1980-11-27"
+          - "1982-04-30"
+          - "1984-09-03"
+          - "1986-06-16"
+          - "1988-12-01"
+          - "1990-02-24"
+          - "1992-08-09"
+          - "1994-05-21"
+          - "1996-10-13"
+          - "1998-03-27"
+          - "2000-01-01"
+          - "2001-07-19"
+          - "2002-11-11"
+          - "2003-04-05"
+          - "2004-09-23"
+          - "2005-12-30"
+          - "1951-06-06"
+          - "1965-03-03"
+          - "1979-08-08"
+          - "1993-11-20"
+      event_ts:
+        kind: pick
+        values:
+          - "2026-01-05T08:15:00Z"
+          - "2026-01-19T13:42:11Z"
+          - "2026-02-02T05:03:27Z"
+          - "2026-02-16T19:58:44Z"
+          - "2026-03-02T11:21:09Z"
+          - "2026-03-16T22:37:52Z"
+          - "2026-03-30T02:14:33Z"
+          - "2026-04-13T16:49:05Z"
+          - "2026-04-27T09:26:18Z"
+          - "2026-05-11T14:03:41Z"
+          - "2026-05-25T20:47:59Z"
+          - "2026-06-08T07:12:24Z"
+          - "2026-06-22T17:35:06Z"
+          - "2026-07-06T03:58:12Z"
+          - "2026-07-20T12:41:37Z"
+          - "2026-08-03T18:24:53Z"
+          - "2026-01-12T06:09:15Z"
+          - "2026-01-26T21:33:28Z"
+          - "2026-02-09T15:47:02Z"
+          - "2026-02-23T10:11:46Z"
+          - "2026-03-09T23:55:19Z"
+          - "2026-03-23T04:28:37Z"
+          - "2026-04-06T13:16:52Z"
+          - "2026-04-20T08:44:29Z"
+          - "2026-05-04T19:07:14Z"
+          - "2026-05-18T01:52:36Z"
+          - "2026-06-01T12:19:48Z"
+          - "2026-06-15T22:03:57Z"
+          - "2026-06-29T06:31:22Z"
+          - "2026-07-13T15:58:41Z"
+          - "2026-07-27T20:14:05Z"
+          - "2026-08-10T09:37:29Z"
+          - "2026-01-08T17:22:14Z"
+          - "2026-02-28T04:49:33Z"
+          - "2026-05-31T11:06:47Z"
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: ","
+      header_row_index: 0
+      data_rows: 120
+
+  # --- the ~1M row fixture (D-06): U3's throughput/peak-RSS baseline and
+  # D-09/D-10/D-11's real kubectl-delete-pod mid-load proof. SAME header/
+  # row_spec shape as customers_small.csv (D-08: extend the existing
+  # generator, never build a second one).
+  #
+  # `rlimit_as_bytes` here is NOT the KPO ingest pod's Kubernetes memory
+  # LIMIT (that is Gi-scale — 4Gi per airflow/dags/csv_ingest_customers.py's
+  # `_INGEST_RESOURCES` at the time this manifest was authored — and no
+  # "realistic data" 1,000,000-row/5-column file gets within two orders of
+  # magnitude of 2x that, so tying this field to it would make
+  # `_validate_large_profile` un-satisfiable for any file worth calling
+  # "realistic"). Instead this follows tests/fixtures/corpus.yaml's OWN
+  # already-established, already-validated precedent for this exact field
+  # (its "tabular, large profile" fixture: an 11,000,000-row file sized
+  # 293,000,000 bytes against `rlimit_as_bytes: 134217728`, a deliberately
+  # small address-space ceiling a STREAMING reader survives and a BUFFERING
+  # one would not) — a small, meaningful bounded-memory ceiling this file
+  # comfortably clears twice over, not a copy of the pod's own resource
+  # request/limit. `approx_bytes` is the real measured size of this exact
+  # manifest, generated once via `python -m tools.corpus generate
+  # --manifest tests/fixtures/slice-corpus.yaml --out <dir>` (never guessed
+  # -- see tools/corpus/manifest.py's `_validate_large_profile`).
+  - name: "customers_large.csv"
+    covers: [LOAD-01, LOAD-05, QUAL-06]
+    generator: tabular
+    encoding: utf-8
+    bom: false
+    delimiter: ","
+    quotechar: '"'
+    line_terminator: "\n"
+    header: [customer_id, name, country, birth_date, event_ts]
+    rows: 1000000
+    profile: large
+    row_spec:
+      customer_id: { kind: zero_padded_int, width: 6, start: 1 }
+      name:
+        kind: pick
+        values:
+          - "Anna Kowalski"
+          - "Piotr Nowak"
+          - "Maria Wisniewska"
+          - "Jan Wojcik"
+          - "Emily Johnson"
+          - "James Smith"
+          - "Sophie Muller"
+          - "Lukas Schmidt"
+          - "Chiara Rossi"
+          - "Marco Bianchi"
+          - "Fatima Al-Sayed"
+          - "Ahmed Hassan"
+          - "Yuki Tanaka"
+          - "Haruto Sato"
+          - "Wei Zhang"
+          - "Li Chen"
+          - "Olga Ivanova"
+          - "Dmitri Petrov"
+          - "Lucas Silva"
+          - "Ana Santos"
+          - "Erik Andersson"
+          - "Freja Nielsen"
+          - "Noah Van Dijk"
+          - "Emma Jansen"
+          - "Liam O'Brien"
+          - "Aoife Murphy"
+          - "Carlos Garcia"
+          - "Sofia Fernandez"
+          - "Priya Sharma"
+          - "Raj Patel"
+          - "Grace Kim"
+          - "Minjun Lee"
+          - "Isabella Rodriguez"
+          - "Diego Martinez"
+          - "Amara Okafor"
+      country:
+        kind: pick
+        values:
+          ["PL", "US", "GB", "DE", "FR", "ES", "IT", "NL", "SE", "NO",
+           "DK", "FI", "JP", "CN", "BR", "IN", "CA", "AU"]
+      birth_date:
+        kind: pick
+        values:
+          - "1950-03-14"
+          - "1952-07-22"
+          - "1954-11-05"
+          - "1956-01-30"
+          - "1958-09-18"
+          - "1960-04-02"
+          - "1962-12-25"
+          - "1964-06-11"
+          - "1966-08-29"
+          - "1968-02-17"
+          - "1970-05-06"
+          - "1972-10-23"
+          - "1974-03-19"
+          - "1976-07-08"
+          - "1978-01-14"
+          - "1980-11-27"
+          - "1982-04-30"
+          - "1984-09-03"
+          - "1986-06-16"
+          - "1988-12-01"
+          - "1990-02-24"
+          - "1992-08-09"
+          - "1994-05-21"
+          - "1996-10-13"
+          - "1998-03-27"
+          - "2000-01-01"
+          - "2001-07-19"
+          - "2002-11-11"
+          - "2003-04-05"
+          - "2004-09-23"
+          - "2005-12-30"
+          - "1951-06-06"
+          - "1965-03-03"
+          - "1979-08-08"
+          - "1993-11-20"
+      event_ts:
+        kind: pick
+        values:
+          - "2026-01-05T08:15:00Z"
+          - "2026-01-19T13:42:11Z"
+          - "2026-02-02T05:03:27Z"
+          - "2026-02-16T19:58:44Z"
+          - "2026-03-02T11:21:09Z"
+          - "2026-03-16T22:37:52Z"
+          - "2026-03-30T02:14:33Z"
+          - "2026-04-13T16:49:05Z"
+          - "2026-04-27T09:26:18Z"
+          - "2026-05-11T14:03:41Z"
+          - "2026-05-25T20:47:59Z"
+          - "2026-06-08T07:12:24Z"
+          - "2026-06-22T17:35:06Z"
+          - "2026-07-06T03:58:12Z"
+          - "2026-07-20T12:41:37Z"
+          - "2026-08-03T18:24:53Z"
+          - "2026-01-12T06:09:15Z"
+          - "2026-01-26T21:33:28Z"
+          - "2026-02-09T15:47:02Z"
+          - "2026-02-23T10:11:46Z"
+          - "2026-03-09T23:55:19Z"
+          - "2026-03-23T04:28:37Z"
+          - "2026-04-06T13:16:52Z"
+          - "2026-04-20T08:44:29Z"
+          - "2026-05-04T19:07:14Z"
+          - "2026-05-18T01:52:36Z"
+          - "2026-06-01T12:19:48Z"
+          - "2026-06-15T22:03:57Z"
+          - "2026-06-29T06:31:22Z"
+          - "2026-07-13T15:58:41Z"
+          - "2026-07-27T20:14:05Z"
+          - "2026-08-10T09:37:29Z"
+          - "2026-01-08T17:22:14Z"
+          - "2026-02-28T04:49:33Z"
+          - "2026-05-31T11:06:47Z"
+    expect:
+      detected_encoding: utf-8
+      detected_delimiter: ","
+      header_row_index: 0
+      data_rows: 1000000
+      approx_bytes: 55083701
+      rlimit_as_bytes: 16777216
