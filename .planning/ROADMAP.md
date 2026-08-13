@@ -174,8 +174,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-02-PLAN.md — Metadata schema migrations, testcontainers harness, `make test-integration` (wave 2)
-- [ ] 03-03-PLAN.md — Structured logging (JSON/console, contextvars, redaction) and the SecretsResolver (wave 2)
+- [x] 03-02-PLAN.md — Metadata schema migrations, testcontainers harness, `make test-integration` (wave 2)
+- [x] 03-03-PLAN.md — Structured logging (JSON/console, contextvars, redaction) and the SecretsResolver (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
