@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Repository, Toolchain & CI Skeleton** - Gated repo from day one: uv, ruff, mypy, pytest, gitleaks in GitHub Actions, plus a seed-generated CSV fixture corpus (completed 2026-08-11)
 - [x] **Phase 2: kind Cluster & Core Infrastructure** - A destroyable/recreatable 3-node kind cluster running MinIO, two separate PostgreSQL clusters and Airflow 3.3, all from committed files (completed 2026-08-12)
-- [ ] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster
+- [x] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster (completed 2026-08-13)
 - [ ] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows
 - [ ] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests
 - [ ] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization
@@ -189,7 +189,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 03-08-PLAN.md — csv_processor's minimal Source: record-ordinal CSV chunking (wave 5)
+- [x] 03-08-PLAN.md — csv_processor's minimal Source: record-ordinal CSV chunking (wave 5)
 
 **Research stage**: S3. **Skip `--research-phase`** — pure Python over a fixture corpus; STACK.md has already chosen every library and rejected the alternatives with reasons.
 
