@@ -141,3 +141,14 @@ None - no external service configuration required.
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
+
+## Self-Check: PASSED
+
+- FOUND: `tests/integration/test_discover_files.py`
+- FOUND: `.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/04-06-SUMMARY.md`
+- FOUND: commit `36ca08a` (Task 1: discover_files rerun-safety tests + fix)
+- FOUND: commit `f1300d9` (Task 2: publish atomicity/concurrency/lineage/batch-uniqueness tests)
+- FOUND: commit `e839012` (deferred-items.md cross-reference + findings)
+- FOUND: commit `d691dc7` (SUMMARY.md + REQUIREMENTS.md)
+- Plan-level verification re-run: `uv run --group cluster pytest tests/integration/test_discover_files.py tests/integration/test_publish_merge.py -x -q` → 13 passed
+- Full regression check: `make lint`, `make format`, `make typecheck`, `make imports`, `make test` (126 unit+regression) all pass; `make policy` shows only the two pre-existing, already-documented import-linter output-format failures (confirmed unrelated via `git stash`)
