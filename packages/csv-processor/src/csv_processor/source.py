@@ -25,6 +25,7 @@ import itertools
 from typing import TYPE_CHECKING
 
 from dataplat.models.record import RecordChunk
+from dataplat.observability import metrics
 from dataplat.sources.protocol import RecordStream, Source
 
 if TYPE_CHECKING:
@@ -57,6 +58,16 @@ def _strip_nul(text_stream: TextIOWrapper) -> Iterator[str]:
     ``_csv.Error: line contains NUL`` (cpython #71767) -- this generator is
     the sole place that failure mode is prevented.
 
+    Stripping a NUL byte is a silent content mutation unless observed
+    somewhere (WR-05: the platform's stated Core Value is that "no data is
+    ever silently dropped, duplicated, or corrupted"). Every physical line
+    that actually contained a NUL increments the ``lines_with_nul_stripped``
+    metric once (mirroring the ``rows_rejected``/``rows_kept`` pattern
+    ``dataplat.pipeline.engine.RaggedRowGuard`` already establishes) -- named
+    "lines", not "rows", because this function genuinely operates one
+    physical line at a time, including continuation lines inside an open
+    multiline quoted field, not one parsed CSV record at a time.
+
     Args:
         text_stream: The already-decoded text stream to filter, opened with
             ``newline=""`` by its caller.
@@ -66,7 +77,11 @@ def _strip_nul(text_stream: TextIOWrapper) -> Iterator[str]:
         original line ending preserved untranslated.
     """
     for line in text_stream:
-        yield line.replace("\x00", "")
+        if "\x00" in line:
+            metrics.increment("lines_with_nul_stripped")
+            yield line.replace("\x00", "")
+        else:
+            yield line
 
 
 def chunked_records(text_stream: TextIOWrapper, *, chunk_size: int) -> Iterator[RecordChunk]:

@@ -18,8 +18,11 @@ import itertools
 from typing import TYPE_CHECKING
 
 from csv_processor.source import chunked_records
+from dataplat.observability import metrics
 
 if TYPE_CHECKING:
+    import pytest
+
     from dataplat.models.record import RecordChunk
 
 
@@ -114,3 +117,39 @@ def test_empty_stream_yields_no_chunks_and_does_not_raise() -> None:
     chunks = list(chunked_records(_stream(b""), chunk_size=10))
 
     assert chunks == []
+
+
+# Test 8 (WR-05): stripping a NUL byte is observable, not silent -- exactly
+# one metrics.increment("lines_with_nul_stripped") per physical line that
+# actually contained a NUL, and none for the NUL-free lines in the same file.
+def test_nul_stripping_increments_a_metric_once_per_affected_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def _fake_increment(name: str, value: int = 1, **_labels: str) -> None:
+        calls.append((name, value))
+
+    monkeypatch.setattr(metrics, "increment", _fake_increment)
+
+    list(chunked_records(_stream(_NUL_FIXTURE), chunk_size=10))
+
+    # _NUL_FIXTURE (see fixture above) has exactly one physical line
+    # containing a NUL byte ("1,Al\x00ice"); the header line and "2,Bob" do
+    # not.
+    assert calls == [("lines_with_nul_stripped", 1)]
+
+
+def test_nul_free_stream_never_increments_the_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def _fake_increment(name: str, value: int = 1, **_labels: str) -> None:
+        calls.append((name, value))
+
+    monkeypatch.setattr(metrics, "increment", _fake_increment)
+
+    list(chunked_records(_stream(_LF_FIXTURE), chunk_size=10))
+
+    assert calls == []
