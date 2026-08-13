@@ -155,3 +155,21 @@ def test_run_streaming_increments_metrics_at_least_once_per_chunk(
     list(run_streaming(_make_context(), chunks, [guard]))
 
     assert len(calls) >= len(chunks)
+
+
+# Test 6 (WR-04): the default field_delimiter reproduces the pre-fix "," join
+# exactly, and a caller-supplied field_delimiter is honored instead -- proving
+# the reconstruction is no longer a delimiter hardcoded past the constructor
+# boundary (RaggedRowGuard has no legitimate way to read csv_processor's
+# detected dialect directly: dataplat must never import csv_processor,
+# per setup.cfg's import-linter contract).
+def test_ragged_row_guard_raw_line_uses_the_configured_field_delimiter() -> None:
+    chunk = _chunk([("1", "a")], expected_field_count=3)  # short a field -> ragged
+
+    default_guard = RaggedRowGuard()
+    default_result = default_guard.apply(_make_context(), chunk)
+    assert default_result.rejected[0].raw_line == "1,a"
+
+    pipe_guard = RaggedRowGuard(field_delimiter="|")
+    pipe_result = pipe_guard.apply(_make_context(), chunk)
+    assert pipe_result.rejected[0].raw_line == "1|a"

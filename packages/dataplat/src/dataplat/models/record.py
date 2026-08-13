@@ -69,7 +69,18 @@ class RejectedRecord:
         error_type: A short, stable, machine-readable reason code, e.g.
             ``"RAGGED_ROW"``.
         error_message: A human-readable description of the failure.
-        raw_line: The row's original, unparsed text.
+        raw_line: The row's source text, for audit/reprocessing purposes.
+            Populated by whichever stage created this ``RejectedRecord`` --
+            today that is only ``dataplat.pipeline.engine.RaggedRowGuard``,
+            which reconstructs it by rejoining the row's already-*parsed*
+            fields (quoting/escaping already resolved), not by capturing the
+            true original source bytes (WR-04). That reconstruction is exact
+            only when none of the row's fields contain the join delimiter,
+            an embedded newline, or a quote character -- exactly the cases
+            CSV quoting exists to handle in the first place. Treat this
+            field as a best-effort diagnostic aid, not a guaranteed
+            byte-for-byte copy of the source row, unless/until a future
+            stage threads the true raw physical line through instead.
         error_column: The column the failure is attributed to, when the
             failure is column-specific. ``None`` for row-level failures.
     """

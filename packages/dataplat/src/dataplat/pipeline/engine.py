@@ -44,6 +44,24 @@ class RaggedRowGuard(StreamingStage):
 
     name = "ragged_row_guard"
 
+    def __init__(self, *, field_delimiter: str = ",") -> None:
+        """Configure the delimiter used to reconstruct a rejected row's text.
+
+        Args:
+            field_delimiter: The character ``apply()`` rejoins a rejected
+                row's already-parsed fields with, to populate
+                ``RejectedRecord.raw_line`` (WR-04). Defaults to ``","``,
+                matching this phase's hardcoded comma dialect (D-01). This is
+                a constructor parameter, not a read of
+                ``csv_processor.source.DIALECT``, because ``dataplat`` (this
+                class's package) is source-agnostic and must never import
+                ``csv_processor`` (the CSV-specific plugin) --
+                ``setup.cfg``'s import-linter contract enforces that
+                direction. A future caller that knows the real detected
+                delimiter (Phase 6) passes it in here instead.
+        """
+        self._field_delimiter = field_delimiter
+
     def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:  # noqa: ARG002
         """Split ``chunk`` into rows matching its expected field count and rows that don't.
 
@@ -59,7 +77,11 @@ class RaggedRowGuard(StreamingStage):
         Returns:
             A ``StageResult`` whose ``chunk`` holds only the well-formed
             rows and whose ``rejected`` holds one ``RejectedRecord`` per
-            ragged row.
+            ragged row. Each rejected row's ``raw_line`` is a
+            *reconstruction* (``self._field_delimiter.join(row)`` over
+            already-parsed fields), not necessarily the row's true original
+            source text -- see ``RejectedRecord.raw_line``'s docstring
+            (WR-04).
         """
         kept: list[tuple[str, ...]] = []
         rejected: list[RejectedRecord] = []
@@ -72,7 +94,7 @@ class RaggedRowGuard(StreamingStage):
                         error_message=(
                             f"expected {chunk.expected_field_count} fields, got {len(row)}"
                         ),
-                        raw_line=",".join(row),
+                        raw_line=self._field_delimiter.join(row),
                     )
                 )
                 continue  # never pad or truncate (polars #10585, CONTEXT.md D-01)
