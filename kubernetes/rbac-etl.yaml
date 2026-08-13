@@ -1,0 +1,68 @@
+# The ONLY RBAC grant into namespace `etl`. Invariant this file must always
+# hold: exactly `get/list/watch/create/patch/delete` on `pods`, `get` on
+# `pods/log`, `create/get` on `pods/exec`, `list/watch` on `events` — in
+# namespace `etl` only — bound to exactly two named subjects. Nothing
+# broader: no `cluster-admin`, no wildcard verb, no wildcard resource, no
+# ClusterRole. This is deliberately the SAME verb set the Airflow chart's own
+# generated `airflow-pod-launcher-role`/`-rolebinding` already grants those
+# same two ServiceAccounts inside namespace `airflow` (confirmed live this
+# session: `pods: create,list,get,patch,watch,delete`, `pods/log: get`,
+# `pods/exec: create,get`, `events: list,watch`) — this file grants the
+# identical set, scoped to `etl` instead, so a KubernetesPodOperator pod can
+# be launched into `etl` with no more privilege than the chart already trusts
+# it with inside its own namespace.
+#
+# Two subjects, not one: locally (`executor: KubernetesExecutor`), the
+# KPO-launching Python code runs inside the ephemeral per-task-instance
+# worker pod, whose pod_template_file sets `serviceAccountName:
+# "airflow-worker"`; in CI (`executor: LocalExecutor`), task code runs
+# in-process inside the scheduler pod itself, under `airflow-scheduler`. Both
+# must be able to create/watch/delete pods in `etl` for the KPO pods this
+# phase's DAGs launch. `airflow-triggerer` is deliberately NOT a subject —
+# it never itself calls `KubernetesPodOperator.execute()`.
+#
+# The `csv-processor` ServiceAccount below (what the KPO pod itself runs as)
+# gets NO Role of its own: this phase's pod never creates further pods, only
+# reads its own Secrets/env via the default `automountServiceAccountToken` +
+# Secret-via-env wiring, which needs no RBAC grant at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csv-processor
+  namespace: etl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etl-pod-launcher-role
+  namespace: etl
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etl-pod-launcher-rolebinding
+  namespace: etl
+subjects:
+  - kind: ServiceAccount
+    name: airflow-worker
+    namespace: airflow
+  - kind: ServiceAccount
+    name: airflow-scheduler
+    namespace: airflow
+roleRef:
+  kind: Role
+  name: etl-pod-launcher-role
+  apiGroup: rbac.authorization.k8s.io

@@ -26,11 +26,15 @@ code" (DoD 7).
   `wait_for_deploy_available` / `wait_for_cnpg_cluster_ready` /
   `wait_for_statefulset_ready`.
 - **`kubectl apply -f <committed path under kubernetes/>`** — the plan's own
-  wording. Today this is exactly one call site,
-  `scripts/stages/20-namespaces.sh`'s own header comment calls it "the ONE
-  permitted `kubectl apply`" naming a committed file: namespaces are owned by
-  `kubernetes/namespaces.yaml` alone, so no two Helm releases ever fight over
-  the same object.
+  wording. `scripts/stages/20-namespaces.sh`'s own header comment calls
+  itself "the ONE permitted `kubectl apply`" naming a committed file:
+  namespaces are owned by `kubernetes/namespaces.yaml` alone, so no two Helm
+  releases ever fight over the same object — true when it was written, and
+  still true of *namespace ownership specifically*. Plan 04-02 adds a second,
+  equally narrow instance for a different owned object:
+  `scripts/stages/75-etl.sh` applies `kubernetes/rbac-etl.yaml` the same way,
+  for the same reason (RBAC objects owned by one committed manifest, not a
+  Helm release).
 - **`kubectl apply -f -` (stdin)** — a DELIBERATE WIDENING of the plan's
   literal "committed path" wording, recorded here rather than silently
   applied. D-14 requires MinIO's and Airflow's derived credentials to be
@@ -45,10 +49,27 @@ code" (DoD 7).
   imperative surgery, and treating it as a violation would fail this test
   against the very scripts the plan cites in its own read_first list. Every
   OTHER `-f` target must still be a committed `kubernetes/` path.
+- **`kubectl exec -i`** (stdin) — a SECOND deliberate widening (plan 04-02),
+  for a mutation with no Kubernetes-object shape to express as "apply a
+  manifest" at all: `scripts/etl-secrets.sh` sets `etl_app`'s PostgreSQL
+  password by piping `ALTER ROLE ... WITH PASSWORD '...'` on stdin into a
+  `psql` session opened via `kubectl exec -i` against the CNPG analytical
+  primary pod, authenticating under PostgreSQL's own peer/local trust (the
+  pod's local socket, not a network connection). There is no committed
+  manifest that could express "set this role's password", and no path from
+  the host reaches the analytical cluster's network listener without itself
+  requiring a `kubectl port-forward` — equally outside the permitted set, and
+  no improvement on the argv-safety this rule exists to protect (T-02-23/
+  T-04-09: a credential in argv is visible in `ps`/`/proc/<pid>/cmdline`).
+  Requiring the literal `-i` token is the enforcement mechanism, exactly
+  parallel to requiring `-f -` above: it is what proves the payload travels
+  by stdin, never as a `psql -c '...'` argument. A bare `kubectl exec` (no
+  `-i`) is still reported — it cannot prove its payload avoided argv.
 
-Everything else — `create`, `edit`, `patch`, `delete`, `replace`, `exec`,
-`cp`, `label`, `annotate`, `set`, `scale`, `rollout`, `cordon`, `drain`,
-`taint`, or `apply` against anything but the two forms above — is reported.
+Everything else — `create`, `edit`, `patch`, `delete`, `replace`, `exec`
+(without `-i`), `cp`, `label`, `annotate`, `set`, `scale`, `rollout`,
+`cordon`, `drain`, `taint`, `port-forward`, or `apply` against anything but
+the two `apply` forms above — is reported.
 
 ## How the scan finds a real invocation without a full shell parser
 
@@ -142,14 +163,17 @@ def _raw_tokens(text: str) -> list[str]:
     return tokens
 
 
-def kubectl_invocation(line: str) -> tuple[str, str | None] | None:
-    """Return (subcommand, apply_target) for the first kubectl-ish call on `line`.
+def kubectl_invocation(line: str) -> tuple[str, str | None, bool] | None:
+    """Return (subcommand, apply_target, has_dash_i) for the first kubectl-ish call on `line`.
 
     `apply_target` is the raw text following `-f` when the subcommand is
-    `apply`, else None. Returns None when `line` contains no determinable
-    invocation — either because there is none, or because the match is a
-    wrapper-function DEFINITION (its own subcommand is `"$@"`, forwarded from
-    whoever calls it, not a literal word on this line).
+    `apply`, else None. `has_dash_i` is True when a bare `-i` token appears
+    anywhere after the subcommand — the stdin-transport marker `kubectl exec
+    -i` needs (see the module docstring's second widening and
+    `_PERMITTED` handling in `surgery_problems`). Returns None when `line`
+    contains no determinable invocation — either because there is none, or
+    because the match is a wrapper-function DEFINITION (its own subcommand is
+    `"$@"`, forwarded from whoever calls it, not a literal word on this line).
     """
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
@@ -180,7 +204,9 @@ def kubectl_invocation(line: str) -> tuple[str, str | None] | None:
                 apply_target = tokens[i + 1]
                 break
 
-    return subcommand, apply_target
+    has_dash_i = "-i" in tokens[index + 1 :]
+
+    return subcommand, apply_target, has_dash_i
 
 
 def _is_permitted_apply(apply_target: str | None) -> bool:
@@ -198,7 +224,7 @@ def surgery_problems(text: str, label: str) -> list[str]:
         result = kubectl_invocation(line)
         if result is None:
             continue
-        subcommand, apply_target = result
+        subcommand, apply_target, has_dash_i = result
         if subcommand in _PERMITTED_READ_ONLY_SUBCOMMANDS:
             continue
         if subcommand == "apply":
@@ -209,10 +235,19 @@ def surgery_problems(text: str, label: str) -> list[str]:
                 "committed path under kubernetes/, and not stdin ('-')",
             )
             continue
+        if subcommand == "exec":
+            if has_dash_i:
+                continue
+            problems.append(
+                f"{label}:{lineno}: kubectl exec without -i — a value-bearing "
+                "command must move its payload via stdin, never argv "
+                "(T-02-23/T-04-09); see module docstring's kubectl-exec-stdin exception",
+            )
+            continue
         problems.append(
             f"{label}:{lineno}: kubectl {subcommand} — imperative cluster "
             "mutation outside the permitted set (get, wait, apply -f "
-            "<kubernetes/...|->)",
+            "<kubernetes/...|->, exec -i)",
         )
     return problems
 
@@ -266,9 +301,21 @@ def test_an_imperative_mutation_is_reported() -> None:
         "kubectl create secret generic foo",
         "kubectl label node foo bar=baz",
         "_kubectl apply -f /tmp/not-committed.yaml",
+        "kubectl port-forward svc/analytics-db-rw 5432:5432",
+        # exec WITHOUT -i cannot prove its payload avoided argv (e.g. a
+        # `psql -c '...'` argument would leak into `ps`) — still forbidden.
+        "_kubectl exec -n data analytics-db-1 -- psql -U postgres -c 'select 1'",
     ):
         problems = surgery_problems(injected, "scratch")
         assert problems, f"an imperative `{injected}` was not reported"
+
+
+def test_stdin_exec_is_not_reported() -> None:
+    """The deliberate 04-02 widening (module docstring): kubectl exec -i, stdin only."""
+    text = "_kubectl exec -i -n data analytics-db-1 -- psql -U postgres -d analytics\n"
+    assert not surgery_problems(text, "scratch"), (
+        "kubectl exec -i (stdin) — the 04-02 password-derivation pattern — was reported"
+    )
 
 
 def test_a_comment_explaining_the_rule_is_not_reported() -> None:
