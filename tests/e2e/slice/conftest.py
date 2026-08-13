@@ -124,6 +124,46 @@ def slice_fixtures_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return out_dir
 
 
+_SMOKE_DAG_ID = "smoke_kubernetes_pod"
+_CUSTOMERS_DAG_ID = "csv_ingest_customers"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _unpause_slice_dags(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],  # noqa: F811 -- fixture-injection param name
+) -> None:
+    """Unpause both this phase's DAGs once per session — a paused DAG never runs.
+
+    Discovered live: `test_smoke_dag_xcom_contains_built_sha` already
+    unpauses `smoke_kubernetes_pod` itself before triggering it explicitly
+    (idempotent, so this overlaps harmlessly, not a conflict) — but nothing
+    anywhere in this suite unpaused `csv_ingest_customers`, which every test
+    that uploads a file and polls for discovery
+    (`test_idempotent_reupload`, both `test_pod_kill_retry` tests,
+    `test_concurrent_select_never_observes_partial_publish`) depends on
+    actually running on its own schedule/sensor. A paused DAG's scheduler
+    simply never starts a run for it — there is no error, no timeout
+    shortcut, just silence — so every one of those tests would poll
+    `meta.files` until its own deadline and fail with a misleading
+    "discovery never registered it" message that looks like a pipeline bug.
+    Session-scoped and autouse so every test in this suite gets a running
+    DAG regardless of which file pytest happens to collect first.
+    """
+    for dag_id in (_SMOKE_DAG_ID, _CUSTOMERS_DAG_ID):
+        result = kubectl(
+            "-n",
+            "airflow",
+            "exec",
+            "deploy/airflow-api-server",
+            "--",
+            "airflow",
+            "dags",
+            "unpause",
+            dag_id,
+        )
+        assert result.returncode == 0, f"airflow dags unpause {dag_id} failed:\n{result.stderr}"
+
+
 def large_csv_with_offset_customer_ids(base_bytes: bytes, *, offset: int) -> bytes:
     """Return `base_bytes` with every row's `customer_id` shifted by `offset`.
 
