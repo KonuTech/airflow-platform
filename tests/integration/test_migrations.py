@@ -9,12 +9,19 @@ than `SELECT, INSERT, UPDATE`, or an accidental foreign key on
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psycopg
+from alembic import command
+from alembic.config import Config
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ALEMBIC_INI = REPO_ROOT / "migrations" / "alembic.ini"
 
 # The complete slice: five slice tables, meta.batch_files, normalized.customers
 # (D-05). alembic_version is Alembic's own bookkeeping table, deliberately
@@ -126,3 +133,81 @@ def test_ingestion_runs_schema_version_id_has_no_fk(migrated_dsn: str) -> None:
             """,
         ).fetchall()
     assert rows == [], f"schema_version_id must carry no FK constraint, found: {rows}"
+
+
+def _customers_customer_id_constraint_types(dsn: str) -> tuple[str, ...]:
+    """Return every `table_constraints.constraint_type` covering `customer_id` alone.
+
+    A plain index is not a constraint at all, so this returns an empty tuple
+    for it -- distinct from a real `UNIQUE` constraint, which always shows up
+    here (`information_schema.table_constraints` joined through
+    `key_column_usage`).
+    """
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            """
+            SELECT tc.constraint_type
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+               AND tc.table_schema = kcu.table_schema
+             WHERE tc.table_schema = 'normalized'
+               AND tc.table_name = 'customers'
+               AND kcu.column_name = 'customer_id'
+            """,
+        ).fetchall()
+    return tuple(row[0] for row in rows)
+
+
+def _index_exists(dsn: str, *, schema: str, index_name: str) -> bool:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = %s AND indexname = %s",
+            (schema, index_name),
+        ).fetchone()
+    return row is not None
+
+
+def test_0006_customer_id_has_a_real_unique_constraint(migrated_dsn: str) -> None:
+    """LOAD-09's `ON CONFLICT (customer_id)` needs a real conflict target, not merely an index."""
+    assert _customers_customer_id_constraint_types(migrated_dsn) == ("UNIQUE",)
+    assert not _index_exists(
+        migrated_dsn,
+        schema="normalized",
+        index_name="ix_customers_customer_id",
+    )
+
+
+def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_constraint(
+    migrated_dsn: str,
+) -> None:
+    """`alembic downgrade -1` cleanly reverses 0006; re-`upgrade head` restores it.
+
+    `migrated_dsn` is session-scoped and shared by every other module in
+    `tests/integration/`, so this test restores it to `head` in a `finally`
+    block regardless of which assertion (if any) fails.
+    """
+    alembic_config = Config(str(ALEMBIC_INI))
+    previous = os.environ.get("ALEMBIC_DSN")
+    os.environ["ALEMBIC_DSN"] = migrated_dsn
+    try:
+        command.downgrade(alembic_config, "-1")
+        assert _customers_customer_id_constraint_types(migrated_dsn) == ()
+        assert _index_exists(
+            migrated_dsn,
+            schema="normalized",
+            index_name="ix_customers_customer_id",
+        )
+    finally:
+        command.upgrade(alembic_config, "head")
+        if previous is None:
+            os.environ.pop("ALEMBIC_DSN", None)
+        else:
+            os.environ["ALEMBIC_DSN"] = previous
+
+    assert _customers_customer_id_constraint_types(migrated_dsn) == ("UNIQUE",)
+    assert not _index_exists(
+        migrated_dsn,
+        schema="normalized",
+        index_name="ix_customers_customer_id",
+    )

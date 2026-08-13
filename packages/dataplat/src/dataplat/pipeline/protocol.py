@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from dataplat.metadata.repository import MetadataRepository
     from dataplat.models.identity import RunContext
     from dataplat.models.record import RecordChunk, StageResult
+    from dataplat.sources.protocol import Source
     from dataplat.storage.objectstore import ObjectStore
 
 
@@ -53,6 +54,10 @@ class PipelineContext:
         db: The connection pool staging and publication code executes
             against.
         log: The structlog logger bound with this run's context.
+        source: This run's opened ``Source``, once one has been resolved.
+            Defaults to ``None`` and is appended after ``log`` (never
+            inserted earlier) specifically so no existing
+            ``PipelineContext(...)`` construction breaks.
     """
 
     run: RunContext
@@ -61,6 +66,13 @@ class PipelineContext:
     objects: ObjectStore
     db: ConnectionPool
     log: FilteringBoundLogger
+    # TYPE_CHECKING-only mutual reference with `sources/protocol.py` (which
+    # already TYPE_CHECKING-imports `PipelineContext` from this module): this
+    # is safe -- neither import executes at runtime, both are guarded by
+    # `from __future__ import annotations` + `if TYPE_CHECKING:`, so there is
+    # no real circular import, only two forward-reference type names each
+    # module resolves lazily.
+    source: Source | None = None
 
 
 class StreamingStage(Protocol):

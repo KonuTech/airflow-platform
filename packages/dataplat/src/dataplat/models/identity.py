@@ -88,6 +88,16 @@ class RunContext:
             is active.
         span_id: OTel span id for cross-process correlation, when tracing is
             active.
+        file_id: The single file this run processes, when applicable.
+            Populated by the ``ingest`` CLI (plan 04-05) from the
+            ``AssignmentDocument`` it parses (``file.file_id``), and consumed
+            as ``ctx.run.file_id`` by ``StagingLoader.load()`` (plan 04-04)
+            and by the ``finalize_publication()`` call inside ``run_ingest``
+            (plan 04-05) — neither assumes nor re-derives it independently.
+            Defaults to ``None``.
+        batch_id: The batch this run processes, when applicable. Populated
+            and consumed the same way as ``file_id``, from
+            ``AssignmentDocument.batch.batch_id``. Defaults to ``None``.
     """
 
     run_id: int
@@ -98,3 +108,5 @@ class RunContext:
     task_id: str | None = None
     trace_id: str | None = None
     span_id: str | None = None
+    file_id: int | None = None
+    batch_id: int | None = None
