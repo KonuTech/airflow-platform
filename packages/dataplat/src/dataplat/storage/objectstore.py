@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from dataplat.errors import StorageError
 
@@ -123,13 +123,19 @@ class S3ObjectStore(ObjectStore):
 
         Raises:
             StorageError: ``bucket``/``key`` do not resolve to an existing
-                object, or any other ``botocore.exceptions.ClientError``
-                occurs. The raw boto3/botocore exception type never
-                escapes this method.
+                object, any other ``botocore.exceptions.ClientError`` (an
+                S3-service-level error) occurs, or a
+                ``botocore.exceptions.BotoCoreError`` (a connectivity
+                failure -- endpoint unreachable, DNS failure, connect/read
+                timeout -- raised when MinIO/S3 itself cannot be reached at
+                all) occurs. ``ClientError`` and ``BotoCoreError`` are
+                disjoint exception hierarchies (WR-01: neither is a subclass
+                of the other), so both are caught explicitly. The raw
+                boto3/botocore exception type never escapes this method.
         """
         try:
             response = self._client.get_object(Bucket=bucket, Key=key)
-        except ClientError as exc:
+        except (ClientError, BotoCoreError) as exc:
             msg = "failed to get object from object storage"
             raise StorageError(msg, context={"bucket": bucket, "key": key}) from exc
         return open_text_stream(response["Body"], encoding="utf-8")
