@@ -639,22 +639,25 @@ def resolve_window(dag_run=None) -> dict[str, str | None]:
 
 **If this table is empty:** N/A — see rows above. All other claims in this document were verified against either the live repository, the live cluster, or an official documentation source fetched this session.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **How does `csv_ingest_customers` get a new DagRun after each cycle completes?**
    - What we know: D-01/D-02/D-03/D-04 lock the sensor's own behavior (deferrable, 30s poke, `max_active_runs=1`, one run processes all currently-visible new files) but say nothing about the DAG's own `schedule=` value — the mechanism that determines whether a *second* DagRun ever starts after the first one finishes.
    - What's unclear: whether a short, real `schedule` (e.g. every 1–5 minutes) is intended, versus a self-triggering pattern, versus something else.
    - Recommendation: use a real, short `schedule` (this document's Assumption A2) — it is the standard, idiomatic Airflow shape for "keep creating opportunities to sense," composes cleanly with `max_active_runs=1`, and needs no extra machinery. Treat the exact interval value as an implementation detail for the plan to fix (not phase-blocking).
+   - **RESOLVED:** 04-07-PLAN.md fixes the value -- `schedule="*/1 * * * *"` (every 1 minute), with the rationale (a short, real interval so a new sensing opportunity exists almost immediately after the previous run completes, since `max_active_runs=1` otherwise leaves dead time) recorded as an inline comment in the DAG file itself, not left silent.
 
 2. **What does "supports backfill" (ORCH-04) mean for a sensor-first DAG?**
    - What we know: ORCH-04 is a locked Phase 4 requirement; ARCHITECTURE.md/PITFALLS.md's backfill discussion (B7) is written primarily about downstream, window-based DAGs, not a file-arrival sensor.
    - What's unclear: whether "backfill" for `csv_ingest_customers` should mean anything beyond "the mechanical `airflow dags backfill` CLI command does not crash" — a backfilled run of a sensor-first DAG has no historical window to speak of; it would just re-poke the *current* state of `s3://raw/customers/*.csv`.
    - Recommendation: treat this as a degenerate but harmless case (idempotent by the same run-claim protocol as any other run) and document that decision explicitly in the plan rather than silently deciding it; meaningful historical-window backfill semantics belong to future batch-oriented DAGs, not this one.
+   - **RESOLVED:** 04-07-PLAN.md's `csv_ingest_customers.py` module docstring states this explicitly: `airflow dags backfill` against this sensor-first DAG is a degenerate-but-harmless case with no historical window -- a backfilled run re-invokes the same `wait_for_files` -> `discover` -> `ingest` chain against the CURRENT state of `s3://raw/customers/*.csv`, made safe by the same run-claim idempotency protocol (04-01/04-05) every other run relies on, not by DAG-specific backfill logic.
 
 3. **Exact NULL-handling for the `event_ts >= t.event_ts` publication guard.**
    - What we know: `normalized.customers.event_ts` is nullable; SQL comparisons against `NULL` evaluate to `NULL`, which `WHERE` treats as false, meaning a row with `NULL` `event_ts` would never update an existing row under the guard as written in Pattern 1.
    - What's unclear: whether this edge case is even reachable given the phase's synthetic, no-edge-case fixture scope (D-05's Faker-style data will very likely always populate `event_ts`).
    - Recommendation: leave the guard as written (NULL-safe via `IS DISTINCT FROM` elsewhere, plain comparison here is acceptable) unless a fixture actually exercises a NULL `event_ts`; if one does, decide explicitly (e.g. `COALESCE(EXCLUDED.event_ts, 'infinity') >= COALESCE(t.event_ts, '-infinity')`) rather than leaving it as an accidental default.
+   - **RESOLVED:** not reachable in this phase's test surface -- 04-08-PLAN.md's `slice-corpus.yaml` fixture (`event_ts: {kind: pick, values: [...]}`) always populates `event_ts` from a fixed, non-empty value list, so the NULL-`event_ts` edge case this question raised is never exercised; the guard is left as written per the original recommendation, and revisiting it is deferred until a fixture actually needs a NULL `event_ts`.
 
 ## Environment Availability
 
