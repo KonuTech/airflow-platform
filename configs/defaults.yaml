@@ -1,0 +1,16 @@
+# configs/defaults.yaml — COMMITTED. Platform-wide defaults merged UNDER every
+# dataset config (ARCHITECTURE.md Q4.4, lines 592-594).
+#
+# dataplat.config.loader.load_config() shallow-merges configs/datasets/<name>.yaml
+# OVER this file before validating the result against dataplat.config.model.
+# DatasetConfig — dataset keys win on any collision. Any key this file omits
+# must be supplied by the dataset config itself, or validation fails
+# (DatasetConfig requires it and extra="forbid" rejects anything unrecognized).
+#
+# Changing a value here changes the resolved config — and therefore the
+# config_hash — of every dataset that inherits it (ARCHITECTURE.md Q5.2). That
+# is intentional: a platform-default change is a genuine processing-behavior
+# change for every dataset it touches, and must be tracked as a new
+# meta.config_versions row for each one.
+
+config_schema_version: 1

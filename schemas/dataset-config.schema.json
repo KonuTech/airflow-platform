@@ -1,0 +1,116 @@
+{
+  "$comment": "GENERATED from dataplat.config.model.DatasetConfig.model_json_schema(). Regenerate after any model change (json.dumps(DatasetConfig.model_json_schema(), indent=2)); never hand-edit.",
+  "$defs": {
+    "DeduplicationConfig": {
+      "additionalProperties": false,
+      "description": "How a dataset's deduplication stage collapses duplicate records.\n\nAttributes:\n    strategy: Deduplication strategy key resolved through\n        ``DEDUP_REGISTRY``, e.g. ``\"business_key_latest\"``.\n    keys: Business-key column names that identify one logical record.\n    order_by: Column expressions (e.g. ``\"event_ts desc\"``) that decide\n        which duplicate wins.",
+      "properties": {
+        "strategy": {
+          "title": "Strategy",
+          "type": "string"
+        },
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Keys",
+          "type": "array"
+        },
+        "order_by": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Order By",
+          "type": "array"
+        }
+      },
+      "required": [
+        "strategy",
+        "keys",
+        "order_by"
+      ],
+      "title": "DeduplicationConfig",
+      "type": "object"
+    },
+    "LoadConfig": {
+      "additionalProperties": false,
+      "description": "How a dataset's records are published to their target table.\n\nAttributes:\n    strategy: Publisher strategy key resolved through\n        ``PUBLISHER_REGISTRY``, e.g. ``\"merge\"``.\n    target: Fully-qualified target table, e.g.\n        ``\"normalized.customers\"``.",
+      "properties": {
+        "strategy": {
+          "title": "Strategy",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy",
+        "target"
+      ],
+      "title": "LoadConfig",
+      "type": "object"
+    },
+    "SourceConfig": {
+      "additionalProperties": false,
+      "description": "Where a dataset's source files live and how change is signaled.\n\nAttributes:\n    type: Source engine key resolved through ``SOURCE_REGISTRY``, e.g.\n        ``\"csv\"``. A string, never an enum \u2014 see the module docstring.\n    bucket: Object-store bucket the source files arrive in.\n    path: Prefix within ``bucket`` the source discovers files under.\n    change_semantics: How the source signals change, e.g.\n        ``\"snapshot\"`` or ``\"cdc\"``.",
+      "properties": {
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "change_semantics": {
+          "title": "Change Semantics",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "bucket",
+        "path",
+        "change_semantics"
+      ],
+      "title": "SourceConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The complete, validated configuration for one dataset.\n\nEvery ``configs/datasets/<name>.yaml``, merged over\n``configs/defaults.yaml``, must validate against this model with zero\nerrors (``dataplat.config.loader.load_config``). ``extra=\"forbid\"``\nrejects an unknown top-level key at validation time; ``frozen=True``\nrejects any post-construction mutation.\n\nAttributes:\n    dataset: The dataset's unique name, matching ``meta.datasets.dataset_name``.\n    config_schema_version: Version of this model's *shape* \u2014 lets\n        ``loader.py`` migrate an older document into a newer model when\n        replaying a historical run (ARCHITECTURE.md Q5.2).\n    source: Where and how source files arrive.\n    deduplication: How duplicate records are collapsed.\n    load: How records are published to their target table.",
+  "properties": {
+    "dataset": {
+      "title": "Dataset",
+      "type": "string"
+    },
+    "config_schema_version": {
+      "title": "Config Schema Version",
+      "type": "integer"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceConfig"
+    },
+    "deduplication": {
+      "$ref": "#/$defs/DeduplicationConfig"
+    },
+    "load": {
+      "$ref": "#/$defs/LoadConfig"
+    }
+  },
+  "required": [
+    "dataset",
+    "config_schema_version",
+    "source",
+    "deduplication",
+    "load"
+  ],
+  "title": "DatasetConfig",
+  "type": "object"
+}

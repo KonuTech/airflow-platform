@@ -1,0 +1,27 @@
+# configs/datasets/customers.yaml — COMMITTED. The first real, non-illustrative
+# dataset config in this repository (CONTEXT.md D-02).
+#
+# Merged OVER configs/defaults.yaml, then validated against
+# dataplat.config.model.DatasetConfig (dataplat.config.loader.load_config).
+# dataplat.config.registry.ConfigRegistry.sync() hashes the merged, validated
+# document (dataplat.config.hashing.hash_config) and versions it into
+# meta.config_versions the moment it syncs.
+#
+# Shape follows ARCHITECTURE.md's worked `transactions.yaml` example (Q4.4,
+# lines 526-541), adapted to normalized.customers's columns (CONTEXT.md D-02:
+# customer_id, name, country, birth_date, event_ts).
+
+dataset: customers
+config_schema_version: 1
+source:
+  type: csv
+  bucket: raw
+  path: customers/
+  change_semantics: snapshot
+deduplication:
+  strategy: business_key_latest
+  keys: [customer_id]
+  order_by: [event_ts desc]
+load:
+  strategy: merge
+  target: normalized.customers
