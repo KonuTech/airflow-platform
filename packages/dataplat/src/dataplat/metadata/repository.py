@@ -110,7 +110,17 @@ class MetadataRepository(Protocol):
     def create_batch(self, *, dataset_id: int, batch_key: str, status: str) -> int:
         """Insert one row into `meta.batches`.
 
-        Maps to ``meta.batches(dataset_id, batch_key, status)``.
+        Maps to ``meta.batches(dataset_id, batch_key, status)`` via a plain
+        ``INSERT ... RETURNING`` -- deliberately NOT idempotent. A second
+        call with the identical `(dataset_id, batch_key)` raises
+        `psycopg.errors.UniqueViolation` against `uq_batches_dataset_batch_key`
+        (migration 0003): this is how LOAD-08's uniqueness guarantee is
+        proven to be database-enforced rather than decorative. Callers that
+        may legitimately re-observe an already-known `(dataset_id,
+        batch_key)` -- e.g. `dataplat.discovery.discover_files` on a rerun
+        over an unchanged object set -- must use `get_or_create_batch`
+        below instead. These are two different SQL statements doing two
+        different jobs and must never be conflated.
 
         Args:
             dataset_id: The owning dataset's `meta.datasets.dataset_id`.
@@ -123,10 +133,46 @@ class MetadataRepository(Protocol):
         """
         ...
 
-    def link_batch_file(self, *, batch_id: int, file_id: int, sequence_no: int) -> None:
-        """Insert one row into `meta.batch_files`, linking a file into a batch.
+    def get_or_create_batch(self, *, dataset_id: int, batch_key: str, status: str) -> int:
+        """Idempotently insert (or resolve) one row in `meta.batches`.
 
-        Maps to ``meta.batch_files(batch_id, file_id, sequence_no)``.
+        Maps to ``INSERT INTO meta.batches (...) VALUES (..., status)
+        ON CONFLICT (dataset_id, batch_key) DO UPDATE SET batch_key =
+        EXCLUDED.batch_key RETURNING batch_id`` -- the `get_or_create_dataset`
+        idiom, not `create_batch`'s raising one. `status` is deliberately
+        excluded from the conflict `SET` clause: a rediscovery of a file
+        whose batch has already progressed past `OPEN` (e.g. to
+        `PUBLISHED` via `finalize_publication`) must never be silently
+        reset back to `status`'s caller-supplied value.
+
+        Calling this twice with the identical `(dataset_id, batch_key)`
+        returns the SAME `batch_id` both times and leaves exactly one row
+        in `meta.batches` -- this is what makes
+        `dataplat.discovery.discover_files` safe to call twice over an
+        unchanged object set (ORCH-08), which `create_batch` alone is not.
+
+        Args:
+            dataset_id: The owning dataset's `meta.datasets.dataset_id`.
+            batch_key: The batch's natural key, e.g.
+                `<dataset>:<business_date>:<seq>`.
+            status: The batch's status, used only when this call performs
+                the FIRST insert for `(dataset_id, batch_key)`.
+
+        Returns:
+            The row's `batch_id`, whether newly inserted or already present.
+        """
+        ...
+
+    def link_batch_file(self, *, batch_id: int, file_id: int, sequence_no: int) -> None:
+        """Idempotently insert one row into `meta.batch_files`, linking a file into a batch.
+
+        Maps to ``INSERT INTO meta.batch_files (...) VALUES (...)
+        ON CONFLICT (batch_id, file_id) DO NOTHING`` -- calling this twice
+        with the identical `(batch_id, file_id)` (the table's composite
+        primary key, migration 0003) is a no-op the second time, which is
+        what a discovery rerun over an unchanged object set requires
+        (ORCH-08): `sequence_no` never changes for a given `(batch_id,
+        file_id)` pair under this phase's one-file-one-batch simplification.
 
         Args:
             batch_id: The batch's `meta.batches.batch_id`.

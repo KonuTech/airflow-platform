@@ -115,6 +115,7 @@ class _FakeMetadataRepository:
 
     files_by_uri: dict[str, _FakeFileRow] = field(default_factory=dict)
     runs_by_key: dict[str, _FakeRunRow] = field(default_factory=dict)
+    batches_by_key: dict[tuple[int, str], int] = field(default_factory=dict)
     _next_file_id: int = 1
     _next_batch_id: int = 1
     _next_run_id: int = 1
@@ -152,10 +153,14 @@ class _FakeMetadataRepository:
         )
         return file_id
 
-    def create_batch(self, *, dataset_id: int, batch_key: str, status: str) -> int:
-        del dataset_id, batch_key, status
+    def get_or_create_batch(self, *, dataset_id: int, batch_key: str, status: str) -> int:
+        del status
+        existing = self.batches_by_key.get((dataset_id, batch_key))
+        if existing is not None:
+            return existing
         batch_id = self._next_batch_id
         self._next_batch_id += 1
+        self.batches_by_key[(dataset_id, batch_key)] = batch_id
         return batch_id
 
     def link_batch_file(self, *, batch_id: int, file_id: int, sequence_no: int) -> None:
