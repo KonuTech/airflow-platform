@@ -141,3 +141,31 @@ None - no external service configuration required.
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
+
+## Self-Check: PASSED
+
+**Files verified to exist:**
+- FOUND: `packages/dataplat/src/dataplat/load/staging.py`
+- FOUND: `packages/dataplat/src/dataplat/load/publish/merge.py`
+- FOUND: `packages/dataplat/src/dataplat/load/publish/registry.py`
+- FOUND: `migrations/versions/0007_staging_schema.py`
+- FOUND: `tests/integration/test_staging_loader.py`
+- FOUND: `tests/integration/test_publish_merge.py`
+- FOUND: `tests/unit/test_publisher_registry.py`
+- FOUND: `tests/integration/test_migrations.py`
+
+**Commits verified to exist in git log:**
+- FOUND: `f6b032a` (Task 1: StagingLoader)
+- FOUND: `d789c83` (Task 2: MergePublisher and PUBLISHER_REGISTRY)
+- FOUND: `464eb3e` (docs: complete plan)
+
+**Verification commands re-run and confirmed passing:**
+- `uv run --group cluster pytest tests/integration/test_staging_loader.py tests/integration/test_publish_merge.py -x -q` → 11 passed
+- `mypy packages/dataplat/src` → Success, no issues found in 36 source files
+- `grep -n "MERGE INTO\|WHEN MATCHED\|WHEN NOT MATCHED" packages/dataplat/src/dataplat/load/publish/merge.py` → zero matches
+- `grep -c "MERGE INTO" packages/dataplat/src/dataplat/load/publish/merge.py | grep -qx 0` → pass
+- Full `tests/integration/` suite → 42 passed (no regressions from migration 0007)
+- `tests/unit` + `tests/regression` → 114 passed
+- `ruff check .` (whole repo) → all checks passed
+- `ruff format --check .` → 113 files already formatted
+- `lint-imports` → Contract 1 (`dataplat` must not depend on `csv_processor`) KEPT
