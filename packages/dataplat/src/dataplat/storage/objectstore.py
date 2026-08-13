@@ -16,6 +16,7 @@ without notice.
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import boto3
@@ -25,6 +26,9 @@ from botocore.exceptions import BotoCoreError, ClientError
 from dataplat.errors import StorageError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from datetime import datetime
+
     from mypy_boto3_s3 import S3Client
 
 
@@ -63,12 +67,42 @@ def open_text_stream(
     return io.TextIOWrapper(buffered, encoding=encoding, newline=newline, errors=errors)
 
 
-class ObjectStore(Protocol):
-    """The object-store read surface ``dataplat`` code depends on.
+@dataclass(frozen=True, slots=True)
+class ObjectSummary:
+    """One object's identity/size, as returned by ``ObjectStore.list_objects``.
 
-    One method today: this phase proves only the StreamingBody-to-text-
-    stream bridge (03-RESEARCH.md finding 1). Write paths and additional
-    operations belong to whichever later phase first needs them.
+    Deliberately minimal (STACK.md's boto3 guidance): ``key`` is what
+    ``dataplat.discovery`` needs to construct an ``object_uri``, and
+    ``size_bytes`` is what it needs for ``meta.files.size_bytes``. ``etag``
+    is carried for observability only -- it must never be trusted as
+    ``content_sha256``: MinIO's ETag is an MD5 of implementation-dependent
+    multipart chunking, not this platform's content hash. Content hashing is
+    always done separately, via ``get_object()`` plus a streaming sha256
+    over the actual bytes.
+
+    Attributes:
+        key: The object's key within its bucket.
+        etag: The object's S3 ETag, as reported by ``ListObjectsV2`` --
+            observability only, never a content hash (see above).
+        size_bytes: The object's size, in bytes.
+        last_modified: The object's last-modified timestamp, as reported by
+            ``ListObjectsV2``.
+    """
+
+    key: str
+    etag: str
+    size_bytes: int
+    last_modified: datetime
+
+
+class ObjectStore(Protocol):
+    """The object-store read/list/write surface ``dataplat`` code depends on.
+
+    ``get_object`` proves the StreamingBody-to-text-stream bridge
+    (03-RESEARCH.md finding 1, Phase 3). ``list_objects``/``put_object``
+    (Phase 4) are the seam ``dataplat.discovery`` lists newly arrived files
+    through, and a future write path uses -- both cross into the same boto3
+    client ``get_object`` already constructs, never a second one.
     """
 
     def get_object(self, bucket: str, key: str) -> io.TextIOWrapper:
@@ -82,6 +116,30 @@ class ObjectStore(Protocol):
             A UTF-8 text stream over the object's bytes, opened with
             ``newline=""`` so embedded line endings inside quoted fields
             survive unchanged.
+        """
+        ...
+
+    def list_objects(self, bucket: str, prefix: str) -> Iterator[ObjectSummary]:
+        """List every object under ``bucket``/``prefix``, paginated transparently.
+
+        Args:
+            bucket: The bucket to list within.
+            prefix: The key prefix to list under, e.g. ``"customers/"``.
+
+        Returns:
+            An iterator of ``ObjectSummary``, one per object found under
+            ``prefix``, across every page -- never truncated at 1000 keys.
+            Empty (not an exception) when ``prefix`` matches no objects.
+        """
+        ...
+
+    def put_object(self, bucket: str, key: str, body: bytes) -> None:
+        """Write ``body`` to ``bucket``/``key``, overwriting any existing object there.
+
+        Args:
+            bucket: The bucket to write into.
+            key: The object key to write to.
+            body: The object's full contents.
         """
         ...
 
@@ -139,3 +197,59 @@ class S3ObjectStore(ObjectStore):
             msg = "failed to get object from object storage"
             raise StorageError(msg, context={"bucket": bucket, "key": key}) from exc
         return open_text_stream(response["Body"], encoding="utf-8")
+
+    def list_objects(self, bucket: str, prefix: str) -> Iterator[ObjectSummary]:
+        """Fetch every object under ``bucket``/``prefix``, across every ``ListObjectsV2`` page.
+
+        Collects every page eagerly, inside the same try/except shape
+        ``get_object`` uses above (WR-01) -- so a ``ClientError``/
+        ``BotoCoreError`` raises synchronously from this call, not lazily
+        from the returned iterator's first ``next()``.
+
+        Args:
+            bucket: The bucket to list within.
+            prefix: The key prefix to list under.
+
+        Returns:
+            An iterator of ``ObjectSummary``, one per object found.
+
+        Raises:
+            StorageError: Any ``botocore.exceptions.ClientError`` or
+                ``botocore.exceptions.BotoCoreError`` occurs. Same
+                disjoint-hierarchy handling as ``get_object`` (WR-01).
+        """
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            summaries = [
+                ObjectSummary(
+                    key=entry["Key"],
+                    etag=entry["ETag"],
+                    size_bytes=entry["Size"],
+                    last_modified=entry["LastModified"],
+                )
+                for page in paginator.paginate(Bucket=bucket, Prefix=prefix)
+                for entry in page.get("Contents", [])
+            ]
+        except (ClientError, BotoCoreError) as exc:
+            msg = "failed to list objects from object storage"
+            raise StorageError(msg, context={"bucket": bucket, "prefix": prefix}) from exc
+        return iter(summaries)
+
+    def put_object(self, bucket: str, key: str, body: bytes) -> None:
+        """Write ``body`` to ``bucket``/``key``, overwriting any existing object there.
+
+        Args:
+            bucket: The bucket to write into.
+            key: The object key to write to.
+            body: The object's full contents.
+
+        Raises:
+            StorageError: Any ``botocore.exceptions.ClientError`` or
+                ``botocore.exceptions.BotoCoreError`` occurs. Same
+                disjoint-hierarchy handling as ``get_object`` (WR-01).
+        """
+        try:
+            self._client.put_object(Bucket=bucket, Key=key, Body=body)
+        except (ClientError, BotoCoreError) as exc:
+            msg = "failed to put object to object storage"
+            raise StorageError(msg, context={"bucket": bucket, "key": key}) from exc
