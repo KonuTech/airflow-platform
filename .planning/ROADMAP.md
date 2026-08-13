@@ -185,7 +185,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 03-06-PLAN.md — PipelineContext, Source/Publisher protocols, the sequencing engine, ADR-0008 (wave 4)
+- [x] 03-06-PLAN.md — PipelineContext, Source/Publisher protocols, the sequencing engine, ADR-0008 (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
