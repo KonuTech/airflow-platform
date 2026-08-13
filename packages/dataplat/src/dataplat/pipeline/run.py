@@ -299,6 +299,14 @@ def run_ingest(
             )
             publisher = resolve_publisher(ctx.config.load.strategy)
             result = publisher.publish(ctx, staging_result.staging_table, conn)
+            # Measured HERE, immediately after the publish that does the
+            # actual work, not after the trailing DROP TABLE below: this is
+            # the number `finalize_publication` persists inside the SAME
+            # transaction as that publish, so it must exist before that call
+            # and before the transaction commits. Reused as-is for the
+            # Receipt/log after the `with` block exits -- one canonical
+            # duration, never two slightly different numbers for one run.
+            duration_ms = int((time.monotonic() - start) * 1000)
             # META-03: lands inside the SAME transaction as the Publisher's
             # own write -- the `with` block's exit commits both together,
             # or rolls back both together on any exception.
@@ -309,6 +317,7 @@ def run_ingest(
                 batch_id=batch_id,
                 rows_loaded=result.rows_affected,
                 finished_at=finished_at,
+                duration_ms=duration_ms,
                 report_uri=None,
             )
 
@@ -321,7 +330,11 @@ def run_ingest(
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=heartbeat_interval_seconds + 5)
 
-    duration_ms = int((time.monotonic() - start) * 1000)
+    # duration_ms was already computed above, right after publish, and
+    # reused here as-is (see the comment at its assignment) -- never
+    # recomputed against `time.monotonic()` again, which would silently
+    # fold in the trailing DROP TABLE's time and produce a second, slightly
+    # larger number for the same run.
     # This phase does not separately track "collapsed by DISTINCT ON /
     # duplicate customer_id within one batch" from "suppressed as a no-op
     # write by the WHERE guard" -- both reduce rows_parsed to a smaller

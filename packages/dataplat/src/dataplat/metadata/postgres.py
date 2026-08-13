@@ -366,6 +366,7 @@ class PostgresMetadataRepository(MetadataRepository):
         batch_id: int,
         rows_loaded: int,
         finished_at: datetime,
+        duration_ms: int,
         report_uri: str | None,
     ) -> None:
         """See `MetadataRepository.finalize_publication`.
@@ -390,10 +391,11 @@ class PostgresMetadataRepository(MetadataRepository):
                SET status = 'SUCCEEDED',
                    finished_at = %s,
                    rows_loaded = %s,
+                   duration_ms = %s,
                    report_uri = %s
              WHERE run_id = %s
             """,
-            (finished_at, rows_loaded, report_uri, run_id),
+            (finished_at, rows_loaded, duration_ms, report_uri, run_id),
         )
 
     def update_ingestion_run_status(self, *, run_id: int, status: str, **fields: object) -> None:

@@ -623,6 +623,7 @@ def test_finalize_publication_updates_are_invisible_until_the_callers_commit(
             batch_id=batch_id,
             rows_loaded=7,
             finished_at=finished_at,
+            duration_ms=1234,
             report_uri="s3://processed/customers/finalize_publication-report.json",
         )
 

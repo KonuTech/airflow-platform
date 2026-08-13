@@ -542,6 +542,7 @@ def test_atomic_commit(
             batch_id=batch_id,
             rows_loaded=1,
             finished_at=datetime.now(tz=UTC),
+            duration_ms=1234,
             report_uri="s3://processed/customers/atomic_commit-report.json",
         )
 

@@ -339,6 +339,7 @@ class MetadataRepository(Protocol):
         batch_id: int,
         rows_loaded: int,
         finished_at: datetime,
+        duration_ms: int,
         report_uri: str | None,
     ) -> None:
         """Mark a file, batch and run SUCCEEDED, inside the caller's own open transaction.
@@ -346,7 +347,8 @@ class MetadataRepository(Protocol):
         Maps to three sequential UPDATEs -- ``meta.files.status =
         'PROCESSED'``, ``meta.batches.status = 'PUBLISHED'``,
         ``meta.ingestion_runs`` (``status = 'SUCCEEDED'``, `finished_at`,
-        `rows_loaded`, `report_uri`) -- all issued against `conn`.
+        `rows_loaded`, `duration_ms`, `report_uri`) -- all issued against
+        `conn`.
 
         The one exception on this Protocol: every other method opens its
         own connection from the pool; this one never does. `conn` must
@@ -370,6 +372,10 @@ class MetadataRepository(Protocol):
             batch_id: The batch to mark `PUBLISHED`.
             rows_loaded: The row count to record on the run.
             finished_at: The run's completion timestamp.
+            duration_ms: Wall-clock milliseconds from claim to publish
+                commit, as measured by the caller (`run_ingest`) via
+                `time.monotonic()` -- this method never derives it from
+                `finished_at` minus some other timestamp.
             report_uri: The object-store URI of this run's validation
                 report, when one was written. `None` when no such report
                 exists yet (this phase's `run_ingest` never generates one --
