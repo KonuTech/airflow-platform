@@ -71,8 +71,11 @@ policies:
       - effect: Allow
         resources: ["arn:aws:s3:::raw", "arn:aws:s3:::validated"]
         actions: ["s3:ListBucket"]
+      # metadata/*: discover_files PutObjects AssignmentDocuments here,
+      # csv_processor.cli.ingest GetObjects them back (plan 04-03/04-05) —
+      # see helm/values/local/minio.yaml's fuller comment on this same line.
       - effect: Allow
-        resources: ["arn:aws:s3:::raw/*", "arn:aws:s3:::validated/*"]
+        resources: ["arn:aws:s3:::raw/*", "arn:aws:s3:::validated/*", "arn:aws:s3:::metadata/*"]
         actions: ["s3:GetObject", "s3:PutObject"]
       - effect: Deny
         resources: ["arn:aws:s3:::raw/*"]

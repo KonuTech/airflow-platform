@@ -95,15 +95,22 @@ policies:
     statements:
       # HeadBucket/ListObjectsV2 need s3:ListBucket evaluated against the
       # BUCKET arn (no /*); Get/Put need OBJECT arns (with /*). `raw` and
-      # `validated` are the pipeline's working buckets — `processed`,
-      # `quarantine` and `metadata` are reached by the admin credential only
-      # in this phase (tests/e2e/cluster/test_minio_buckets.py, plan 02-04
-      # Task 3), matching how each later Phase writes to those layers.
+      # `validated` are the pipeline's working buckets — `processed` and
+      # `quarantine` are reached by the admin credential only in this phase
+      # (tests/e2e/cluster/test_minio_buckets.py, plan 02-04 Task 3),
+      # matching how each later Phase writes to those layers. `metadata` was
+      # originally scoped the same way, but Phase 4's own discover_files
+      # (ORCH-08's frozen assignment manifest, plan 04-03) PutObjects
+      # AssignmentDocuments to `metadata/assignments/...` as this SAME
+      # credential, and csv_processor.cli.ingest GetObjects them back — this
+      # phase, not a later one, discovered live (04-08) that the policy had
+      # never been updated to match. No s3:ListBucket on `metadata`: both
+      # call sites read/write a specific, already-known key, never list.
       - effect: Allow
         resources: ["arn:aws:s3:::raw", "arn:aws:s3:::validated"]
         actions: ["s3:ListBucket"]
       - effect: Allow
-        resources: ["arn:aws:s3:::raw/*", "arn:aws:s3:::validated/*"]
+        resources: ["arn:aws:s3:::raw/*", "arn:aws:s3:::validated/*", "arn:aws:s3:::metadata/*"]
         actions: ["s3:GetObject", "s3:PutObject"]
       # §63 immutability, enforced by the server — not by convention. The
       # admin credential (used by no workload, only by `cluster-rebuild` and
