@@ -239,7 +239,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 04-07-PLAN.md — The two DAG files (smoke + csv_ingest_customers) and their structural/policy tests
+- [x] 04-07-PLAN.md — The two DAG files (smoke + csv_ingest_customers) and their structural/policy tests
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
