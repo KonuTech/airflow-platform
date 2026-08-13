@@ -23,8 +23,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 > Research called this "the single strongest structural recommendation" and marked it CRITICAL. Watermarks, dedup audit, validation results, the schema registry, the batch ledger and lineage are all writes into **one** schema. Accreting it capability-by-capability guarantees inconsistent foreign keys and six migrations.
 
-- [ ] **META-01**: A single coherent `meta` schema in analytical PostgreSQL is designed up front and migrated via Alembic, covering datasets, config versions, files, batches, ingestion runs, run stages, schema versions, watermarks, dedup audit, validation results and reconciliation results — *(Gap 1)*
-- [ ] **META-02**: Every stored content hash carries a `hash_version` column, so the hash recipe can change without invalidating history or making every dimension appear to change at once — *(PITFALLS #1 cheap-now decision)*
+- [x] **META-01**: A single coherent `meta` schema in analytical PostgreSQL is designed up front and migrated via Alembic, covering datasets, config versions, files, batches, ingestion runs, run stages, schema versions, watermarks, dedup audit, validation results and reconciliation results — *(Gap 1)*
+- [x] **META-02**: Every stored content hash carries a `hash_version` column, so the hash recipe can change without invalidating history or making every dimension appear to change at once — *(PITFALLS #1 cheap-now decision)*
 - [ ] **META-03**: Data rows, watermark advancement and run status commit inside a single publication transaction, or none of them do — *(ARCHITECTURE claim 4)*
 
 ### INFRA — Cluster, Services, Infrastructure as Code
@@ -276,8 +276,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| META-01 | Phase 3 | Pending |
-| META-02 | Phase 3 | Pending |
+| META-01 | Phase 3 | Complete |
+| META-02 | Phase 3 | Complete |
 | META-03 | Phase 4 | Pending |
 | INFRA-01 | Phase 2 | Complete |
 | INFRA-02 | Phase 2 | Complete |
