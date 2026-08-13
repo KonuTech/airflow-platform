@@ -75,6 +75,30 @@ jobs:
       - run: make install
       - run: make manifest-policy
 
+  # META-01 / META-02 (and, once later Phase-3 plans land, every other
+  # phase requirement tests/integration/ proves). Runs `alembic upgrade
+  # head` and the dataplat test suite against throwaway testcontainers
+  # PostgreSQL/MinIO — no live Kubernetes cluster involved, unlike the
+  # `manifests` job above or `cluster-verify` (which stays unreachable from
+  # both `check` and `ci`, D-16). Docker is available by default on
+  # ubuntu-latest runners, so no docker:dind service is needed. A separate
+  # job from `check` for the same reason `manifest-policy` is: Docker/
+  # testcontainers is a dependency `check` must never need (D-04), not a
+  # gate this project exempts from CI.
+  integration:
+    name: Integration tests (testcontainers, offline of any cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: make install
+      - run: make test-integration
+
   # SEC-02 / SEC-11. This job holds the claim that no credential has ever been
   # committed to this repository, which is the claim that has to be true before
   # the repository becomes public: once it is, any credential in any reachable

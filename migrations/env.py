@@ -129,6 +129,21 @@ def run_migrations_online() -> None:
             )
             raise RuntimeError(msg)
 
+        # Alembic creates its own bookkeeping table (`alembic_version`, in
+        # version_table_schema below) BEFORE running any revision's
+        # upgrade() — including 0001, which is otherwise the one place
+        # `CREATE SCHEMA meta` lives. Against a brand-new database that
+        # ordering makes `alembic_version`'s own CREATE TABLE fail with
+        # `InvalidSchemaName`, since PostgreSQL never auto-creates a schema
+        # for a table statement. Ensuring the schema here, committed ahead
+        # of Alembic's own migration transaction, is what makes
+        # version_table_schema="meta" usable at all against an empty
+        # database. Revision 0001 still issues its own (idempotent)
+        # `CREATE SCHEMA IF NOT EXISTS meta` — this is defense in depth,
+        # not a duplicate no-op to remove.
+        connection.execute(sa.text("CREATE SCHEMA IF NOT EXISTS meta"))
+        connection.commit()
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

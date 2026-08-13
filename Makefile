@@ -45,7 +45,7 @@ FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha2
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
-        minio-creds helm-lint manifests manifest-policy
+        minio-creds helm-lint manifests manifest-policy test-integration
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -164,6 +164,20 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster against the live 
 	# standalone install path when you want the environment prepared without
 	# running the suite.
 	$(RUN_CLUSTER) pytest tests/e2e/cluster -q
+
+test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — migrations, dataplat [plan 03-02]
+	# $(RUN_CLUSTER), same reasoning as cluster-verify above: testcontainers
+	# is what makes this target need the `cluster` group at all now (boto3/
+	# psycopg themselves are already importable via `dev` since dataplat
+	# depends on them directly — see pyproject.toml's updated cluster-group
+	# comment). Deliberately its own target, reachable from NEITHER `check`
+	# nor `ci` — `tests/integration` needs a local Docker daemon to start
+	# throwaway PostgreSQL/MinIO containers, and Makefile lines 94-97's own
+	# Phase-1-authored instruction is explicit that Phase 3 must not assume
+	# `check` already collects it. Still runs in CI, as its own job (see
+	# .github/workflows/ci.yml's `integration` job) — separated from `check`
+	# for local-dev speed and Docker-optionality, not exempted from CI.
+	$(RUN_CLUSTER) pytest tests/integration -q
 
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
