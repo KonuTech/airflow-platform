@@ -95,7 +95,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **SCHEMA-04**: Added, removed, renamed, reordered and retyped columns are classified as compatible or breaking, per a configurable per-dataset policy — *(DoD 26)*
 - [ ] **SCHEMA-05**: Drift against previously observed schemas is detected and *reported*, never silently adapted to — *(DoD 27)*
 - [ ] **SCHEMA-06**: Historical files process under their historical schema version rather than being forced through the newest — *(DoD 51)*
-- [ ] **SCHEMA-07**: Processing configuration is versioned and hashed, and every run records which config version produced it — *(Gap 9)*
+- [x] **SCHEMA-07**: Processing configuration is versioned and hashed, and every run records which config version produced it — *(Gap 9)*
 
 ### VALID — Validation, Quality, Quarantine and Reconciliation
 
@@ -333,7 +333,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SCHEMA-04 | Phase 6 | Pending |
 | SCHEMA-05 | Phase 6 | Pending |
 | SCHEMA-06 | Phase 6 | Pending |
-| SCHEMA-07 | Phase 3 | Pending |
+| SCHEMA-07 | Phase 3 | Complete |
 | VALID-01 | Phase 8 | Pending |
 | VALID-02 | Phase 8 | Pending |
 | VALID-03 | Phase 8 | Pending |
