@@ -325,3 +325,37 @@ uv run --group cluster pytest tests/e2e/slice -x -q --timeout=900
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
+
+## Self-Check: PASSED (with an honest FAIL on the plan's own live-verification goal)
+
+**Files verified to exist on disk:**
+- FOUND: `tests/fixtures/slice-corpus.yaml`
+- FOUND: `tests/e2e/slice/__init__.py`
+- FOUND: `tests/e2e/slice/conftest.py`
+- FOUND: `tests/e2e/slice/test_smoke_and_idempotency.py`
+- FOUND: `tests/e2e/slice/test_pod_kill_retry.py`
+- FOUND: `tests/e2e/slice/test_concurrent_select.py`
+- FOUND: `.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/deferred-items.md`
+- FOUND: `.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/04-08-SUMMARY.md`
+- CONFIRMED ABSENT (as documented, not a false claim): `docs/spikes/U1-smoke-xcom.md`, `docs/spikes/U3-throughput-baseline.md`
+
+**Commits verified to exist in `git log --oneline --all`:**
+- FOUND: `784e0cf` (Task 1)
+- FOUND: `2c49b8c` (Task 2)
+- FOUND: `3608ece` (Task 3)
+- FOUND: `a7a477d` (deferred-items log)
+- FOUND: `f085867` (this SUMMARY)
+
+**Re-run and confirmed passing (offline/static only):**
+- `uv run ruff check .` (whole repo) → all checks passed
+- `uv run ruff format --check .` (whole repo) → 138 files already formatted
+- `uv run mypy tests/e2e/slice/` → success, 0 issues, 5 source files
+- `uv run --group cluster pytest tests/e2e/slice --collect-only -q` → 5 tests collected, 0 errors
+- `python -c "from tools.corpus.manifest import load_manifest; load_manifest('tests/fixtures/slice-corpus.yaml')"` → succeeds
+- Every SQL statement in `tests/e2e/slice/*.py` independently re-verified against the live schema in a seeded-then-`ROLLBACK`ed transaction (both `analytics` and `airflow` databases) — see Verification Status
+
+**NOT re-run, and cannot honestly be claimed passing:** `uv run --group cluster
+pytest tests/e2e/slice -x -q --timeout=900` against the live cluster — this
+plan's own `<verification>` block. Blocked by the stale `dags/` mount
+documented at length above. This is the plan's actual, primary deliverable,
+and it is the one thing this Self-Check cannot report PASSED.
