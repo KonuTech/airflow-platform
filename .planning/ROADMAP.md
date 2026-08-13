@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Repository, Toolchain & CI Skeleton** - Gated repo from day one: uv, ruff, mypy, pytest, gitleaks in GitHub Actions, plus a seed-generated CSV fixture corpus (completed 2026-08-11)
 - [x] **Phase 2: kind Cluster & Core Infrastructure** - A destroyable/recreatable 3-node kind cluster running MinIO, two separate PostgreSQL clusters and Airflow 3.3, all from committed files (completed 2026-08-12)
 - [x] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster (completed 2026-08-13)
-- [ ] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows
+- [x] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows (completed 2026-08-13)
 - [ ] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests
 - [ ] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization
 - [ ] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking
@@ -243,8 +243,8 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 04-08-PLAN.md — E2E suite: pod-kill/retry, concurrent-select, idempotent reupload, U1/U3 spike results
-- [ ] 04-09-PLAN.md — make ingest-demo (D-14/D-15/D-16)
+- [x] 04-08-PLAN.md — E2E suite: pod-kill/retry, concurrent-select, idempotent reupload, U1/U3 spike results
+- [x] 04-09-PLAN.md — make ingest-demo (D-14/D-15/D-16)
 
 **Research stage**: S4 + S5. **Skip `--research-phase` for the smoke DAG** (S4 is deliberately trivial and the experiment is fully specified). Consider targeted research only for the publication-transaction shape.
 
