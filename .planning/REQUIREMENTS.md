@@ -85,7 +85,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **CSV-10**: Numeric, boolean and NULL values normalize per configuration — decimal comma/point, thousands separators, parenthesised negatives, currency, percentages, scientific notation, `Y/N`, `T/F`, `N/A` — without `1/0` becoming boolean absent evidence — *(DoD 29)*
 - [ ] **CSV-11**: Compressed inputs (`.gz`, `.zip`) and multi-part datasets are supported — absent from all 95 README sections, ubiquitous in real feeds — *(Gap 13)*
 - [ ] **CSV-12**: Unicode normalization (NFC/NFD) is applied before hashing, since NFC/NFD variants of the same value otherwise break deduplication and produce phantom SCD2 versions — *(Gap 16)*
-- [ ] **CSV-13**: Files stream through a single `csv.reader` over a `newline=""` wrapper and are chunked in *records*, never by lines or byte offsets, so embedded-newline fields survive — *(PITFALLS #5)*
+- [x] **CSV-13**: Files stream through a single `csv.reader` over a `newline=""` wrapper and are chunked in *records*, never by lines or byte offsets, so embedded-newline fields survive — *(PITFALLS #5)*
 
 ### SCHEMA — Inference, Contracts, Versioning and Drift
 
@@ -326,7 +326,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CSV-10 | Phase 6 | Pending |
 | CSV-11 | Phase 6 | Pending |
 | CSV-12 | Phase 6 | Pending |
-| CSV-13 | Phase 3 | Pending |
+| CSV-13 | Phase 3 | Complete |
 | SCHEMA-01 | Phase 6 | Pending |
 | SCHEMA-02 | Phase 6 | Pending |
 | SCHEMA-03 | Phase 6 | Pending |
