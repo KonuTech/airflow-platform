@@ -36,7 +36,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **INFRA-05**: MinIO provides S3-compatible object storage with `raw`, `validated`, `processed`, `quarantine` and `metadata` layers — *(DoD 5)*
 - [ ] **INFRA-06**: HashiCorp Vault is deployed in-cluster as the secrets manager and survives cluster restart without manual data loss — *(DoD 6)*
 - [x] **INFRA-07**: All infrastructure is defined as code — cluster config, Helm values and manifests are committed and no step requires manual `kubectl` surgery — *(DoD 7)*
-- [ ] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
+- [x] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
 - [x] **INFRA-09**: Kubelet reservations, `maxPods` and `extraMounts` are set in the kind config at creation time, because changing them later requires destroying the cluster — *(PITFALLS #10, #11)*
 - [x] **INFRA-10**: Two Helm values profiles (`values-local.yaml`, `values-ci.yaml`) exist from the first infrastructure commit, since the full stack does not fit a 4 CPU / 16 GB CI runner — *(PROJECT.md constraint)*
 - [ ] **INFRA-11**: Configurable retention policies are enforced for raw files, processed files, quarantine, validation reports, ingestion metadata and logs, separately from processing logic — *(Gap 11)*
@@ -180,7 +180,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 - [x] **QUAL-01**: Type hints are used consistently across arguments, returns, classes, public APIs, configuration and data models, verified by mypy in CI — *(DoD 71)*
 - [x] **QUAL-02**: Public classes, functions and methods carry docstrings describing purpose, parameters, returns, assumptions, exceptions and side effects — *(DoD 72)*
-- [ ] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
+- [x] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
 - [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [ ] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
 - [ ] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
@@ -286,7 +286,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-05 | Phase 2 | Complete |
 | INFRA-06 | Phase 5 | Pending |
 | INFRA-07 | Phase 2 | Complete |
-| INFRA-08 | Phase 3 | Pending |
+| INFRA-08 | Phase 3 | Complete |
 | INFRA-09 | Phase 2 | Complete |
 | INFRA-10 | Phase 2 | Complete |
 | INFRA-11 | Phase 11 | Pending |
@@ -394,7 +394,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | OBS-10 | Phase 7 | Pending |
 | QUAL-01 | Phase 1 | Complete |
 | QUAL-02 | Phase 1 | Complete |
-| QUAL-03 | Phase 3 | Pending |
+| QUAL-03 | Phase 3 | Complete |
 | QUAL-04 | Phase 6 | Pending |
 | QUAL-05 | Phase 4 | Pending |
 | QUAL-06 | Phase 4 | Pending |

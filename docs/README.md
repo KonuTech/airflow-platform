@@ -18,7 +18,7 @@ noted.
 | `schemas/` | §22 dataset contracts. | Phase 6 |
 | `migrations/` | Alembic revisions for the analytical database. Hand-written, never bare autogenerate output. | Phase 3 |
 | `docker/airflow/` | Airflow image. Installs providers under Airflow's own constraints file — deliberately outside the uv workspace. | Phase 2 |
-| `docker/csv-processor/` | ETL image. Contains no Airflow distribution. | Phase 4 |
+| `docker/csv-processor/` | ETL image. Contains no Airflow distribution. | Phase 3 |
 | `kubernetes/` | Cluster manifests and the kind cluster definition. | Phase 2 |
 | `helm/values/local/` | Full multi-node profile values. | Phase 2 |
 | `helm/values/ci/` | Trimmed single-node profile for a 4 CPU / 16 GB runner. Written in Phase 2 even though Phase 11 consumes it — retrofitting profile parameterization is expensive. | Phase 2 |

@@ -20,5 +20,10 @@ dependencies = [
 # The absence here is the packaging half of the guarantee; the import-linter
 # contract in setup.cfg is the other half.
 
+[project.scripts]
+# The pod entrypoint (plan 03-07): docker/csv-processor/Dockerfile's
+# `ENTRYPOINT ["dataplat"]` invokes exactly this console script.
+dataplat = "dataplat.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/dataplat"]
