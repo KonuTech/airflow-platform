@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import pytest
 
-from dataplat.config.model import DatasetConfig, DeduplicationConfig, LoadConfig, SourceConfig
+from dataplat.config.model import (
+    BatchingConfig,
+    DatasetConfig,
+    DeduplicationConfig,
+    LoadConfig,
+    SourceConfig,
+)
 from dataplat.load.staging import StagingLoader
 from dataplat.models.identity import RunContext
 from dataplat.models.record import RecordChunk
@@ -81,6 +87,7 @@ def _make_config() -> DatasetConfig:
             bucket="raw",
             path="customers/",
             change_semantics="snapshot",
+            duplicate_policy="skip",
         ),
         deduplication=DeduplicationConfig(
             strategy="business_key_latest",
@@ -88,6 +95,7 @@ def _make_config() -> DatasetConfig:
             order_by=["event_ts desc"],
         ),
         load=LoadConfig(strategy="merge", target="normalized.customers"),
+        batching=BatchingConfig(max_units_per_run=100),
     )
 
 
