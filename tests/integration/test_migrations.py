@@ -181,7 +181,14 @@ def test_0006_customer_id_has_a_real_unique_constraint(migrated_dsn: str) -> Non
 def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_constraint(
     migrated_dsn: str,
 ) -> None:
-    """`alembic downgrade -1` cleanly reverses 0006; re-`upgrade head` restores it.
+    """`alembic downgrade 0005` cleanly reverses 0006; re-`upgrade head` restores it.
+
+    Targets the explicit revision `"0005"` rather than the relative `"-1"`:
+    migration `0007` (plan 04-04) added a new head above `0006`, so `"-1"`
+    from head would now reverse `0007` instead of `0006` -- an explicit
+    target is what this test actually means ("undo exactly 0006's change"),
+    and stays correct regardless of how many further migrations are added
+    later.
 
     `migrated_dsn` is session-scoped and shared by every other module in
     `tests/integration/`, so this test restores it to `head` in a `finally`
@@ -191,7 +198,7 @@ def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_cons
     previous = os.environ.get("ALEMBIC_DSN")
     os.environ["ALEMBIC_DSN"] = migrated_dsn
     try:
-        command.downgrade(alembic_config, "-1")
+        command.downgrade(alembic_config, "0005")
         assert _customers_customer_id_constraint_types(migrated_dsn) == ()
         assert _index_exists(
             migrated_dsn,
