@@ -13,14 +13,21 @@ CONTEXT.md D-02's explicit out-of-scope boundary for this phase.
 current version -> no-op; hash differs -> close the old row
 (``valid_to = now()``) and insert ``version = max + 1``. The whole
 read-then-write sequence for one dataset runs inside a single transaction,
-with ``SELECT ... FOR UPDATE`` on the ``meta.datasets`` row serializing
-concurrent ``sync()`` calls for that dataset (T-03-10 in this plan's threat
-model) — without it, two concurrent syncs could both observe "no current
-row" (or the same stale hash) and each insert a version with
+with ``_resolve_dataset_id()``'s row lock on the ``meta.datasets`` row
+serializing concurrent ``sync()`` calls for that dataset (T-03-10 in this
+plan's threat model) — without it, two concurrent syncs could both observe
+"no current row" (or the same stale hash) and each insert a version with
 ``valid_to IS NULL``, which the partial unique index on
 ``meta.config_versions`` would then reject for the second writer as a
 constraint violation instead of the intended serialized no-op/version
-sequence.
+sequence. ``_resolve_dataset_id()`` itself is an atomic
+``INSERT ... ON CONFLICT DO UPDATE`` (CR-03), not a plain
+``SELECT ... FOR UPDATE`` followed by a plain ``INSERT``: a lock taken by
+``FOR UPDATE`` only ever protects a row that already exists, so it does
+nothing to serialize the *first-ever* ``sync()`` of a brand new dataset —
+exactly the gap that let two concurrent first-time syncs race each other
+into a raw ``psycopg.errors.UniqueViolation`` instead of the serialized
+outcome this module's design intends.
 """
 
 from __future__ import annotations
@@ -182,10 +189,23 @@ class ConfigRegistry:
     def _resolve_dataset_id(cur: Cursor[Any], dataset_name: str) -> int:
         """Return ``dataset_name``'s ``dataset_id``, inserting the row if absent.
 
-        Locks the row with ``FOR UPDATE`` (or holds the implicit lock on a
-        row this same transaction just inserted) for the remainder of the
-        caller's transaction, so a concurrent ``sync()`` for the same
-        dataset blocks until this one commits or rolls back.
+        A single atomic ``INSERT ... ON CONFLICT DO UPDATE`` (CR-03), never a
+        plain ``SELECT ... FOR UPDATE`` followed by a plain ``INSERT``:
+        ``FOR UPDATE`` can only lock a row that already exists, so it does
+        nothing to serialize the *first-ever* ``sync()`` of a brand new
+        dataset -- two concurrent first-time callers could both observe "no
+        row exists" before either commits, and the loser's plain ``INSERT``
+        would raise a raw, unwrapped `psycopg.errors.UniqueViolation`
+        against `meta.datasets`' `UNIQUE(dataset_name)` constraint instead of
+        resolving to the winner's row. ``DO UPDATE SET dataset_name =
+        EXCLUDED.dataset_name`` is a standard no-op-update idiom: it changes
+        nothing (the value is identical), but -- unlike ``DO NOTHING``, which
+        returns no row on conflict -- it still lets ``RETURNING`` yield the
+        existing row's `dataset_id` in one round trip. The ``UPDATE`` half of
+        an upsert takes the same row-level lock ``FOR UPDATE`` would have,
+        held for the remainder of the caller's transaction, so a concurrent
+        ``sync()`` for the same (already-existing) dataset still blocks
+        until this one commits or rolls back.
 
         Args:
             cur: An open cursor on the transaction ``sync()`` is running.
@@ -195,13 +215,12 @@ class ConfigRegistry:
             The dataset's ``dataset_id``.
         """
         row = cur.execute(
-            "SELECT dataset_id FROM meta.datasets WHERE dataset_name = %s FOR UPDATE",
+            """
+            INSERT INTO meta.datasets (dataset_name) VALUES (%s)
+            ON CONFLICT (dataset_name) DO UPDATE
+                SET dataset_name = EXCLUDED.dataset_name
+            RETURNING dataset_id
+            """,
             (dataset_name,),
         ).fetchone()
-        if row is not None:
-            return int(row[0])
-        inserted = cur.execute(
-            "INSERT INTO meta.datasets (dataset_name) VALUES (%s) RETURNING dataset_id",
-            (dataset_name,),
-        ).fetchone()
-        return int(_require_row(inserted, "meta.datasets insert returned no row")[0])
+        return int(_require_row(row, "meta.datasets insert returned no row")[0])

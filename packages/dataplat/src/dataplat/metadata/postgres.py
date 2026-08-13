@@ -75,22 +75,38 @@ class PostgresMetadataRepository(MetadataRepository):
         self._pool = pool
 
     def get_or_create_dataset(self, dataset_name: str) -> int:
-        """See `MetadataRepository.get_or_create_dataset`."""
+        """See `MetadataRepository.get_or_create_dataset`.
+
+        Implemented as a single atomic ``INSERT ... ON CONFLICT DO UPDATE``
+        (CR-03), never a separate ``SELECT`` followed by an ``INSERT``: two
+        concurrent first-time callers for the same new `dataset_name` (e.g.
+        a backfill fanning out multiple files of a brand-new dataset in
+        parallel under `KubernetesExecutor`) would otherwise both observe
+        "no row exists" before either commits, and the loser's plain
+        ``INSERT`` would raise a raw, unwrapped
+        `psycopg.errors.UniqueViolation` against
+        `meta.datasets`' `UNIQUE(dataset_name)` constraint instead of
+        resolving to the winner's row. ``DO UPDATE SET dataset_name =
+        EXCLUDED.dataset_name`` is a standard no-op-update idiom: it changes
+        nothing (the value is identical), but -- unlike ``DO NOTHING``, which
+        returns no row on conflict -- it still lets ``RETURNING`` yield the
+        existing row's `dataset_id` in one round trip, with no fallback
+        `SELECT` needed either way.
+        """
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT dataset_id FROM meta.datasets WHERE dataset_name = %s",
+                """
+                INSERT INTO meta.datasets (dataset_name) VALUES (%s)
+                ON CONFLICT (dataset_name) DO UPDATE
+                    SET dataset_name = EXCLUDED.dataset_name
+                RETURNING dataset_id
+                """,
                 (dataset_name,),
             ).fetchone()
-            if row is not None:
-                return int(row[0])
-            inserted = conn.execute(
-                "INSERT INTO meta.datasets (dataset_name) VALUES (%s) RETURNING dataset_id",
-                (dataset_name,),
-            ).fetchone()
-            if inserted is None:  # pragma: no cover - RETURNING always yields a row here
-                msg = "INSERT ... RETURNING dataset_id returned no row"
+            if row is None:  # pragma: no cover - RETURNING always yields a row here
+                msg = "INSERT ... ON CONFLICT ... RETURNING dataset_id returned no row"
                 raise RuntimeError(msg)
-            return int(inserted[0])
+            return int(row[0])
 
     def create_file(  # noqa: PLR0913 -- matches meta.files' column set (repository.py Protocol)
         self,
