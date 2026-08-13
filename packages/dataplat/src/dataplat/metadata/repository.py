@@ -260,6 +260,30 @@ class MetadataRepository(Protocol):
         """
         ...
 
+    def get_ingestion_run_status(self, *, run_id: int) -> str | None:
+        """Read one `meta.ingestion_runs` row's current `status`, without claiming it.
+
+        Maps to ``SELECT status FROM meta.ingestion_runs WHERE run_id =
+        ...``. A pure read: distinct from `claim_ingestion_run` (which
+        conditionally mutates) and from `get_or_create_ingestion_run` (which
+        conditionally inserts) -- this method never writes.
+
+        `run_ingest` (plan 04-05) calls this exactly when
+        `claim_ingestion_run` refuses a claim, to distinguish
+        `SKIPPED_DUPLICATE` (status is `SUCCEEDED`) from
+        `SKIPPED_CONCURRENT` (status is `RUNNING` with a still-live lease)
+        without re-deriving `dataset_id`/`config_version_id` just to call
+        `get_or_create_ingestion_run` for a read.
+
+        Args:
+            run_id: The run to read.
+
+        Returns:
+            The row's current `status`, or `None` if no row matches
+            `run_id`.
+        """
+        ...
+
     def finalize_publication(  # noqa: PLR0913 -- matches the files/batches/ingestion_runs field set this updates
         self,
         *,
@@ -269,7 +293,7 @@ class MetadataRepository(Protocol):
         batch_id: int,
         rows_loaded: int,
         finished_at: datetime,
-        report_uri: str,
+        report_uri: str | None,
     ) -> None:
         """Mark a file, batch and run SUCCEEDED, inside the caller's own open transaction.
 
@@ -301,7 +325,11 @@ class MetadataRepository(Protocol):
             rows_loaded: The row count to record on the run.
             finished_at: The run's completion timestamp.
             report_uri: The object-store URI of this run's validation
-                report.
+                report, when one was written. `None` when no such report
+                exists yet (this phase's `run_ingest` never generates one --
+                mirrors `Receipt.report_uri`'s own docstring) -- the column
+                is nullable (migration 0004), so this is a real, intended
+                value, not a workaround.
         """
         ...
 

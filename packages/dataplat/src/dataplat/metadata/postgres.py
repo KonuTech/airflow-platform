@@ -321,6 +321,15 @@ class PostgresMetadataRepository(MetadataRepository):
                 return None
             return int(row[0]), str(row[1])
 
+    def get_ingestion_run_status(self, *, run_id: int) -> str | None:
+        """See `MetadataRepository.get_ingestion_run_status`."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM meta.ingestion_runs WHERE run_id = %s",
+                (run_id,),
+            ).fetchone()
+            return None if row is None else str(row[0])
+
     def finalize_publication(  # noqa: PLR0913 -- matches the files/batches/ingestion_runs field set this updates
         self,
         *,
@@ -330,7 +339,7 @@ class PostgresMetadataRepository(MetadataRepository):
         batch_id: int,
         rows_loaded: int,
         finished_at: datetime,
-        report_uri: str,
+        report_uri: str | None,
     ) -> None:
         """See `MetadataRepository.finalize_publication`.
 
