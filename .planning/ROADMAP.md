@@ -170,7 +170,7 @@ Plans:
 
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Core data contracts: exception hierarchy, frozen value objects, the psycopg connection-pool factory (wave 1)
+- [x] 03-01-PLAN.md — Core data contracts: exception hierarchy, frozen value objects, the psycopg connection-pool factory (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
