@@ -1,5 +1,5 @@
 ---
-status: diagnosed
+status: complete
 phase: 03-dataplat-core-library-metadata-control-plane
 source: [03-01-SUMMARY.md, 03-02-SUMMARY.md, 03-03-SUMMARY.md, 03-04-SUMMARY.md, 03-05-SUMMARY.md, 03-06-SUMMARY.md, 03-07-SUMMARY.md, 03-08-SUMMARY.md]
 started: 2026-08-13T09:49:35Z
@@ -74,11 +74,15 @@ result: pass
 ## Summary
 
 total: 9
-passed: 8
-issues: 1
+passed: 9
+issues: 0
 pending: 0
 skipped: 0
 blocked: 0
+
+**Resolution:** Gap closed via plan 03-09 (commit `1063a04`). `make test-integration` (14/14) and
+`pytest tests/integration/` confirmed passing cleanly as a whole session, matching CI's
+`integration` job invocation exactly.
 
 ## Gaps
 
