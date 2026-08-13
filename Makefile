@@ -179,7 +179,18 @@ test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — mig
 	# for local-dev speed and Docker-optionality, not exempted from CI.
 	$(RUN_CLUSTER) pytest tests/integration -q
 
-image-csv-processor:            ## INFRA-08: build+tag the csv-processor image by git SHA, never a mutable tag [plan 03-07]
+# GIT_SHA is fixed once per `make` invocation, ahead of the target below, so
+# `docker tag`/`docker push`/the Airflow Variable registration all reference
+# the exact image `docker build` produced — even though `docker build` can
+# run for real minutes on a cold cache, long enough for a concurrent commit
+# to move HEAD. `docker build`'s own two inline `git rev-parse --short HEAD`
+# calls (build-arg + -t, unchanged from plan 03-07) evaluate together, before
+# docker does any work, so they can never drift from this value or from each
+# other — tests/policy/test_no_latest_image_tag.py still reads this recipe
+# body expecting at least those two literal invocations.
+GIT_SHA := $(shell git rev-parse --short HEAD)
+
+image-csv-processor:            ## INFRA-08/U1: build, tag, push to the local registry, register the image for the DAG [plan 03-07, extended 04-02]
 	# GIT_SHA is computed inline, TWICE — once for the build arg (which
 	# becomes the image's own org.opencontainers.image.revision/.version
 	# labels, see the Dockerfile), once for the tag — and never a literal,
@@ -193,6 +204,31 @@ image-csv-processor:            ## INFRA-08: build+tag the csv-processor image b
 	  --build-arg GIT_SHA=$$(git rev-parse --short HEAD) \
 	  -t csv-processor:$$(git rev-parse --short HEAD) \
 	  -f docker/csv-processor/Dockerfile .
+	# 04-02/U1: push to this project's local registry (STACK.md's
+	# registry-vs-`kind load docker-image` comparison — only changed layers
+	# cross the wire, once, and every node pulls on demand instead of a
+	# serial per-node re-tar of the whole image). The source tag here uses
+	# $(GIT_SHA), NOT a fresh inline git call, so it always names exactly the
+	# image `docker build` just produced above, never a same-run race.
+	docker tag csv-processor:$(GIT_SHA) localhost:5001/csv-processor:$(GIT_SHA)
+	docker push localhost:5001/csv-processor:$(GIT_SHA)
+	# 04-02: record the pushed tag as the image csv_ingest_customers (and the
+	# U1 smoke DAG) will launch via KubernetesPodOperator.Variable.get(...).
+	# Guarded behind the same live-cluster reachability probe
+	# tests/e2e/cluster/conftest.py's `_require_cluster` uses (`kubectl get
+	# nodes`, bounded by --request-timeout) so a developer with no cluster
+	# running still gets a successful build+push — not a raw kubectl
+	# connection-refused failure — and can re-run this target once a cluster
+	# exists, or set the Variable by hand in the meantime.
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	if $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
+	  echo "==> registering csv_processor_image=localhost:5001/csv-processor:$(GIT_SHA)"; \
+	  $(KUBECTL) --context "$$ctx" exec -n airflow deploy/airflow-api-server -- \
+	    airflow variables set csv_processor_image "localhost:5001/csv-processor:$(GIT_SHA)"; \
+	else \
+	  echo "WARNING: no live cluster — image pushed but csv_processor_image Variable NOT set; run this target again once the cluster is up, or set it manually" >&2; \
+	fi
 
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
