@@ -229,8 +229,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 04-03-PLAN.md — AssignmentDocument/Receipt models and discover_files (frozen-manifest authoring)
-- [ ] 04-04-PLAN.md — StagingLoader and the corrected MergePublisher (advisory-lock + ON CONFLICT, never MERGE)
+- [x] 04-03-PLAN.md — AssignmentDocument/Receipt models and discover_files (frozen-manifest authoring)
+- [x] 04-04-PLAN.md — StagingLoader and the corrected MergePublisher (advisory-lock + ON CONFLICT, never MERGE)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
