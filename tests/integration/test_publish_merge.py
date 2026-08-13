@@ -7,16 +7,22 @@ own implementation -- keeping this task's tests self-contained) into
 ``normalized.customers``.
 
 The concurrency case PITFALLS C1 names (two overlapping publish attempts
-against the same dataset) is deliberately NOT tested here -- 04-RESEARCH.md
-assigns it to plan 04-06's integration-test suite; this file's job is only
-to prove ``MergePublisher``'s SQL will not need to change for that later
-test to pass.
+against the same dataset) was deliberately NOT tested by 04-04's own tests
+above -- 04-RESEARCH.md assigned it to plan 04-06's integration-test suite;
+04-04's tests exist only to prove ``MergePublisher``'s SQL would not need to
+change for that later test to pass. The tests below `test_atomic_commit`
+onward are 04-06's own additions: the concurrency case itself
+(`test_advisory_lock_serializes_concurrent_publishers`), plus META-03's
+atomic-visibility claim, LOAD-04's lineage-queryability claim, and LOAD-08's
+batch-uniqueness claim, all proven against this same real database.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -30,6 +36,14 @@ from dataplat.storage.db import create_pool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+# The shared resource two concurrent publishers serialize over in
+# `test_advisory_lock_serializes_concurrent_publishers` -- this phase's
+# `MergePublisher` is single-dataset/single-target (its own module
+# docstring), so one key naming the target table is sufficient for this
+# plan's proof; a later multi-table publisher would need a per-target key,
+# which is 04-05/future-work's concern, not this test's.
+_ADVISORY_LOCK_KEY = "normalized.customers"
 
 _STAGING_COLUMNS_DDL = """
     customer_id text, name text, country text, birth_date text, event_ts text,
@@ -438,3 +452,341 @@ def test_on_conflict_fails_without_the_unique_constraint_migration_0006_adds(
                 "ADD CONSTRAINT uq_customers_customer_id UNIQUE (customer_id)",
             )
             conn.commit()
+
+
+# --- 04-06 Task 2: atomicity, concurrency, lineage, batch uniqueness ------
+#
+# The four tests below are 04-06's own contribution -- proving META-03's
+# one-transaction claim, LOAD-09's single-writer claim, LOAD-04's
+# lineage-queryability claim and LOAD-08's batch-uniqueness claim against
+# this same real, migrated Postgres. Every helper above (`_seed_run`,
+# `_create_staging_table`, `_insert_staging_row`, `_make_context`,
+# `repository`) is reused as-is; no new fixture is introduced.
+
+
+def _read_publication_state(
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: int,
+    file_id: int,
+    batch_id: int,
+    run_id: int,
+) -> tuple[int, str, str, str]:
+    """Read `(normalized.customers row count, file status, batch status, run status)` as one tuple.
+
+    A single helper used from both sides of `test_atomic_commit`'s
+    visibility boundary, so the pre-commit and post-commit reads are
+    guaranteed to check the exact same four things.
+    """
+    row_count = conn.execute(
+        "SELECT COUNT(*) FROM normalized.customers WHERE customer_id = %s",
+        (customer_id,),
+    ).fetchone()
+    file_status = conn.execute(
+        "SELECT status FROM meta.files WHERE file_id = %s",
+        (file_id,),
+    ).fetchone()
+    batch_status = conn.execute(
+        "SELECT status FROM meta.batches WHERE batch_id = %s",
+        (batch_id,),
+    ).fetchone()
+    run_status = conn.execute(
+        "SELECT status FROM meta.ingestion_runs WHERE run_id = %s",
+        (run_id,),
+    ).fetchone()
+    assert row_count is not None
+    assert file_status is not None
+    assert batch_status is not None
+    assert run_status is not None
+    return int(row_count[0]), str(file_status[0]), str(batch_status[0]), str(run_status[0])
+
+
+def test_atomic_commit(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """META-03: rows becoming visible and file/batch/run status flips are ONE atomic transition.
+
+    `MergePublisher.publish()` and `MetadataRepository.finalize_publication()`
+    both run inside the SAME open transaction, uncommitted -- a second,
+    independent connection must see the complete pre-publish state for ALL
+    FOUR effects at once, then, after exactly one commit, the complete
+    post-publish state for all four at once. Never a partial mix of the two.
+    """
+    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="atomic_commit")
+    staging_table = "staging.merge_test_atomic_commit"
+    customer_id = 6001
+
+    with psycopg.connect(migrated_dsn) as conn:
+        _create_staging_table(conn, staging_table)
+        _insert_staging_row(
+            conn,
+            staging_table,
+            customer_id=str(customer_id),
+            name="Atomic",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-08-13T10:00:00+00:00",
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"atomic-commit").digest(),
+        )
+
+        MergePublisher().publish(_make_context(), staging_table, conn)
+        repository.finalize_publication(
+            conn=conn,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            rows_loaded=1,
+            finished_at=datetime.now(tz=UTC),
+            report_uri="s3://processed/customers/atomic_commit-report.json",
+        )
+
+        # conn's transaction is still open -- a SEPARATE connection must see
+        # the pre-publish state for every one of the four effects.
+        with psycopg.connect(migrated_dsn) as observer:
+            state = _read_publication_state(
+                observer,
+                customer_id=customer_id,
+                file_id=file_id,
+                batch_id=batch_id,
+                run_id=run_id,
+            )
+        assert state == (0, "DISCOVERED", "OPEN", "RUNNING")
+
+        conn.commit()
+
+    # Now a fresh connection sees all four effects simultaneously.
+    with psycopg.connect(migrated_dsn) as observer:
+        state = _read_publication_state(
+            observer,
+            customer_id=customer_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            run_id=run_id,
+        )
+    assert state == (1, "PROCESSED", "PUBLISHED", "SUCCEEDED")
+
+
+def test_advisory_lock_serializes_concurrent_publishers(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """LOAD-09/PITFALLS C1: two publishers with overlapping `customer_id`s serialize, never race.
+
+    Connection A takes `pg_advisory_xact_lock` and publishes, but does not
+    commit. Connection B -- from a background thread -- attempts the exact
+    same lock-then-publish sequence (the documented caller contract
+    `merge.py`'s own module docstring specifies). B must not return while A
+    still holds the lock (checked via a `threading.Event`, never a fixed
+    `sleep`); once A commits (releasing the lock), B must complete promptly,
+    and the final state must reflect BOTH publishes with no
+    `UniqueViolation` or cardinality-violation raised on either side --
+    exactly the failure mode literal SQL `MERGE` has under concurrent access
+    (`merge.py`'s own module docstring, PostgreSQL BUG #18279) and
+    `INSERT ... ON CONFLICT` does not.
+
+    Negative-case check performed once during development (this plan's own
+    acceptance criteria): with BOTH `pg_advisory_xact_lock` calls below
+    temporarily commented out, this test still PASSED, reproducibly, across
+    repeated runs -- it did not flake and did not raise a constraint
+    violation. Root cause, confirmed by direct trace of `_PUBLISH_SQL`
+    (`merge.py`): `_PUBLISH_SQL` arbitrates on exactly ONE unique index
+    (`customer_id`) via a SINGLE `INSERT ... SELECT ... ORDER BY customer_id
+    ...` statement, so PostgreSQL's OWN unique-index insert-conflict
+    handling already forces connection B to block on the SAME row until
+    connection A's transaction resolves -- deterministically, with no
+    deadlock possible, because both statements process any overlapping keys
+    in the SAME fixed order (`ORDER BY customer_id`), so a crossed-lock-order
+    deadlock (the failure mode that WOULD require an external lock to
+    prevent) cannot arise. This is a real difference from literal `MERGE`
+    (BUG #18279): `INSERT ... ON CONFLICT` was designed to be safe here,
+    `MERGE` was not (PITFALLS.md C1) -- so for THIS single-arbiter-index,
+    single-statement publisher, `pg_advisory_xact_lock` is not
+    independently load-bearing for the specific race this test constructs.
+    It is kept here anyway (a) because it is the documented calling
+    convention `merge.py` specifies for its caller and this test exercises
+    that real contract, not a simplified stand-in, and (b) per PITFALLS.md
+    C1's own recommendation, as defense-in-depth that remains load-bearing
+    the moment a future change adds a second arbiter index or turns
+    publication into more than one statement -- at which point removing it
+    would silently reopen the exact race class this test's name promises to
+    catch.
+    """
+    run_id_a, file_id_a, batch_id_a = _seed_run(repository, migrated_dsn, key_suffix="lock_a")
+    run_id_b, file_id_b, batch_id_b = _seed_run(repository, migrated_dsn, key_suffix="lock_b")
+    customer_id = "7001"
+    table_a = "staging.merge_test_lock_a"
+    table_b = "staging.merge_test_lock_b"
+
+    conn_a = psycopg.connect(migrated_dsn, autocommit=False)
+    conn_b = psycopg.connect(migrated_dsn, autocommit=False)
+    try:
+        _create_staging_table(conn_a, table_a)
+        _insert_staging_row(
+            conn_a,
+            table_a,
+            customer_id=customer_id,
+            name="FromA",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-01-01T00:00:00+00:00",
+            run_id=run_id_a,
+            file_id=file_id_a,
+            batch_id=batch_id_a,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"lock-a").digest(),
+        )
+        conn_a.commit()
+
+        _create_staging_table(conn_b, table_b)
+        _insert_staging_row(
+            conn_b,
+            table_b,
+            customer_id=customer_id,
+            name="FromB",
+            country="CA",
+            birth_date="1990-01-01",
+            event_ts="2026-06-01T00:00:00+00:00",
+            run_id=run_id_b,
+            file_id=file_id_b,
+            batch_id=batch_id_b,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"lock-b").digest(),
+        )
+        conn_b.commit()
+
+        # Connection A: take the lock, publish, but do NOT commit yet.
+        conn_a.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_ADVISORY_LOCK_KEY,))
+        MergePublisher().publish(_make_context(), table_a, conn_a)
+
+        b_returned = threading.Event()
+        b_errors: list[BaseException] = []
+
+        def _publish_b() -> None:
+            try:
+                conn_b.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (_ADVISORY_LOCK_KEY,),
+                )
+                MergePublisher().publish(_make_context(), table_b, conn_b)
+            except BaseException as exc:  # noqa: BLE001 -- re-raised on the main thread below
+                b_errors.append(exc)
+            finally:
+                b_returned.set()
+
+        thread = threading.Thread(target=_publish_b)
+        thread.start()
+
+        # B must not complete while A still holds the lock, uncommitted.
+        # This window is NOT a race: A does not commit until AFTER this
+        # wait() call returns, so the lock is deterministically still held
+        # for this entire timeout, not merely "usually" held.
+        still_blocked = not b_returned.wait(timeout=1.0)
+        assert still_blocked, "connection B's publish() returned before connection A committed"
+
+        conn_a.commit()
+
+        thread.join(timeout=10.0)
+        assert not thread.is_alive(), "connection B's publish() never returned after A committed"
+        if b_errors:
+            raise b_errors[0]
+
+        conn_b.commit()
+    finally:
+        conn_a.close()
+        conn_b.close()
+
+    with psycopg.connect(migrated_dsn) as verify_conn:
+        row = verify_conn.execute(
+            "SELECT name, country, _run_id FROM normalized.customers WHERE customer_id = %s",
+            (int(customer_id),),
+        ).fetchone()
+    assert row is not None
+    # B is forced (by the lock) to execute strictly after A committed, and
+    # B's event_ts (2026-06-01) is newer than A's (2026-01-01) -- so
+    # MergePublisher's own event_ts guard lets B's write win. This proves
+    # both writes were APPLIED IN SEQUENCE with no error -- not that one
+    # silently clobbered the other via an unserialized race.
+    assert row[0] == "FromB"
+    assert row[1] == "CA"
+    assert row[2] == run_id_b
+
+
+def test_lineage_columns_populated(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """LOAD-04: "which file, which batch, which run" is answerable by SQL alone.
+
+    Per this phase's own success criterion 4.
+    """
+    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="lineage")
+    staging_table = "staging.merge_test_lineage"
+    customer_id = "8001"
+    record_hash = hashlib.sha256(b"lineage-content").digest()
+
+    with psycopg.connect(migrated_dsn) as conn:
+        _create_staging_table(conn, staging_table)
+        _insert_staging_row(
+            conn,
+            staging_table,
+            customer_id=customer_id,
+            name="Lineage",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-08-13T10:00:00+00:00",
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=42,
+            record_hash=record_hash,
+        )
+        MergePublisher().publish(_make_context(), staging_table, conn)
+        conn.commit()
+
+    with psycopg.connect(migrated_dsn) as verify_conn:
+        row = verify_conn.execute(
+            """
+            SELECT _run_id, _file_id, _batch_id, _source_row_number,
+                   _record_hash, _record_hash_version
+              FROM normalized.customers WHERE customer_id = %s
+            """,
+            (int(customer_id),),
+        ).fetchone()
+
+    assert row is not None
+    (
+        lineage_run_id,
+        lineage_file_id,
+        lineage_batch_id,
+        source_row_number,
+        stored_hash,
+        hash_version,
+    ) = row
+    assert lineage_run_id == run_id
+    assert lineage_file_id == file_id
+    assert lineage_batch_id == batch_id
+    assert source_row_number == 42
+    assert bytes(stored_hash) == record_hash
+    assert hash_version == 1
+
+
+def test_duplicate_batch_key_rejected(repository: PostgresMetadataRepository) -> None:
+    """LOAD-08: `uq_batches_dataset_batch_key` (migration 0003) is real, enforced, not decorative.
+
+    `PostgresMetadataRepository.create_batch` does a plain
+    ``INSERT ... RETURNING`` (04-01's untouched Protocol) -- never an
+    upsert -- so a second call with the identical `(dataset_id, batch_key)`
+    lets the underlying `psycopg.errors.UniqueViolation` propagate directly,
+    uncaught and unwrapped.
+    """
+    dataset_id = repository.get_or_create_dataset("merge_test_duplicate_batch_key")
+
+    repository.create_batch(dataset_id=dataset_id, batch_key="same-key", status="OPEN")
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        repository.create_batch(dataset_id=dataset_id, batch_key="same-key", status="OPEN")
