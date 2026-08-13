@@ -66,3 +66,40 @@ def test_get_object_missing_key_raises_storage_error(
 ) -> None:
     with pytest.raises(StorageError):
         object_store.get_object(scratch_bucket, "does/not/exist.csv")
+
+
+def test_list_objects_finds_every_key_under_a_prefix_and_none_outside_it(
+    object_store: S3ObjectStore,
+    s3_client: Any,
+    scratch_bucket: str,
+) -> None:
+    prefix = "list-objects-proof/"
+    keys = {f"{prefix}a.csv", f"{prefix}nested/b.csv", f"{prefix}c.csv"}
+    for key in keys:
+        s3_client.put_object(Bucket=scratch_bucket, Key=key, Body=b"x")
+    s3_client.put_object(Bucket=scratch_bucket, Key="outside-the-prefix.csv", Body=b"x")
+
+    found = {summary.key for summary in object_store.list_objects(scratch_bucket, prefix)}
+
+    assert found == keys
+
+
+def test_list_objects_yields_nothing_for_an_absent_prefix(
+    object_store: S3ObjectStore,
+    scratch_bucket: str,
+) -> None:
+    found = list(object_store.list_objects(scratch_bucket, "no-such-prefix/"))
+
+    assert found == []
+
+
+def test_put_object_then_get_object_round_trips_the_exact_bytes(
+    object_store: S3ObjectStore,
+    scratch_bucket: str,
+) -> None:
+    payload = b"round,trip,proof\n1,2,3\n"
+
+    object_store.put_object(scratch_bucket, "put-object-proof.csv", payload)
+    stream = object_store.get_object(scratch_bucket, "put-object-proof.csv")
+
+    assert stream.read().encode("utf-8") == payload

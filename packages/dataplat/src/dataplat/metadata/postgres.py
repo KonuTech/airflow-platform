@@ -118,6 +118,7 @@ class PostgresMetadataRepository(MetadataRepository):
         size_bytes: int,
         filename: str,
         status: str,
+        duplicate_of_file_id: int | None = None,
     ) -> int:
         """See `MetadataRepository.create_file`."""
         with self._pool.connection() as conn:
@@ -125,8 +126,11 @@ class PostgresMetadataRepository(MetadataRepository):
                 """
                 INSERT INTO meta.files (
                     dataset_id, object_uri, content_sha256, hash_version,
-                    size_bytes, filename, status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    size_bytes, filename, status, duplicate_of_file_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (dataset_id, object_uri, content_sha256) DO UPDATE
+                    SET filename = EXCLUDED.filename,
+                        duplicate_of_file_id = EXCLUDED.duplicate_of_file_id
                 RETURNING file_id
                 """,
                 (
@@ -137,10 +141,11 @@ class PostgresMetadataRepository(MetadataRepository):
                     size_bytes,
                     filename,
                     status,
+                    duplicate_of_file_id,
                 ),
             ).fetchone()
             if row is None:  # pragma: no cover - RETURNING always yields a row here
-                msg = "INSERT ... RETURNING file_id returned no row"
+                msg = "INSERT ... ON CONFLICT ... RETURNING file_id returned no row"
                 raise RuntimeError(msg)
             return int(row[0])
 
@@ -227,6 +232,45 @@ class PostgresMetadataRepository(MetadataRepository):
                 msg = "INSERT ... RETURNING run_id returned no row"
                 raise RuntimeError(msg)
             return int(row[0])
+
+    def get_or_create_ingestion_run(  # noqa: PLR0913 -- matches ingestion_runs' identity/FK column set
+        self,
+        *,
+        idempotency_key: str,
+        dataset_id: int,
+        config_version_id: int,
+        processor_version: str,
+        processor_image_digest: str,
+        file_id: int | None = None,
+        batch_id: int | None = None,
+    ) -> tuple[int, str]:
+        """See `MetadataRepository.get_or_create_ingestion_run`."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO meta.ingestion_runs (
+                    idempotency_key, dataset_id, file_id, batch_id,
+                    config_version_id, processor_version,
+                    processor_image_digest, status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING')
+                ON CONFLICT (idempotency_key) DO UPDATE
+                    SET idempotency_key = EXCLUDED.idempotency_key
+                RETURNING run_id, status
+                """,
+                (
+                    idempotency_key,
+                    dataset_id,
+                    file_id,
+                    batch_id,
+                    config_version_id,
+                    processor_version,
+                    processor_image_digest,
+                ),
+            ).fetchone()
+            if row is None:  # pragma: no cover - RETURNING always yields a row here
+                msg = "INSERT ... ON CONFLICT ... RETURNING run_id, status returned no row"
+                raise RuntimeError(msg)
+            return int(row[0]), str(row[1])
 
     def update_ingestion_run_status(self, *, run_id: int, status: str, **fields: object) -> None:
         """See `MetadataRepository.update_ingestion_run_status`.

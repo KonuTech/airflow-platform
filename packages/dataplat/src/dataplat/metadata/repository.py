@@ -10,6 +10,13 @@ these methods with no hand-written SQL at any call site.
 Every ID here is a plain ``int`` — the database surrogate key — not a
 ``dataplat.models.identity`` dataclass; those value objects serve
 ``PipelineContext``/in-memory use, not this CRUD layer.
+
+``get_or_create_ingestion_run`` and ``create_file``'s ``duplicate_of_file_id``
+parameter are added by 04-03-PLAN.md Task 2 (``dataplat.discovery.
+discover_files``' own dependency, per 04-01-PLAN.md's already-designed
+interface for the discovery-time upsert half of the ingestion-run split —
+see ``get_or_create_ingestion_run``'s own docstring for the pod-startup-time
+``claim_ingestion_run`` counterpart, which this module does not yet define).
 """
 
 from __future__ import annotations
@@ -44,11 +51,24 @@ class MetadataRepository(Protocol):
         size_bytes: int,
         filename: str,
         status: str,
+        duplicate_of_file_id: int | None = None,
     ) -> int:
-        """Insert one row into `meta.files`.
+        """Idempotently insert (or re-fetch) one `meta.files` row.
 
-        Maps to ``meta.files(dataset_id, object_uri, content_sha256,
-        hash_version, size_bytes, filename, status)``.
+        Maps to ``INSERT INTO meta.files (dataset_id, object_uri,
+        content_sha256, hash_version, size_bytes, filename, status,
+        duplicate_of_file_id) VALUES (...) ON CONFLICT (dataset_id,
+        object_uri, content_sha256) DO UPDATE SET filename =
+        EXCLUDED.filename, duplicate_of_file_id = EXCLUDED.
+        duplicate_of_file_id RETURNING file_id`` — the real
+        `uq_files_dataset_uri_content` unique constraint (migration 0002)
+        is the `ON CONFLICT` target. Calling this twice with identical
+        `(dataset_id, object_uri, content_sha256)` returns the SAME
+        `file_id` both times and leaves exactly one row in `meta.files`;
+        `filename`/`duplicate_of_file_id` are refreshed to whatever this
+        call passed, every other column is left as first written. This
+        idempotency is what lets `dataplat.discovery.discover_files` be
+        re-run over an unchanged object listing with no duplicate rows.
 
         Args:
             dataset_id: The owning dataset's `meta.datasets.dataset_id`.
@@ -59,9 +79,12 @@ class MetadataRepository(Protocol):
             size_bytes: Size of the file, in bytes.
             filename: The file's base name, independent of its full URI.
             status: The file's processing status.
+            duplicate_of_file_id: The `file_id` of the file this row
+                duplicates by content, when known. `None` when this file is
+                not (yet) known to duplicate another.
 
         Returns:
-            The newly inserted row's `file_id`.
+            The row's `file_id`, whether newly inserted or already present.
         """
         ...
 
@@ -149,6 +172,51 @@ class MetadataRepository(Protocol):
 
         Returns:
             The newly inserted row's `run_id`.
+        """
+        ...
+
+    def get_or_create_ingestion_run(  # noqa: PLR0913 -- matches ingestion_runs' identity/FK column set
+        self,
+        *,
+        idempotency_key: str,
+        dataset_id: int,
+        config_version_id: int,
+        processor_version: str,
+        processor_image_digest: str,
+        file_id: int | None = None,
+        batch_id: int | None = None,
+    ) -> tuple[int, str]:
+        """Idempotently pre-allocate (or re-fetch) one `meta.ingestion_runs` row, discovery-time.
+
+        Maps to ``INSERT INTO meta.ingestion_runs (...) VALUES (...,
+        'PENDING') ON CONFLICT (idempotency_key) DO UPDATE SET
+        idempotency_key = EXCLUDED.idempotency_key RETURNING run_id,
+        status``. Called twice with the same `idempotency_key` returns the
+        same `run_id` both times and performs no second `INSERT` — this is
+        the discovery-time half of a two-upsert split: it tolerates being
+        re-run over an unchanged file listing, unlike a pod-startup-time
+        `claim_ingestion_run` (not yet defined on this Protocol; enforces
+        exclusivity via a conditional `UPDATE ... WHERE`, a distinct SQL
+        statement with a distinct job). Never conflate the two.
+
+        Args:
+            idempotency_key: The run's idempotency key (Q7).
+            dataset_id: The dataset this run processes.
+            config_version_id: The `meta.config_versions` row this run is
+                configured by.
+            processor_version: The `dataplat` distribution version
+                discovering this run.
+            processor_image_digest: The container image digest that will
+                execute this run.
+            file_id: The single file this run processes, when applicable.
+            batch_id: The batch this run processes, when applicable.
+
+        Returns:
+            A `(run_id, status)` tuple: `status` is the row's CURRENT
+            status after this call — `"PENDING"` on a first call, whatever
+            it already was on a repeat call. The caller uses this to decide
+            whether to include the unit in a Dynamic-Task-Mapping expand
+            list.
         """
         ...
 

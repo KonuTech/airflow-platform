@@ -173,6 +173,108 @@ def test_update_ingestion_run_status_rejects_unknown_field(
     assert _read_ingestion_run_status(migrated_dsn, run_id) == "RUNNING"
 
 
+def test_create_file_is_idempotent_on_identical_business_identity(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """04-03-PLAN.md Task 2's own dependency: re-discovery must not duplicate a row."""
+    dataset_id = repository.get_or_create_dataset("create_file_idempotency_proof")
+    content_sha256 = hashlib.sha256(b"idempotent content").digest()
+    # A real, already-existing file row for duplicate_of_file_id to reference
+    # -- meta.files.duplicate_of_file_id is a real self-FK (migration 0002),
+    # so a fabricated id would (correctly) be rejected.
+    original_file_id = repository.create_file(
+        dataset_id=dataset_id,
+        object_uri="s3://raw/customers/original.csv",
+        content_sha256=hashlib.sha256(b"the original content").digest(),
+        hash_version=1,
+        size_bytes=7,
+        filename="original.csv",
+        status="DISCOVERED",
+    )
+
+    first_id = repository.create_file(
+        dataset_id=dataset_id,
+        object_uri="s3://raw/customers/idempotent.csv",
+        content_sha256=content_sha256,
+        hash_version=1,
+        size_bytes=42,
+        filename="idempotent.csv",
+        status="DISCOVERED",
+    )
+    second_id = repository.create_file(
+        dataset_id=dataset_id,
+        object_uri="s3://raw/customers/idempotent.csv",
+        content_sha256=content_sha256,
+        hash_version=1,
+        size_bytes=42,
+        filename="idempotent.csv",
+        status="DISCOVERED",
+        duplicate_of_file_id=original_file_id,
+    )
+
+    assert first_id == second_id
+    with psycopg.connect(migrated_dsn) as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM meta.files WHERE dataset_id = %s AND object_uri = %s",
+            (dataset_id, "s3://raw/customers/idempotent.csv"),
+        ).fetchone()
+        assert rows is not None
+        assert rows[0] == 1
+        duplicate_col = conn.execute(
+            "SELECT duplicate_of_file_id FROM meta.files WHERE file_id = %s",
+            (first_id,),
+        ).fetchone()
+        assert duplicate_col is not None
+        assert duplicate_col[0] == original_file_id
+
+
+def test_get_or_create_ingestion_run_is_idempotent_and_reports_current_status(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    dataset_id = repository.get_or_create_dataset("get_or_create_run_proof")
+    config_version_id = _insert_config_version(migrated_dsn, dataset_id=dataset_id)
+
+    first_run_id, first_status = repository.get_or_create_ingestion_run(
+        idempotency_key="get_or_create_run_proof:attempt-1",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+    )
+    assert first_status == "PENDING"
+
+    second_run_id, second_status = repository.get_or_create_ingestion_run(
+        idempotency_key="get_or_create_run_proof:attempt-1",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+    )
+    assert second_run_id == first_run_id
+    assert second_status == "PENDING"
+
+    with psycopg.connect(migrated_dsn) as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM meta.ingestion_runs WHERE idempotency_key = %s",
+            ("get_or_create_run_proof:attempt-1",),
+        ).fetchone()
+        assert rows is not None
+        assert rows[0] == 1
+
+    repository.update_ingestion_run_status(run_id=first_run_id, status="SUCCEEDED")
+    third_run_id, third_status = repository.get_or_create_ingestion_run(
+        idempotency_key="get_or_create_run_proof:attempt-1",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+    )
+    assert third_run_id == first_run_id
+    assert third_status == "SUCCEEDED"
+
+
 def test_resolved_env_secret_yields_a_live_metadata_connection(
     migrated_dsn: str,
     monkeypatch: pytest.MonkeyPatch,

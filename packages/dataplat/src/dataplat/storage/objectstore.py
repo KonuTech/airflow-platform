@@ -11,11 +11,17 @@ finding 1) — so ``io.BufferedReader`` accepts it as-is. Reaching into
 ``StreamingBody``'s private internal-stream attribute is forbidden: doing
 so is both unnecessary against this boto3 version and liable to break
 without notice.
+
+``list_objects``/``put_object``/``ObjectSummary`` are added by
+04-03-PLAN.md Task 2 (``dataplat.discovery.discover_files``'s own
+dependency, per 04-01-PLAN.md's already-designed interface for these two
+operations).
 """
 
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import boto3
@@ -25,6 +31,9 @@ from botocore.exceptions import BotoCoreError, ClientError
 from dataplat.errors import StorageError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from datetime import datetime
+
     from mypy_boto3_s3 import S3Client
 
 
@@ -63,13 +72,33 @@ def open_text_stream(
     return io.TextIOWrapper(buffered, encoding=encoding, newline=newline, errors=errors)
 
 
-class ObjectStore(Protocol):
-    """The object-store read surface ``dataplat`` code depends on.
+@dataclass(frozen=True, slots=True)
+class ObjectSummary:
+    """One object-store listing entry — the minimal shape `dataplat.discovery` needs.
 
-    One method today: this phase proves only the StreamingBody-to-text-
-    stream bridge (03-RESEARCH.md finding 1). Write paths and additional
-    operations belong to whichever later phase first needs them.
+    Deliberately excludes any content-identity field: MinIO's ETag is an
+    MD5 of implementation-dependent multipart-upload chunking, not this
+    platform's `content_sha256` — content hashing is always done
+    separately, by streaming the object through `get_object()` and
+    `hashlib.sha256()`, never trusted from `etag`.
+
+    Attributes:
+        key: The object's key within its bucket.
+        etag: The object's ETag, as reported by the store. Not a content
+            hash — see the class docstring.
+        size_bytes: Size of the object, in bytes.
+        last_modified: When the object store recorded this object's most
+            recent write.
     """
+
+    key: str
+    etag: str
+    size_bytes: int
+    last_modified: datetime
+
+
+class ObjectStore(Protocol):
+    """The object-store read/list/write surface ``dataplat`` code depends on."""
 
     def get_object(self, bucket: str, key: str) -> io.TextIOWrapper:
         """Return a text stream over one object's bytes.
@@ -82,6 +111,29 @@ class ObjectStore(Protocol):
             A UTF-8 text stream over the object's bytes, opened with
             ``newline=""`` so embedded line endings inside quoted fields
             survive unchanged.
+        """
+        ...
+
+    def list_objects(self, bucket: str, prefix: str) -> Iterator[ObjectSummary]:
+        """List every object under `bucket`/`prefix`.
+
+        Args:
+            bucket: The bucket to list within.
+            prefix: The key prefix to filter by.
+
+        Yields:
+            One `ObjectSummary` per object found, across every page of
+            results — never truncated at a single-page limit.
+        """
+        ...
+
+    def put_object(self, bucket: str, key: str, body: bytes) -> None:
+        """Write `body` to `bucket`/`key`, overwriting any existing object there.
+
+        Args:
+            bucket: The bucket to write into.
+            key: The object's key within `bucket`.
+            body: The object's raw bytes.
         """
         ...
 
@@ -139,3 +191,40 @@ class S3ObjectStore(ObjectStore):
             msg = "failed to get object from object storage"
             raise StorageError(msg, context={"bucket": bucket, "key": key}) from exc
         return open_text_stream(response["Body"], encoding="utf-8")
+
+    def list_objects(self, bucket: str, prefix: str) -> Iterator[ObjectSummary]:
+        """See `ObjectStore.list_objects`.
+
+        Uses the `list_objects_v2` paginator, never the single-call
+        `list_objects`, which truncates silently at 1000 keys.
+
+        Raises:
+            StorageError: as `get_object` — see its docstring (same
+                exception types, adapted here to wrap generator iteration
+                rather than a single call).
+        """
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for entry in page.get("Contents", []):
+                    yield ObjectSummary(
+                        key=entry["Key"],
+                        etag=entry["ETag"],
+                        size_bytes=entry["Size"],
+                        last_modified=entry["LastModified"],
+                    )
+        except (ClientError, BotoCoreError) as exc:
+            msg = "failed to list objects from object storage"
+            raise StorageError(msg, context={"bucket": bucket, "prefix": prefix}) from exc
+
+    def put_object(self, bucket: str, key: str, body: bytes) -> None:
+        """See `ObjectStore.put_object`.
+
+        Raises:
+            StorageError: as `get_object` — see its docstring.
+        """
+        try:
+            self._client.put_object(Bucket=bucket, Key=key, Body=body)
+        except (ClientError, BotoCoreError) as exc:
+            msg = "failed to put object to object storage"
+            raise StorageError(msg, context={"bucket": bucket, "key": key}) from exc
