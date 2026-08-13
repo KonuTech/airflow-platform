@@ -2,11 +2,11 @@
 
 **Regenerated automatically by `tests/e2e/slice/test_smoke_and_idempotency.py::test_smoke_dag_xcom_contains_built_sha` — do not hand-edit.**
 
-- Proven at: 2026-08-13T22:30:46.060804+00:00
+- Proven at: 2026-08-13T23:00:24.986885+00:00
 - DAG: `smoke_kubernetes_pod`, task `print_version_to_xcom`
-- DagRun: `e2e-u1-9c7e38c56ceb`
+- DagRun: `e2e-u1-c8a2a0a74c4f`
 - Git SHA baked into the running image (`ENV GIT_SHA`,
-  `docker/csv-processor/Dockerfile`): `180990c`
+  `docker/csv-processor/Dockerfile`): `5ae3546`
 
 ## Pass criterion (ROADMAP.md, Spikes table)
 
