@@ -64,6 +64,12 @@ if TYPE_CHECKING:
 
 SLICE_MANIFEST = Path(__file__).resolve().parents[2] / "fixtures" / "slice-corpus.yaml"
 
+# tests/fixtures/slice-corpus.yaml's own `customers_large.csv` declaration --
+# kept as a named constant here (not re-read from the manifest at collection
+# time) so a manifest edit that changes `rows:` is a visible two-file diff,
+# not a silent behavior change to every test that reads this constant.
+LARGE_FIXTURE_ROWS = 1_000_000
+
 _DATA_NAMESPACE = "data"
 _ETL_NAMESPACE = "etl"
 _ANALYTICS_CLUSTER = "analytics-db"
@@ -116,6 +122,49 @@ def slice_fixtures_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     manifest = load_manifest(SLICE_MANIFEST)
     generate_corpus(manifest, out_dir, fast=False)
     return out_dir
+
+
+def large_csv_with_offset_customer_ids(base_bytes: bytes, *, offset: int) -> bytes:
+    """Return `base_bytes` with every row's `customer_id` shifted by `offset`.
+
+    Shared by every test in this directory that uploads `customers_large.
+    csv`: `test_pod_kill_retry.py`'s two tests and `test_concurrent_select.
+    py`'s one. Every run gets its own randomly-chosen `offset` (never the
+    fixture's literal `1..LARGE_FIXTURE_ROWS` range), so repeat runs of this
+    suite, `test_smoke_and_idempotency.py`'s small-fixture test (customer_id
+    `1..120`), and 04-09-PLAN.md's own concurrent demo activity never
+    contend for the same `normalized.customers` keys -- a collision would
+    make an exact-row-count assertion, a throughput figure derived from
+    `rows_loaded`, or a concurrent-SELECT observation window all
+    meaningless, since `ON CONFLICT ... WHERE _record_hash IS DISTINCT ...`
+    correctly suppresses a no-op republish of already-identical rows.
+
+    `customer_id` is always the text before the first comma on a data line
+    (never a fixed-width slice: the fixture's `zero_padded_int(width=6)`
+    renders row 1,000,000 as 7 digits, "1000000", not 6 -- see
+    `tools/corpus/generators.py`'s own `_zero_padded_renderer`, a MINIMUM
+    width). This changes only that leading integer, keeping every other
+    field (`name`/`country`/`birth_date`/`event_ts`) exactly as generated.
+
+    Args:
+        base_bytes: The generated `customers_large.csv` bytes, unmodified.
+        offset: Added to every row's `customer_id`.
+
+    Returns:
+        The rewritten CSV bytes, same header, same row count, same line
+        terminator (`\\n`, matching `tests/fixtures/slice-corpus.yaml`'s own
+        declaration).
+    """
+    lines = base_bytes.decode("utf-8").split("\n")
+    out = [lines[0]]
+    for line in lines[1:]:
+        if not line:
+            out.append(line)
+            continue
+        first_comma = line.index(",")
+        new_id = int(line[:first_comma]) + offset
+        out.append(f"{new_id:06d}{line[first_comma:]}")
+    return "\n".join(out).encode("utf-8")
 
 
 def _free_local_port() -> int:

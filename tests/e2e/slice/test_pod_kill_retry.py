@@ -13,7 +13,7 @@ reads /sys/fs/cgroup/memory.peak ... taking the MAX observed value" --
 adapted here to `memory.current`, the file that actually exists).
 
 Both tests give the ~1,000,000-row fixture a FRESH, randomly-offset
-`customer_id` range on every invocation (`_large_csv_with_offset_customer_ids`)
+`customer_id` range on every invocation (`large_csv_with_offset_customer_ids`)
 -- never the fixture's literal 1..1,000,000 range. This keeps repeat runs
 of this suite, runs of `test_smoke_and_idempotency.py`'s small-fixture test
 (customer_id 1..120), and 04-09-PLAN.md's own concurrent demo activity from
@@ -38,7 +38,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
+from tests.e2e.slice.conftest import (
+    LARGE_FIXTURE_ROWS,
+    large_csv_with_offset_customer_ids,
+    poll_file_discovered,
+    poll_ingestion_run,
+    poll_run_for_file,
+)
 
 if TYPE_CHECKING:
     import subprocess
@@ -50,12 +56,6 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.cluster
 
 _CUSTOMERS_DATASET = "customers"
-
-# tests/fixtures/slice-corpus.yaml's own `customers_large.csv` declaration --
-# kept as a named constant here (not re-read from the manifest at collection
-# time) so a manifest edit that changes `rows:` is a visible two-file diff,
-# not a silent behavior change to this file's assertions.
-_LARGE_FIXTURE_ROWS = 1_000_000
 
 # The KPO ingest pod's configured Kubernetes memory LIMIT
 # (airflow/dags/csv_ingest_customers.py's `_INGEST_RESOURCES`, read directly
@@ -80,39 +80,6 @@ _RETRY_TIMEOUT_SECONDS = 600
 # (~1 `kubectl exec` per tick) not to itself perturb the pod's own resource
 # usage materially.
 _MEMORY_SAMPLE_INTERVAL_SECONDS = 3.0
-
-
-def _large_csv_with_offset_customer_ids(base_bytes: bytes, *, offset: int) -> bytes:
-    """Return `base_bytes` with every row's `customer_id` shifted by `offset`.
-
-    `customer_id` is always the text before the first comma on a data line
-    (never a fixed-width slice: the fixture's `zero_padded_int(width=6)`
-    renders row 1,000,000 as 7 digits, "1000000", not 6 -- see
-    `tools/corpus/generators.py`'s own `_zero_padded_renderer`, a MINIMUM
-    width). This changes only that leading integer, keeping every other
-    field (`name`/`country`/`birth_date`/`event_ts`) exactly as generated
-    -- module docstring explains why every run needs its own customer_id
-    window.
-
-    Args:
-        base_bytes: The generated `customers_large.csv` bytes, unmodified.
-        offset: Added to every row's `customer_id`.
-
-    Returns:
-        The rewritten CSV bytes, same header, same row count, same line
-        terminator (`\\n`, matching `tests/fixtures/slice-corpus.yaml`'s own
-        declaration).
-    """
-    lines = base_bytes.decode("utf-8").split("\n")
-    out = [lines[0]]
-    for line in lines[1:]:
-        if not line:
-            out.append(line)
-            continue
-        first_comma = line.index(",")
-        new_id = int(line[:first_comma]) + offset
-        out.append(f"{new_id:06d}{line[first_comma:]}")
-    return "\n".join(out).encode("utf-8")
 
 
 def _poll_mid_load_signal(
@@ -233,7 +200,7 @@ def test_pod_kill_mid_load_produces_no_duplicates(
     admin = s3_client("admin")
 
     offset = random.SystemRandom().randint(2_000_000, 1_000_000_000)
-    payload = _large_csv_with_offset_customer_ids(
+    payload = large_csv_with_offset_customer_ids(
         (slice_fixtures_dir / "customers_large.csv").read_bytes(),
         offset=offset,
     )
@@ -281,14 +248,14 @@ def test_pod_kill_mid_load_produces_no_duplicates(
         with analytics_owner_connection.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM normalized.customers WHERE customer_id BETWEEN %s AND %s",
-                (offset + 1, offset + _LARGE_FIXTURE_ROWS),
+                (offset + 1, offset + LARGE_FIXTURE_ROWS),
             )
             row = cur.fetchone()
             assert row is not None
             total = row[0]
-        assert total == _LARGE_FIXTURE_ROWS, (
-            f"expected exactly {_LARGE_FIXTURE_ROWS} rows in this run's own customer_id "
-            f"window [{offset + 1}, {offset + _LARGE_FIXTURE_ROWS}], found {total} -- "
+        assert total == LARGE_FIXTURE_ROWS, (
+            f"expected exactly {LARGE_FIXTURE_ROWS} rows in this run's own customer_id "
+            f"window [{offset + 1}, {offset + LARGE_FIXTURE_ROWS}], found {total} -- "
             f"a value below the fixture's row count means rows went missing after the kill; "
             f"a value above is impossible under migration 0006's UNIQUE(customer_id) but "
             f"would mean the constraint itself regressed"
@@ -345,7 +312,7 @@ def test_u3_throughput_and_peak_rss_baseline(
     admin = s3_client("admin")
 
     offset = random.SystemRandom().randint(2_000_000, 1_000_000_000)
-    payload = _large_csv_with_offset_customer_ids(
+    payload = large_csv_with_offset_customer_ids(
         (slice_fixtures_dir / "customers_large.csv").read_bytes(),
         offset=offset,
     )
@@ -453,7 +420,7 @@ def _write_u3_spike_doc(  # noqa: PLR0913 -- six independently-named metrics; a 
 
 - Measured at: {measured_at}
 - Fixture: `tests/fixtures/slice-corpus.yaml`'s `customers_large.csv`
-  ({_LARGE_FIXTURE_ROWS:,} rows, ~55 MB — see that manifest's own
+  ({LARGE_FIXTURE_ROWS:,} rows, ~55 MB — see that manifest's own
   `expect.approx_bytes`)
 - Ingest pod configured memory limit:
   `{_INGEST_POD_MEMORY_LIMIT}` (`airflow/dags/csv_ingest_customers.py`'s
