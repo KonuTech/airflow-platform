@@ -210,3 +210,89 @@ run: 116 passed, 2 failed (both this pre-existing issue), 10 deselected, 130.83s
   publication path.
 - **Status:** Documented (in the test's own docstring and here), not a
   deferred fix — there is nothing to fix.
+
+## From Plan 04-09
+
+### `meta.ingestion_runs.duration_ms` is never persisted by `finalize_publication`
+
+- **Found during:** Task 1 (designing `scripts/ingest-demo.py`'s receipt
+  query against the real, live `meta.ingestion_runs` schema).
+- **File:** `packages/dataplat/src/dataplat/metadata/postgres.py`'s
+  `PostgresMetadataRepository.finalize_publication` — its `UPDATE
+  meta.ingestion_runs SET status = 'SUCCEEDED', finished_at = %s,
+  rows_loaded = %s, report_uri = %s WHERE run_id = %s` never sets
+  `duration_ms`, even though `dataplat.pipeline.run.run_ingest` computes a
+  real `duration_ms` (via `time.monotonic()`) and puts it on the in-memory
+  `Receipt`/XCom payload. The DB column exists (migration `0004`,
+  `_INGESTION_RUN_UPDATABLE_FIELDS` even lists it as settable via
+  `update_ingestion_run_status`) but no call site in this phase's code ever
+  writes it.
+- **Not caused by 04-09:** neither file is in this plan's `files_modified`
+  list (`scripts/ingest-demo.py`, `Makefile` only); both were last touched
+  by 04-05/04-06.
+- **Impact on this plan:** none that blocks 04-09's own deliverable —
+  `scripts/ingest-demo.py`'s `_RUN_QUERY` works around it with
+  `COALESCE(r.duration_ms, (EXTRACT(EPOCH FROM (r.finished_at -
+  r.started_at)) * 1000)::bigint)`, since both `started_at`/`finished_at`
+  ARE persisted, so the printed receipt still shows a real number.
+- **Status:** Deferred — out of scope for 04-09 (pre-existing gap in an
+  already-merged plan's files).
+- **Suggested fix:** Have `finalize_publication` accept and persist
+  `duration_ms` alongside `rows_loaded`/`report_uri` (its caller,
+  `run_ingest`, already computes the value — it is just never threaded
+  through to this call).
+
+### Live cluster (this wave): no DAG is currently registered on the shared kind cluster
+
+- **Found during:** Task 1 live verification (`airflow dags list` /
+  `airflow dags list-import-errors` against the shared live cluster both
+  returned "No data found" — zero DAGs, not an import error).
+- **Root cause, traced (read-only, no infra mutated by this plan):**
+  `kind/cluster.yaml` hostPath-mounts the MAIN checkout's `airflow/dags/`
+  to `/mnt/dags` on every node (Phase 2), and
+  `helm/values/local/airflow.yaml`'s `apiServer`/`scheduler`/
+  `dagProcessor`/`workers.kubernetes` sections all declare
+  `extraVolumes`/`extraVolumeMounts` wiring `/mnt/dags` to
+  `/opt/airflow/dags` (plan 04-02) — but the LIVE `airflow` Helm release
+  currently running on the shared cluster predates that wiring: `kubectl
+  get deploy airflow-dag-processor -o jsonpath='{.spec.template.spec.
+  volumes}'` shows only `logs`/`config`, no `dags` volume. The values file
+  is correct and merged; the live release simply has not been
+  `helm upgrade`d to pick it up yet in this wave's cluster session.
+  `meta.datasets`/`meta.files`/`meta.ingestion_runs` all report 0 rows,
+  confirming nothing has ever been ingested on this cluster session.
+- **Not fixed by 04-09:** re-running `helm upgrade`/`make stage-airflow`
+  against the SHARED live cluster would restart the scheduler/dag-
+  processor/api-server/triggerer pods while plan 04-08 is concurrently
+  running its own live E2E session against the same cluster (this wave's
+  parallel-execution note) — a real risk of disrupting a sibling plan's
+  in-flight verification, and outside 04-09's own `files_modified` scope
+  (`scripts/ingest-demo.py`, `Makefile`) regardless.
+- **Impact:** `scripts/ingest-demo.py`'s `--file`-nonexistent guard,
+  `--help`, credential resolution, live MinIO upload, and the
+  poll-until-timeout diagnostic path are all verified live and working
+  (see 04-09-SUMMARY.md). The `status=SUCCEEDED` receipt path (this plan's
+  Task 1 acceptance criteria's first bullet) could not be exercised live in
+  this session because no DAG is registered to process the uploaded file —
+  this is a live-infrastructure/deployment-lifecycle gap, not a defect in
+  this plan's own code.
+- **Status:** Deferred — needs a `helm upgrade` (or equivalent
+  `make stage-airflow` re-run) against the live cluster once no sibling
+  plan is concurrently depending on the current pod generation, then
+  `airflow dags list` should show `csv_ingest_customers`.
+- **Suggested owner:** whichever plan/session next has exclusive use of the
+  live cluster (or the phase's own end-to-end verification pass).
+
+### `kubectl port-forward` to `analytics-db-rw` serves exactly one real connection per tunnel (WSL2/kind characteristic)
+
+- **Found during:** Task 1 live testing of `scripts/ingest-demo.py`'s poll
+  loop.
+- **Not a deferred item — documented and worked around entirely within
+  this plan's own file** (`scripts/ingest-demo.py`'s `_poll_for_receipt`
+  docstring has the full reproduction detail: a reused tunnel's second
+  `psycopg.connect()` reliably fails "connection refused" after the pod
+  side resets the first real connection). Recorded here only so a future
+  plan adding ANOTHER script that talks to the analytical cluster via
+  `kubectl port-forward` from the host (outside `tests/e2e/cluster/`, which
+  already only ever opens one connection per tunnel) knows to open one
+  tunnel per connection rather than rediscovering this the same way.
