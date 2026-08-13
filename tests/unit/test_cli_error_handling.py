@@ -82,3 +82,17 @@ def test_zero_arguments_does_not_crash() -> None:
     assert result.exit_code == 2
     assert "Traceback" not in result.output
     assert "Usage" in result.output
+
+
+def test_main_returns_zero_on_a_successful_invocation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``main()``'s own literal contract: 0 on success, exercised directly
+    (not just via ``cli``/``CliRunner``) since Tests 1-4 above never call
+    ``main()`` on a non-raising path.
+    """
+    exit_code = main(["--version"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert resolve_version() in captured.out
