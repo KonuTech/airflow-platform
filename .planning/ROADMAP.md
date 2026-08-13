@@ -219,7 +219,32 @@ Plans:
   4. `meta.batches`, `meta.ingestion_runs` and every loaded row answer "which file, which batch, which run, which attempt, which config version" by SQL alone, with file, batch, record and target-row identity stored distinctly.
   5. Spike results are recorded in the repository: U1 — the XCom payload contains the git SHA that was built; U3 — a measured streaming throughput *and peak RSS* baseline for per-chunk `COPY` under the pod's memory limit.
 
-**Plans**: TBD
+**Plans**: 9 plans in 5 waves
+
+Plans:
+**Wave 1**
+
+- [ ] 04-01-PLAN.md — Migration 0006 (UNIQUE constraint) and the metadata/objectstore/config-registry interface contracts
+- [ ] 04-02-PLAN.md — etl namespace RBAC, dev-only credential Secrets, Helm DAG-mount wiring, image build/push
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 04-03-PLAN.md — AssignmentDocument/Receipt models and discover_files (frozen-manifest authoring)
+- [ ] 04-04-PLAN.md — StagingLoader and the corrected MergePublisher (advisory-lock + ON CONFLICT, never MERGE)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 04-05-PLAN.md — run_ingest orchestration and the discover/ingest CLI wiring (entry-point plugin fix)
+- [ ] 04-06-PLAN.md — Integration tests: discovery rerun, publish atomicity/concurrency/lineage
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 04-07-PLAN.md — The two DAG files (smoke + csv_ingest_customers) and their structural/policy tests
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 04-08-PLAN.md — E2E suite: pod-kill/retry, concurrent-select, idempotent reupload, U1/U3 spike results
+- [ ] 04-09-PLAN.md — make ingest-demo (D-14/D-15/D-16)
 
 **Research stage**: S4 + S5. **Skip `--research-phase` for the smoke DAG** (S4 is deliberately trivial and the experiment is fully specified). Consider targeted research only for the publication-transaction shape.
 
@@ -516,7 +541,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 | 1. Repository, Toolchain & CI Skeleton | 9/9 | Complete    | 2026-08-11 |
 | 2. kind Cluster & Core Infrastructure | 0/TBD | Not started | - |
 | 3. `dataplat` Core Library & Metadata Control Plane | 0/TBD | Not started | - |
-| 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/TBD | Not started | - |
+| 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/9 | Planned | - |
 | 5. Vault Secrets & Workload Identity | 0/TBD | Not started | - |
 | 6. Universal CSV Engine, Schema Contracts & Normalization | 0/TBD | Not started | - |
 | 7. Observability, Metrics, Tracing & Lineage | 0/TBD | Not started | - |
