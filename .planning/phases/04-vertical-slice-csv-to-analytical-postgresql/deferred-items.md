@@ -163,6 +163,20 @@ top where it tested something 04-01's suite didn't.
   `MetadataRepository`), or add no-op stub implementations of the four
   missing methods for structural conformance.
 
+## From Plan 04-07
+
+04-07 also independently reproduced the `tests/policy/test_gates_actually_fail.py`
+import-linter output-format drift documented above (`test_forbidden_import_is_rejected`,
+`test_good_forbidden_import_is_accepted` — same root cause: `FORCE_COLOR=3` is set in
+this execution environment, so `lint-imports`' subprocess inherits it via `_run`'s
+`env=dict(os.environ)` and renders ANSI color codes even though its stdout is piped,
+breaking the plain-substring assertion). Confirmed unrelated to this plan's diff: the
+file was last touched by Phase 1 commit `edf4756`; 04-07 adds only DAG files, `_common/
+kpo.py`, `setup.cfg` Contract 2, `pyproject.toml`'s new `apache-airflow*` dev-group
+entries, and the four new test files named in its own plan — none of which this test
+or its `_import_contract()` helper touches. Full `tests/policy -q -m "not manifests"`
+run: 116 passed, 2 failed (both this pre-existing issue), 10 deselected, 130.83s.
+
 ### `test_advisory_lock_serializes_concurrent_publishers` — the negative-case check did not fail as anticipated
 
 - **Found during:** Task 2's own required development-time negative-case
