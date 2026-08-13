@@ -104,3 +104,13 @@ def test_ordinals_are_contiguous_and_non_overlapping() -> None:
         chunks = list(chunked_records(_stream(_LF_FIXTURE), chunk_size=chunk_size))
         for earlier, later in itertools.pairwise(chunks):
             assert later.first_ordinal == earlier.first_ordinal + len(earlier.rows)
+
+
+# Test 7 (CR-02): a genuinely empty (zero-byte) stream -- no header, no rows
+# -- yields zero chunks rather than crashing with an opaque RuntimeError
+# (PEP 479 turning next(reader)'s uncaught StopIteration into
+# "generator raised StopIteration" inside chunked_records's generator body).
+def test_empty_stream_yields_no_chunks_and_does_not_raise() -> None:
+    chunks = list(chunked_records(_stream(b""), chunk_size=10))
+
+    assert chunks == []

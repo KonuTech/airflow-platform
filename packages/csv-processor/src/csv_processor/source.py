@@ -82,6 +82,14 @@ def chunked_records(text_stream: TextIOWrapper, *, chunk_size: int) -> Iterator[
     it is yielded exactly as ``csv.reader`` produced it -- classifying it is
     a downstream stage's job (``RaggedRowGuard``), not this function's.
 
+    A genuinely empty (zero-byte) ``text_stream`` -- no header, no rows --
+    yields zero chunks rather than raising (CR-02): ``next()`` on the
+    underlying reader is guarded explicitly, because letting its
+    ``StopIteration`` escape unguarded inside this generator would otherwise
+    become an opaque ``RuntimeError: generator raised StopIteration``
+    (PEP 479) at whichever caller first drives the generator, instead of the
+    empty-input outcome an empty file actually represents.
+
     Args:
         text_stream: An already-decoded text stream, opened with
             ``newline=""`` by its caller (``open_text_stream`` /
@@ -93,11 +101,18 @@ def chunked_records(text_stream: TextIOWrapper, *, chunk_size: int) -> Iterator[
     Yields:
         ``RecordChunk`` instances in ordinal order, each carrying up to
         ``chunk_size`` rows, a contiguous non-overlapping ``first_ordinal``,
-        and the header-derived ``expected_field_count``.
+        and the header-derived ``expected_field_count``. Yields nothing at
+        all for a zero-byte ``text_stream`` (CR-02).
     """
     csv.field_size_limit(FIELD_SIZE_LIMIT)
     reader = csv.reader(_strip_nul(text_stream), dialect=DIALECT)
-    header = next(reader)  # D-01: header at row 0, hardcoded -- no detection
+    try:
+        header = next(reader)  # D-01: header at row 0, hardcoded -- no detection
+    except StopIteration:
+        # Zero-byte input: no header, no rows. Return (yield nothing) instead
+        # of letting StopIteration escape this generator as PEP 479's
+        # RuntimeError (CR-02).
+        return
     expected_field_count = len(header)
     ordinal = 0
     for batch in itertools.batched(reader, chunk_size):
