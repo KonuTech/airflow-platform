@@ -60,6 +60,7 @@ _DISCOVER_RESOURCES = k8s.V1ResourceRequirements(
 _INGEST_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"}, limits={"cpu": "2", "memory": "4Gi"}
 )
+_INGEST_EXTRA_ENV_VARS = [k8s.V1EnvVar(name="DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", value="2")]
 
 
 @task
@@ -139,7 +140,7 @@ def csv_ingest_customers() -> None:
         retries=3,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=5,
-        **common_kpo_kwargs(resources=_INGEST_RESOURCES),
+        **common_kpo_kwargs(resources=_INGEST_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_ingest_args(discover.output))
 
     aggregate_receipts(ingest.output)

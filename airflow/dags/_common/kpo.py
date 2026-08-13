@@ -29,7 +29,11 @@ _S3_SECRET_NAME = "csv-processor-s3"  # noqa: S105 -- a K8s Secret's `metadata.n
 _S3_ENDPOINT_URL = "http://minio.data.svc.cluster.local:9000"
 
 
-def common_kpo_kwargs(*, resources: k8s.V1ResourceRequirements) -> dict[str, object]:
+def common_kpo_kwargs(
+    *,
+    resources: k8s.V1ResourceRequirements,
+    extra_env_vars: list[k8s.V1EnvVar] | None = None,
+) -> dict[str, object]:
     """Build the ``KubernetesPodOperator`` kwargs every task pod in this phase shares.
 
     Every value below is either verified live against this phase's prior
@@ -44,6 +48,15 @@ def common_kpo_kwargs(*, resources: k8s.V1ResourceRequirements) -> dict[str, obj
             a lighter profile for ``discover`` and a heavier one for
             ``ingest`` (04-07-PLAN.md Interfaces) -- this function does not
             choose a default, so every call site is explicit (T-04-03).
+        extra_env_vars: Appended after the four shared env vars below.
+            ``None`` (the default) adds nothing -- ``discover`` never passes
+            this. ``ingest`` uses it for
+            ``DATAPLAT_HEARTBEAT_INTERVAL_SECONDS`` (discovered live, 04-08
+            verification: the 60s production default never fires even once
+            during this fixture's real COPY duration, so D-11's mid-load
+            proof could never observe a heartbeat through the real pod path
+            -- `dataplat.pipeline.run.run_ingest`'s own default is
+            unchanged; only this one task's env shrinks the interval).
 
     Returns:
         A kwargs mapping suitable for ``KubernetesPodOperator(**kwargs)`` or
@@ -80,5 +93,6 @@ def common_kpo_kwargs(*, resources: k8s.V1ResourceRequirements) -> dict[str, obj
                 ),
             ),
             k8s.V1EnvVar(name="DATAPLAT_S3_ENDPOINT_URL", value=_S3_ENDPOINT_URL),
+            *(extra_env_vars or []),
         ],
     }

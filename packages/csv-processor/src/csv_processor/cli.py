@@ -239,7 +239,10 @@ def ingest(assignment: str) -> None:
             log=get_logger(),
             source=CsvSource(bucket=source_bucket, key=source_key),
         )
-        receipt = run_ingest(ctx)
+        heartbeat_interval_seconds = float(
+            os.environ.get("DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", "60.0"),
+        )
+        receipt = run_ingest(ctx, heartbeat_interval_seconds=heartbeat_interval_seconds)
         _write_xcom(receipt)
     except DataPlatformError:
         _write_xcom(

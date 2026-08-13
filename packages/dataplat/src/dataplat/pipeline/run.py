@@ -215,8 +215,13 @@ def run_ingest(
             ``StagingLoader`` without ever inspecting.
         heartbeat_interval_seconds: Seconds between lease/row-count
             heartbeats, well under the 5-minute lease duration. Defaults to
-            60s; overridden only by this module's own tests, to make a
-            heartbeat observable without a real 60-second wait.
+            60s. This module's own tests override it directly; the real
+            `ingest` CLI (`csv_processor.cli.ingest`) reads it from
+            `DATAPLAT_HEARTBEAT_INTERVAL_SECONDS` (unset -- i.e. every
+            production KPO pod except the one `csv_ingest_customers.py`'s
+            `ingest` task sets it on -- falls back to this same 60s
+            default), so a live E2E run can shrink it without changing
+            production behavior anywhere else.
 
     Returns:
         A ``Receipt``: ``status="SUCCEEDED"`` after a genuine claim, stage
