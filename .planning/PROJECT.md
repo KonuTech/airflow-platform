@@ -28,6 +28,16 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 - [x] MinIO providing S3-compatible object storage with `raw/validated/processed/quarantine/metadata` layers — INFRA-05
 - [x] Infrastructure defined as code; no manual `kubectl` surgery; CI-sized values profile validated in CI — INFRA-07, INFRA-10, CICD-07
 
+**Core Library & Metadata Control Plane** (Phase 3, 2026-08-13)
+
+- [x] Coherent `meta`/`normalized` schema (datasets, config_versions, files, batches, batch_files, ingestion_runs, normalized.customers) hand-migrated via Alembic; every stored hash column carries a companion `hash_version` — META-01, META-02
+- [x] Container images reproducible, versioned by git SHA, never `:latest` — csv-processor Dockerfile, non-root, git-SHA ENTRYPOINT-tagged — INFRA-08
+- [x] `SecretsResolver` resolves credentials through opaque `env://`/`file://` references; no code path names Vault or Kubernetes Secrets — the Kubernetes-Secrets→Vault swap in Phase 5 becomes a configuration change — SEC-15
+- [x] Files stream through one `csv.reader` over a `newline=""` wrapper, chunked in records via `itertools.batched` — embedded LF/CRLF fields survive at chunk sizes 1/2/3, proven by unit and hypothesis property tests — CSV-13
+- [x] Dataset processing configuration is versioned and canonically hashed (`ConfigRegistry`); every run records which config version produced it — SCHEMA-07
+- [x] Structured JSON (in-cluster) / console (local) logging works identically in local, Docker, Kubernetes and Airflow task-pod contexts; contextual fields propagate via contextvars without re-passing at each call site; a credential resolved by `SecretsResolver` never appears in a captured log line — OBS-02, OBS-04, OBS-05
+- [x] Domain exception hierarchy (`DataPlatformError` + 3 leaves) for run-fatal conditions; row-level problems flow as values (`RejectedRecord`/`StageResult`), never exceptions — QUAL-03
+
 ### Active
 
 <!-- Current scope. All are hypotheses until shipped. Detailed REQ-IDs live in REQUIREMENTS.md. -->
@@ -36,7 +46,6 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 
 - [ ] Analytical PostgreSQL with staging / warehouse / analytics separation
 - [ ] HashiCorp Vault deployed in-cluster as the secrets manager
-- [ ] Containers reproducible, versioned by git SHA, never `:latest` — INFRA-08
 
 **Secrets & Security**
 
@@ -194,49 +203,54 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**Phase 2 complete (2026-08-12)** — kind Cluster & Core Infrastructure.
+**Phase 3 complete (2026-08-13)** — `dataplat` Core Library & Metadata Control Plane.
 
-A production-like Kubernetes data platform now exists and is destroyable/
-recreatable from committed files: a 3-node kind cluster, CloudNativePG
-Postgres 17 (Airflow metadata) and 18 (analytical) as physically separate
-clusters, MinIO with five buckets and a server-enforced deny-delete on `raw`,
-and Airflow 3.3.0 running as four separate workloads reachable through
-ingress. All verified live, not just read from code — including a full cold
-`make cluster-rebuild` exercised twice mid-phase.
+The metadata control plane and pipeline engine now exist as one coherent,
+testable Python library — proven entirely with testcontainers (PostgreSQL 18
++ MinIO), no Kubernetes cluster required. Built across 8 plans in 5 waves,
+each executed in an isolated git worktree and merged back; a repo-wide scan
+found zero duplicate definitions between `dataplat` and `csv_processor` from
+the parallel execution. All 5 ROADMAP success criteria were independently
+re-verified live (not just read from SUMMARY.md claims): `alembic upgrade
+head` builds the whole `meta`/`normalized` schema with `hash_version`
+columns on every stored hash; the full test suite (99 tests, including a
+hypothesis property test) passes against testcontainers alone;
+`docker run csv-processor:<git-sha> dataplat --version` prints the version
+from a non-root, git-SHA-tagged image; `SecretsResolver` resolves opaque
+`env://`/`file://` references with no code path naming Vault or Kubernetes
+Secrets; every log line is structured JSON with contextvars-propagated
+fields, and a credential passed through the resolver never appears in a
+captured log line.
 
-Validated in Phase 2: INFRA-01, INFRA-02, INFRA-03, INFRA-04, INFRA-05,
-INFRA-07, INFRA-09, INFRA-10, CICD-07 — 9/9.
+Validated in Phase 3: META-01, META-02, INFRA-08, SEC-15, CSV-13, SCHEMA-07,
+OBS-02, OBS-04, OBS-05, QUAL-03 — 10/10.
 
 Standing facts later phases inherit:
-- The execution host's real capacity (12 CPU / 32GiB laptop, WSL2 capped to
-  24GiB) is well under the "32-core/47-GiB" figure STACK.md assumed
-  throughout. `kind/cluster.yaml`'s kubelet reservations are tuned to this
-  host's actual capacity, summed across all 3 nodes (they share one physical
-  kernel, so each node's advertised allocatable must not sum to more than the
-  real host total — the exact failure mode INFRA-09 exists to prevent).
-  Revisit sizing if profiling later phases shows it's tight.
-- Docker Desktop on this host needed `%UserProfile%\.wslconfig`'s
-  `kernelCommandLine = cgroup_no_v1=all` to get cgroup v2 — a WSL distro's own
-  `systemd=true` setting does not reach Docker Desktop's separate internal VM.
-- ADR-0006 records a human-accepted risk: `pgsty/minio`, `ingress-nginx
-  controller:v1.15.1` and `quay.io/minio/mc` are all unmaintained-upstream
-  artifacts. The ingress controller carries an unpatched CVE (T-02-21, high
-  severity, disposition `accept`) — safe only because the ingress is
-  loopback-only. If this platform is ever exposed beyond the local machine,
-  that acceptance no longer holds and the Gateway API migration ADR-0006
-  names becomes required, not optional.
-- Vault is deliberately not in this phase (D3) — arrives in Phase 5 behind the
-  `SecretsResolver` seam. Secrets today (MinIO credentials, the Airflow
-  metadata connection) are generated directly into Kubernetes Secrets via
-  `scripts/{minio-credentials,airflow-metadata-secret}.sh`.
-
-Phase 2 found and fixed three real bugs live during execution: a worker
-node-label config bug (`InitConfiguration` vs `JoinConfiguration`) that
-silently broke D-03 physical placement since the phase's first commit; a
-Helm 4 `--wait=watcher` deadlock against the Airflow chart's post-install-hook
-shape; and kubelet reservations sized for hardware this session's actual host
-doesn't have. All three are fixed in committed files and re-proven by cold
-cluster rebuilds, not just live-patched.
+- `PipelineContext` composes `RunContext`/`DatasetConfig`/`MetadataRepository`/
+  `ObjectStore`/a psycopg `ConnectionPool` into one frozen object — every
+  future `Source`/`Publisher` implementation (Phase 4's `merge`, Phase 10's
+  CDC/SCD) is written against this one settled contract, recorded permanently
+  as ADR-0008.
+- `csv_processor.source.CsvSource`/`CsvRecordStream` are the plugin's first
+  real code: one `csv.reader` over a `newline=""` stream, chunked by record
+  ordinal (never lines or byte offsets), hardcoded UTF-8/comma/header-row-0.
+  Encoding and dialect detection are deliberately out of scope — Phase 6's
+  `csv_processor/detect/` territory.
+- A standard-depth code review across all 61 changed files found 3 Critical
+  robustness defects worth triaging before Phase 4 builds on top, documented
+  in `03-REVIEW.md` and independently reproduced by the phase verifier: the
+  CLI crashes with a raw traceback on a bare/invalid invocation
+  (`standalone_mode=False` bypasses click's own usage-error handling);
+  `chunked_records()` raises an untyped `RuntimeError` on a genuinely empty
+  CSV file (PEP 479); and `get_or_create_dataset`/`ConfigRegistry` have an
+  unguarded TOCTOU race on a dataset's first-ever insert. None falsify a
+  must-have — all are edge-case/robustness gaps, not missing functionality.
+- `make test-integration` (testcontainers) could not be re-run by the
+  orchestrator immediately post-merge because the local `docker` CLI's `info`
+  subcommand was hanging — a client-side quirk following a host power event,
+  not a daemon problem (the raw Docker Engine API and `docker ps` both worked
+  correctly throughout). Each contributing plan had already proven its own
+  integration tests green during isolated worktree execution.
 
 ---
-*Last updated: 2026-08-12 after Phase 2*
+*Last updated: 2026-08-13 after Phase 3*
