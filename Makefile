@@ -45,7 +45,7 @@ FIXTURES_WRITE := $(if $(FAST),--fast,--write-digests tests/fixtures/CORPUS.sha2
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
-        minio-creds helm-lint manifests manifest-policy test-integration
+        minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -178,6 +178,21 @@ test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — mig
 	# .github/workflows/ci.yml's `integration` job) — separated from `check`
 	# for local-dev speed and Docker-optionality, not exempted from CI.
 	$(RUN_CLUSTER) pytest tests/integration -q
+
+image-csv-processor:            ## INFRA-08: build+tag the csv-processor image by git SHA, never a mutable tag [plan 03-07]
+	# GIT_SHA is computed inline, TWICE — once for the build arg (which
+	# becomes the image's own org.opencontainers.image.revision/.version
+	# labels, see the Dockerfile), once for the tag — and never a literal,
+	# never a floating tag. tests/policy/test_no_latest_image_tag.py reads this
+	# recipe body to prove that regression can't land silently. Joins
+	# neither `check` nor `ci`: it is exercised by
+	# tests/integration/test_docker_image.py (Task 3) and by a future CI
+	# image-publish job (Phase 11), same reasoning as test-integration above
+	# — a Docker build is not part of the network-free offline gate.
+	docker build \
+	  --build-arg GIT_SHA=$$(git rev-parse --short HEAD) \
+	  -t csv-processor:$$(git rev-parse --short HEAD) \
+	  -f docker/csv-processor/Dockerfile .
 
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
