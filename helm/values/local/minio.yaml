@@ -124,9 +124,19 @@ users:
 # resolves to 127.0.0.1 with no /etc/hosts edit. Host-side tools and tests
 # reach MinIO here; in-cluster pods use the ClusterIP service DNS instead, so
 # no address is hardcoded anywhere (S3_ENDPOINT_URL is resolved per context).
+#
+# proxy-body-size: "0" disables nginx-ingress's default 1MB request-body cap
+# (discovered live, 04-08/04-08-verification: any CSV upload through this
+# ingress above ~1MB fails with a 413 before it ever reaches MinIO) — this is
+# an object store; an artificial 1MB ceiling on the one path host-side tools
+# and tests use to reach it is never correct here. In-cluster pods bypass the
+# ingress entirely (ClusterIP DNS), so this only affects host-initiated
+# uploads.
 ingress:
   enabled: true
   ingressClassName: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
   hosts:
     - minio.localtest.me
 
