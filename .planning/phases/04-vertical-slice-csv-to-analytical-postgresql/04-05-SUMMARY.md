@@ -164,3 +164,13 @@ None - no external service configuration required. (The four `DATAPLAT_*` env va
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
+
+## Self-Check: PASSED
+
+- FOUND: `packages/dataplat/src/dataplat/pipeline/run.py`
+- FOUND: `packages/csv-processor/src/csv_processor/cli.py`
+- FOUND: `tests/integration/test_run_ingest.py`
+- FOUND commit: `1ea985a` (Task 1)
+- FOUND commit: `244c7a7` (Task 2)
+- FOUND commit: `f0e1ce1` (plan metadata)
+- Live-verified (not merely claimed): `docker run --rm --entrypoint pwd csv-processor:test` prints `/app`; `docker run --rm --entrypoint ls csv-processor:test -la /app/configs/datasets/customers.yaml` shows the file present; `docker run --rm csv-processor:test discover --help` / `... ingest --help` both exit 0; `uv lock --check` passes; `uv run mypy packages/dataplat/src packages/csv-processor/src` passes with zero issues (43 source files); `uv run ruff check` passes with zero issues; `uv run lint-imports` (via `uv run --frozen lint-imports`) reports contract 1 KEPT; the full `tests/integration/` suite (50 tests, including the 6 new `test_run_ingest.py` tests) passes; `tests/unit/` (126 tests) passes with no regressions.
