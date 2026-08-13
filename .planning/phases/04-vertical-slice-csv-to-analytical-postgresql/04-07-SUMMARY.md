@@ -176,6 +176,12 @@ None - no external service configuration required. (The `apache-airflow` depende
 - `csv_ingest_customers.py` is ready for 04-09's `make ingest-demo` target to trigger via the real `S3KeySensor` path (no CLI-trigger shortcut, per D-15).
 - No blockers. The one open item (`airflow dags list` live verification) is naturally covered by 04-08's live-cluster context, not a gap this plan could have closed without one.
 
+## Self-Check: PASSED
+
+- All 9 created files confirmed tracked via `git ls-files` (4 DAG/helper files, 5 test files).
+- All 4 referenced commit hashes (`2bedbae`, `4e1e752`, `7df6a41`, `6f17673`) confirmed present via `git log --oneline --all`.
+- No missing items.
+
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
