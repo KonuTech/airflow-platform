@@ -87,6 +87,15 @@ COPY configs/ configs/
 
 FROM python:3.12-slim-bookworm AS runtime
 ARG GIT_SHA
+# plan 04-07: the ONLY consumer of this env var is airflow/dags/
+# smoke_kubernetes_pod.py's entrypoint override (`cmds=["sh","-c"]`), which
+# reads $GIT_SHA at container runtime to write the XCom receipt U1 checks
+# ("the XCom contains the SHA that was built" -- ROADMAP Phase 4 spike U1).
+# ARG values do NOT persist into the running container's environment on
+# their own -- only into build-time RUN/LABEL substitution -- so without this
+# ENV line, $GIT_SHA is unset at runtime and the smoke DAG's printf would
+# write git_sha: "" regardless of which image actually ran.
+ENV GIT_SHA=${GIT_SHA}
 RUN groupadd -r app -g 1000 && useradd -r -g app -u 1000 -m app
 WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
