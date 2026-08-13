@@ -117,6 +117,28 @@ def test_etl_app_grants(migrated_dsn: str) -> None:
             )
 
 
+def test_etl_app_can_actually_use_the_schemas_it_has_table_grants_in(migrated_dsn: str) -> None:
+    """`role_table_grants` rows are inert without schema-level `USAGE` (0008's own bug).
+
+    `test_etl_app_grants` above proves the table-level grant *rows* exist,
+    but PostgreSQL gates all table access behind `USAGE` on the containing
+    schema first — a role can hold `SELECT, INSERT, UPDATE` on a table and
+    still get `permission denied for schema ...` on every single statement
+    if `USAGE` was never granted. That is exactly what migrations 0001/0005
+    shipped for three phases before 0008 fixed it: `has_schema_privilege`
+    is the same check PostgreSQL itself runs, so this is the one query that
+    actually proves the schema is usable, not merely that a grant row exists.
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        for schema in ("meta", "normalized", "staging"):
+            usable = conn.execute(
+                "SELECT has_schema_privilege('etl_app', %s, 'USAGE')",
+                (schema,),
+            ).fetchone()
+            assert usable is not None
+            assert usable[0] is True, f"etl_app lacks USAGE on schema {schema!r}"
+
+
 def test_ingestion_runs_schema_version_id_has_no_fk(migrated_dsn: str) -> None:
     with psycopg.connect(migrated_dsn) as conn:
         rows = conn.execute(
