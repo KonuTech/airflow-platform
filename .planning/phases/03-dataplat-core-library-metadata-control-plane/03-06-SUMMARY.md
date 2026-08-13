@@ -145,6 +145,14 @@ None - no external service configuration required.
 - `run_streaming()` is ready to be the sequencing loop Phase 4's vertical slice calls once a real `Source` exists.
 - No blockers. This was the phase's last purely-contractual plan; 03-08 is the first real `Source` consumer.
 
+## Self-Check: PASSED
+
+All 12 files claimed above verified present on disk (`ls -la`), including all
+7 new `dataplat` source files, the test file, both ADR files, and this
+SUMMARY. All 5 claimed commit hashes (`25c8809`, `28d3bfc`, `1603567`,
+`ab6f15d`, `b1d0239`) verified present in `git log --oneline --all`. No
+missing items.
+
 ---
 *Phase: 03-dataplat-core-library-metadata-control-plane*
 *Completed: 2026-08-13*
