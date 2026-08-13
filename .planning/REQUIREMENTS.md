@@ -183,7 +183,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
 - [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [x] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
-- [ ] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
+- [x] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
 - [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
 - [x] **QUAL-08**: A CSV edge-case fixture corpus exists, generated from a seed rather than committed en masse, and grows as cases are discovered — the corpus is the specification — *(DoD 82)*
 - [ ] **QUAL-09**: Idempotency is tested, including the assertion that a re-run produces zero additional rows — *(DoD 83)*
@@ -397,7 +397,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-03 | Phase 3 | Complete |
 | QUAL-04 | Phase 6 | Pending |
 | QUAL-05 | Phase 4 | Complete |
-| QUAL-06 | Phase 4 | Pending |
+| QUAL-06 | Phase 4 | Complete |
 | QUAL-07 | Phase 1 | Complete |
 | QUAL-08 | Phase 1 | Complete |
 | QUAL-09 | Phase 4 | Pending |
