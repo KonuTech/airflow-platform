@@ -369,3 +369,53 @@ run: 116 passed, 2 failed (both this pre-existing issue), 10 deselected, 130.83s
   "DATAPLAT_PROCESSOR_IMAGE", value=Variable.get("csv_processor_image"))`
   to `common_kpo_kwargs`'s `env_vars` list, mirroring how `image=` itself
   is already resolved from the same Variable two lines above it.
+
+## From the orchestrator (post-wave-5 live E2E verification)
+
+Five live infrastructure/code bugs were found and fixed while getting
+`tests/e2e/slice/` to actually run against the shared kind cluster (all
+committed, all applied live, all independently verified): `etl_app` missing
+`USAGE` on `meta`/`normalized` schemas (migration 0008), nginx-ingress's
+default 1MB body-size cap on the MinIO ingress, `csv_ingest_customers`/
+`smoke_kubernetes_pod` never unpaused, `etl-app`'s MinIO policy missing
+`metadata/*` access, and `run_ingest`'s 60s heartbeat interval never being
+observable through the real CLI/pod path. `meta.ingestion_runs.duration_ms`
+never being persisted (04-09's own deferred item) was also fixed.
+
+### `max_active_runs=1` scheduling contention across a full E2E suite run
+
+- **Found during:** Running all of `tests/e2e/slice/` in one pytest
+  invocation, twice, after every fix above landed.
+- **Symptom:** Each individual test — `test_concurrent_select_never_
+  observes_partial_publish`, `test_pod_kill_mid_load_produces_no_
+  duplicates`, `test_u3_throughput_and_peak_rss_baseline`, `test_smoke_dag_
+  xcom_contains_built_sha`, `test_idempotent_reupload` — passes on its own,
+  live, against the real cluster (confirmed independently, each at least
+  once, some multiple times). Run all five back-to-back in one session and
+  the same two (`test_u3_throughput_and_peak_rss_baseline`,
+  `test_idempotent_reupload`) reproducibly fail `poll_file_discovered`'s
+  180s timeout, twice in a row with an identical failure shape.
+- **Root cause:** `csv_ingest_customers`'s `max_active_runs=1` (D-03,
+  deliberate — prevents two runs racing the same advisory lock) plus its
+  `*/1 * * * *` schedule means only one DagRun is ever active. A prior
+  test's DagRun (especially `test_pod_kill_mid_load`'s kill-then-retry
+  cycle, which can run for several minutes once Airflow's default 300s
+  `retry_delay` is counted) can still be `running` when the next test
+  uploads its own file and starts polling — no new DagRun starts until the
+  active one clears, and `poll_file_discovered`'s 180s budget was sized
+  for "wait for discovery," not "wait for a full worst-case queue behind
+  up to four earlier tests' DagRuns on a shared, serialized DAG."
+- **Not a pipeline defect:** every mechanism the suite proves (atomicity,
+  kill/retry idempotency, XCom delivery, duplicate detection, throughput)
+  is independently confirmed correct. This is a test-suite-level scheduling
+  characteristic of running the FULL suite in one unbroken session against
+  one shared, `max_active_runs=1` DAG.
+- **Status:** Deferred, by explicit user decision after two reproducible
+  full-suite attempts — accept per-test-verified correctness rather than
+  chasing a single all-green full-suite run.
+- **Suggested fix, if ever revisited:** raise `poll_file_discovered`'s
+  default timeout (and/or `test_u3`'s and `test_idempotent_reupload`'s
+  call sites specifically) to comfortably exceed a worst-case queue behind
+  every other test's own DagRun, OR give `tests/e2e/slice/` its own
+  session-scoped fixture that waits for `csv_ingest_customers` to have no
+  active DagRun before each test uploads its file.
