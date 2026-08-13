@@ -132,6 +132,15 @@ None - no external service configuration required.
 - No blockers. `alembic upgrade head` is at `0006`; every Phase 3 integration/unit test still passes (31 integration, 111 unit); `mypy --strict`, `ruff check`/`format`, and `import-linter` all pass on every file this plan touches.
 - One unrelated, pre-existing gate failure (see Issues Encountered) is documented for a future plan or maintenance pass to pick up; it does not block Phase 4's critical path.
 
+## Self-Check: PASSED
+
+- All 13 files claimed as created/modified are tracked and present on disk
+  (verified via `git ls-files`): the 7 source files (1 new migration, 6
+  modified `dataplat` modules), the 4 modified integration test files, and
+  the 2 new docs files (`deferred-items.md`, this `SUMMARY.md`).
+- All 5 commit hashes claimed above (`e7f0092`, `efc415e`, `c4d17a0`,
+  `3db928a`, `11df524`) are present in `git log --oneline --all`.
+
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-13*
