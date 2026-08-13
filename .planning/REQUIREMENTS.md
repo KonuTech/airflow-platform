@@ -111,11 +111,11 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### LOAD — Identity, Idempotency and Transactional Loading
 
-- [ ] **LOAD-01**: Re-running any DAG, task, file, batch or record produces no duplicate or corrupted data — across Airflow retries, pod restarts, DAG reruns, backfills, manual reprocessing and re-uploaded files — *(DoD 34)*
-- [ ] **LOAD-02**: An Airflow retry mid-load creates no duplicate rows, proven by test — *(DoD 35)*
-- [ ] **LOAD-03**: Reprocessing an identical file is a no-op, identified by content checksum rather than filename — *(DoD 36)*
+- [x] **LOAD-01**: Re-running any DAG, task, file, batch or record produces no duplicate or corrupted data — across Airflow retries, pod restarts, DAG reruns, backfills, manual reprocessing and re-uploaded files — *(DoD 34)*
+- [x] **LOAD-02**: An Airflow retry mid-load creates no duplicate rows, proven by test — *(DoD 35)*
+- [x] **LOAD-03**: Reprocessing an identical file is a no-op, identified by content checksum rather than filename — *(DoD 36)*
 - [x] **LOAD-04**: File identity, batch identity, record identity and target-row identity are modelled distinctly and never conflated — *(DoD 37)*
-- [ ] **LOAD-05**: Loads are transactional — staging table, validation, then atomic publication — so consumers never observe a partially loaded dataset — *(DoD 52)*
+- [x] **LOAD-05**: Loads are transactional — staging table, validation, then atomic publication — so consumers never observe a partially loaded dataset — *(DoD 52)*
 - [ ] **LOAD-06**: After a partial failure the platform determines what succeeded, what remains, and whether retry or rollback is required, without manual log inspection — *(DoD 53)*
 - [ ] **LOAD-07**: Files larger than container memory process in bounded memory with configurable batch size and maximum field/row length — *(DoD 54)*
 - [x] **LOAD-08**: A batch ledger with `UNIQUE (dataset, batch_key)` plus run-scoped identity (`run_id`, `attempt`) on every staged and loaded row exists from the vertical slice onward — *(PITFALLS #3, research deviation D1)*
@@ -186,7 +186,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
 - [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
 - [x] **QUAL-08**: A CSV edge-case fixture corpus exists, generated from a seed rather than committed en masse, and grows as cases are discovered — the corpus is the specification — *(DoD 82)*
-- [ ] **QUAL-09**: Idempotency is tested, including the assertion that a re-run produces zero additional rows — *(DoD 83)*
+- [x] **QUAL-09**: Idempotency is tested, including the assertion that a re-run produces zero additional rows — *(DoD 83)*
 - [ ] **QUAL-10**: Deduplication is tested within files, across files and across batches — *(DoD 84)*
 - [ ] **QUAL-11**: Backfills are tested for idempotency and historical schema resolution — *(DoD 85)*
 - [ ] **QUAL-12**: Schema evolution is tested for compatible and breaking changes — *(DoD 86)*
@@ -343,11 +343,11 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | VALID-07 | Phase 8 | Pending |
 | VALID-08 | Phase 8 | Pending |
 | VALID-09 | Phase 8 | Pending |
-| LOAD-01 | Phase 4 | Pending |
-| LOAD-02 | Phase 4 | Pending |
-| LOAD-03 | Phase 4 | Pending |
+| LOAD-01 | Phase 4 | Complete |
+| LOAD-02 | Phase 4 | Complete |
+| LOAD-03 | Phase 4 | Complete |
 | LOAD-04 | Phase 4 | Complete |
-| LOAD-05 | Phase 4 | Pending |
+| LOAD-05 | Phase 4 | Complete |
 | LOAD-06 | Phase 9 | Pending |
 | LOAD-07 | Phase 6 | Pending |
 | LOAD-08 | Phase 4 | Complete |
@@ -400,7 +400,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-06 | Phase 4 | Complete |
 | QUAL-07 | Phase 1 | Complete |
 | QUAL-08 | Phase 1 | Complete |
-| QUAL-09 | Phase 4 | Pending |
+| QUAL-09 | Phase 4 | Complete |
 | QUAL-10 | Phase 9 | Pending |
 | QUAL-11 | Phase 9 | Pending |
 | QUAL-12 | Phase 6 | Pending |
