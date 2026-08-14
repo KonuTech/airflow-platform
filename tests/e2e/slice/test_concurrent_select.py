@@ -35,7 +35,6 @@ import pytest
 from tests.e2e.slice.conftest import (
     LARGE_FIXTURE_ROWS,
     large_csv_with_offset_customer_ids,
-    open_analytics_connection,
     poll_file_discovered,
     poll_ingestion_run,
     poll_run_for_file,
@@ -119,8 +118,9 @@ def _wait_for_running(
 def test_concurrent_select_never_observes_partial_publish(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
-    kubectl_context: str,
-    kubectl_json: Callable[..., Any],
+    open_etl_app_connection: Callable[
+        [], contextlib.AbstractContextManager[psycopg.Connection[Any]]
+    ],
     slice_fixtures_dir: Path,
 ) -> None:
     """A concurrent SELECT throughout an in-flight publish sees only the pre- or post-count.
@@ -178,7 +178,7 @@ def test_concurrent_select_never_observes_partial_publish(
         app.put_object(Bucket="raw", Key=key, Body=payload)
         observer.start()
 
-        with open_analytics_connection(kubectl_context, kubectl_json, role="etl_app") as main_conn:
+        with open_etl_app_connection() as main_conn:
             file_row = poll_file_discovered(
                 main_conn,
                 dataset=_CUSTOMERS_DATASET,

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
+import hvac
 import psycopg
 import pytest
 from tools.corpus.generators import generate_corpus
@@ -57,6 +58,9 @@ from tests.e2e.cluster.conftest import (  # noqa: F401 -- re-exported as pytest 
     kubectl_json,
     repo_root,
     s3_client,
+)
+from tests.e2e.vault.conftest import (
+    vault_addr,  # noqa: F401 -- re-exported as a pytest fixture below
 )
 
 if TYPE_CHECKING:
@@ -73,7 +77,6 @@ LARGE_FIXTURE_ROWS = 1_000_000
 _DATA_NAMESPACE = "data"
 _ETL_NAMESPACE = "etl"
 _ANALYTICS_CLUSTER = "analytics-db"
-_ANALYTICS_DB_SECRET = "csv-processor-db"  # noqa: S105 -- a K8s Secret's metadata.name, not a credential
 
 # The Airflow metadata cluster's own CNPG-generated owner Secret. Lives in
 # `data` alongside `analytics-db-app` -- CNPG's own Secrets are namespaced by
@@ -364,27 +367,65 @@ def _port_forwarded_airflow_db(kubectl_context_value: str) -> Iterator[int]:
             proc.wait(timeout=10)
 
 
-def _etl_app_credentials(kubectl_json_fn: Callable[..., Any]) -> dict[str, str]:
-    """Parse `etl_app`'s user/password/dbname out of the `csv-processor-db` Secret's DSN.
+def _kubectl_create_token(
+    kubectl_fn: Callable[..., Any],
+    *,
+    service_account: str,
+    namespace: str,
+) -> str:
+    """Obtain a fresh projected token for `service_account` in `namespace`.
 
-    `scripts/etl-secrets.sh`'s own `_ensure_csv_processor_db_secret` writes a
-    single `dsn` key: `postgresql://etl_app:<url-encoded-password>@
-    analytics-db-rw.data:5432/analytics` — the exact DSN
-    `DATAPLAT_DB_DSN` resolves to inside a real KPO pod. The host in that
-    DSN is cluster-internal (`analytics-db-rw.data`), unreachable from this
-    suite's host process, so only the user/password/dbname are used here;
-    the connection itself goes through `_port_forwarded_analytics`.
+    Copied from `tests/e2e/vault/test_positive_auth.py`'s own helper of the
+    same name (this repository's established convention: small helpers are
+    copied per test tier, not shared through a library module — see this
+    module's own docstring).
+    """
+    proc = kubectl_fn("create", "token", service_account, "-n", namespace)
+    assert proc.returncode == 0, (
+        f"kubectl create token {service_account} -n {namespace} failed "
+        f"(exit {proc.returncode}):\n{proc.stderr}"
+    )
+    return proc.stdout.strip()
+
+
+def _etl_app_credentials(
+    kubectl_fn: Callable[..., Any],
+    vault_addr_value: str,
+) -> dict[str, str]:
+    """Parse `etl_app`'s user/password/dbname out of Vault's `etl/analytics-db#dsn`.
+
+    Plan 05-02 migrated this credential off the `csv-processor-db`
+    Kubernetes Secret (deleted from the live cluster once that migration's
+    own live proof passed) into Vault, authenticated the SAME way the real
+    pipeline pods do: the `csv-processor` ServiceAccount's own Kubernetes-auth
+    role. `scripts/vault-bootstrap.py`'s `_ensure_etl_secrets` writes the
+    identical single-`dsn`-key shape the old Secret held —
+    `postgresql://etl_app:<url-encoded-password>@analytics-db-rw.data:5432/
+    analytics` — so only the read mechanism changed, not the DSN shape. The
+    host in that DSN is cluster-internal (`analytics-db-rw.data`),
+    unreachable from this suite's host process, so only the
+    user/password/dbname are used here; the connection itself goes through
+    `_port_forwarded_analytics`.
 
     Args:
-        kubectl_json_fn: The `kubectl_json` fixture callable.
+        kubectl_fn: The `kubectl` fixture callable (raw, not JSON-parsing).
+        vault_addr_value: The `vault_addr` fixture's value.
 
     Returns:
         `{"user": ..., "password": ..., "dbname": ...}`.
     """
-    secret = _read_secret_data(kubectl_json_fn, _ETL_NAMESPACE, _ANALYTICS_DB_SECRET)
-    parsed = urlsplit(secret["dsn"])
-    assert parsed.username is not None, f"csv-processor-db Secret's dsn has no username: {parsed}"
-    assert parsed.password is not None, f"csv-processor-db Secret's dsn has no password: {parsed}"
+    csv_processor_jwt = _kubectl_create_token(
+        kubectl_fn,
+        service_account="csv-processor",
+        namespace=_ETL_NAMESPACE,
+    )
+    client = hvac.Client(url=vault_addr_value)
+    client.auth.kubernetes.login(role="csv-processor", jwt=csv_processor_jwt)
+    secret = client.secrets.kv.v2.read_secret_version(mount_point="etl", path="analytics-db")
+    dsn = secret["data"]["data"]["dsn"]
+    parsed = urlsplit(dsn)
+    assert parsed.username is not None, f"etl/analytics-db#dsn has no username: {parsed}"
+    assert parsed.password is not None, f"etl/analytics-db#dsn has no password: {parsed}"
     return {
         "user": unquote(parsed.username),
         "password": unquote(parsed.password),
@@ -414,6 +455,8 @@ def _analytics_owner_credentials(kubectl_json_fn: Callable[..., Any]) -> dict[st
 def open_analytics_connection(
     kubectl_context_value: str,
     kubectl_json_fn: Callable[..., Any],
+    kubectl_fn: Callable[..., Any],
+    vault_addr_value: str,
     *,
     role: str = "etl_app",
 ) -> Iterator[psycopg.Connection[Any]]:
@@ -428,11 +471,16 @@ def open_analytics_connection(
 
     Args:
         kubectl_context_value: The `kubectl_context` fixture's value.
-        kubectl_json_fn: The `kubectl_json` fixture callable.
+        kubectl_json_fn: The `kubectl_json` fixture callable -- only used
+            for `role="owner"` (reads the CNPG-generated Secret directly).
+        kubectl_fn: The `kubectl` fixture callable -- only used for
+            `role="etl_app"` (obtains a projected token for Vault auth).
+        vault_addr_value: The `vault_addr` fixture's value -- only used for
+            `role="etl_app"`.
         role: `"etl_app"` (default — matches what the real pipeline pods
-            authenticate as) or `"owner"` (the CNPG-generated
-            `analytics_owner` role, for test-harness needs broader than the
-            pipeline's own access).
+            authenticate as, credential sourced from Vault since plan
+            05-02) or `"owner"` (the CNPG-generated `analytics_owner` role,
+            for test-harness needs broader than the pipeline's own access).
 
     Yields:
         An open `psycopg.Connection` to the `analytics` database.
@@ -441,7 +489,7 @@ def open_analytics_connection(
         ValueError: `role` is neither `"etl_app"` nor `"owner"`.
     """
     if role == "etl_app":
-        creds = _etl_app_credentials(kubectl_json_fn)
+        creds = _etl_app_credentials(kubectl_fn, vault_addr_value)
     elif role == "owner":
         creds = _analytics_owner_credentials(kubectl_json_fn)
     else:
@@ -467,6 +515,8 @@ def open_analytics_connection(
 def analytics_connection(
     kubectl_context: str,  # noqa: F811 -- pytest fixture-injection param name, not a real redefinition
     kubectl_json: Callable[..., Any],  # noqa: F811 -- same reasoning as kubectl_context above
+    kubectl: Callable[..., Any],  # noqa: F811 -- same reasoning as kubectl_context above
+    vault_addr: str,  # noqa: F811 -- same reasoning as kubectl_context above
 ) -> Iterator[psycopg.Connection[Any]]:
     """A live `etl_app`-authenticated connection to the analytical cluster.
 
@@ -475,14 +525,46 @@ def analytics_connection(
     assertions made through this connection observe exactly what the
     pipeline itself is entitled to see.
     """
-    with open_analytics_connection(kubectl_context, kubectl_json, role="etl_app") as conn:
+    with open_analytics_connection(
+        kubectl_context, kubectl_json, kubectl, vault_addr, role="etl_app"
+    ) as conn:
         yield conn
+
+
+@pytest.fixture
+def open_etl_app_connection(
+    kubectl_context: str,  # noqa: F811 -- pytest fixture-injection param name, not a real redefinition
+    kubectl_json: Callable[..., Any],  # noqa: F811 -- same reasoning as kubectl_context above
+    kubectl: Callable[..., Any],  # noqa: F811 -- same reasoning as kubectl_context above
+    vault_addr: str,  # noqa: F811 -- same reasoning as kubectl_context above
+) -> Callable[[], contextlib.AbstractContextManager[psycopg.Connection[Any]]]:
+    """A zero-arg factory for a SECOND, independent `etl_app` connection.
+
+    `open_analytics_connection` itself needs four fixture values
+    (`kubectl_context`, `kubectl_json`, `kubectl`, `vault_addr`) to resolve
+    Vault-backed `etl_app` credentials (plan 05-02) -- passing all four
+    through a TEST function's own signature just to open one extra
+    connection pushes it over this repository's `PLR0913`/`PLR0917` (max 5
+    args) budget. This fixture binds them once via closure so a test needs
+    only ONE parameter (this fixture) plus a `with ...() as conn:` call,
+    exactly like `test_concurrent_select.py`'s own "observer" vs. "main"
+    two-connection need (see `open_analytics_connection`'s own docstring).
+    """
+
+    def _factory() -> contextlib.AbstractContextManager[psycopg.Connection[Any]]:
+        return open_analytics_connection(
+            kubectl_context, kubectl_json, kubectl, vault_addr, role="etl_app"
+        )
+
+    return _factory
 
 
 @pytest.fixture
 def analytics_owner_connection(
     kubectl_context: str,  # noqa: F811 -- pytest fixture-injection param name, not a real redefinition
     kubectl_json: Callable[..., Any],  # noqa: F811 -- same reasoning as kubectl_context above
+    kubectl: Callable[..., Any],  # noqa: F811 -- same reasoning as kubectl_context above
+    vault_addr: str,  # noqa: F811 -- same reasoning as kubectl_context above
 ) -> Iterator[psycopg.Connection[Any]]:
     """A live `analytics_owner`-authenticated connection to the analytical cluster.
 
@@ -490,9 +572,14 @@ def analytics_owner_connection(
     grants (04-08-PLAN.md's Interfaces section: "as the owner where broader
     test-harness access is needed"). None of this suite's own tests
     currently require it; provided because the plan names this fixture
-    explicitly as a pair with `analytics_connection`.
+    explicitly as a pair with `analytics_connection`. `role="owner"` never
+    touches `kubectl`/`vault_addr` internally, but `open_analytics_connection`
+    requires them positionally for the `role="etl_app"` path its other
+    caller (`analytics_connection`) uses.
     """
-    with open_analytics_connection(kubectl_context, kubectl_json, role="owner") as conn:
+    with open_analytics_connection(
+        kubectl_context, kubectl_json, kubectl, vault_addr, role="owner"
+    ) as conn:
         yield conn
 
 
