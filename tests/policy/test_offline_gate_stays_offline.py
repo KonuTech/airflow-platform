@@ -5,8 +5,25 @@ test directory is silently uncollected until a target names it —
 `tests/e2e/cluster/` (D-16) is exactly the kind of directory that defect
 would swallow. This file decides one narrow, structural question: does any
 target in `check`'s or `ci`'s full prerequisite closure name a path under
-`tests/e2e/` in its own recipe? And separately: is `cluster-verify` the
-*only* target in the whole Makefile that does?
+`tests/e2e/` in its own recipe? And separately: does only a documented,
+argued SET of targets do so — never an unreviewed, growing list?
+
+`cluster-verify` (Phase 2, D-16) was originally the only such target,
+covering `tests/e2e/cluster` and (from plan 04-09) `tests/e2e/slice` too.
+Plan 05-01 deliberately added a SECOND, independent one: `vault-verify`,
+covering `tests/e2e/vault` — the plan's own action text is explicit that
+this is its own long-lived target ("targeting the WHOLE directory so no
+later plan needs to edit this recipe again"), not folded into
+`cluster-verify`, because Vault's own live-cluster suite is a logically
+distinct subsystem from the CSV-ingestion vertical slice `cluster-verify`
+already covers, and merging them would force every `cluster-verify`
+invocation to also require Vault to be unsealed and bootstrapped — a new
+precondition its existing callers (and CI, if it ever adds a
+`cluster-verify` job) do not expect. `ARGUED_TESTS_E2E_TARGETS` below is
+therefore an ALLOWLIST, not a single name, mirroring
+`test_values_profiles.py`'s `PERMITTED_AXES` table: every entry carries a
+written argument, and the non-vacuity test below still proves a THIRD,
+unargued target is reported.
 
 **Honest limit.** This decides the PATH-NAMING question — whether
 `tests/e2e/` is reachable from the offline gate by a recipe literally
@@ -27,6 +44,34 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = REPO_ROOT / "Makefile"
 
 OFFLINE_GATES = ("check", "ci")
+
+# (target, argument) — every live-cluster-verify target that legitimately
+# names a `tests/e2e/` path in its own recipe, each with a written reason
+# it is a SEPARATE target rather than folded into an existing one. Mirrors
+# `test_values_profiles.py`'s `PERMITTED_AXES` discipline: an unargued
+# addition here is exactly what `test_a_third_target_is_reported` below
+# exists to catch.
+ARGUED_TESTS_E2E_TARGETS: tuple[tuple[str, str], ...] = (
+    (
+        "cluster-verify",
+        (
+            "D-16 (plan 02-02), extended by plan 04-09: the original, "
+            "general-purpose live-cluster suite, covering tests/e2e/cluster "
+            "and tests/e2e/slice."
+        ),
+    ),
+    (
+        "vault-verify",
+        (
+            "Plan 05-01: a deliberately SEPARATE target for tests/e2e/vault "
+            "-- Vault's own live-cluster suite is a distinct subsystem from "
+            "the CSV-ingestion vertical slice cluster-verify covers, and "
+            "folding it in would force every cluster-verify invocation to "
+            "also require Vault unsealed and bootstrapped, a precondition "
+            "its existing callers do not expect."
+        ),
+    ),
+)
 
 # A target line: `name: prereq1 prereq2  ## comment`. The negative lookahead
 # on `=` excludes GNU Make's `NAME := value` / `NAME ?= value` / `NAME += value`
@@ -123,12 +168,43 @@ def test_check_and_ci_never_reach_tests_e2e() -> None:
     )
 
 
-def test_cluster_verify_is_the_only_target_naming_tests_e2e() -> None:
+def test_only_argued_targets_name_tests_e2e() -> None:
     names = targets_naming_tests_e2e(_load_targets())
-    assert names == ["cluster-verify"], (
-        f"expected exactly the 'cluster-verify' target to name tests/e2e; found {names}. "
-        f"tests/e2e/cluster must be collected by exactly one target (D-16)."
+    argued_names = sorted(name for name, _argument in ARGUED_TESTS_E2E_TARGETS)
+    assert names == argued_names, (
+        f"expected exactly the argued targets {argued_names} to name tests/e2e; found "
+        f"{names}. Every target under D-16 must be a documented, argued entry in "
+        "ARGUED_TESTS_E2E_TARGETS, not an unreviewed addition."
     )
+
+
+def test_every_argued_target_carries_an_argument() -> None:
+    assert len(ARGUED_TESTS_E2E_TARGETS) >= 1
+    for name, argument in ARGUED_TESTS_E2E_TARGETS:
+        has_argument = bool(argument and argument.strip())
+        assert has_argument, (
+            f"the {name!r} entry in ARGUED_TESTS_E2E_TARGETS carries no written argument"
+        )
+
+
+def test_a_third_target_is_reported() -> None:
+    """Non-vacuity: a target this table does not name must still be reported.
+
+    Modelled on an in-memory mutated copy of the parsed Makefile, mirroring
+    `test_a_fifth_axis_is_reported`'s scratch-mutation shape in
+    `test_values_profiles.py` — nothing on disk is touched.
+    """
+    targets = _load_targets()
+    mutated = dict(targets)
+    mutated["airflow-verify"] = {
+        "prereqs": [],
+        "recipe_lines": ["$(RUN_CLUSTER) pytest tests/e2e/airflow -q"],
+    }
+    assert mutated != targets, "the scratch mutation did not apply"
+    names = targets_naming_tests_e2e(mutated)
+    argued_names = sorted(name for name, _argument in ARGUED_TESTS_E2E_TARGETS)
+    assert names != argued_names, "an unargued third target was not reported"
+    assert "airflow-verify" in names
 
 
 # 2. Non-vacuity by mutation on an in-memory copy of the Makefile text ------
