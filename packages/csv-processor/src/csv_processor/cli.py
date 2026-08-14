@@ -185,6 +185,35 @@ def discover(dataset: str) -> None:
             pool.close()
 
 
+def _failure_receipt(doc: AssignmentDocument | None) -> Receipt:
+    """Build the `status="FAILED"` `Receipt` `ingest()` writes on any exception.
+
+    Factored out so both of `ingest()`'s exception branches -- the
+    `DataPlatformError` branch and the broader `Exception` branch added by
+    WR-01 -- construct the identical shape from the identical guard,
+    instead of duplicating the `Receipt(...)` call inline in each branch.
+
+    Args:
+        doc: The `AssignmentDocument` parsed so far, or `None` when the
+            failure happened before `AssignmentDocument.model_validate_json`
+            ever succeeded.
+
+    Returns:
+        A `Receipt` with `run_id=doc.run_id if doc is not None else -1`,
+        `status="FAILED"`, and every count/duration field zeroed.
+    """
+    return Receipt(
+        run_id=doc.run_id if doc is not None else -1,
+        status="FAILED",
+        rows_read=0,
+        rows_loaded=0,
+        rows_invalid=0,
+        rows_deduplicated=0,
+        duration_ms=0,
+        report_uri=None,
+    )
+
+
 @cli.command()
 @click.option("--assignment", required=True, help="The s3://bucket/key URI of the assignment JSON.")
 def ingest(assignment: str) -> None:
@@ -196,8 +225,9 @@ def ingest(assignment: str) -> None:
     `DatasetConfig` version it was written against, and delegates the whole
     claim/stage/publish orchestration to `dataplat.pipeline.run.run_ingest`.
     A `Receipt` is written to the XCom path on every exit path, success or
-    failure -- the `finally`/`except` pairing below is this command's own
-    concern, distinct from `run_ingest`'s (which adds no receipt-writing
+    failure, for ANY exception -- not only `DataPlatformError` (WR-01;
+    04-REVIEW.md) -- the `finally`/`except` pairing below is this command's
+    own concern, distinct from `run_ingest`'s (which adds no receipt-writing
     boundary of its own; see that function's docstring).
 
     Args:
@@ -245,18 +275,24 @@ def ingest(assignment: str) -> None:
         receipt = run_ingest(ctx, heartbeat_interval_seconds=heartbeat_interval_seconds)
         _write_xcom(receipt)
     except DataPlatformError:
-        _write_xcom(
-            Receipt(
-                run_id=doc.run_id if doc is not None else -1,
-                status="FAILED",
-                rows_read=0,
-                rows_loaded=0,
-                rows_invalid=0,
-                rows_deduplicated=0,
-                duration_ms=0,
-                report_uri=None,
-            ),
-        )
+        _write_xcom(_failure_receipt(doc))
+        raise
+    except Exception:
+        # WR-01: deliberate, narrow, always-re-raising catch that exists
+        # solely to guarantee ingest()'s own docstring-promised
+        # Receipt-on-every-exit-path contract for exceptions outside the
+        # DataPlatformError hierarchy (e.g. a raw psycopg.errors.DataError,
+        # a network error, MemoryError). Airflow still observes the pod's
+        # non-zero exit code either way; this only ensures a Receipt is
+        # written before that propagation. Because the DataPlatformError
+        # branch above is listed first, DataPlatformError instances are
+        # still only ever caught there -- this clause only ever sees what
+        # that one did not match, per normal Python except-clause ordering,
+        # and never intercepts BaseException-only families like
+        # KeyboardInterrupt/SystemExit. No blind-except lint suppression is
+        # needed here: ruff's BLE001 check does not fire on a branch that
+        # always re-raises rather than swallowing the exception.
+        _write_xcom(_failure_receipt(doc))
         raise
     finally:
         if pool is not None:
