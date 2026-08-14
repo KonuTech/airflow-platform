@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
-status: executing
-stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-08-14T14:47:39.281Z"
+status: verifying
+stopped_at: Completed 05-05-PLAN.md
+last_updated: "2026-08-14T15:15:50.278Z"
 last_activity: 2026-08-14
 progress:
   total_phases: 11
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 42
-  completed_plans: 41
-  percent: 36
+  completed_plans: 42
+  percent: 45
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 Phase: 05 (vault-secrets-workload-identity) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-14
 
-Progress: [██████████] 98%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Progress: [██████████] 98%
 | Phase 05 P02 | 45min | 3 tasks | 11 files |
 | Phase 05 P03 | 95min | 2 tasks | 7 files |
 | Phase 05 P04 | 40min | 3 tasks | 5 files |
+| Phase 05 P05 | 20min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,8 @@ Recent decisions affecting current work:
 - [Phase 05]: [Phase 05, plan 04]: vault-audit-tail's Makefile target is self-contained (no env-sourcing prefix), matching vault-unseal/vault-bootstrap's own Python-script shape rather than the plan's literal minio-creds citation. — The plan's action text simultaneously instructed duplicating _kubectl_context() as a self-contained helper (so no external KUBECTL_CONTEXT is needed) and citing minio-creds's shell env-sourcing Makefile shape -- these conflict; the script computes its own context, so sourcing an env var it never reads would be dead Makefile configuration.
 - [Phase 05]: [Phase 05, plan 04]: test_rotation.py's D-03 proof rotates minio_default's conn_uri by appending a harmless, ignorable query parameter rather than changing login/password/endpoint. — Verified live against the installed apache-airflow-providers-amazon AwsConnectionWrapper that an unrecognised extra key is silently absorbed by _get_credentials(**kwargs), never raised on -- keeps the connection fully functional throughout the test, including for concurrently-running pipeline traffic from the phase's own background DagRun backlog.
 - [Phase 05]: Plan 05-04: test_dev_secrets_reproducible.py's SEC-13 non-vacuity test renames (Path.replace) .secrets/vault-init.json aside instead of deleting it, restoring it in a finally block with an in-memory byte backup as a second line of defence. — This exact file was already lost once earlier in this phase (plan 05-02, session 1) via an unrelated worktree-isolation issue, requiring a full Vault re-bootstrap to recover -- an atomic rename can never produce a state where the data does not exist anywhere on disk, unlike a delete-then-rewrite sequence, while still satisfying the plan's own fail-closed acceptance criterion.
+- [Phase 05]: Plan 05-05: tests/policy/test_no_stale_secrets.py's YAML walker (_iter_leaves) recurses into both dicts AND lists, not dicts alone — A dict-only flatten (test_workflow_secrets.py's own _flatten_keys) would silently never catch a secretKeyRef re-introduced inside a Kubernetes env: list -- the exact real historical shape all three of this phase's now-deleted secretKeyRef blocks used (git show 851e7e5) -- making the guard vacuous against its own primary threat
+- [Phase 05]: Plan 05-05: the script-side non-vacuity test in test_no_stale_secrets.py mutates scripts/stages/75-etl.sh, not the plan-cited scripts/etl-secrets.sh — scripts/etl-secrets.sh was deleted outright in plan 05-03 once all three D-01 migrations completed, before this plan's own session began -- 75-etl.sh is a real, currently-committed script under the same scanned scripts/**/*.sh surface
 
 ### Pending Todos
 
@@ -101,6 +104,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T14:47:39.256Z
-Stopped at: Completed 05-04-PLAN.md
+Last session: 2026-08-14T15:15:50.259Z
+Stopped at: Completed 05-05-PLAN.md
 Resume file: None

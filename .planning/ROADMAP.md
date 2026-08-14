@@ -36,7 +36,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: kind Cluster & Core Infrastructure** - A destroyable/recreatable 3-node kind cluster running MinIO, two separate PostgreSQL clusters and Airflow 3.3, all from committed files (completed 2026-08-12)
 - [x] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster (completed 2026-08-13)
 - [x] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows (completed 2026-08-13)
-- [ ] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests
+- [x] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests (completed 2026-08-14)
 - [ ] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization
 - [ ] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking
 - [ ] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection
@@ -298,7 +298,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 05-05-PLAN.md — Permanent SEC-01 structural guard, SEC-14 secrets-architecture documentation, ADR-0009 (OpenBao) (wave 5)
+- [x] 05-05-PLAN.md — Permanent SEC-01 structural guard, SEC-14 secrets-architecture documentation, ADR-0009 (OpenBao) (wave 5)
 
 **Research stage**: S6. **Use `/gsd-plan-phase --research-phase`** — the kind-specific JWT-issuer caveat in ARCHITECTURE is explicitly flagged as *inference, unverified on this cluster*, and `auth_type: kubernetes` is present in the Airflow hashicorp provider code but undocumented on its docs page. Verify against pinned provider source, not the docs page.
 

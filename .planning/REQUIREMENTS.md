@@ -56,7 +56,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **SEC-11**: Automated secret scanning runs in CI and fails the build on a detected credential — *(DoD 100)*
 - [x] **SEC-12**: A negative test proves an unauthorized service account is *denied* access to another workload's secrets — if this test is awkward to write, the identity model is not real — *(DoD 101)*
 - [x] **SEC-13**: Development secrets are clearly marked, never committed, isolated from production, and reproducible when rebuilding the local environment — *(DoD 102)*
-- [ ] **SEC-14**: The secrets architecture is documented end-to-end — injection mechanism, trust boundaries, and how a production secrets manager would substitute without application code changes — *(DoD 111)*
+- [x] **SEC-14**: The secrets architecture is documented end-to-end — injection mechanism, trust boundaries, and how a production secrets manager would substitute without application code changes — *(DoD 111)*
 - [x] **SEC-15**: The ETL library resolves credentials through an opaque `SecretsResolver` reference (`env://`, `file://`) and never learns which backend served it — making the Kubernetes-Secrets→Vault swap a configuration change — *(ARCHITECTURE deviation D3)*
 
 ### ORCH — Airflow Orchestration
@@ -303,7 +303,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SEC-11 | Phase 1 | Complete |
 | SEC-12 | Phase 5 | Complete |
 | SEC-13 | Phase 5 | Complete |
-| SEC-14 | Phase 5 | Pending |
+| SEC-14 | Phase 5 | Complete |
 | SEC-15 | Phase 3 | Complete |
 | ORCH-01 | Phase 4 | Complete |
 | ORCH-02 | Phase 4 | Complete |
