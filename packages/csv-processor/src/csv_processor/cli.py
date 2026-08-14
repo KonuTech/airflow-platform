@@ -71,14 +71,37 @@ _S3_SECRET_KEY_REF = "env://DATAPLAT_S3_SECRET_KEY"  # noqa: S105 -- an opaque e
 def _build_common() -> tuple[ConnectionPool, PostgresMetadataRepository, S3ObjectStore]:
     """Resolve credentials and build the pool/metadata/objects trio both commands need.
 
+    Three of the four env vars `kpo.py` sets now hold a SECOND opaque
+    reference as their own value (plan 05-02: `DATAPLAT_DB_DSN`,
+    `DATAPLAT_S3_ACCESS_KEY` and `DATAPLAT_S3_SECRET_KEY` are each a literal
+    `vault://...` string, not a directly-usable value) -- resolving them is
+    `resolve_secret()` two levels deep: the outer `env://` call reads the
+    process environment and hands back that `vault://` string UNRESOLVED
+    (by design -- `resolve_secret()` performs exactly one level of
+    resolution, never recursively), and the inner call resolves THAT.
+    `DATAPLAT_S3_ENDPOINT_URL` is the one exception -- `kpo.py` sets it to a
+    plain, non-secret literal directly, so a single `resolve_secret()` call
+    is already its final value; a second call would incorrectly try to
+    interpret an `http://` URL as a secret-reference scheme and fail closed.
+
+    Bug fixed live, this plan (05-03): the un-double-resolved form failed
+    every real KPO pod with `missing "=" after "vault://etl/analytics-db
+    #dsn" in connection info string` -- psycopg received the raw,
+    unresolved `vault://` reference string as if it were already a DSN.
+    This was the first time any KPO pod actually ran against the
+    `vault://`-literal `kpo.py` wiring plan 05-02 shipped (the previously-
+    deployed image predated it entirely; see this plan's own SUMMARY.md and
+    `.planning/phases/05-vault-secrets-workload-identity/deferred-items.md`),
+    so the gap was latent, not a regression this plan introduced.
+
     Returns:
         `(pool, metadata, objects)` -- `pool` is already opened
         (`pool.open(wait=True)`); the caller owns closing it.
     """
-    dsn = resolve_secret(_DB_DSN_REF)
+    dsn = resolve_secret(resolve_secret(_DB_DSN_REF))
     endpoint_url = resolve_secret(_S3_ENDPOINT_URL_REF)
-    access_key = resolve_secret(_S3_ACCESS_KEY_REF)
-    secret_key = resolve_secret(_S3_SECRET_KEY_REF)
+    access_key = resolve_secret(resolve_secret(_S3_ACCESS_KEY_REF))
+    secret_key = resolve_secret(resolve_secret(_S3_SECRET_KEY_REF))
 
     pool = create_pool(dsn)
     pool.open(wait=True)

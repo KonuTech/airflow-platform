@@ -74,6 +74,77 @@ def test_ingest_writes_a_failed_receipt_for_a_non_dataplatformerror_exception(
     assert payload["run_id"] == -1
 
 
+def test_build_common_resolves_vault_literals_held_inside_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test, plan 05-03: three of `_build_common()`'s four env vars
+    (`DATAPLAT_DB_DSN`, `DATAPLAT_S3_ACCESS_KEY`, `DATAPLAT_S3_SECRET_KEY`) each hold a
+    SECOND opaque `vault://` reference as their own value (plan 05-02's `kpo.py` wiring)
+    -- `_build_common()` must resolve them two `resolve_secret()` calls deep, not hand
+    the raw, unresolved `vault://` string straight to `create_pool()`/`S3ObjectStore`.
+    Found live: every real KPO pod failed with `missing "=" after "vault://etl/
+    analytics-db#dsn" in connection info string` because the un-double-resolved DSN
+    reached psycopg as if it were already a real DSN. `DATAPLAT_S3_ENDPOINT_URL` is the
+    control case -- it holds a plain, non-secret literal directly and must resolve
+    through exactly ONE `resolve_secret()` call, not two.
+    """
+    monkeypatch.setenv("DATAPLAT_DB_DSN", "vault://etl/analytics-db#dsn")
+    monkeypatch.setenv("DATAPLAT_S3_ENDPOINT_URL", "http://minio.data.svc.cluster.local:9000")
+    monkeypatch.setenv("DATAPLAT_S3_ACCESS_KEY", "vault://etl/minio#access_key")
+    monkeypatch.setenv("DATAPLAT_S3_SECRET_KEY", "vault://etl/minio#secret_key")
+
+    # Maps EVERY ref this fake ever expects to see resolved -- a ref this test does
+    # not anticipate (e.g. a real vault:// string reaching create_pool unresolved,
+    # which is exactly the bug) raises KeyError, failing the test loudly rather than
+    # silently passing an unresolved reference through.
+    resolved = {
+        "env://DATAPLAT_DB_DSN": "vault://etl/analytics-db#dsn",
+        "vault://etl/analytics-db#dsn": "postgresql://real-user:real-pass@host/db",
+        "env://DATAPLAT_S3_ENDPOINT_URL": "http://minio.data.svc.cluster.local:9000",
+        "env://DATAPLAT_S3_ACCESS_KEY": "vault://etl/minio#access_key",
+        "vault://etl/minio#access_key": "real-access-key",
+        "env://DATAPLAT_S3_SECRET_KEY": "vault://etl/minio#secret_key",
+        "vault://etl/minio#secret_key": "real-secret-key",
+    }
+
+    def _fake_resolve_secret(ref: str) -> str:
+        return resolved[ref]
+
+    monkeypatch.setattr(csv_processor_cli, "resolve_secret", _fake_resolve_secret)
+
+    captured: dict[str, object] = {}
+
+    class _FakePool:
+        def open(self, *, wait: bool = True) -> None:
+            captured["opened"] = wait
+
+    def _fake_create_pool(dsn: str) -> _FakePool:
+        captured["dsn"] = dsn
+        return _FakePool()
+
+    def _fake_metadata_repository(pool: object) -> object:
+        captured["metadata_pool"] = pool
+        return object()
+
+    def _fake_s3_object_store(*, endpoint_url: str, access_key: str, secret_key: str) -> object:
+        captured["endpoint_url"] = endpoint_url
+        captured["access_key"] = access_key
+        captured["secret_key"] = secret_key
+        return object()
+
+    monkeypatch.setattr(csv_processor_cli, "create_pool", _fake_create_pool)
+    monkeypatch.setattr(csv_processor_cli, "PostgresMetadataRepository", _fake_metadata_repository)
+    monkeypatch.setattr(csv_processor_cli, "S3ObjectStore", _fake_s3_object_store)
+
+    csv_processor_cli._build_common()  # noqa: SLF001 -- exercising the exact private function this test regression-covers
+
+    assert captured["dsn"] == "postgresql://real-user:real-pass@host/db"
+    assert captured["opened"] is True
+    assert captured["endpoint_url"] == "http://minio.data.svc.cluster.local:9000"
+    assert captured["access_key"] == "real-access-key"
+    assert captured["secret_key"] == "real-secret-key"  # noqa: S105 -- a test double's literal, not a real credential
+
+
 def test_ingest_dataplatformerror_path_is_unaffected_by_the_new_except_clause(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
