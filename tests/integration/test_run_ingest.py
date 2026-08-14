@@ -32,7 +32,7 @@ import hashlib
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -575,4 +575,114 @@ def test_publish_transaction_effects_are_invisible_to_another_connection_until_c
     assert len(result_holder) == 1
     assert result_holder[0].status == "SUCCEEDED"
     assert _read_customers_count_for_run(env.migrated_dsn, run_id) == 2
+    assert _read_run_status(env.migrated_dsn, run_id) == "SUCCEEDED"
+
+
+# --- heartbeat_loop terminal-status safety (04-10 gap closure: CR-01) ------
+
+
+class _HeartbeatCallSpy:
+    """Wraps a real `MetadataRepository`, recording `heartbeat_ingestion_run` calls.
+
+    Delegates every call -- including `heartbeat_ingestion_run` itself --
+    unchanged to the wrapped repository, so the real, guarded SQL still runs
+    against the real database on every tick. This proxy exists only to
+    observe that `_heartbeat_loop` genuinely calls `heartbeat_ingestion_run`
+    (not `update_ingestion_run_status`) with the test's sentinel values --
+    CR-01's own "the production call-site swap actually took effect, not
+    merely that a new, unused repository method exists" requirement.
+
+    The write itself is correctly a no-op against an already-terminal run
+    (proven independently by this test's own DB poll loop, which asserts
+    `status` never leaves `SUCCEEDED`), so a sentinel value can never become
+    visible in `meta.ingestion_runs.rows_read` for a run that is already
+    SUCCEEDED when the loop starts -- observing the call itself is the only
+    way to prove the loop genuinely ticked at least once without
+    contradicting that guarantee.
+    """
+
+    def __init__(self, inner: PostgresMetadataRepository) -> None:
+        self._inner = inner
+        self.heartbeat_calls: list[tuple[int, int, int]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def heartbeat_ingestion_run(
+        self,
+        *,
+        run_id: int,
+        lease_expires_at: datetime,
+        rows_read: int,
+        rows_parsed: int,
+    ) -> None:
+        self.heartbeat_calls.append((run_id, rows_read, rows_parsed))
+        self._inner.heartbeat_ingestion_run(
+            run_id=run_id,
+            lease_expires_at=lease_expires_at,
+            rows_read=rows_read,
+            rows_parsed=rows_parsed,
+        )
+
+
+def test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status(
+    env: _Env,
+) -> None:
+    """CR-01: a stray heartbeat tick against an already-terminal run must never regress it.
+
+    Targets `_heartbeat_loop` directly on its own thread (not through
+    `run_ingest`) against a run already marked SUCCEEDED -- the exact
+    post-publish-commit race window CR-01 closes. See `_HeartbeatCallSpy`'s
+    own docstring for why "the loop genuinely ticked" is proven via a call
+    spy rather than a `rows_read` value becoming visible in the database.
+    """
+    ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
+        env,
+        key_suffix="heartbeat_terminal",
+        csv_bytes=_csv_bytes(1, start_id=9_100_601),
+    )
+    env.metadata.claim_ingestion_run(
+        idempotency_key=ctx.run.idempotency_key,
+        try_number=1,
+        pod_name="pod-heartbeat-terminal",
+    )
+    env.metadata.update_ingestion_run_status(run_id=run_id, status="SUCCEEDED")
+
+    spy = _HeartbeatCallSpy(env.metadata)
+    spy_ctx = replace(ctx, metadata=spy)
+
+    progress = run_module._Progress()
+    progress.rows_read = 777
+    progress.rows_parsed = 777
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=run_module._heartbeat_loop,
+        args=(spy_ctx, run_id, progress, stop_event, 0.02),
+        name=f"test-heartbeat-terminal-{run_id}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        sentinel_observed = False
+        while time.monotonic() < deadline:
+            with psycopg.connect(env.migrated_dsn) as probe:
+                row = probe.execute(
+                    "SELECT status FROM meta.ingestion_runs WHERE run_id = %s",
+                    (run_id,),
+                ).fetchone()
+            assert row is not None
+            assert row[0] == "SUCCEEDED", (
+                f"CR-01 regression: a stray heartbeat tick against a terminal run "
+                f"changed status to {row[0]!r} -- must stay SUCCEEDED"
+            )
+            if any(call == (run_id, 777, 777) for call in spy.heartbeat_calls):
+                sentinel_observed = True
+                break
+            time.sleep(0.01)
+    finally:
+        stop_event.set()
+        thread.join(timeout=10)
+
+    assert sentinel_observed, "heartbeat loop never ticked (no heartbeat_ingestion_run call observed)"
     assert _read_run_status(env.migrated_dsn, run_id) == "SUCCEEDED"
