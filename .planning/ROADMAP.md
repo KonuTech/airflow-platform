@@ -276,7 +276,15 @@ Plans:
   4. Vault's audit log shows which workload read which path, when, and whether it succeeded — with no secret values present in the log.
   5. No credential exists in git history, Python source, Dockerfiles, Kubernetes manifests, Airflow Variables or CI workflow files; development secrets are marked, isolated and reproducible on a fresh local rebuild.
 
-**Plans**: TBD
+**Plans**: 5 plans in 5 waves
+
+Plans:
+
+- [ ] 05-01-PLAN.md — Vault deployed: namespace, both Helm values profiles, scripted unseal (D-02), idempotent bootstrap (mounts, auth method, both roles/policies, audit device), restart-persistence proof (wave 1)
+- [ ] 05-02-PLAN.md — ETL identity: the vault:// scheme in resolve_secret(), KPO pod wiring, positive/negative auth proof (SEC-06/07/12), csv-processor-db + csv-processor-s3 retired (wave 2)
+- [ ] 05-03-PLAN.md — Airflow identity: VaultBackend wiring, empirical ServiceAccount correction, SEC-05 proof, airflow-minio-connection retired (wave 3)
+- [ ] 05-04-PLAN.md — D-03 rotation proof, D-04 make vault-audit-tail, SEC-08 audit-content proof, SEC-13 reproducibility proof (wave 4)
+- [ ] 05-05-PLAN.md — Permanent SEC-01 structural guard, SEC-14 secrets-architecture documentation, ADR-0009 (OpenBao) (wave 5)
 
 **Research stage**: S6. **Use `/gsd-plan-phase --research-phase`** — the kind-specific JWT-issuer caveat in ARCHITECTURE is explicitly flagged as *inference, unverified on this cluster*, and `auth_type: kubernetes` is present in the Airflow hashicorp provider code but undocumented on its docs page. Verify against pinned provider source, not the docs page.
 
@@ -542,7 +550,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 | 2. kind Cluster & Core Infrastructure | 0/TBD | Not started | - |
 | 3. `dataplat` Core Library & Metadata Control Plane | 0/TBD | Not started | - |
 | 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/9 | Planned | - |
-| 5. Vault Secrets & Workload Identity | 0/TBD | Not started | - |
+| 5. Vault Secrets & Workload Identity | 0/5 | Planned     | - |
 | 6. Universal CSV Engine, Schema Contracts & Normalization | 0/TBD | Not started | - |
 | 7. Observability, Metrics, Tracing & Lineage | 0/TBD | Not started | - |
 | 8. Validation, Quarantine & Metadata Control-Plane Completion | 0/TBD | Not started | - |
