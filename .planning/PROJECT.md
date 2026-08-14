@@ -38,6 +38,20 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 - [x] Structured JSON (in-cluster) / console (local) logging works identically in local, Docker, Kubernetes and Airflow task-pod contexts; contextual fields propagate via contextvars without re-passing at each call site; a credential resolved by `SecretsResolver` never appears in a captured log line — OBS-02, OBS-04, OBS-05
 - [x] Domain exception hierarchy (`DataPlatformError` + 3 leaves) for run-fatal conditions; row-level problems flow as values (`RejectedRecord`/`StageResult`), never exceptions — QUAL-03
 
+**Vertical Slice — CSV to Analytical PostgreSQL** (Phase 4, 2026-08-14)
+
+- [x] A TaskFlow DAG (`@dag`/`@task`) triggers a `KubernetesPodOperator` pod that loads a real CSV into analytical PostgreSQL and returns a ≤4KB receipt via XCom; DAG file stays under 150 lines with zero parsing/validation/typing/DB-writes — ORCH-01, ORCH-02, ORCH-06
+- [x] Bounded Dynamic Task Mapping, explicit retry/backfill posture, logical-date/data-interval-derived windows (tolerates `None`), dataset dependency via a deferrable `S3KeySensor`, per-task CPU/memory requests+limits — ORCH-03, ORCH-04, ORCH-05, ORCH-07, ORCH-09
+- [x] Frozen-manifest discovery — list once, hash once, freeze once, never re-derive from a live listing mid-run — ORCH-08
+- [x] Re-running the same DAG run, and re-uploading the same file under a different name, both produce zero additional rows — proven live at 10M-row scale (`normalized.customers`: 10,000,122 rows = 10,000,122 distinct customers across 13 real ingestion runs, including deliberate pod-kills and concurrent-reads-during-publish) — LOAD-01, LOAD-02, LOAD-03
+- [x] File / batch / record / target-row identity modeled distinctly; every loaded row traceable to its file/batch/run/attempt/config-version by SQL alone — LOAD-04, LOAD-08
+- [x] Transactional staging (`UNLOGGED`, `ON COMMIT DROP`) → single-writer atomic publication via `pg_advisory_xact_lock` + `INSERT ... ON CONFLICT`, deliberately never `MERGE` (PG BUG #18279) — LOAD-05, LOAD-09
+- [x] `csv_processor` is the only CSV parser; no `COPY ... FORMAT csv` on raw input — LOAD-12
+- [x] Business date derivation never reads wall-clock or `logical_date` (positive extraction from filenames/content deferred to Phase 6) — INCR-08
+- [x] Integration tests (MinIO → processor → PostgreSQL) and E2E tests (CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL) proven against a live kind cluster; idempotency tested including a zero-additional-rows assertion — QUAL-05, QUAL-06, QUAL-09
+- [x] U1 (XCom carries the built git SHA) and U3 (streaming throughput 41,946 rows/sec, peak RSS 62.9 MiB) spike results recorded in `docs/spikes/`
+- [x] Run-lifecycle integrity hardened after live-confirmed gap closure: a `SUCCEEDED` run's status can never regress to `RUNNING` (heartbeat write now guarded `WHERE status = 'RUNNING'`); duplicate-content file resolution is deterministic (`ORDER BY file_id ASC`, restoring a live-orphaned row); a `Receipt` is written to XCom on every `ingest()` exit path, not only `DataPlatformError` — META-03
+
 ### Active
 
 <!-- Current scope. All are hypotheses until shipped. Detailed REQ-IDs live in REQUIREMENTS.md. -->
@@ -55,15 +69,6 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 - [ ] Runtime secret injection — nothing secret in Git, Python, images, or manifests
 - [ ] Secret access auditable; rotation documented; automated secret scanning in CI
 - [ ] Tests prove unauthorized workloads are denied
-
-**Orchestration**
-
-- [ ] DAGs use the TaskFlow API (`@dag` / `@task`) and stay thin — orchestration only
-- [ ] ETL executes in Kubernetes task pods via `KubernetesPodOperator`, not in the scheduler
-- [ ] Dynamic Task Mapping fans work out across pods
-- [ ] DAGs are idempotent, retry-safe, and driven by logical date / data interval — never wall-clock
-- [ ] Dataset dependencies expressed in Airflow (assets / sensors), not hidden in Python
-- [ ] Per-workload CPU/memory requests and limits; concurrency and pools configured
 
 **Universal CSV Engine**
 
@@ -90,14 +95,12 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 
 **ETL Correctness**
 
-- [ ] All ETL idempotent across retries, pod restarts, reruns, backfills and re-uploaded files
-- [ ] File / batch / record / target-row identity explicitly distinguished
+- [ ] All ETL idempotent across retries, pod restarts, reruns, backfills and re-uploaded files (retries/pod-restarts/reruns/re-uploads proven at 10M-row live scale in Phase 4 — LOAD-01, LOAD-02, LOAD-03; backfill execution itself remains unproven)
 - [ ] Dataset-specific deduplication (exact-hash, business key, key+timestamp, latest-wins, source-priority, batch-aware), within and across batches
 - [ ] Deduplication auditable — counts and reasons retained
 - [ ] Incremental processing with watermarks that advance only after successful commit
 - [ ] Late-arriving and out-of-order data routed to the correct historical partition, never discarded
 - [ ] Backfills as a first-class capability using the same pipeline, no bypass path
-- [ ] Transactional loading via staging tables and atomic publication — no partially visible datasets
 - [ ] Partial-failure recovery determinable without reading logs; checkpointing for very large files
 - [ ] Source-to-target reconciliation and control-total validation
 - [ ] Full replayability from immutable raw data plus versioned configuration
@@ -203,6 +206,70 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 4 complete (2026-08-14)** — Vertical Slice: CSV to Analytical PostgreSQL.
+
+One real CSV now travels the full, unattended path this milestone's critical
+path exists to prove: `s3://raw/` → TaskFlow DAG → `KubernetesPodOperator` →
+`dataplat`/`csv_processor` → analytical PostgreSQL, live on the actual kind
+cluster, not just in tests. Phase verification ran direct `kubectl
+exec`/`psql` queries against the live `analytics-db` and live Airflow
+deployment rather than trusting SUMMARY.md claims, and found the vertical
+slice genuinely solid at scale — 10,000,122 rows in `normalized.customers`
+matching 10,000,122 distinct customers across 13 real ingestion runs — but
+also found 3 precise, code-confirmed defects (a heartbeat race that could
+silently revert a `SUCCEEDED` run back to `RUNNING`; a non-deterministic
+duplicate-file lookup that had already orphaned one real row live; a
+Receipt-on-every-exit-path contract violated for non-`DataPlatformError`
+exceptions), all three already caught by a same-day code review
+(`04-REVIEW.md`, CR-01/CR-02/WR-01). Two gap-closure plans (04-10, 04-11)
+closed all three — independently re-verified true at the code, test, AND
+live-cluster-data level by a second verification pass, which additionally
+caught and closed a deployment-currency gap the fix authors themselves
+missed (the parallel-worktree image rebuild only carried one of the two
+plans' commits; `make image-csv-processor` was re-run from the merged `main`
+to bake in both).
+
+Validated in Phase 4: ORCH-01 through ORCH-09, META-03, LOAD-01, LOAD-02,
+LOAD-03, LOAD-04, LOAD-05, LOAD-08, LOAD-09, LOAD-12, INCR-08, QUAL-05,
+QUAL-06, QUAL-09 — 22/22.
+
+Standing facts later phases inherit:
+- **A guarded, narrower sibling method beats adding a `WHERE` clause to a
+  shared setter.** `heartbeat_ingestion_run` (new, `WHERE run_id = %s AND
+  status = 'RUNNING'`) is deliberately separate from
+  `update_ingestion_run_status` (unchanged, unconditional) — periodic
+  background writers that must never regress a terminal state get their own
+  narrow method; one-shot intentional status transitions keep the generic
+  one. Phase 9's CDC/SCD status machinery should follow the same split if it
+  grows a similar periodic-write path.
+- **`LIMIT 1` with no `ORDER BY` is a live landmine, not a theoretical one.**
+  `find_file_by_content_hash`'s missing `ORDER BY file_id ASC` produced a
+  real orphaned row in the running cluster before this phase closed. Any
+  future "resolve one canonical row from a group that can have 2+ members"
+  query (dedup, SCD-original lookup, latest-wins resolution) needs an
+  explicit, documented tie-break column from the start.
+- **Two plans in the same wave that both touch a runtime-deployed image must
+  not assume either one's rebuild covers the other's commit.** Parallel git
+  worktrees branch from the same base and don't see each other's
+  not-yet-merged commits; a rebuild step inside one plan's worktree can only
+  ever bake in that worktree's own history. When a wave's plans jointly
+  change code that ships in a container image, the rebuild belongs after the
+  merge, not inside either plan.
+- Known, deliberately-not-yet-fixed findings carried forward from
+  `04-REVIEW.md` for a future phase: no code path ever writes
+  `meta.ingestion_runs.status = 'FAILED'` (WR-02); `try_number` is always
+  `1` since no KPO pod sets `AIRFLOW_TASK_TRY_NUMBER` (WR-03); a single
+  bad-value row aborts an entire file's publish, explicitly scoped as
+  later-phase quarantine work (WR-04); `DatasetConfig.dataset` reaches raw
+  SQL/filesystem paths unvalidated (WR-05, WR-06); the new
+  `scripts/repair-duplicate-file-lineage.py` only detects
+  `duplicate_of_file_id IS NULL` (not an existing wrong non-`NULL` value)
+  and assumes every dataset uses `duplicate_policy: skip` (WR-07, WR-08) —
+  none currently exploitable, all tracked for the multi-dataset phase that
+  first stresses them.
+
+---
+
 **Phase 3 complete (2026-08-13)** — `dataplat` Core Library & Metadata Control Plane.
 
 The metadata control plane and pipeline engine now exist as one coherent,
@@ -253,4 +320,4 @@ Standing facts later phases inherit:
   integration tests green during isolated worktree execution.
 
 ---
-*Last updated: 2026-08-13 after Phase 3*
+*Last updated: 2026-08-14 after Phase 4*
