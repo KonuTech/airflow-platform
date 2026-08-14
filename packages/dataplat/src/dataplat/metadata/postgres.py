@@ -165,12 +165,26 @@ class PostgresMetadataRepository(MetadataRepository):
         dataset_id: int,
         content_sha256: bytes,
     ) -> int | None:
-        """See `MetadataRepository.find_file_by_content_hash`."""
+        """See `MetadataRepository.find_file_by_content_hash`.
+
+        This query's explicit row ordering, ascending by ``file_id``, is
+        load-bearing, not cosmetic (CR-02, `04-REVIEW.md`; live-confirmed
+        against the running cluster's `file_id=10` in
+        `04-VERIFICATION.md`). PostgreSQL's own documentation treats which
+        row ``LIMIT 1`` returns as unspecified once more than one row
+        matches a ``WHERE`` clause with no explicit ordering, and
+        `discovery.py`'s rediscovery-correction logic depends on this
+        method returning the SAME row across repeated calls for the same
+        content. Sorting ascending by ``file_id`` makes "the true
+        original" a stable, well-defined concept -- the earliest-created
+        row -- instead of an accident of current heap layout.
+        """
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 SELECT file_id FROM meta.files
                  WHERE dataset_id = %s AND content_sha256 = %s
+                 ORDER BY file_id ASC
                  LIMIT 1
                 """,
                 (dataset_id, content_sha256),
