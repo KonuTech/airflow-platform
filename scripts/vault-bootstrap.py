@@ -21,37 +21,44 @@ step). It creates, if not already present:
       this role's own definition in `bootstrap()` for the per-SA evidence
       -- never widened to a wildcard or "every candidate" as a shortcut
   (g) a `file` audit device at `/vault/audit/audit.log`
-  (h) the two `etl` KV secret VALUES (plan 05-02) -- `etl/analytics-db`
-      (`dsn`) and `etl/minio` (`access_key`/`secret_key`) -- sourced from
-      the live `csv-processor-db`/`csv-processor-s3` Kubernetes Secrets
-      `scripts/etl-secrets.sh` already created (Phase 4), so the value the
-      KPO pod reads through `vault://` is identical to the value it read
-      through `secretKeyRef` before this plan's swap
-  (i) the `airflow/connections/minio_default` KV secret VALUE (plan 05-03)
-      -- field name `conn_uri`, matching `providers-hashicorp`'s own
-      `VaultBackend.get_connection` convention (`response.get("conn_uri")`,
-      verified against the installed provider's source: it prioritizes
-      `conn_uri` if present, falling back to `Connection(conn_id,
-      **response)` otherwise) -- sourced from the live
-      `airflow-minio-connection` Kubernetes Secret `scripts/etl-secrets.sh`
-      already created (Phase 4), so the value `VaultBackend` resolves is
-      identical to the value the Secret carried before this plan's swap
+  (h) the two `etl` KV secret VALUES (plan 05-02, retargeted plan 05-06) --
+      `etl/analytics-db` (`dsn`) and `etl/minio` (`access_key`/
+      `secret_key`). `etl/analytics-db`'s DSN is generated FRESH on every
+      first-ever bootstrap of an empty Vault -- a `kubectl exec`-driven
+      `ALTER ROLE etl_app WITH PASSWORD ...` against the CNPG
+      `analytics-db` Cluster's own current primary pod, restoring the
+      mechanism the now-deleted `scripts/etl-secrets.sh` originally used
+      (git history only, `git show 6d86cb8:scripts/etl-secrets.sh`) -- see
+      `_ensure_etl_secrets`. `etl/minio`'s value is read from the live
+      `data/minio-app` Kubernetes Secret
+  (i) the `airflow/connections/minio_default` KV secret VALUE (plan 05-03,
+      retargeted plan 05-06) -- field name `conn_uri`, matching
+      `providers-hashicorp`'s own `VaultBackend.get_connection` convention
+      (`response.get("conn_uri")`, verified against the installed
+      provider's source: it prioritizes `conn_uri` if present, falling
+      back to `Connection(conn_id, **response)` otherwise) -- assembled
+      from the same live `data/minio-app` Kubernetes Secret `etl/minio`
+      reads (see `_ensure_airflow_secrets`)
 
 Every step is idempotent: re-running this script against an already-
 bootstrapped Vault performs zero writes and prints "already present" for
-each step whose live state already matches its target. This mirrors
-`scripts/etl-secrets.sh`'s `_secret_exists`-before-`_apply_secret` shape --
-read first, write only if missing. One step, (f), also self-corrects DRIFT
-(not just absence): a kubernetes-auth role whose live
-`bound_service_account_names` no longer matches this script's own target
-list is RE-WRITTEN, not skipped -- this is the exact mechanism plan 05-03
-uses to correct plan 05-01's original best guess in place, on a Vault that
-was already bootstrapped once.
+each step whose live state already matches its target. This mirrors the
+now-deleted `scripts/etl-secrets.sh`'s own `_secret_exists`-before-
+`_apply_secret` shape (git history only) -- read first, write only if
+missing. One step, (f), also self-corrects DRIFT (not just absence): a
+kubernetes-auth role whose live `bound_service_account_names` no longer
+matches this script's own target list is RE-WRITTEN, not skipped -- this
+is the exact mechanism plan 05-03 uses to correct plan 05-01's original
+best guess in place, on a Vault that was already bootstrapped once. Steps
+(c) and (e) are held to the same standard as of plan 05-06 (CR-02):
+`_ensure_policy` now re-applies a policy whose live body has drifted from
+its target HCL, not only a policy that was entirely absent.
 
 The root token, read once from `.secrets/vault-init.json`, is the ONLY
 place in this codebase that value is ever read. It is never logged,
 printed, or passed to a subprocess as an argument. No step here ever
-prints a secret value, token, or key.
+prints a secret value, token, or key -- including the `etl_app` password
+`_ensure_etl_secrets` now generates and the DSN it assembles from it.
 """
 
 from __future__ import annotations
@@ -59,6 +66,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import secrets
 import shutil
 import socket
 import subprocess
@@ -66,6 +74,7 @@ import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 import hvac
 import hvac.exceptions
@@ -94,20 +103,20 @@ path "airflow/data/connections/*" { capabilities = ["read"] }
 
 _AUDIT_DEVICE_PATH = "/vault/audit/audit.log"
 
-# (h) The two live Kubernetes Secrets `scripts/etl-secrets.sh` already
-# created (Phase 4) -- the SOURCE of the KV values this step writes, never
-# printed. `_MINIO_APP_ACCESS_KEY` is the same fixed, non-secret literal
-# `scripts/etl-secrets.sh`'s own `MINIO_APP_ACCESS_KEY` hardcodes.
-_ETL_NAMESPACE = "etl"
-_DB_SECRET_NAME = "csv-processor-db"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
-_S3_SECRET_NAME = "csv-processor-s3"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
+# (h)/(i) The live Kubernetes Secret and CNPG `Cluster` these two steps
+# source from (plan 05-06) -- see `_ensure_etl_secrets`/
+# `_ensure_airflow_secrets` for the full mechanism, restored from git
+# history (`git show 6d86cb8:scripts/etl-secrets.sh`, the ORIGINAL,
+# pre-deletion version of the script plans 05-02/05-03 later deleted once
+# its Secrets migrated to Vault). Never printed. `_MINIO_APP_ACCESS_KEY` is
+# the same fixed, non-secret literal `scripts/minio-credentials.sh`'s own
+# `cmd_show` hardcodes.
+_DATA_NAMESPACE = "data"
+_ANALYTICS_CLUSTER = "analytics-db"
+_ANALYTICS_DATABASE = "analytics"
+_ANALYTICS_APP_ROLE = "etl_app"
+_MINIO_APP_SECRET_NAME = "minio-app"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 _MINIO_APP_ACCESS_KEY = "etl-app"
-
-# (i) The live Kubernetes Secret `scripts/etl-secrets.sh` already created
-# (Phase 4) -- the SOURCE of the `airflow/connections/minio_default` KV
-# value this step writes, never printed.
-_AIRFLOW_NAMESPACE = "airflow"
-_AIRFLOW_MINIO_SECRET_NAME = "airflow-minio-connection"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 
 
 def _versions_env_variable(name: str) -> str:
@@ -277,13 +286,42 @@ def _ensure_kubernetes_auth_method(client: hvac.Client) -> None:
 
 
 def _ensure_policy(client: hvac.Client, name: str, policy_hcl: str) -> None:
-    """(c)/(e) Write a policy, if not already present under `name`."""
+    """(c)/(e) Write a policy if absent, or re-apply it if its live body has drifted.
+
+    CR-02 fix (05-REVIEW.md, plan 05-06): the original shape of this
+    function returned unconditionally once `name` was merely present in
+    `list_policies()`, so a policy body edited in this file (e.g.
+    narrowing access after discovering a mistake) was never re-applied on
+    a later idempotent bootstrap run against an already-bootstrapped
+    Vault -- silently staying at its old, possibly-wider body forever
+    (T-05-15). This now reads the live body back via `read_policy()` and
+    compares it against `policy_hcl` (both `.strip()`-ed) before deciding
+    to skip -- the same "read first, re-write only on drift" convergence
+    shape `_ensure_kubernetes_role` already established for role bindings.
+
+    `read_policy()` calls the legacy `GET /v1/sys/policy/{name}` endpoint.
+    Its response IS wrapped in a `data` envelope, keyed `rules` (never
+    `policy`, and never a flat top-level key) -- confirmed by reading the
+    installed hvac 2.4.0 source directly rather than guessing: `hvac/v1/
+    __init__.py`'s own `Client.get_policy()` convenience wrapper does
+    exactly `self.sys.read_policy(name=name)["data"]["rules"]`.
+
+    Args:
+        client: An `hvac.Client` authenticated with the root token.
+        name: The policy's name.
+        policy_hcl: The target policy body (HCL).
+    """
     existing = client.sys.list_policies()["data"]["policies"]
-    if name in existing:
-        print(f"policy {name}: already present")
-        return
+    already_exists = name in existing
+    if already_exists:
+        live_body = client.sys.read_policy(name=name)["data"]["rules"]
+        if live_body.strip() == policy_hcl.strip():
+            print(f"policy {name}: already present")
+            return
+        print(f"policy {name}: body drifted -- correcting")
+
     client.sys.create_or_update_policy(name=name, policy=policy_hcl)
-    print(f"policy {name}: created")
+    print(f"policy {name}: {'updated' if already_exists else 'created'}")
 
 
 def _ensure_kubernetes_role(
@@ -367,13 +405,14 @@ def _ensure_audit_device(client: hvac.Client) -> None:
 def _kubectl_get_secret_field(kubectl_context: str, *, namespace: str, name: str, key: str) -> str:
     """Read one base64-decoded field from a live Kubernetes Secret.
 
-    Same read mechanism `scripts/etl-secrets.sh`'s own
-    `_read_minio_app_secret_key` uses -- `kubectl get secret ... -o
+    Same read mechanism the now-deleted `scripts/etl-secrets.sh`'s own
+    `_read_minio_app_secret_key` used (git history only, `git show
+    6d86cb8:scripts/etl-secrets.sh`) -- `kubectl get secret ... -o
     jsonpath=...` piped through a base64 decode -- reimplemented here via
-    `subprocess.run` rather than shelling out to that script, since this is
-    the one place D-01's migration-source credentials (the `etl` namespace's
-    two dev credentials, plan 05-02; `airflow-minio-connection`, plan 05-03)
-    are read to populate Vault. Never prints the decoded value.
+    `subprocess.run` rather than shelling out to that script. This is the
+    one place the live `data/minio-app` Kubernetes Secret is read to
+    populate `etl/minio` and `airflow/connections/minio_default` (plan
+    05-06). Never prints the decoded value.
 
     Args:
         kubectl_context: The kubectl context to read through.
@@ -413,30 +452,176 @@ def _kubectl_get_secret_field(kubectl_context: str, *, namespace: str, name: str
     return base64.b64decode(proc.stdout).decode("utf-8")
 
 
+def _kubectl_cluster_primary_pod(kubectl_context: str, *, namespace: str, cluster: str) -> str:
+    """Resolve a CNPG `Cluster`'s current primary pod name.
+
+    Restores the exact resolution step the now-deleted `scripts/
+    etl-secrets.sh`'s own `_ensure_csv_processor_db_secret` performed (git
+    history only, `git show 6d86cb8:scripts/etl-secrets.sh`), reimplemented
+    via `subprocess.run` in the same shape as `_kubectl_get_secret_field`.
+
+    Args:
+        kubectl_context: The kubectl context to read through.
+        namespace: The `Cluster` resource's namespace.
+        cluster: The `Cluster` resource's name.
+
+    Returns:
+        The current primary pod's name.
+
+    Raises:
+        RuntimeError: The `kubectl get` call fails, or the Cluster has no
+            `.status.currentPrimary` yet.
+    """
+    kubectl_bin = _require_kubectl()
+    proc = subprocess.run(  # noqa: S603
+        [
+            kubectl_bin,
+            "--context",
+            kubectl_context,
+            "get",
+            "cluster",
+            "-n",
+            namespace,
+            cluster,
+            "-o",
+            "jsonpath={.status.currentPrimary}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        msg = f"kubectl get cluster -n {namespace} {cluster} (currentPrimary) failed: {proc.stderr}"
+        raise RuntimeError(msg)
+    primary_pod = proc.stdout.strip()
+    if not primary_pod:
+        msg = f"Cluster/{cluster} (namespace {namespace}) has no currentPrimary yet"
+        raise RuntimeError(msg)
+    return primary_pod
+
+
+def _kubectl_exec_psql(
+    kubectl_context: str,
+    *,
+    namespace: str,
+    pod: str,
+    database: str,
+    sql: str,
+) -> None:
+    """Run `sql` against `database` inside `pod` via `kubectl exec ... psql`, stdin only.
+
+    `sql` is passed via `input=` (stdin), never as an argv element, so it
+    never appears in `ps`/`/proc/<pid>/cmdline` -- restoring the now-deleted
+    `scripts/etl-secrets.sh`'s own identical `kubectl exec -i ... psql`
+    pattern (git history only, `git show 6d86cb8:scripts/etl-secrets.sh`).
+    `-v ON_ERROR_STOP=1` makes a SQL error a non-zero exit rather than a
+    silently-ignored one.
+
+    Args:
+        kubectl_context: The kubectl context to exec through.
+        namespace: The pod's namespace.
+        pod: The pod name to exec into.
+        database: The `-d` database name `psql` connects to.
+        sql: The SQL text piped to `psql` on stdin.
+
+    Raises:
+        RuntimeError: The `psql` exec fails. The error message includes
+            only `proc.stderr` -- psql does not echo stdin SQL to stderr on
+            an `ON_ERROR_STOP` failure, so this cannot leak `sql`'s
+            contents.
+    """
+    kubectl_bin = _require_kubectl()
+    proc = subprocess.run(  # noqa: S603
+        [
+            kubectl_bin,
+            "--context",
+            kubectl_context,
+            "exec",
+            "-i",
+            "-n",
+            namespace,
+            pod,
+            "--",
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "postgres",
+            "-d",
+            database,
+        ],
+        input=sql,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        msg = f"kubectl exec -n {namespace} {pod} -- psql -d {database} failed: {proc.stderr}"
+        raise RuntimeError(msg)
+
+
 def _ensure_etl_secrets(client: hvac.Client, kubectl_context: str) -> None:
     """(h) Populate `etl/analytics-db` and `etl/minio`'s KV secret VALUES, if not already present.
 
     Guard: attempt `read_secret_version` first; a successful read means the
-    secret is already present (skip, unchanged). On `hvac.exceptions.
-    InvalidPath` (Vault's 404-shaped "not found"), source the value from the
-    live `csv-processor-db`/`csv-processor-s3` Kubernetes Secrets
-    `scripts/etl-secrets.sh` already created (Phase 4) and write it. Never
-    prints either value.
+    secret is already present (skip, unchanged -- a credential already
+    handed to a caller must never be silently rotated out from under it).
+    On `hvac.exceptions.InvalidPath` (Vault's 404-shaped "not found"):
+
+    - `etl/analytics-db`: regenerate `etl_app`'s PostgreSQL password ON THE
+      SPOT, via `kubectl exec` into the CNPG `analytics-db` Cluster's
+      current primary pod (peer/local trust, the developer's own
+      kubeconfig context) running `ALTER ROLE etl_app WITH PASSWORD
+      '<fresh value>';`, then assemble and write the resulting DSN. This
+      restores the exact mechanism the now-deleted `scripts/etl-secrets.sh`'s
+      own `_ensure_csv_processor_db_secret` used (git history only, `git
+      show 6d86cb8:scripts/etl-secrets.sh`) -- retargeted to write straight
+      to Vault KV instead of staging through the now-deleted, phase-4-era
+      Kubernetes Secret this exact DSN previously lived in. Deliberately
+      NOT sourced from CNPG's own auto-generated `analytics-db-app` Secret
+      (05-REVIEW.md CR-01's literal suggestion) -- that Secret holds
+      `analytics_owner`, a DIFFERENT, MORE PRIVILEGED role than `etl_app`
+      (`helm/values/local/cnpg-analytics.yaml`'s `initdb.owner`), and using
+      it would silently widen the ETL pipeline's database privilege level
+      (T-05-17).
+    - `etl/minio`: read the live `data/minio-app` Secret's `secretKey`
+      field (never a Secret staged specifically for this one purpose, as
+      plan 05-02's original design used).
+
+    Never prints either value.
 
     Args:
         client: An `hvac.Client` authenticated with the root token.
-        kubectl_context: The kubectl context to read the source Secrets
-            through.
+        kubectl_context: The kubectl context to read/exec through.
     """
     try:
         client.secrets.kv.v2.read_secret_version(mount_point="etl", path="analytics-db")
         print("secret etl/analytics-db: already present")
     except hvac.exceptions.InvalidPath:
-        dsn = _kubectl_get_secret_field(
+        primary_pod = _kubectl_cluster_primary_pod(
             kubectl_context,
-            namespace=_ETL_NAMESPACE,
-            name=_DB_SECRET_NAME,
-            key="dsn",
+            namespace=_DATA_NAMESPACE,
+            cluster=_ANALYTICS_CLUSTER,
+        )
+        # secrets.token_hex's charset is pure [0-9a-f] -- it cannot contain
+        # the `'` character the SQL string literal below depends on, so
+        # this is not an injection vector (T-05-13). Documented explicitly
+        # so a future charset change (e.g. switching to token_urlsafe)
+        # cannot silently reopen it.
+        password = secrets.token_hex(32)
+        _kubectl_exec_psql(
+            kubectl_context,
+            namespace=_DATA_NAMESPACE,
+            pod=primary_pod,
+            database=_ANALYTICS_DATABASE,
+            sql=f"ALTER ROLE {_ANALYTICS_APP_ROLE} WITH PASSWORD '{password}';",
+        )
+        encoded_password = quote(password, safe="")
+        dsn = (
+            f"postgresql://{_ANALYTICS_APP_ROLE}:{encoded_password}"
+            f"@{_ANALYTICS_CLUSTER}-rw.{_DATA_NAMESPACE}:5432/{_ANALYTICS_DATABASE}"
         )
         client.secrets.kv.v2.create_or_update_secret(
             mount_point="etl",
@@ -451,9 +636,9 @@ def _ensure_etl_secrets(client: hvac.Client, kubectl_context: str) -> None:
     except hvac.exceptions.InvalidPath:
         secret_key = _kubectl_get_secret_field(
             kubectl_context,
-            namespace=_ETL_NAMESPACE,
-            name=_S3_SECRET_NAME,
-            key="secret_key",
+            namespace=_DATA_NAMESPACE,
+            name=_MINIO_APP_SECRET_NAME,
+            key="secretKey",
         )
         client.secrets.kv.v2.create_or_update_secret(
             mount_point="etl",
@@ -469,14 +654,18 @@ def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
     Same read-then-skip-or-write shape as `_ensure_etl_secrets`. Guard:
     attempt `read_secret_version` first; a successful read means the secret
     is already present (skip, unchanged). On `hvac.exceptions.InvalidPath`
-    (Vault's 404-shaped "not found"), source the value from the live
-    `airflow-minio-connection` Kubernetes Secret `scripts/etl-secrets.sh`
-    already created (Phase 4) and write it under the field name `conn_uri`
-    -- matching `providers-hashicorp`'s own `VaultBackend.get_connection`
-    convention (`response.get("conn_uri")`, verified against the installed
-    provider's source: it prioritizes `conn_uri` if present, falling back
-    to `Connection(conn_id, **response)` otherwise). Never prints the
-    value.
+    (Vault's 404-shaped "not found"), read the live `data/minio-app`
+    Secret's `secretKey` field -- the same source `_ensure_etl_secrets`
+    reads for `etl/minio`, never a pre-built connection-URI Secret staged
+    specifically for this one purpose, as plan 05-03's original design
+    used -- and ASSEMBLE the URI exactly as the now-deleted `scripts/
+    etl-secrets.sh`'s own `_ensure_airflow_minio_connection_secret` did
+    (git history only, `git show 6d86cb8:scripts/etl-secrets.sh`), then
+    write it under the field name `conn_uri` -- matching
+    `providers-hashicorp`'s own `VaultBackend.get_connection` convention
+    (`response.get("conn_uri")`, verified against the installed provider's
+    source: it prioritizes `conn_uri` if present, falling back to
+    `Connection(conn_id, **response)` otherwise). Never prints the value.
 
     Args:
         client: An `hvac.Client` authenticated with the root token.
@@ -490,11 +679,17 @@ def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
         )
         print("secret airflow/connections/minio_default: already present")
     except hvac.exceptions.InvalidPath:
-        conn_uri = _kubectl_get_secret_field(
+        secret_key = _kubectl_get_secret_field(
             kubectl_context,
-            namespace=_AIRFLOW_NAMESPACE,
-            name=_AIRFLOW_MINIO_SECRET_NAME,
-            key="AIRFLOW_CONN_MINIO_DEFAULT",
+            namespace=_DATA_NAMESPACE,
+            name=_MINIO_APP_SECRET_NAME,
+            key="secretKey",
+        )
+        encoded_secret_key = quote(secret_key, safe="")
+        conn_uri = (
+            f"aws://{_MINIO_APP_ACCESS_KEY}:{encoded_secret_key}@/"
+            "?endpoint_url=http%3A%2F%2Fminio.data.svc.cluster.local%3A9000"
+            "&region_name=us-east-1"
         )
         client.secrets.kv.v2.create_or_update_secret(
             mount_point="airflow",
@@ -509,8 +704,8 @@ def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
 
     Args:
         client: An `hvac.Client` authenticated with the root token.
-        kubectl_context: The kubectl context `_ensure_etl_secrets` reads the
-            source Kubernetes Secrets through.
+        kubectl_context: The kubectl context `_ensure_etl_secrets`/
+            `_ensure_airflow_secrets` read Secrets and exec SQL through.
 
     Raises:
         RuntimeError: `client`'s Vault is sealed -- bootstrap never
