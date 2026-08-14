@@ -112,6 +112,14 @@ None - no external service configuration required.
 - WR-01 is closed. `04-REVIEW.md`'s WR-02 (no code path ever writes `meta.ingestion_runs.status = 'FAILED'`), WR-03 (`AIRFLOW_TASK_TRY_NUMBER` never set by the KPO pod spec), and WR-04 (a single cast failure at publish time aborts the whole file) remain open and out of this plan's scope — each would need its own gap-closure plan if scheduled.
 - `META-03` was already marked `Complete` in `REQUIREMENTS.md` from earlier Phase 4 work (the single publication transaction it requires); `requirements.mark-complete META-03` was re-run as a safe no-op (`already_complete`, `updated: false`) and `REQUIREMENTS.md` was left untouched, so nothing further to commit there.
 
+## Self-Check: PASSED
+
+- FOUND: `packages/csv-processor/src/csv_processor/cli.py`
+- FOUND: `tests/unit/test_csv_processor_cli.py`
+- FOUND: `.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/04-11-SUMMARY.md`
+- FOUND: commit `ee3d591` (Task 1: WR-01 fix + test file)
+- FOUND: commit `7925373` (this SUMMARY.md)
+
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-14*
