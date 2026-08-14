@@ -43,18 +43,18 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### SEC — Secrets Management and Workload Identity
 
-- [ ] **SEC-01**: A dedicated secrets-management solution is deployed and is the only source of runtime credentials — *(DoD 90)*
+- [x] **SEC-01**: A dedicated secrets-management solution is deployed and is the only source of runtime credentials — *(DoD 90)*
 - [x] **SEC-02**: No secret exists anywhere in git history or the working tree — *(DoD 91)*
-- [ ] **SEC-03**: No credential is hard-coded in Python source — *(DoD 92)*
-- [ ] **SEC-04**: No secret is baked into any container image — *(DoD 93)*
+- [x] **SEC-03**: No credential is hard-coded in Python source — *(DoD 92)*
+- [x] **SEC-04**: No secret is baked into any container image — *(DoD 93)*
 - [ ] **SEC-05**: Airflow resolves connections through the Vault secrets backend, verified with the metadata-DB connection deleted and `AIRFLOW_CONN_*` unset — the backend fails open, so a test that skips this proves nothing — *(DoD 94)*
-- [ ] **SEC-06**: Task pods obtain only the credentials their workload requires, via explicit `namespace` and `service_account_name` matched to a Vault role — *(DoD 95)*
-- [ ] **SEC-07**: Workloads authenticate with least-privilege Kubernetes service-account identities, not a shared root token — *(DoD 96)*
+- [x] **SEC-06**: Task pods obtain only the credentials their workload requires, via explicit `namespace` and `service_account_name` matched to a Vault role — *(DoD 95)*
+- [x] **SEC-07**: Workloads authenticate with least-privilege Kubernetes service-account identities, not a shared root token — *(DoD 96)*
 - [ ] **SEC-08**: Secret access is auditable — which workload read which path, when, and whether it succeeded — without logging secret values — *(DoD 97)*
 - [ ] **SEC-09**: Secret rotation is documented, including which credentials need a workload restart and which refresh dynamically — *(DoD 98)*
 - [x] **SEC-10**: CI/CD holds no unnecessary long-lived credentials, and secrets are never printed during CI execution — *(DoD 99)*
 - [x] **SEC-11**: Automated secret scanning runs in CI and fails the build on a detected credential — *(DoD 100)*
-- [ ] **SEC-12**: A negative test proves an unauthorized service account is *denied* access to another workload's secrets — if this test is awkward to write, the identity model is not real — *(DoD 101)*
+- [x] **SEC-12**: A negative test proves an unauthorized service account is *denied* access to another workload's secrets — if this test is awkward to write, the identity model is not real — *(DoD 101)*
 - [x] **SEC-13**: Development secrets are clearly marked, never committed, isolated from production, and reproducible when rebuilding the local environment — *(DoD 102)*
 - [ ] **SEC-14**: The secrets architecture is documented end-to-end — injection mechanism, trust boundaries, and how a production secrets manager would substitute without application code changes — *(DoD 111)*
 - [x] **SEC-15**: The ETL library resolves credentials through an opaque `SecretsResolver` reference (`env://`, `file://`) and never learns which backend served it — making the Kubernetes-Secrets→Vault swap a configuration change — *(ARCHITECTURE deviation D3)*
@@ -290,18 +290,18 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-09 | Phase 2 | Complete |
 | INFRA-10 | Phase 2 | Complete |
 | INFRA-11 | Phase 11 | Pending |
-| SEC-01 | Phase 5 | Pending |
+| SEC-01 | Phase 5 | Complete |
 | SEC-02 | Phase 1 | Complete |
-| SEC-03 | Phase 5 | Pending |
-| SEC-04 | Phase 5 | Pending |
+| SEC-03 | Phase 5 | Complete |
+| SEC-04 | Phase 5 | Complete |
 | SEC-05 | Phase 5 | Pending |
-| SEC-06 | Phase 5 | Pending |
-| SEC-07 | Phase 5 | Pending |
+| SEC-06 | Phase 5 | Complete |
+| SEC-07 | Phase 5 | Complete |
 | SEC-08 | Phase 5 | Pending |
 | SEC-09 | Phase 5 | Pending |
 | SEC-10 | Phase 1 | Complete |
 | SEC-11 | Phase 1 | Complete |
-| SEC-12 | Phase 5 | Pending |
+| SEC-12 | Phase 5 | Complete |
 | SEC-13 | Phase 5 | Complete |
 | SEC-14 | Phase 5 | Pending |
 | SEC-15 | Phase 3 | Complete |

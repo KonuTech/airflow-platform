@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Phase 5 context gathered
-last_updated: "2026-08-14T10:19:59.666Z"
-last_activity: 2026-08-14 -- Phase 05 execution started
+stopped_at: Completed 05-02-PLAN.md (retirement completion, continuation session)
+last_updated: "2026-08-14T12:23:15.044Z"
+last_activity: 2026-08-14
 progress:
   total_phases: 11
   completed_phases: 4
   total_plans: 42
-  completed_plans: 37
+  completed_plans: 39
   percent: 36
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 05 (vault-secrets-workload-identity) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 05
-Last activity: 2026-08-14 -- Phase 05 execution started
+Plan: 3 of 5
+Status: Ready to execute
+Last activity: 2026-08-14
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█████████░] 93%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: —
 
 *Updated after each plan completion*
+| Phase 05 P02 | 45min | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,9 @@ Recent decisions affecting current work:
 - Roadmap: Phases 2 and 3 are fully parallel (~25% of effort) — infrastructure track vs. pure-Python library track, no shared files.
 - Roadmap: Phase 4 is the strictly serial critical path. It closes only when a re-run produces zero additional rows.
 - Repository moved to WSL ext4 (`/home/user/projects/airflow-platform`) — measured 50–60× penalty on `/mnt/c` 9p small-file operations.
+- [Phase 05]: Vault root-token/unseal-key loss (plan 05-02, session 1) was resolved outside a plan-executor session: orchestrator deleted vault-0's pod/PVCs, redeployed Vault, and re-ran make vault-unseal (writing .secrets/vault-init.json to the main tree this time, not an ephemeral worktree) and make vault-bootstrap. — The lost token only ever existed in a worktree-local gitignored file that never travels to the main tree or sibling worktrees, by design (D-02: no auto-unseal in this local dev setup). Recovery was fully scripted and idempotent (05-01's own bootstrap code), and the destructive PVC deletion targets explicitly regenerable local dev state, not a production secret.
+- [Phase 05]: tests/e2e/vault/test_positive_auth.py's comparison against csv-processor-db/csv-processor-s3 was removed (Rule 1 fix) once this plan's own Task 3 deletes those Secrets, replaced with structural well-formed/non-empty assertions. — Keeping the comparison would make the test -- and make vault-verify, the phase's own standing per-wave gate -- permanently fail on every future run once the Secrets it compared against no longer exist. The value-equality proof was already performed live once, immediately before deletion.
+- [Phase 05]: tests/e2e/slice/conftest.py's analytics_connection fixture (27 references across 3 files) depends on the now-deleted csv-processor-db Secret. Found and flagged in deferred-items.md, deliberately NOT auto-fixed in this plan. — A correct fix needs a new root-token-authenticated Vault read in a host-side test harness with no projected ServiceAccount token -- a real architectural decision (Rule 4), and the file belongs to Phase 4, outside plan 05-02's declared Task 3 file scope. make cluster-verify will fail until a future plan addresses this.
 
 ### Pending Todos
 
@@ -88,6 +92,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T08:07:46.485Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-vault-secrets-workload-identity/05-CONTEXT.md
+Last session: 2026-08-14T12:23:15.034Z
+Stopped at: Completed 05-02-PLAN.md (retirement completion, continuation session)
+Resume file: None

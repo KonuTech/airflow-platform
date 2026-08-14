@@ -286,7 +286,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 05-02-PLAN.md — ETL identity: the vault:// scheme in resolve_secret(), KPO pod wiring, positive/negative auth proof (SEC-06/07/12), csv-processor-db + csv-processor-s3 retired (wave 2)
+- [x] 05-02-PLAN.md — ETL identity: the vault:// scheme in resolve_secret(), KPO pod wiring, positive/negative auth proof (SEC-06/07/12), csv-processor-db + csv-processor-s3 retired (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -564,7 +564,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 | 2. kind Cluster & Core Infrastructure | 0/TBD | Not started | - |
 | 3. `dataplat` Core Library & Metadata Control Plane | 0/TBD | Not started | - |
 | 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/9 | Planned | - |
-| 5. Vault Secrets & Workload Identity | 0/5 | Planned     | - |
+| 5. Vault Secrets & Workload Identity | 2/5 | In Progress | - |
 | 6. Universal CSV Engine, Schema Contracts & Normalization | 0/TBD | Not started | - |
 | 7. Observability, Metrics, Tracing & Lineage | 0/TBD | Not started | - |
 | 8. Validation, Quarantine & Metadata Control-Plane Completion | 0/TBD | Not started | - |
