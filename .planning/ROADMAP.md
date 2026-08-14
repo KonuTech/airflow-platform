@@ -294,7 +294,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 05-04-PLAN.md — D-03 rotation proof, D-04 make vault-audit-tail, SEC-08 audit-content proof, SEC-13 reproducibility proof (wave 4)
+- [x] 05-04-PLAN.md — D-03 rotation proof, D-04 make vault-audit-tail, SEC-08 audit-content proof, SEC-13 reproducibility proof (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 

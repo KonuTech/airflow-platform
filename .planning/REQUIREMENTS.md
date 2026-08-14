@@ -50,8 +50,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **SEC-05**: Airflow resolves connections through the Vault secrets backend, verified with the metadata-DB connection deleted and `AIRFLOW_CONN_*` unset — the backend fails open, so a test that skips this proves nothing — *(DoD 94)*
 - [x] **SEC-06**: Task pods obtain only the credentials their workload requires, via explicit `namespace` and `service_account_name` matched to a Vault role — *(DoD 95)*
 - [x] **SEC-07**: Workloads authenticate with least-privilege Kubernetes service-account identities, not a shared root token — *(DoD 96)*
-- [ ] **SEC-08**: Secret access is auditable — which workload read which path, when, and whether it succeeded — without logging secret values — *(DoD 97)*
-- [ ] **SEC-09**: Secret rotation is documented, including which credentials need a workload restart and which refresh dynamically — *(DoD 98)*
+- [x] **SEC-08**: Secret access is auditable — which workload read which path, when, and whether it succeeded — without logging secret values — *(DoD 97)*
+- [x] **SEC-09**: Secret rotation is documented, including which credentials need a workload restart and which refresh dynamically — *(DoD 98)*
 - [x] **SEC-10**: CI/CD holds no unnecessary long-lived credentials, and secrets are never printed during CI execution — *(DoD 99)*
 - [x] **SEC-11**: Automated secret scanning runs in CI and fails the build on a detected credential — *(DoD 100)*
 - [x] **SEC-12**: A negative test proves an unauthorized service account is *denied* access to another workload's secrets — if this test is awkward to write, the identity model is not real — *(DoD 101)*
@@ -297,8 +297,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SEC-05 | Phase 5 | Complete |
 | SEC-06 | Phase 5 | Complete |
 | SEC-07 | Phase 5 | Complete |
-| SEC-08 | Phase 5 | Pending |
-| SEC-09 | Phase 5 | Pending |
+| SEC-08 | Phase 5 | Complete |
+| SEC-09 | Phase 5 | Complete |
 | SEC-10 | Phase 1 | Complete |
 | SEC-11 | Phase 1 | Complete |
 | SEC-12 | Phase 5 | Complete |

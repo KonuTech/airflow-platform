@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-08-14T14:05:55.200Z"
+stopped_at: Completed 05-04-PLAN.md
+last_updated: "2026-08-14T14:47:39.281Z"
 last_activity: 2026-08-14
 progress:
   total_phases: 11
   completed_phases: 4
   total_plans: 42
-  completed_plans: 40
+  completed_plans: 41
   percent: 36
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 05 (vault-secrets-workload-identity) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-08-14
 
-Progress: [██████████] 95%
+Progress: [██████████] 98%
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ Progress: [██████████] 95%
 *Updated after each plan completion*
 | Phase 05 P02 | 45min | 3 tasks | 11 files |
 | Phase 05 P03 | 95min | 2 tasks | 7 files |
+| Phase 05 P04 | 40min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,9 @@ Recent decisions affecting current work:
 - [Phase 05]: The airflow Vault role is bound to four ServiceAccounts (airflow-api-server, airflow-triggerer, airflow-worker, airflow-scheduler), not the two the plan anticipated — airflow-worker was confirmed necessary by reading the actually-installed S3KeySensor.execute() source (it pokes synchronously before deferring); airflow-scheduler was added for CI's LocalExecutor profile (documented architectural necessity, not live-observed on this session's KubernetesExecutor cluster) since this plan also removes CI's own scheduler.env fallback in the same change.
 - [Phase 05]: csv_processor.cli._build_common() had a real, previously-latent bug -- nested vault:// references held inside env vars were never resolved a second time — Every real KPO pod failed identically until fixed with a second resolve_secret() call; this was the first time any pod ran plan 05-02's vault://-literal kpo.py wiring for real, since the previously-deployed image predated it.
 - [Phase 05]: A self-inflicted Airflow scheduling backlog (~680 DagRuns) from this session's own diagnostic commands is still draining at hand-off, safe but slow — Root cause: airflow tasks clear -t discover (no -d) left downstream tasks frozen at pre-clear terminal states; fixed by re-clearing with -d. A bulk DB fix to force-drain immediately was attempted but denied by the permission classifier as too invasive, and that denial was respected. SEC-05 itself is independently proven via multiple genuine SUCCEEDED live DAG runs, unaffected by the backlog.
+- [Phase 05]: [Phase 05, plan 04]: vault-audit-tail's Makefile target is self-contained (no env-sourcing prefix), matching vault-unseal/vault-bootstrap's own Python-script shape rather than the plan's literal minio-creds citation. — The plan's action text simultaneously instructed duplicating _kubectl_context() as a self-contained helper (so no external KUBECTL_CONTEXT is needed) and citing minio-creds's shell env-sourcing Makefile shape -- these conflict; the script computes its own context, so sourcing an env var it never reads would be dead Makefile configuration.
+- [Phase 05]: [Phase 05, plan 04]: test_rotation.py's D-03 proof rotates minio_default's conn_uri by appending a harmless, ignorable query parameter rather than changing login/password/endpoint. — Verified live against the installed apache-airflow-providers-amazon AwsConnectionWrapper that an unrecognised extra key is silently absorbed by _get_credentials(**kwargs), never raised on -- keeps the connection fully functional throughout the test, including for concurrently-running pipeline traffic from the phase's own background DagRun backlog.
+- [Phase 05]: Plan 05-04: test_dev_secrets_reproducible.py's SEC-13 non-vacuity test renames (Path.replace) .secrets/vault-init.json aside instead of deleting it, restoring it in a finally block with an in-memory byte backup as a second line of defence. — This exact file was already lost once earlier in this phase (plan 05-02, session 1) via an unrelated worktree-isolation issue, requiring a full Vault re-bootstrap to recover -- an atomic rename can never produce a state where the data does not exist anywhere on disk, unlike a delete-then-rewrite sequence, while still satisfying the plan's own fail-closed acceptance criterion.
 
 ### Pending Todos
 
@@ -97,6 +101,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T14:05:20.016Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-08-14T14:47:39.256Z
+Stopped at: Completed 05-04-PLAN.md
 Resume file: None
