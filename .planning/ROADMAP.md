@@ -280,10 +280,24 @@ Plans:
 
 Plans:
 
+**Wave 1**
+
 - [ ] 05-01-PLAN.md — Vault deployed: namespace, both Helm values profiles, scripted unseal (D-02), idempotent bootstrap (mounts, auth method, both roles/policies, audit device), restart-persistence proof (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 05-02-PLAN.md — ETL identity: the vault:// scheme in resolve_secret(), KPO pod wiring, positive/negative auth proof (SEC-06/07/12), csv-processor-db + csv-processor-s3 retired (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 05-03-PLAN.md — Airflow identity: VaultBackend wiring, empirical ServiceAccount correction, SEC-05 proof, airflow-minio-connection retired (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 05-04-PLAN.md — D-03 rotation proof, D-04 make vault-audit-tail, SEC-08 audit-content proof, SEC-13 reproducibility proof (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 05-05-PLAN.md — Permanent SEC-01 structural guard, SEC-14 secrets-architecture documentation, ADR-0009 (OpenBao) (wave 5)
 
 **Research stage**: S6. **Use `/gsd-plan-phase --research-phase`** — the kind-specific JWT-issuer caveat in ARCHITECTURE is explicitly flagged as *inference, unverified on this cluster*, and `auth_type: kubernetes` is present in the Airflow hashicorp provider code but undocumented on its docs page. Verify against pinned provider source, not the docs page.
