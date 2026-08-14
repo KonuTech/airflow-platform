@@ -52,7 +52,7 @@ FILE ?=
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
-        ingest-demo vault-unseal vault-bootstrap vault-verify
+        ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -170,6 +170,16 @@ vault-bootstrap:                ## idempotent Vault admin bootstrap: mounts, aut
 
 vault-verify:                    ## INFRA-06: run tests/e2e/vault against the live cluster [plan 05-01]
 	$(RUN_CLUSTER) pytest tests/e2e/vault -q
+
+vault-audit-tail:                ## D-04: human-readable tail of Vault's persistent audit log [plan 05-04]
+	# Same shape as vault-unseal/vault-bootstrap above, not minio-creds's
+	# `set -a; . helm/versions.env; set +a` shell-sourcing shape: this script
+	# is Python, like its two siblings, and resolves its own kubectl context
+	# by reading helm/versions.env directly (scripts/vault-audit-tail.py's own
+	# _kubectl_context helper) -- no KUBECTL_CONTEXT env var is read, so
+	# sourcing one here would be dead configuration matching nothing the
+	# script actually consumes.
+	$(RUN_CLUSTER) python scripts/vault-audit-tail.py
 
 cluster-verify:                 ## D-16: run tests/e2e/cluster and tests/e2e/slice against the live cluster [plan 02-02, extended 04-09]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
