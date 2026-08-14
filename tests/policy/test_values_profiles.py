@@ -67,7 +67,15 @@ def _is_replica_count(path: str) -> bool:
 
 def _is_resource_sizing(path: str) -> bool:
     segments = path.split(".")
-    return "resources" in segments or path.endswith("storage.size")
+    # Case-insensitive on the "storage.size" suffix (plan 05-01): CNPG's own
+    # `cluster.storage.size` is lowercase, but the Vault chart's PVC knobs
+    # are `server.dataStorage.size`/`server.auditStorage.size` — camelCase
+    # compound keys ending in "Storage", not a bare "storage" segment. Both
+    # are the same permitted class this axis's own written argument already
+    # names ("every PVC `storage.size` may differ in magnitude without
+    # differing in shape") — matching only the lowercase spelling was an
+    # incomplete implementation of that argument, not a narrower axis.
+    return "resources" in segments or path.lower().endswith("storage.size")
 
 
 def _is_monitoring_enablement(path: str) -> bool:
