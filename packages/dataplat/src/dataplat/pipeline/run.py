@@ -175,6 +175,18 @@ def _heartbeat_loop(
     moment ``stop_event`` is set, and ``False`` (one more heartbeat runs)
     after a full interval with no stop signal.
 
+    CR-01 (``04-REVIEW.md``): this is exactly the call site where a stray
+    tick could otherwise regress a just-committed ``SUCCEEDED`` status back
+    to ``RUNNING``. ``stop_event.set()`` (in ``run_ingest``'s ``finally``
+    block) only fires AFTER the publish transaction has already committed
+    and the trailing staging-table drop has run -- a tick landing in that
+    narrow window still calls this loop's body one more time. Calling
+    ``ctx.metadata.heartbeat_ingestion_run`` (not the generic, unconditional
+    ``update_ingestion_run_status``) makes that stray call a silent no-op
+    instead of a status regression: its ``WHERE status = 'RUNNING'`` guard
+    means a run that has already reached a terminal status is left
+    untouched.
+
     Args:
         ctx: The current pipeline context. Only ``ctx.metadata`` is used.
         run_id: The claimed run this heartbeat keeps alive.
@@ -188,9 +200,8 @@ def _heartbeat_loop(
             without a real-time wait.
     """
     while not stop_event.wait(interval_seconds):
-        ctx.metadata.update_ingestion_run_status(
+        ctx.metadata.heartbeat_ingestion_run(
             run_id=run_id,
-            status="RUNNING",
             lease_expires_at=datetime.now(tz=UTC) + _LEASE_DURATION,
             rows_read=progress.rows_read,
             rows_parsed=progress.rows_parsed,

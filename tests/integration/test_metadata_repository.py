@@ -102,6 +102,29 @@ def _read_run_row(dsn: str, run_id: int) -> tuple[str, str | None, datetime | No
         return str(row[0]), row[1], row[2]
 
 
+def _read_run_progress(
+    dsn: str,
+    run_id: int,
+) -> tuple[str, str | None, datetime | None, int | None, int | None]:
+    """Read `(status, k8s_pod_name, lease_expires_at, rows_read, rows_parsed)`, bypassing the repo.
+
+    A NEW, separate helper (04-10 gap closure: CR-01) -- `_read_run_row`'s own
+    3-tuple return shape is unpacked positionally at two existing call sites
+    (`test_claim_ingestion_run_claims_a_pending_run`,
+    `test_claim_ingestion_run_claims_a_failed_run`) and must not be widened.
+    """
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            """
+            SELECT status, k8s_pod_name, lease_expires_at, rows_read, rows_parsed
+              FROM meta.ingestion_runs WHERE run_id = %s
+            """,
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        return str(row[0]), row[1], row[2], row[3], row[4]
+
+
 def _read_file_status(dsn: str, file_id: int) -> str:
     """Read back `meta.files.status` directly via SQL (bypassing the repository)."""
     with psycopg.connect(dsn) as conn:
@@ -571,6 +594,68 @@ def test_claim_ingestion_run_returns_none_for_an_unknown_idempotency_key(
     assert claimed is None
 
 
+# --- heartbeat_ingestion_run (04-10 gap closure: CR-01) ---------------------
+#
+# Terminal-status-safe heartbeat write: distinct from `update_ingestion_run_
+# status` (no status guard, reserved for genuine status transitions) -- a
+# stray heartbeat tick landing after a run's publish transaction has already
+# committed SUCCEEDED must be a silent no-op, never a status regression back
+# to RUNNING.
+
+
+def test_heartbeat_ingestion_run_updates_a_running_row(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    run_id = _seed_pending_run(repository, migrated_dsn, key_suffix="heartbeat_running")
+    repository.claim_ingestion_run(
+        idempotency_key="claim_run_heartbeat_running:1",
+        try_number=1,
+        pod_name="pod-heartbeat-running",
+    )
+    new_lease = datetime.now(tz=UTC) + timedelta(minutes=7)
+
+    repository.heartbeat_ingestion_run(
+        run_id=run_id,
+        lease_expires_at=new_lease,
+        rows_read=42,
+        rows_parsed=41,
+    )
+
+    status, _pod_name, lease_expires_at, rows_read, rows_parsed = _read_run_progress(
+        migrated_dsn,
+        run_id,
+    )
+    assert status == "RUNNING"
+    assert lease_expires_at is not None
+    assert abs((lease_expires_at - new_lease).total_seconds()) < 1
+    assert rows_read == 42
+    assert rows_parsed == 41
+
+
+def test_heartbeat_ingestion_run_is_a_noop_once_the_run_is_no_longer_running(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    run_id = _seed_pending_run(repository, migrated_dsn, key_suffix="heartbeat_terminal")
+    repository.claim_ingestion_run(
+        idempotency_key="claim_run_heartbeat_terminal:1",
+        try_number=1,
+        pod_name="pod-heartbeat-terminal",
+    )
+    repository.update_ingestion_run_status(run_id=run_id, status="SUCCEEDED")
+    before = _read_run_progress(migrated_dsn, run_id)
+
+    repository.heartbeat_ingestion_run(
+        run_id=run_id,
+        lease_expires_at=datetime.now(tz=UTC) + timedelta(days=1),
+        rows_read=999_999,
+        rows_parsed=999_999,
+    )
+
+    assert _read_run_progress(migrated_dsn, run_id) == before
+
+
 # --- finalize_publication (04-01 Task 2) ----------------------------------
 #
 # The one MetadataRepository method that never opens its own connection: it
@@ -684,3 +769,41 @@ def test_create_file_is_idempotent_and_stores_duplicate_of_file_id(
     assert first_file_id == second_file_id
     assert _count_files(migrated_dsn, dataset_id=dataset_id, object_uri=object_uri) == 1
     assert _read_duplicate_of_file_id(migrated_dsn, first_file_id) == original_file_id
+
+
+# --- find_file_by_content_hash (04-10 gap closure: CR-02) -------------------
+#
+# Deterministic duplicate-file resolution: PostgreSQL documents `LIMIT 1`
+# with no `ORDER BY` as unspecified once more than one row matches a WHERE
+# clause -- `discovery.py`'s rediscovery-correction logic depends on this
+# method returning the SAME row across repeated calls for the same content,
+# and the live cluster's `file_id=10` orphan (04-VERIFICATION.md) is what
+# happens when that assumption breaks.
+
+
+def test_find_file_by_content_hash_resolves_to_the_lowest_file_id_deterministically(
+    repository: PostgresMetadataRepository,
+) -> None:
+    dataset_id = repository.get_or_create_dataset("find_file_deterministic_proof")
+    content_sha256 = hashlib.sha256(b"three-way duplicate content, CR-02").digest()
+
+    file_ids = [
+        repository.create_file(
+            dataset_id=dataset_id,
+            object_uri=f"s3://raw/customers/deterministic-{index}.csv",
+            content_sha256=content_sha256,
+            hash_version=1,
+            size_bytes=10,
+            filename=f"deterministic-{index}.csv",
+            status="DISCOVERED",
+        )
+        for index in range(3)
+    ]
+
+    expected = min(file_ids)
+    for _ in range(5):
+        resolved = repository.find_file_by_content_hash(
+            dataset_id=dataset_id,
+            content_sha256=content_sha256,
+        )
+        assert resolved == expected
