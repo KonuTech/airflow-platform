@@ -5,6 +5,7 @@ status: planned
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-08-14
+gap_closure_plans: ["05-06"]
 ---
 
 # Phase 5 — Validation Strategy
@@ -38,7 +39,9 @@ created: 2026-08-14
 
 Threat refs correspond to the Known Threat Patterns identified in `05-RESEARCH.md`'s Security Domain
 section (T-05-01 through T-05-06) plus additional threats identified during planning (T-05-07 through
-T-05-12), each recorded in the owning plan's own `<threat_model>` block.
+T-05-12), each recorded in the owning plan's own `<threat_model>` block. T-05-13 through T-05-17 were
+added by gap-closure plan `05-06` (see its own `<threat_model>` block) to close the SEC-13 verification
+gap `05-VERIFICATION.md` found (CR-01/CR-02, same root cause).
 
 | Task | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | Status |
 |------|------|------|-------------|------------|------------------|-----------|--------------------|--------|
@@ -52,6 +55,8 @@ T-05-12), each recorded in the owning plan's own `<threat_model>` block.
 | T1 | 05-04 | 4 | SEC-09 | — | Rotating `minio_default`'s value in Vault is reflected on a running Airflow process's *next* read, with no pod restart (D-03); read-once-vs-read-per-use documented regardless | e2e (cluster) | `pytest tests/e2e/vault/test_rotation.py -x` | ⬜ pending |
 | T3 | 05-02 | 2 | SEC-12 | T-05-03 | The `default` ServiceAccount's Kubernetes-auth login against `csv-processor`'s Vault role is denied — asserted by an automated negative test, not inferred from policy text | e2e (cluster) | `pytest tests/e2e/vault/test_negative_auth.py -x` | ⬜ pending |
 | T3 | 05-04 | 4 | SEC-13 | T-05-02 | Re-running `vault-bootstrap`/`vault-unseal` against an already-configured Vault is a safe no-op; `.secrets/vault-init.json` is gitignored and never tracked | e2e (cluster) | `pytest tests/e2e/vault/test_dev_secrets_reproducible.py -x` | ⬜ pending |
+| T1 | 05-06 | 6 | SEC-13 / SEC-01 | T-05-13 / T-05-14 / T-05-15 | `scripts/vault-bootstrap.py` populates all three Vault KV credential paths (`etl/analytics-db`, `etl/minio`, `airflow/connections/minio_default`) from live sources — never a deleted Secret — when Vault has zero prior KV data for them, regenerating `etl_app`'s PostgreSQL password directly rather than depending on a since-deleted cache; `_ensure_policy` re-applies a drifted policy body instead of silently skipping (CR-02) | unit (offline, mocked) | `pytest tests/unit/test_vault_bootstrap.py -v` | ⬜ pending |
+| T2 | 05-06 | 6 | SEC-13 | T-05-16 | The fix is proven against the real live cluster from a genuinely empty Vault (scoped Vault-release-and-PVC reinstall, namespace `vault` only), not merely by code review or mocks — `make vault-verify`'s full suite and a real DAG run both succeed using the freshly-generated credentials | e2e (cluster) | `pytest tests/e2e/vault -q -m cluster` | ⬜ pending |
 | T2 | 05-05 | 5 | SEC-14 | — | Substitution path to a production secrets manager documented end-to-end (auto-unseal, multi-key ceremony, OpenBao, VSO, TLS) | manual-only (documentation review) | N/A — see Manual-Only Verifications below | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
@@ -76,6 +81,7 @@ pre-planning pass:
 - [x] `tests/e2e/vault/test_dev_secrets_reproducible.py` — plan 05-04, Task 3, Wave 4
 - [x] `tests/policy/test_no_stale_secrets.py` — plan 05-05, Task 1, Wave 5
 - [x] Framework install: `hvac` added to root `pyproject.toml`'s `cluster` dependency group — plan 05-01, Task 2, Wave 1; `hvac` added to `packages/dataplat/pyproject.toml`'s `[project.dependencies]` — plan 05-02, Task 1, Wave 2 (two additions, two different reasons — see each plan's own Interfaces section)
+- [ ] `tests/unit/test_vault_bootstrap.py` — gap-closure plan 05-06, Task 1, Wave 6 (new: this repo's first unit test for a `scripts/*.py` file, via dynamic `importlib` import — closes the SEC-13 verification gap offline, without needing a live cluster)
 
 ---
 
@@ -84,7 +90,7 @@ pre-planning pass:
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | Substitution path to a production secrets manager is documented end-to-end | SEC-14 | Documentation completeness/quality is not automatable — no test can assert prose content | Review `docs/secrets-architecture.md` for explicit coverage of: auto-unseal (cloud KMS/transit) vs. this phase's scripted single-key local convenience (D-02); a genuine multi-key-holder ceremony vs. the local shortcut; OpenBao as the OSI-licensed escape hatch (`docs/adr/0009-openbao-licence-escape-hatch.md`); VSO/ESO as alternatives to direct SA-token login; TLS as a hard requirement outside local dev |
-| Full reproducibility from a completely fresh cluster (SEC-13's other half) | SEC-13 | A full `kind delete cluster` + recreate cycle inside a pytest run is disproportionately slow for a per-wave gate — `tests/e2e/vault/test_dev_secrets_reproducible.py` (plan 05-04) proves re-run idempotency against an already-live cluster only | Run `make cluster-down && make cluster-up && make vault-unseal && make vault-bootstrap && make vault-verify` from a clean checkout and confirm all Vault e2e tests pass with no manual intervention beyond those four commands |
+| Full reproducibility from a completely fresh cluster (SEC-13's other half) | SEC-13 | **Partially superseded by gap-closure plan 05-06.** A full `kind delete cluster` + recreate cycle inside a pytest run remains disproportionately slow for a per-wave gate, so it is still not run automatically on every wave. But this is no longer purely manual: `tests/unit/test_vault_bootstrap.py` (plan 05-06, Task 1) offline-proves the empty-Vault credential-sourcing code path with mocks, and plan 05-06's Task 2 performed one real live-cluster proof (a scoped Vault-release-and-PVC reinstall — the same empty-KV-store precondition a full cluster rebuild produces, without the ~full teardown cost) before this claim was corrected in `docs/secrets-architecture.md`. | The scoped proof (plan 05-06, Task 2): delete PVCs `data-vault-0`/`audit-vault-0` and pod `vault-0` in namespace `vault` only, let the StatefulSet reconcile a fresh empty Vault, then run `make vault-unseal && make vault-bootstrap && make vault-verify` and confirm a real DAG run succeeds afterward. The full literal `make cluster-down && make cluster-up && make vault-unseal && make vault-bootstrap && make vault-verify` sequence from an actual clean checkout remains unexercised by this project's own automation — a residual, honestly-disclosed limit, not a hidden gap. |
 
 ---
 
@@ -97,4 +103,6 @@ pre-planning pass:
 - [x] Feedback latency < 90s (offline gate); cluster-gated Vault E2E tier explicitly exempted as phase-gate-only
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** planned — every row above maps to a real plan/task/wave; execution not yet started.
+**Approval:** planned — every row above maps to a real plan/task/wave; gap-closure plan `05-06` added
+to close the SEC-13 verification gap (`05-VERIFICATION.md`), execution not yet started for that plan.
+</content>
