@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Completed 05-02-PLAN.md (retirement completion, continuation session)
-last_updated: "2026-08-14T12:23:15.044Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-08-14T14:05:55.200Z"
 last_activity: 2026-08-14
 progress:
   total_phases: 11
   completed_phases: 4
   total_plans: 42
-  completed_plans: 39
+  completed_plans: 40
   percent: 36
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 05 (vault-secrets-workload-identity) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-08-14
 
-Progress: [█████████░] 93%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [█████████░] 93%
 
 *Updated after each plan completion*
 | Phase 05 P02 | 45min | 3 tasks | 11 files |
+| Phase 05 P03 | 95min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,9 @@ Recent decisions affecting current work:
 - [Phase 05]: Vault root-token/unseal-key loss (plan 05-02, session 1) was resolved outside a plan-executor session: orchestrator deleted vault-0's pod/PVCs, redeployed Vault, and re-ran make vault-unseal (writing .secrets/vault-init.json to the main tree this time, not an ephemeral worktree) and make vault-bootstrap. — The lost token only ever existed in a worktree-local gitignored file that never travels to the main tree or sibling worktrees, by design (D-02: no auto-unseal in this local dev setup). Recovery was fully scripted and idempotent (05-01's own bootstrap code), and the destructive PVC deletion targets explicitly regenerable local dev state, not a production secret.
 - [Phase 05]: tests/e2e/vault/test_positive_auth.py's comparison against csv-processor-db/csv-processor-s3 was removed (Rule 1 fix) once this plan's own Task 3 deletes those Secrets, replaced with structural well-formed/non-empty assertions. — Keeping the comparison would make the test -- and make vault-verify, the phase's own standing per-wave gate -- permanently fail on every future run once the Secrets it compared against no longer exist. The value-equality proof was already performed live once, immediately before deletion.
 - [Phase 05]: tests/e2e/slice/conftest.py's analytics_connection fixture (27 references across 3 files) depends on the now-deleted csv-processor-db Secret. Found and flagged in deferred-items.md, deliberately NOT auto-fixed in this plan. — A correct fix needs a new root-token-authenticated Vault read in a host-side test harness with no projected ServiceAccount token -- a real architectural decision (Rule 4), and the file belongs to Phase 4, outside plan 05-02's declared Task 3 file scope. make cluster-verify will fail until a future plan addresses this.
+- [Phase 05]: The airflow Vault role is bound to four ServiceAccounts (airflow-api-server, airflow-triggerer, airflow-worker, airflow-scheduler), not the two the plan anticipated — airflow-worker was confirmed necessary by reading the actually-installed S3KeySensor.execute() source (it pokes synchronously before deferring); airflow-scheduler was added for CI's LocalExecutor profile (documented architectural necessity, not live-observed on this session's KubernetesExecutor cluster) since this plan also removes CI's own scheduler.env fallback in the same change.
+- [Phase 05]: csv_processor.cli._build_common() had a real, previously-latent bug -- nested vault:// references held inside env vars were never resolved a second time — Every real KPO pod failed identically until fixed with a second resolve_secret() call; this was the first time any pod ran plan 05-02's vault://-literal kpo.py wiring for real, since the previously-deployed image predated it.
+- [Phase 05]: A self-inflicted Airflow scheduling backlog (~680 DagRuns) from this session's own diagnostic commands is still draining at hand-off, safe but slow — Root cause: airflow tasks clear -t discover (no -d) left downstream tasks frozen at pre-clear terminal states; fixed by re-clearing with -d. A bulk DB fix to force-drain immediately was attempted but denied by the permission classifier as too invasive, and that denial was respected. SEC-05 itself is independently proven via multiple genuine SUCCEEDED live DAG runs, unaffected by the backlog.
 
 ### Pending Todos
 
@@ -83,6 +87,7 @@ None yet.
 - `values-ci.yaml` must be written in Phase 2 even though Phase 11's ephemeral-kind E2E consumes it — retrofitting profile parameterization is expensive.
 - Helm 4.2.3 against Helm-3 charts is the MEDIUM-confidence call in STACK.md; `3.21.3` is the documented fallback.
 - Three spikes carry pre-declared pass criteria: U1 and U3 in Phase 4, U2 in Phase 5.
+- csv_ingest_customers has a self-inflicted, self-draining Airflow scheduling backlog (~680 DagRuns re-queued by an over-broad diagnostic `airflow tasks clear` in plan 05-03) -- safe (idempotent pipeline) but may make `pytest tests/e2e/vault/test_airflow_backend.py -q -m cluster` or `make cluster-verify` slow/flaky until it fully drains (max_active_runs=1 serializes recovery). No action needed beyond waiting, or re-running the live-DAG test once `dag_run` for this dag_id shows queued near zero.
 
 ## Deferred Items
 
@@ -92,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T12:23:15.034Z
-Stopped at: Completed 05-02-PLAN.md (retirement completion, continuation session)
+Last session: 2026-08-14T14:05:20.016Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None

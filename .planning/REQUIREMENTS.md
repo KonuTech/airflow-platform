@@ -47,7 +47,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **SEC-02**: No secret exists anywhere in git history or the working tree — *(DoD 91)*
 - [x] **SEC-03**: No credential is hard-coded in Python source — *(DoD 92)*
 - [x] **SEC-04**: No secret is baked into any container image — *(DoD 93)*
-- [ ] **SEC-05**: Airflow resolves connections through the Vault secrets backend, verified with the metadata-DB connection deleted and `AIRFLOW_CONN_*` unset — the backend fails open, so a test that skips this proves nothing — *(DoD 94)*
+- [x] **SEC-05**: Airflow resolves connections through the Vault secrets backend, verified with the metadata-DB connection deleted and `AIRFLOW_CONN_*` unset — the backend fails open, so a test that skips this proves nothing — *(DoD 94)*
 - [x] **SEC-06**: Task pods obtain only the credentials their workload requires, via explicit `namespace` and `service_account_name` matched to a Vault role — *(DoD 95)*
 - [x] **SEC-07**: Workloads authenticate with least-privilege Kubernetes service-account identities, not a shared root token — *(DoD 96)*
 - [ ] **SEC-08**: Secret access is auditable — which workload read which path, when, and whether it succeeded — without logging secret values — *(DoD 97)*
@@ -294,7 +294,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SEC-02 | Phase 1 | Complete |
 | SEC-03 | Phase 5 | Complete |
 | SEC-04 | Phase 5 | Complete |
-| SEC-05 | Phase 5 | Pending |
+| SEC-05 | Phase 5 | Complete |
 | SEC-06 | Phase 5 | Complete |
 | SEC-07 | Phase 5 | Complete |
 | SEC-08 | Phase 5 | Pending |

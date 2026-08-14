@@ -290,7 +290,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 05-03-PLAN.md — Airflow identity: VaultBackend wiring, empirical ServiceAccount correction, SEC-05 proof, airflow-minio-connection retired (wave 3)
+- [x] 05-03-PLAN.md — Airflow identity: VaultBackend wiring, empirical ServiceAccount correction, SEC-05 proof, airflow-minio-connection retired (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
