@@ -45,6 +45,37 @@ executor: KubernetesExecutor
 postgresql:
   enabled: false
 
+# SEC-05: Airflow's native VaultBackend serves the minio_default connection
+# through Vault alone -- not a Kubernetes Secret, not an AIRFLOW_CONN_* env
+# var (plan 05-03). `variables_path: null` is load-bearing, not decorative:
+# airflow/dags/_common/kpo.py's common_kpo_kwargs() calls
+# Variable.get("csv_processor_image") at DAG-PARSE time (inside the
+# @dag-decorated function body), and routing Variable lookups through Vault
+# would put a network call on the DAG processor's parse-time critical path
+# for a value this phase never intends to move. `kubernetes_role: "airflow"`
+# and every other key here are verified against the ACTUAL installed
+# apache-airflow-providers-hashicorp==4.7.1 `vault_client.py` source (read
+# live inside the running scheduler pod, this plan) -- not the docs page,
+# which omits `auth_type: kubernetes` entirely. The default
+# `kubernetes_jwt_path` (`/var/run/secrets/kubernetes.io/serviceaccount/
+# token`) needs no extra volume mount -- every pod already has it.
+#
+# backend_kwargs is a SINGLE-LINE scalar, deliberately not a multi-line
+# folded block (>-): the chart embeds this string directly into the
+# airflow.cfg ConfigMap's INI-rendered [secrets] section
+# (`backend_kwargs = {{ $value }}`), with no re-indentation of embedded
+# newlines. A multi-line YAML block scalar whose continuation lines are
+# indented past the block's own base indentation is NOT folded (YAML
+# "more-indented lines are literal" rule) -- verified live, this plan,
+# `helm template` failing with "did not find expected key" because the
+# resulting dedented continuation lines broke the ConfigMap's own YAML
+# structure. Same JSON content either way; only the YAML source shape
+# differs.
+config:
+  secrets:
+    backend: airflow.providers.hashicorp.secrets.vault.VaultBackend
+    backend_kwargs: '{"url": "http://vault.vault.svc.cluster.local:8200", "auth_type": "kubernetes", "kubernetes_role": "airflow", "mount_point": "airflow", "connections_path": "connections", "variables_path": null, "config_path": null, "kv_engine_version": 2}'
+
 data:
   # scripts/airflow-metadata-secret.sh (Task 1) derives this Secret's sole
   # key, `connection`, from the CNPG-generated `airflow-db-app` Secret in

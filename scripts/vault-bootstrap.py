@@ -27,6 +27,15 @@ step). It creates, if not already present:
       `scripts/etl-secrets.sh` already created (Phase 4), so the value the
       KPO pod reads through `vault://` is identical to the value it read
       through `secretKeyRef` before this plan's swap
+  (i) the `airflow/connections/minio_default` KV secret VALUE (plan 05-03)
+      -- field name `conn_uri`, matching `providers-hashicorp`'s own
+      `VaultBackend.get_connection` convention (`response.get("conn_uri")`,
+      verified against the installed provider's source: it prioritizes
+      `conn_uri` if present, falling back to `Connection(conn_id,
+      **response)` otherwise) -- sourced from the live
+      `airflow-minio-connection` Kubernetes Secret `scripts/etl-secrets.sh`
+      already created (Phase 4), so the value `VaultBackend` resolves is
+      identical to the value the Secret carried before this plan's swap
 
 Every step is idempotent: re-running this script against an already-
 bootstrapped Vault performs zero writes and prints "already present" for
@@ -88,6 +97,12 @@ _ETL_NAMESPACE = "etl"
 _DB_SECRET_NAME = "csv-processor-db"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 _S3_SECRET_NAME = "csv-processor-s3"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 _MINIO_APP_ACCESS_KEY = "etl-app"
+
+# (i) The live Kubernetes Secret `scripts/etl-secrets.sh` already created
+# (Phase 4) -- the SOURCE of the `airflow/connections/minio_default` KV
+# value this step writes, never printed.
+_AIRFLOW_NAMESPACE = "airflow"
+_AIRFLOW_MINIO_SECRET_NAME = "airflow-minio-connection"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 
 
 def _versions_env_variable(name: str) -> str:
@@ -322,7 +337,8 @@ def _kubectl_get_secret_field(kubectl_context: str, *, namespace: str, name: str
     `_read_minio_app_secret_key` uses -- `kubectl get secret ... -o
     jsonpath=...` piped through a base64 decode -- reimplemented here via
     `subprocess.run` rather than shelling out to that script, since this is
-    the one place `etl`'s own two dev credentials (D-01's migration source)
+    the one place D-01's migration-source credentials (the `etl` namespace's
+    two dev credentials, plan 05-02; `airflow-minio-connection`, plan 05-03)
     are read to populate Vault. Never prints the decoded value.
 
     Args:
@@ -413,6 +429,47 @@ def _ensure_etl_secrets(client: hvac.Client, kubectl_context: str) -> None:
         print("secret etl/minio: created")
 
 
+def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
+    """(i) Populate `airflow/connections/minio_default`'s KV secret VALUE, if not already present.
+
+    Same read-then-skip-or-write shape as `_ensure_etl_secrets`. Guard:
+    attempt `read_secret_version` first; a successful read means the secret
+    is already present (skip, unchanged). On `hvac.exceptions.InvalidPath`
+    (Vault's 404-shaped "not found"), source the value from the live
+    `airflow-minio-connection` Kubernetes Secret `scripts/etl-secrets.sh`
+    already created (Phase 4) and write it under the field name `conn_uri`
+    -- matching `providers-hashicorp`'s own `VaultBackend.get_connection`
+    convention (`response.get("conn_uri")`, verified against the installed
+    provider's source: it prioritizes `conn_uri` if present, falling back
+    to `Connection(conn_id, **response)` otherwise). Never prints the
+    value.
+
+    Args:
+        client: An `hvac.Client` authenticated with the root token.
+        kubectl_context: The kubectl context to read the source Secret
+            through.
+    """
+    try:
+        client.secrets.kv.v2.read_secret_version(
+            mount_point="airflow",
+            path="connections/minio_default",
+        )
+        print("secret airflow/connections/minio_default: already present")
+    except hvac.exceptions.InvalidPath:
+        conn_uri = _kubectl_get_secret_field(
+            kubectl_context,
+            namespace=_AIRFLOW_NAMESPACE,
+            name=_AIRFLOW_MINIO_SECRET_NAME,
+            key="AIRFLOW_CONN_MINIO_DEFAULT",
+        )
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="airflow",
+            path="connections/minio_default",
+            secret={"conn_uri": conn_uri},
+        )
+        print("secret airflow/connections/minio_default: created")
+
+
 def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
     """Run every idempotent bootstrap step against an authenticated, unsealed `client`.
 
@@ -462,6 +519,7 @@ def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
     _ensure_audit_device(client)
 
     _ensure_etl_secrets(client, kubectl_context)
+    _ensure_airflow_secrets(client, kubectl_context)
 
 
 def main() -> int:
