@@ -14,12 +14,12 @@ step). It creates, if not already present:
       namespace `etl` -- FINAL, not a guess (kubernetes/rbac-etl.yaml,
       plan 04-02, already fixes this identity)
   (e) policy `airflow` (read access to `airflow/data/connections/*`)
-  (f) role `airflow`, bound to ServiceAccount `airflow-api-server` in
-      namespace `airflow` -- a DOCUMENTED BEST GUESS (05-RESEARCH.md
-      Pitfall 1: which Airflow component actually performs the
-      `VaultBackend` login is genuinely unverified), to be empirically
-      corrected by plan 05-03 using this same audit-log-reading discipline
-      -- never widened to a wildcard or multiple SAs as a shortcut
+  (f) role `airflow`, bound to ServiceAccounts `airflow-api-server`,
+      `airflow-triggerer`, `airflow-worker` and `airflow-scheduler` in
+      namespace `airflow` -- EMPIRICALLY CORRECTED (plan 05-03) from plan
+      05-01's original single-SA best guess (05-RESEARCH.md Pitfall 1); see
+      this role's own definition in `bootstrap()` for the per-SA evidence
+      -- never widened to a wildcard or "every candidate" as a shortcut
   (g) a `file` audit device at `/vault/audit/audit.log`
   (h) the two `etl` KV secret VALUES (plan 05-02) -- `etl/analytics-db`
       (`dsn`) and `etl/minio` (`access_key`/`secret_key`) -- sourced from
@@ -39,9 +39,14 @@ step). It creates, if not already present:
 
 Every step is idempotent: re-running this script against an already-
 bootstrapped Vault performs zero writes and prints "already present" for
-each step. This mirrors `scripts/etl-secrets.sh`'s
-`_secret_exists`-before-`_apply_secret` shape -- read first, write only if
-missing.
+each step whose live state already matches its target. This mirrors
+`scripts/etl-secrets.sh`'s `_secret_exists`-before-`_apply_secret` shape --
+read first, write only if missing. One step, (f), also self-corrects DRIFT
+(not just absence): a kubernetes-auth role whose live
+`bound_service_account_names` no longer matches this script's own target
+list is RE-WRITTEN, not skipped -- this is the exact mechanism plan 05-03
+uses to correct plan 05-01's original best guess in place, on a Vault that
+was already bootstrapped once.
 
 The root token, read once from `.secrets/vault-init.json`, is the ONLY
 place in this codebase that value is ever read. It is never logged,
@@ -289,7 +294,7 @@ def _ensure_kubernetes_role(
     bound_service_account_namespaces: list[str],
     policies: list[str],
 ) -> None:
-    """(d)/(f) Write a kubernetes-auth role, if not already present under `name`.
+    """(d)/(f) Write a kubernetes-auth role, creating it if absent or correcting drift if not.
 
     `list_roles()` raises `hvac.exceptions.InvalidPath` both when the
     kubernetes auth method has no roles at all yet AND when (in principle)
@@ -298,6 +303,20 @@ def _ensure_kubernetes_role(
     empty collection rather than an empty list. Both cases mean "this role
     does not exist yet" here, since `_ensure_kubernetes_auth_method` always
     runs first.
+
+    Drift correction (plan 05-03): the ORIGINAL shape of this function only
+    ever checked "does a role named `name` exist" and skipped
+    unconditionally if so -- which meant a role's `bound_service_account_
+    names` could never actually be corrected by re-running this idempotent
+    bootstrap once the role already existed. Plan 05-03's whole point is
+    correcting the `airflow` role's plan-05-01-era best guess
+    (`["airflow-api-server"]`) to the empirically observed set, so this now
+    reads the EXISTING role's live binding and re-writes it (Vault's own
+    `create_role` on an existing name is a full replace, not a merge) only
+    when it differs from what the caller now passes. A role whose binding
+    already matches its target performs zero writes, unchanged from
+    before -- this never affects the `csv-processor` role, whose binding is
+    FINAL and never drifts.
     """
     try:
         existing = client.auth.kubernetes.list_roles()
@@ -305,9 +324,24 @@ def _ensure_kubernetes_role(
     except hvac.exceptions.InvalidPath:
         existing_names = []
 
-    if name in existing_names:
-        print(f"role {name}: already present")
-        return
+    already_exists = name in existing_names
+    if already_exists:
+        # `read_role()` returns the role's data UNWRAPPED (no top-level
+        # "data" envelope) -- verified live, this plan: unlike several raw
+        # `hvac.Client.<module>` calls elsewhere in this file (e.g.
+        # `sys.list_mounted_secrets_engines()["data"]`), this particular
+        # `auth.kubernetes` wrapper method already unwraps Vault's response
+        # for the caller.
+        current = client.auth.kubernetes.read_role(name=name)
+        current_sas = sorted(current.get("bound_service_account_names") or [])
+        target_sas = sorted(bound_service_account_names)
+        if current_sas == target_sas:
+            print(f"role {name}: already present")
+            return
+        print(
+            f"role {name}: bound_service_account_names drifted "
+            f"{current_sas} -> {target_sas} -- correcting",
+        )
 
     client.auth.kubernetes.create_role(
         name=name,
@@ -317,7 +351,7 @@ def _ensure_kubernetes_role(
         ttl="20m",
         max_ttl="1h",
     )
-    print(f"role {name}: created")
+    print(f"role {name}: {'updated' if already_exists else 'created'}")
 
 
 def _ensure_audit_device(client: hvac.Client) -> None:
@@ -502,16 +536,65 @@ def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
     )
 
     _ensure_policy(client, "airflow", _AIRFLOW_POLICY)
-    # DOCUMENTED BEST GUESS (05-RESEARCH.md Pitfall 1): "API server is the
-    # sole metadata-DB access point for tasks and workers" is suggestive,
-    # not confirmed, for secrets-backend lookups. Plan 05-03 empirically
-    # corrects this binding by reading the Vault audit log this step's own
-    # audit device (g) makes possible -- never widened to a wildcard or
-    # multiple SAs as a shortcut in the meantime.
+    # EMPIRICALLY CORRECTED (plan 05-03) from plan 05-01's original
+    # single-SA best guess (05-RESEARCH.md Pitfall 1: "API server is the
+    # sole metadata-DB access point for tasks and workers" turned out to be
+    # suggestive, not confirmed, for secrets-backend lookups). Four
+    # ServiceAccounts actually need to authenticate once every
+    # AIRFLOW_CONN_MINIO_DEFAULT secretKeyRef fallback is removed -- each
+    # justified by name, by its own evidence class, never widened to a
+    # wildcard or "every candidate" as a shortcut (T-05-01):
+    #   - airflow-api-server: LIVE-OBSERVED via the Vault audit log
+    #     (`kubectl exec -i -n vault vault-0 -- tail ... /vault/audit/
+    #     audit.log`, `auth/kubernetes/login` success,
+    #     service_account_name=airflow-api-server) immediately after
+    #     `airflow connections get minio_default` / `airflow config
+    #     get-value secrets backend*` -- this SA alone resolved the
+    #     connection with no DB row (confirmed 0 rows) and no env var on
+    #     its own pod, so plan 05-01's original guess is CONFIRMED, not
+    #     just carried forward.
+    #   - airflow-triggerer: LIVE-OBSERVED by directly invoking
+    #     VaultBackend.get_connection("minio_default") inside the running
+    #     triggerer pod, using its own projected SA token -- this is the
+    #     identity Airflow's deferred-trigger resume path uses (the
+    #     triggerer process re-polls S3KeySensor.poke() itself, never
+    #     proxied through the API server). The FAILURE this fix corrects
+    #     was reproduced first, under the plan-05-01-era binding: "Forbidden
+    #     service account name not authorized."
+    #   - airflow-worker: confirmed by reading the ACTUALLY INSTALLED
+    #     apache-airflow-providers-amazon S3KeySensor.execute() source live
+    #     (not assumed): `if not self.poke(context=context): self._defer()`
+    #     -- the KubernetesExecutor task-instance pod (ServiceAccount
+    #     `airflow-worker`, per this chart's own pod template) performs ONE
+    #     synchronous poke, resolving minio_default itself, BEFORE ever
+    #     deferring to the triggerer. Independently corroborated by this
+    #     plan's own live end-to-end DAG trigger
+    #     (tests/e2e/vault/test_airflow_backend.py).
+    #   - airflow-scheduler: the one addition NOT live-observed on today's
+    #     cluster (PROFILE=local runs KubernetesExecutor, under which the
+    #     scheduler never executes task code itself) -- included on
+    #     documented architectural necessity instead: this repo's own
+    #     helm/values/{local,ci}/airflow.yaml already established (plan
+    #     04-02, D-01) that CI's LocalExecutor profile runs task code
+    #     in-process inside the scheduler, "regardless of executor, for
+    #     consistency" -- and this same plan removes CI's own
+    #     scheduler.env fallback in the same change, so the scheduler's
+    #     identity must be able to authenticate once that fallback is gone,
+    #     or CI regresses the next time it runs under LocalExecutor.
+    #   - airflow-dag-processor is DELIBERATELY EXCLUDED: it only parses
+    #     and serializes DAG files, never executes task or trigger code,
+    #     and has never carried this connection via any delivery mechanism
+    #     (no secretKeyRef block for it ever existed) -- no code path in it
+    #     ever calls BaseHook.get_connection.
     _ensure_kubernetes_role(
         client,
         name="airflow",
-        bound_service_account_names=["airflow-api-server"],
+        bound_service_account_names=[
+            "airflow-api-server",
+            "airflow-triggerer",
+            "airflow-worker",
+            "airflow-scheduler",
+        ],
         bound_service_account_namespaces=["airflow"],
         policies=["airflow"],
     )

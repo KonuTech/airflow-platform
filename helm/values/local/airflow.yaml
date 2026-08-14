@@ -135,14 +135,11 @@ triggerer:
         cpu: 200m
         memory: 256Mi
   # D-01: the deferred S3KeySensor's poke runs on the triggerer, not the
-  # scheduler — it needs the MinIO connection Task 1's
-  # airflow-minio-connection Secret carries.
-  env:
-    - name: AIRFLOW_CONN_MINIO_DEFAULT
-      valueFrom:
-        secretKeyRef:
-          name: airflow-minio-connection
-          key: AIRFLOW_CONN_MINIO_DEFAULT
+  # scheduler. SEC-05 (plan 05-03): the triggerer resolves minio_default
+  # through the `airflow` Vault role's `airflow-triggerer` binding above
+  # (config.secrets.backend) -- live-observed as the identity Airflow's
+  # deferred-trigger resume path actually uses; no secretKeyRef env var
+  # here anymore, and airflow-minio-connection no longer exists.
 
 # ADR-0006 also names ingress-nginx (archived read-only 2026-03-24; chart
 # 4.15.1 / controller 1.15.1 is the final release). No nginx-specific
@@ -217,13 +214,11 @@ scheduler:
       readOnly: true
   # D-01: resolve_config/discover_files run here (LocalExecutor task code is
   # in-process in CI, and the scheduler process itself needs the connection
-  # available regardless of executor for consistency).
-  env:
-    - name: AIRFLOW_CONN_MINIO_DEFAULT
-      valueFrom:
-        secretKeyRef:
-          name: airflow-minio-connection
-          key: AIRFLOW_CONN_MINIO_DEFAULT
+  # available regardless of executor for consistency). SEC-05 (plan 05-03):
+  # resolved through Vault's `airflow-scheduler` role binding above -- not
+  # live-exercised under this profile's KubernetesExecutor (the scheduler
+  # never runs task code here), but required for CI's LocalExecutor profile,
+  # which does. No secretKeyRef env var here anymore.
 
 dagProcessor:
   resources:
@@ -298,11 +293,11 @@ workers:
       - name: dags
         mountPath: /opt/airflow/dags
         readOnly: true
-    # Task-instance pods need the MinIO connection too, for consistency, even
-    # though only the initial S3KeySensor poke before deferral ever runs here.
-    env:
-      - name: AIRFLOW_CONN_MINIO_DEFAULT
-        valueFrom:
-          secretKeyRef:
-            name: airflow-minio-connection
-            key: AIRFLOW_CONN_MINIO_DEFAULT
+    # Task-instance pods need the MinIO connection too -- confirmed live,
+    # not just "for consistency": S3KeySensor.execute() (deferrable=True)
+    # calls self.poke() synchronously BEFORE ever deferring
+    # (apache-airflow-providers-amazon source, read live this plan), so the
+    # KubernetesExecutor task-instance pod (ServiceAccount airflow-worker)
+    # resolves minio_default itself on every run's first poke. SEC-05
+    # (plan 05-03): resolved through Vault's `airflow-worker` role binding
+    # above -- no secretKeyRef env var here anymore.
