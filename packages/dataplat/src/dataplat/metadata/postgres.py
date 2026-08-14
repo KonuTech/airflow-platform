@@ -348,6 +348,33 @@ class PostgresMetadataRepository(MetadataRepository):
                 return None
             return int(row[0]), str(row[1])
 
+    def heartbeat_ingestion_run(
+        self,
+        *,
+        run_id: int,
+        lease_expires_at: datetime,
+        rows_read: int,
+        rows_parsed: int,
+    ) -> None:
+        """See `MetadataRepository.heartbeat_ingestion_run`.
+
+        The `WHERE run_id = %s AND status = 'RUNNING'` guard (CR-01) is what
+        makes a stray post-terminal heartbeat tick a genuine no-op: zero rows
+        affected is the correct, silent outcome once the run is no longer
+        `RUNNING` -- never raised, logged or branched on here, by design.
+        """
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE meta.ingestion_runs
+                   SET lease_expires_at = %s,
+                       rows_read = %s,
+                       rows_parsed = %s
+                 WHERE run_id = %s AND status = 'RUNNING'
+                """,
+                (lease_expires_at, rows_read, rows_parsed, run_id),
+            )
+
     def get_ingestion_run_status(self, *, run_id: int) -> str | None:
         """See `MetadataRepository.get_ingestion_run_status`."""
         with self._pool.connection() as conn:

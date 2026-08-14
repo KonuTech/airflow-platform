@@ -651,12 +651,15 @@ def test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status(
     spy = _HeartbeatCallSpy(env.metadata)
     spy_ctx = replace(ctx, metadata=spy)
 
-    progress = run_module._Progress()
+    # Deliberately targets the module's own private implementation details
+    # (this plan's own Task 1 spec): a thread-level test of the heartbeat
+    # loop itself, not merely its public entry point via run_ingest.
+    progress = run_module._Progress()  # noqa: SLF001
     progress.rows_read = 777
     progress.rows_parsed = 777
     stop_event = threading.Event()
     thread = threading.Thread(
-        target=run_module._heartbeat_loop,
+        target=run_module._heartbeat_loop,  # noqa: SLF001
         args=(spy_ctx, run_id, progress, stop_event, 0.02),
         name=f"test-heartbeat-terminal-{run_id}",
         daemon=True,
@@ -684,5 +687,7 @@ def test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status(
         stop_event.set()
         thread.join(timeout=10)
 
-    assert sentinel_observed, "heartbeat loop never ticked (no heartbeat_ingestion_run call observed)"
+    assert sentinel_observed, (
+        "heartbeat loop never ticked (no heartbeat_ingestion_run call observed)"
+    )
     assert _read_run_status(env.migrated_dsn, run_id) == "SUCCEEDED"

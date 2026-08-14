@@ -306,6 +306,45 @@ class MetadataRepository(Protocol):
         """
         ...
 
+    def heartbeat_ingestion_run(
+        self,
+        *,
+        run_id: int,
+        lease_expires_at: datetime,
+        rows_read: int,
+        rows_parsed: int,
+    ) -> None:
+        """Refresh a RUNNING run's lease and live row counts; a silent no-op once it is not.
+
+        Maps to ``UPDATE meta.ingestion_runs SET lease_expires_at = %s,
+        rows_read = %s, rows_parsed = %s WHERE run_id = %s AND status =
+        'RUNNING'``.
+
+        Distinct from `update_ingestion_run_status` above (CR-01,
+        `04-REVIEW.md`): that method carries no status guard by design --
+        it is the generic, unconditional status-setter other callers
+        (tests, a future `WR-02` fix) legitimately need to perform genuine
+        status *transitions*. This method is narrower and self-guarding:
+        it is reserved for `_heartbeat_loop`'s periodic lease/progress
+        refresh, which must NEVER be able to regress a run's status. A
+        stray heartbeat tick landing after the publish transaction has
+        already committed `SUCCEEDED` (the exact race window between that
+        commit and `stop_heartbeat.set()` in `run_ingest`'s `finally`
+        block) must be a silent no-op -- no exception, no rows affected,
+        no status change -- never an overwrite of the just-committed
+        terminal status back to `RUNNING` with a fresh 5-minute lease.
+
+        Args:
+            run_id: The run to refresh.
+            lease_expires_at: The new lease expiry, only applied while the
+                run is still `RUNNING`.
+            rows_read: The cumulative rows read so far, only applied while
+                the run is still `RUNNING`.
+            rows_parsed: The cumulative rows parsed so far, only applied
+                while the run is still `RUNNING`.
+        """
+        ...
+
     def get_ingestion_run_status(self, *, run_id: int) -> str | None:
         """Read one `meta.ingestion_runs` row's current `status`, without claiming it.
 

@@ -106,7 +106,7 @@ def _read_run_progress(
     dsn: str,
     run_id: int,
 ) -> tuple[str, str | None, datetime | None, int | None, int | None]:
-    """Read `(status, k8s_pod_name, lease_expires_at, rows_read, rows_parsed)`, bypassing the repository.
+    """Read `(status, k8s_pod_name, lease_expires_at, rows_read, rows_parsed)`, bypassing the repo.
 
     A NEW, separate helper (04-10 gap closure: CR-01) -- `_read_run_row`'s own
     3-tuple return shape is unpacked positionally at two existing call sites
