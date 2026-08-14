@@ -52,6 +52,20 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 - [x] U1 (XCom carries the built git SHA) and U3 (streaming throughput 41,946 rows/sec, peak RSS 62.9 MiB) spike results recorded in `docs/spikes/`
 - [x] Run-lifecycle integrity hardened after live-confirmed gap closure: a `SUCCEEDED` run's status can never regress to `RUNNING` (heartbeat write now guarded `WHERE status = 'RUNNING'`); duplicate-content file resolution is deterministic (`ORDER BY file_id ASC`, restoring a live-orphaned row); a `Receipt` is written to XCom on every `ingest()` exit path, not only `DataPlatformError` — META-03
 
+**Vault Secrets & Workload Identity** (Phase 5, 2026-08-14)
+
+- [x] Vault deployed as a persistent, non-dev StatefulSet in both Helm values profiles; scripted unseal restores service after a restart with no data loss — INFRA-06
+- [x] `csv-processor` and Airflow authenticate to Vault via direct ServiceAccount-token Kubernetes-auth login (no Agent Injector/CSI/VSO sidecar); an unauthorized ServiceAccount is provably denied another workload's secrets — SEC-06, SEC-07, SEC-12
+- [x] Airflow's native `VaultBackend` serves the `minio_default` connection; DAGs still resolve and run with the connection deleted from the metadata DB and every `AIRFLOW_CONN_*` unset — SEC-05
+- [x] All three Phase-4-era Kubernetes Secrets (`csv-processor-db`, `csv-processor-s3`, `airflow-minio-connection`) retired; a permanent policy test guards against any of the three ever reappearing as a Secret-creation target — SEC-01, SEC-03, SEC-04
+- [x] Vault's audit log shows which workload read which path, when, and whether it succeeded, with no plaintext secret values present — SEC-08
+- [x] Rotating a credential in Vault is observed by Airflow's already-running process on its next read, no restart required — SEC-09
+- [x] Development secrets are marked, isolated from production, and reproducible on a genuinely fresh local rebuild — proven via a scoped Vault-release-and-PVC reinstall against a real empty Vault (16/16 e2e tests, a real DAG run reaching `SUCCEEDED` on freshly-generated credentials) plus an offline regression guard — SEC-13
+- [x] Secrets architecture documented end-to-end (injection mechanism, trust boundaries, what's-where, rotation, audit, production substitution), including ADR-0009 (Vault's BUSL-1.1 licence, OpenBao named as the OSI-licensed migration target) — SEC-14
+
+Validated in Phase 5: INFRA-06, SEC-01, SEC-03, SEC-04, SEC-05, SEC-06, SEC-07, SEC-08, SEC-09, SEC-12,
+SEC-13, SEC-14 — 12/12.
+
 ### Active
 
 <!-- Current scope. All are hypotheses until shipped. Detailed REQ-IDs live in REQUIREMENTS.md. -->
@@ -59,16 +73,6 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 **Infrastructure**
 
 - [ ] Analytical PostgreSQL with staging / warehouse / analytics separation
-- [ ] HashiCorp Vault deployed in-cluster as the secrets manager
-
-**Secrets & Security**
-
-- [ ] Airflow resolves connections through an external Vault secrets backend
-- [ ] Task pods authenticate to Vault via Kubernetes service-account identity, not a shared root token
-- [ ] Least-privilege policies: each workload reaches only its own secrets
-- [ ] Runtime secret injection — nothing secret in Git, Python, images, or manifests
-- [ ] Secret access auditable; rotation documented; automated secret scanning in CI
-- [ ] Tests prove unauthorized workloads are denied
 
 **Universal CSV Engine**
 
@@ -206,6 +210,67 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 5 complete (2026-08-14)** — Vault Secrets & Workload Identity.
+
+Vault is now the only source of runtime credentials for this platform, and workload
+identity is real: both `csv-processor` (via a `vault://` scheme in `SecretsResolver`)
+and Airflow (via its native `VaultBackend`) authenticate with direct ServiceAccount-
+token Kubernetes-auth logins, an unauthorized ServiceAccount is automatically-tested
+denied, and all three Phase-4-era Kubernetes Secrets are retired with a permanent
+regression guard against their return. Built across 6 plans — 5 in sequence (each
+wave depending on the identity/wiring the previous one proved live), plus one
+gap-closure plan (05-06) after the first verification pass found a real, code-
+confirmed blocker.
+
+That gap-closure plan is the notable story of this phase: `05-VERIFICATION.md`'s
+first pass found `scripts/vault-bootstrap.py`'s credential-sourcing functions still
+depended on three Kubernetes Secrets this same phase's own earlier plans had already
+deleted — meaning a genuinely fresh cluster rebuild would have left Vault
+structurally bootstrapped but with **zero credential values ever written**, directly
+contradicting SEC-01. Plan 05-06 fixed the root cause (restoring the original,
+least-privileged `etl_app`-scoped credential mechanism from git history, rejecting
+a reviewer-suggested fix that would have silently widened database privilege) and
+set out to prove it live. That live proof — a scoped Vault-release-and-PVC reinstall
+against a genuinely empty Vault — surfaced a second, entirely unrelated infrastructure
+fault: a Docker Desktop/WSL2-level restart had broken the DAGs `hostPath` mount on
+all 3 kind nodes, silently freezing Airflow's scheduler *for every DAG, cluster-wide*
+(not scoped to this phase's work at all). A dedicated debug session root-caused and
+fixed it (`.planning/debug/resolved/dagrun-scheduler-stall.md`). A second, independent
+verification pass then re-derived every claim from first principles rather than
+trusting the gap-closure plan's own SUMMARY — re-running the live e2e Vault suite
+fresh (16/16, up from an initially-reported 15/16, confirming the one prior failure
+really was self-resolving backlog depth as claimed) and independently querying the
+live analytical database for the cited `SUCCEEDED` ingestion row.
+
+Validated in Phase 5: INFRA-06, SEC-01, SEC-03, SEC-04, SEC-05, SEC-06, SEC-07, SEC-08,
+SEC-09, SEC-12, SEC-13, SEC-14 — 12/12.
+
+Standing facts later phases inherit:
+- **An idempotent bootstrap's credential-sourcing function must source from the same
+  live system its predecessor did — never a coincidentally-similar but
+  differently-privileged one.** The gap-closure fix restored `etl_app`'s original
+  `kubectl exec`+`ALTER ROLE` mechanism rather than following a code-review
+  suggestion to read CNPG's own `analytics-db-app` Secret, which holds the
+  more-privileged `analytics_owner` role — that shortcut would have been a real,
+  easy-to-miss privilege escalation dressed up as a bug fix.
+- **A WSL2/Docker Desktop restart or suspend/resume can silently break kind's
+  hostPath DAG mount and freeze Airflow scheduling entirely, with zero exceptions
+  logged.** Symptom: `DagModel.is_stale` never clears because the DAG processor's
+  mount silently falls back to an empty tmpfs; the scheduler's own query then
+  excludes every DagRun from ever being scheduled again. Fix is always `docker
+  restart` on the affected kind node(s) — nothing inside Kubernetes/Airflow can
+  force the reattachment. Fast diagnostic: `docker exec <node> mount | grep
+  /mnt/dags`. Saved to project memory (`host_hardware_context.md`) since this is a
+  host-level risk, not phase-specific.
+- **A live-cluster proof step can surface bugs entirely unrelated to what it's
+  proving — don't let the unrelated finding block or get conflated with the actual
+  result.** The scheduler stall had nothing to do with Vault/credentials, but
+  discovering it required distinguishing "the thing I'm testing is broken" from "the
+  environment I'm testing it in just broke" — the same discipline this phase's own
+  citation-driven documentation already enforces elsewhere.
+
+---
+
 **Phase 4 complete (2026-08-14)** — Vertical Slice: CSV to Analytical PostgreSQL.
 
 One real CSV now travels the full, unattended path this milestone's critical
@@ -320,4 +385,4 @@ Standing facts later phases inherit:
   integration tests green during isolated worktree execution.
 
 ---
-*Last updated: 2026-08-14 after Phase 4*
+*Last updated: 2026-08-14 after Phase 5*
