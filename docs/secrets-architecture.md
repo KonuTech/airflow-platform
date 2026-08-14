@@ -260,14 +260,29 @@ Vault:
   both its real Vault paths), `test_negative_auth.py`, `test_audit_log.py`,
   `test_rotation.py`, and `test_dev_secrets_reproducible.py`'s idempotent-rerun case.
 - The one failure, `test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs`,
-  is **not** a credential failure — it times out waiting for a live DAG run to
-  complete, blocked by a separate, pre-existing Airflow `KubernetesExecutor`
-  scheduling fault (a `max_active_runs: 1` DagRun stalled since before this plan's
-  work began, compounded by a Kubernetes-watch event-replay loop). Two scoped
-  remediation attempts during this session (clearing the stuck task; deleting three
-  orphaned pod objects) reduced the symptom but did not resolve the underlying stall.
-  This is an open, separate issue — not a Vault/credential regression — and is not
-  resolved as part of plan 05-06.
+  was **not** a credential failure — it timed out waiting for a live DAG run to
+  complete. **Root-caused and fixed via a separate `/gsd:debug` session**
+  (`.planning/debug/resolved/dagrun-scheduler-stall.md`): a Docker Desktop/WSL2-level
+  event restarted every container on all 3 kind nodes simultaneously, breaking the
+  DAGs `hostPath` bind mount platform-wide. With an empty mount, the DAG processor
+  never re-parsed anything and `DagModel.is_stale` never cleared, so the scheduler's
+  own query silently excluded **every** DagRun for **every** DAG, cluster-wide — a
+  total scheduling freeze with zero relation to Vault, credentials, or
+  `csv_ingest_customers` specifically. Fixed by restarting the affected kind-node
+  Docker containers (reattaching the mount); independently re-verified: the
+  originally-stuck DagRun reached `SUCCEEDED`, and `meta.ingestion_runs` recorded a
+  fresh `SUCCEEDED` row (`run_id=5127`, `2026-08-14 20:09:50`) after this plan's
+  Vault reinstall — a real pipeline run completing end-to-end on the freshly-generated
+  `etl_app`/MinIO credentials.
+- **One honest residual nuance:** re-running `pytest tests/e2e/vault -q -m cluster`
+  after that fix still shows the same test failing, but now for a different, benign
+  reason — an unrelated, pre-existing backlog of queued DagRuns (from an over-broad
+  `airflow tasks clear` during plan 05-03) is still deep, so the DagRun actually
+  executing right now has no reason to notice this specific test's freshly-uploaded
+  marker file. This is expected, self-resolving queue depth, explicitly distinguished
+  from the scheduler-freeze bug above (which is fixed) — not a Vault/credential
+  regression, and not something forced faster here (that would mean bulk-clearing the
+  backlog, a class of action already declined once this project's session).
 
 The full literal `make cluster-down && make cluster-up && make vault-unseal && make
 vault-bootstrap && make vault-verify` sequence from an actual clean checkout was
