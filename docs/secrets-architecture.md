@@ -228,15 +228,55 @@ infrastructure change, because the credential-reference layer (`vault://mount/pa
 | **Bootstrap tooling**: `hvac`-based Python scripts (`scripts/vault-bootstrap.py`, `scripts/vault-unseal.py`), run by a human developer against a `kubectl port-forward` | Same tooling, pointed at a production Vault/OpenBao endpoint with real RBAC-gated operator access, OR a GitOps-managed `Cluster`/policy CRD pipeline if the fleet grows past a single cluster | The `hvac` HTTP client targets any server implementing Vault's API surface (including OpenBao) — no protocol-specific reimplementation exists to migrate |
 
 **SEC-13's other half** (full reproducibility from a *completely fresh* cluster, not
-just a re-run against an already-live one) is deliberately not covered by an
-automated per-wave test — a full `kind delete cluster` + recreate cycle is
-disproportionately slow for that cadence
-(`tests/e2e/vault/test_dev_secrets_reproducible.py`, plan 05-04). It is a **manual
-verification**, recorded in `.planning/phases/05-vault-secrets-workload-identity/
-05-VALIDATION.md`'s "Manual-Only Verifications" table: run `make cluster-down && make
-cluster-up && make vault-unseal && make vault-bootstrap && make vault-verify` from a
-clean checkout and confirm every Vault e2e test passes with no manual intervention
-beyond those four commands.
+just a re-run against an already-live one) was **partially proven live** by
+gap-closure plan 05-06, after `05-VERIFICATION.md` and `05-REVIEW.md` independently
+found that `scripts/vault-bootstrap.py`'s `_ensure_etl_secrets`/`_ensure_airflow_secrets`
+sourced their values from three Kubernetes Secrets that this same phase's own plans
+(05-02, 05-03) had already deleted — meaning a genuinely fresh cluster rebuild would
+have left Vault structurally bootstrapped but with **zero credential values ever
+written**. Plan 05-06 Task 1 fixed this (credentials now sourced from the live
+`data/minio-app` Secret and a fresh `kubectl exec`-driven `ALTER ROLE` against the
+CNPG analytics primary, never a deleted Secret) and added an offline regression guard,
+`tests/unit/test_vault_bootstrap.py` (7 cases, independently re-run and confirmed
+passing).
+
+Task 2 then proved the fix live via a **scoped Vault-release-and-PVC reinstall**
+(delete `data-vault-0`/`audit-vault-0` and pod `vault-0` in namespace `vault` only —
+not a full `kind delete cluster` + recreate, which remains disproportionately slow for
+this cadence). This produces the identical precondition a full rebuild would:
+`scripts/vault-bootstrap.py` cannot distinguish "the whole cluster was rebuilt" from
+"only Vault's storage was wiped" — both present it with an empty KV store, the only
+precondition its logic branches on. Against that genuinely empty, freshly-reinstalled
+Vault:
+
+- `make vault-bootstrap` exited 0 and printed **"created"** (not "already present")
+  for all three previously-broken paths (`etl/analytics-db`, `etl/minio`,
+  `airflow/connections/minio_default`) — direct proof the `InvalidPath`/regeneration
+  branch executed, where before this fix the identical sequence exited 1 with a
+  `RuntimeError` naming a Secret that no longer exists.
+- **15 of 16** `tests/e2e/vault` tests passed against the freshly-generated
+  credentials, including every test that exercises credential *function* rather than
+  mere presence: `test_positive_auth.py` (the `csv-processor` ServiceAccount reads
+  both its real Vault paths), `test_negative_auth.py`, `test_audit_log.py`,
+  `test_rotation.py`, and `test_dev_secrets_reproducible.py`'s idempotent-rerun case.
+- The one failure, `test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs`,
+  is **not** a credential failure — it times out waiting for a live DAG run to
+  complete, blocked by a separate, pre-existing Airflow `KubernetesExecutor`
+  scheduling fault (a `max_active_runs: 1` DagRun stalled since before this plan's
+  work began, compounded by a Kubernetes-watch event-replay loop). Two scoped
+  remediation attempts during this session (clearing the stuck task; deleting three
+  orphaned pod objects) reduced the symptom but did not resolve the underlying stall.
+  This is an open, separate issue — not a Vault/credential regression — and is not
+  resolved as part of plan 05-06.
+
+The full literal `make cluster-down && make cluster-up && make vault-unseal && make
+vault-bootstrap && make vault-verify` sequence from an actual clean checkout was
+**still not independently re-run** in this session. The scoped reinstall above is
+considered an equivalent proof specifically for `vault-bootstrap.py`'s own credential-
+sourcing logic (per the empty-KV-store argument above), not a substitute for
+exercising the full teardown/recreate path itself. See
+`.planning/phases/05-vault-secrets-workload-identity/05-VALIDATION.md`'s "Manual-Only
+Verifications" table for the current, itemized status.
 
 ## Sources
 
