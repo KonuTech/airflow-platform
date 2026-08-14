@@ -1,0 +1,55 @@
+# D-06: this file and helm/values/local/vault.yaml diverge on EXACTLY one
+# permitted axis -- resource sizing -- because the CI profile shares a
+# 4 CPU / 16 GB GitHub-hosted runner with every other pod the CI job
+# renders. Every other key below is IDENTICAL in shape to the local profile.
+#
+# T-05-02 (STRIDE Elevation of Privilege / Information Disclosure):
+# server.dev.enabled: false here too -- a DELIBERATE REVERSAL of
+# .planning/research/STACK.md §E's original guidance that CI should use
+# `dev.enabled: true`. See helm/values/local/vault.yaml's header comment for
+# the full argument: dev mode is in-memory and loses the Kubernetes auth
+# method itself on every restart, which would make CI's own Vault silently
+# exercise a different code path than local/production for the one thing
+# this phase (scripted unseal, idempotent bootstrap, restart-survival proof)
+# exists to prove. `.github/workflows/ci.yml` has no Vault job today, so
+# this changes no active CI run.
+#
+# T-05-05 (STRIDE Information Disclosure, accepted): same as local --
+# `server.standalone.config` is left unoverridden, so `tls_disable = 1`
+# (chart default) applies. See helm/values/local/vault.yaml's header
+# comment for the full argument.
+
+server:
+  dev:
+    enabled: false
+
+  standalone:
+    enabled: true
+
+  dataStorage:
+    enabled: true
+    size: 500Mi
+
+  auditStorage:
+    enabled: true
+    size: 500Mi
+
+  ha:
+    enabled: false
+
+  # Smaller than local: this profile shares a 4 CPU / 16 GB runner with
+  # every other pod the CI job renders (matches
+  # helm/values/ci/minio.yaml's own sizing for the same reason).
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+injector:
+  enabled: false
+
+csi:
+  enabled: false

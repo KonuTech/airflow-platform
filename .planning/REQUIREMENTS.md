@@ -34,7 +34,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **INFRA-03**: A PostgreSQL instance dedicated exclusively to Airflow metadata is deployed and used by nothing else — *(DoD 3)*
 - [x] **INFRA-04**: A physically separate PostgreSQL instance serves analytical workloads — *(DoD 4)*
 - [x] **INFRA-05**: MinIO provides S3-compatible object storage with `raw`, `validated`, `processed`, `quarantine` and `metadata` layers — *(DoD 5)*
-- [ ] **INFRA-06**: HashiCorp Vault is deployed in-cluster as the secrets manager and survives cluster restart without manual data loss — *(DoD 6)*
+- [x] **INFRA-06**: HashiCorp Vault is deployed in-cluster as the secrets manager and survives cluster restart without manual data loss — *(DoD 6)*
 - [x] **INFRA-07**: All infrastructure is defined as code — cluster config, Helm values and manifests are committed and no step requires manual `kubectl` surgery — *(DoD 7)*
 - [x] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
 - [x] **INFRA-09**: Kubelet reservations, `maxPods` and `extraMounts` are set in the kind config at creation time, because changing them later requires destroying the cluster — *(PITFALLS #10, #11)*
@@ -55,7 +55,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **SEC-10**: CI/CD holds no unnecessary long-lived credentials, and secrets are never printed during CI execution — *(DoD 99)*
 - [x] **SEC-11**: Automated secret scanning runs in CI and fails the build on a detected credential — *(DoD 100)*
 - [ ] **SEC-12**: A negative test proves an unauthorized service account is *denied* access to another workload's secrets — if this test is awkward to write, the identity model is not real — *(DoD 101)*
-- [ ] **SEC-13**: Development secrets are clearly marked, never committed, isolated from production, and reproducible when rebuilding the local environment — *(DoD 102)*
+- [x] **SEC-13**: Development secrets are clearly marked, never committed, isolated from production, and reproducible when rebuilding the local environment — *(DoD 102)*
 - [ ] **SEC-14**: The secrets architecture is documented end-to-end — injection mechanism, trust boundaries, and how a production secrets manager would substitute without application code changes — *(DoD 111)*
 - [x] **SEC-15**: The ETL library resolves credentials through an opaque `SecretsResolver` reference (`env://`, `file://`) and never learns which backend served it — making the Kubernetes-Secrets→Vault swap a configuration change — *(ARCHITECTURE deviation D3)*
 
@@ -284,7 +284,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-03 | Phase 2 | Complete |
 | INFRA-04 | Phase 2 | Complete |
 | INFRA-05 | Phase 2 | Complete |
-| INFRA-06 | Phase 5 | Pending |
+| INFRA-06 | Phase 5 | Complete |
 | INFRA-07 | Phase 2 | Complete |
 | INFRA-08 | Phase 3 | Complete |
 | INFRA-09 | Phase 2 | Complete |
@@ -302,7 +302,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SEC-10 | Phase 1 | Complete |
 | SEC-11 | Phase 1 | Complete |
 | SEC-12 | Phase 5 | Pending |
-| SEC-13 | Phase 5 | Pending |
+| SEC-13 | Phase 5 | Complete |
 | SEC-14 | Phase 5 | Pending |
 | SEC-15 | Phase 3 | Complete |
 | ORCH-01 | Phase 4 | Complete |

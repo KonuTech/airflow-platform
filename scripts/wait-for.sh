@@ -8,6 +8,15 @@
 #   wait_for_deploy_available <namespace> <deployment>
 #   wait_for_cnpg_cluster_ready <namespace> <cluster>
 #   wait_for_statefulset_ready <namespace> <statefulset> [<replicas>]
+#   wait_for_pod_running <namespace> <pod>
+#
+# `wait_for_pod_running` (plan 05-01) waits on `.status.phase` alone, never
+# readiness: Vault's own readinessProbe hits `/v1/sys/health`, which fails
+# while the server is sealed, so `wait_for_statefulset_ready`'s
+# `readyReplicas` condition would hang forever on a freshly-installed,
+# still-sealed vault-0. Waiting for Running (the kubelet has started the
+# container) is all `scripts/stages/80-vault.sh` needs before handing off to
+# `make vault-unseal`.
 #
 # `wait_for_deploy_available` deliberately uses
 # `--for=condition=Available`, never `rollout status`: 02-RESEARCH.md
@@ -54,4 +63,11 @@ wait_for_statefulset_ready() {
   _kubectl_wait -n "${namespace}" wait \
     --for="jsonpath={.status.readyReplicas}=${replicas}" \
     --timeout="${WAIT_STATEFULSET_TIMEOUT:-300s}" "statefulset/${statefulset}"
+}
+
+wait_for_pod_running() {
+  local namespace="$1"
+  local pod="$2"
+  _kubectl_wait -n "${namespace}" wait --for=jsonpath='{.status.phase}'=Running \
+    --timeout="${WAIT_POD_TIMEOUT:-180s}" "pod/${pod}"
 }

@@ -1,0 +1,95 @@
+# T-05-02 (STRIDE Elevation of Privilege / Information Disclosure):
+# server.dev.enabled: false in BOTH profiles is a DELIBERATE REVERSAL of
+# .planning/research/STACK.md §E's original Vault guidance ("Do **not** use
+# `server.dev.enabled: true` ... **Except in CI**, where `dev.enabled: true`
+# is correct"), which 05-RESEARCH.md carries forward unexamined in its
+# Recommended Project Structure diagram and Security Domain Known-Threat-
+# Patterns table, and which 05-PATTERNS.md names three times as the expected
+# "argued fourth axis" -- mirroring `executor`'s own precedent
+# (helm/values/local/airflow.yaml's header comment).
+#
+# The reversal is argued here, not smuggled: this phase's own deliverables
+# -- scripts/vault-unseal.py's init-or-unseal branch, scripts/vault-
+# bootstrap.py's idempotent mount/auth-method/role/policy/audit-device
+# creation, and tests/e2e/vault/test_unseal_survives_restart.py's INFRA-06
+# restart-survival proof (`make vault-verify`) -- all assert behavior a
+# dev-mode Vault CANNOT exhibit: dev mode starts pre-unsealed, in-memory,
+# with a known root token, and loses everything -- including the Kubernetes
+# auth method itself -- on every restart, the exact opposite of what this
+# phase's own tests exist to prove. A dev-mode CI Vault would silently
+# exercise a different code path than local/production for the one thing
+# this phase is about. `.github/workflows/ci.yml` has no Vault job today, so
+# this reversal changes no active CI run -- it is argued now so a future CI
+# E2E job does not rediscover the contradiction the hard way.
+#
+# tests/policy/test_values_profiles.py's PERMITTED_AXES table needs NO
+# change: this file and helm/values/ci/vault.yaml diverge only on resource
+# sizing (D-06's already-permitted axis) -- no new divergence axis is
+# introduced here, so nothing requires allowlisting.
+#
+# T-05-05 (STRIDE Information Disclosure, accepted): `server.standalone.
+# config` is left UNOVERRIDDEN, so the chart's own default listener stanza
+# (`tls_disable = 1`) applies. Plaintext HTTP is an explicit, argued
+# acceptance for this LOCAL-DEV, ClusterIP-only, no-ingress Vault: traffic
+# never leaves the kind pod network, no ingress exists for Vault (no
+# `ingress:` block below), and plan 05-05's SEC-14 documentation records
+# that a production deployment must enable TLS. Not a silent inheritance --
+# a deliberate, documented one.
+
+server:
+  dev:
+    enabled: false
+
+  standalone:
+    enabled: true
+
+  # server.dataStorage backs the `storage "file"` stanza the chart's own
+  # default server.standalone.config already declares (path /vault/data) --
+  # INFRA-06's restart-survival guarantee. A synthetic fixture corpus's
+  # worth of KV data and role/policy config never approaches even 1Gi.
+  dataStorage:
+    enabled: true
+    size: 1Gi
+
+  # A PERSISTENT audit-log volume: what makes the Pitfall-2-avoidance path
+  # (`kubectl exec -i` reading a file, never `kubectl logs`, which is
+  # outside tests/policy/test_no_manual_kubectl_surgery.py's permitted set)
+  # possible. scripts/vault-bootstrap.py enables the actual `file` audit
+  # device at /vault/audit/audit.log; this only provisions the PVC it lives
+  # on.
+  auditStorage:
+    enabled: true
+    size: 1Gi
+
+  # Single-node standalone, not HA (chart default -- restated explicitly so
+  # a reader never has to check the chart's own default to know this was a
+  # decision, not an oversight).
+  ha:
+    enabled: false
+
+  # Matches helm/values/local/minio.yaml's own sizing for a single
+  # lightweight, always-on service in this cluster.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# No sidecar injection and no CSI-mounted secrets: this project's secret-
+# delivery mechanism is direct SA-token login (STACK.md §E, locked HIGH
+# confidence) -- a `csv-processor`/`airflow` pod calls `auth/kubernetes/
+# login` itself, it is never handed a Vault-rendered file by a sidecar or a
+# CSI volume. Disabling both here avoids deploying components this project's
+# own architecture will never use.
+injector:
+  enabled: false
+
+csi:
+  enabled: false
+
+# No ingress: block. Vault has no UI need in this design and no
+# host-reachable API -- `hvac` clients reach it via `kubectl port-forward`,
+# never through nginx (chart default is already ingress.enabled: false; not
+# restated, since there is nothing to argue about declining it).

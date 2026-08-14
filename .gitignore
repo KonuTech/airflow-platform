@@ -21,6 +21,17 @@ build/
 # infrastructure file lands, or it is swept into this phase's first commit.
 .gsd/
 
+# D-02 (plan 05-01): the FIRST time this repository stores a credential-
+# shaped value on the local filesystem -- every prior credential script
+# (minio-credentials.sh, airflow-metadata-secret.sh, etl-secrets.sh)
+# explicitly states the opposite invariant (materialize only inside the
+# cluster, never on disk). This is a deliberate, narrow exception: Vault
+# reveals its unseal key and root token exactly once, at `sys.initialize()`
+# time, and D-02 requires a scripted, single-command unseal for a WSL2
+# environment where a cluster restart is an everyday event. Written only by
+# scripts/vault-unseal.py, mode 0600, never committed.
+.secrets/
+
 # Tool caches and coverage output
 .mypy_cache/
 .pytest_cache/

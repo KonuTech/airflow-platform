@@ -91,6 +91,12 @@ cluster = [
   "boto3>=1.43,<2",
   "psycopg[binary]>=3.3,<4",
   "testcontainers[postgres,minio]>=4.15,<5",
+  # plan 05-01: scripts/vault-unseal.py, scripts/vault-bootstrap.py, and
+  # tests/e2e/vault/conftest.py all import hvac directly at module level,
+  # before packages/dataplat/pyproject.toml (plan 05-02) also depends on it
+  # — same reasoning as boto3/psycopg above (tests/e2e/*/conftest.py's own
+  # import must not couple to whichever dataplat version resolves it later).
+  "hvac>=2.4,<3",
 ]
 
 [tool.ruff]
