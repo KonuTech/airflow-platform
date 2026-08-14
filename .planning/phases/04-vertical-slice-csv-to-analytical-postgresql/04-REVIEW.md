@@ -1,357 +1,170 @@
 ---
 phase: 04-vertical-slice-csv-to-analytical-postgresql
-reviewed: 2026-08-13T23:21:59Z
+reviewed: 2026-08-14T06:52:48Z
 depth: standard
-files_reviewed: 63
+files_reviewed: 9
 files_reviewed_list:
-  - Makefile
-  - airflow/dags/_common/__init__.py
-  - airflow/dags/_common/kpo.py
-  - airflow/dags/csv_ingest_customers.py
-  - airflow/dags/smoke_kubernetes_pod.py
-  - configs/datasets/customers.yaml
-  - docker/csv-processor/Dockerfile
-  - docs/spikes/U1-smoke-xcom.md
-  - helm/values/ci/airflow.yaml
-  - helm/values/ci/minio.yaml
-  - helm/values/local/airflow.yaml
-  - helm/values/local/minio.yaml
-  - kubernetes/rbac-etl.yaml
-  - migrations/versions/0006_normalized_customers_business_key_unique.py
-  - migrations/versions/0007_staging_schema.py
-  - migrations/versions/0008_grant_schema_usage_to_etl_app.py
-  - packages/csv-processor/pyproject.toml
   - packages/csv-processor/src/csv_processor/cli.py
-  - packages/dataplat/src/dataplat/cli.py
-  - packages/dataplat/src/dataplat/config/model.py
-  - packages/dataplat/src/dataplat/config/registry.py
-  - packages/dataplat/src/dataplat/discovery.py
-  - packages/dataplat/src/dataplat/load/publish/merge.py
-  - packages/dataplat/src/dataplat/load/publish/registry.py
-  - packages/dataplat/src/dataplat/load/staging.py
   - packages/dataplat/src/dataplat/metadata/postgres.py
   - packages/dataplat/src/dataplat/metadata/repository.py
-  - packages/dataplat/src/dataplat/models/assignment.py
-  - packages/dataplat/src/dataplat/models/identity.py
-  - packages/dataplat/src/dataplat/models/receipt.py
-  - packages/dataplat/src/dataplat/pipeline/protocol.py
   - packages/dataplat/src/dataplat/pipeline/run.py
-  - packages/dataplat/src/dataplat/storage/objectstore.py
-  - pyproject.toml
-  - scripts/etl-secrets.sh
-  - scripts/ingest-demo.py
-  - scripts/stages/75-etl.sh
-  - setup.cfg
-  - tests/e2e/slice/__init__.py
-  - tests/e2e/slice/conftest.py
-  - tests/e2e/slice/test_concurrent_select.py
-  - tests/e2e/slice/test_pod_kill_retry.py
-  - tests/e2e/slice/test_smoke_and_idempotency.py
-  - tests/fixtures/slice-corpus.yaml
-  - tests/integration/test_config_registry.py
+  - scripts/repair-duplicate-file-lineage.py
   - tests/integration/test_discover_files.py
   - tests/integration/test_metadata_repository.py
-  - tests/integration/test_migrations.py
-  - tests/integration/test_objectstore.py
-  - tests/integration/test_publish_merge.py
   - tests/integration/test_run_ingest.py
-  - tests/integration/test_staging_loader.py
-  - tests/policy/test_dag_line_budget.py
-  - tests/policy/test_dag_thinness.py
-  - tests/policy/test_no_manual_kubectl_surgery.py
-  - tests/unit/conftest.py
-  - tests/unit/test_assignment_document.py
-  - tests/unit/test_batching_config.py
-  - tests/unit/test_config_hashing.py
-  - tests/unit/test_dag_structure.py
-  - tests/unit/test_discovery.py
-  - tests/unit/test_publisher_registry.py
-  - tests/unit/test_resolve_window.py
+  - tests/unit/test_csv_processor_cli.py
 findings:
-  critical: 2
-  warning: 6
-  info: 3
-  total: 11
+  critical: 0
+  warning: 7
+  info: 5
+  total: 12
 status: issues_found
 ---
 
 # Phase 4: Code Review Report
 
-**Reviewed:** 2026-08-13T23:21:59Z
+**Reviewed:** 2026-08-14T06:52:48Z
 **Depth:** standard
-**Files Reviewed:** 63
+**Files Reviewed:** 9
 **Status:** issues_found
 
 ## Summary
 
-This review covers the full vertical-slice deliverable — DAGs, the `dataplat`/`csv_processor` packages implementing discover→claim→stage→publish, migrations, Helm/RBAC/Docker infra, and the accompanying unit/integration/E2E/policy test suites — with particular attention to `metadata/repository.py`/`postgres.py` and `pipeline/run.py` as requested.
+This is a **gap-closure re-review**, not a full-phase review. Plans `04-10` and `04-11` were executed specifically to close `CR-01`, `CR-02` and `WR-01` from the prior review (`.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/04-REVIEW.md` as it read at commit `603a9a2`, dated 2026-08-13). This review's scope is exactly the 9 files those two plans touched — it does not re-audit the other 54 files the original 63-file review covered.
 
-The overall design is unusually disciplined: idempotent upserts are used correctly and consistently, the staging/publish split correctly separates checkpointed work from the atomic barrier, `MergePublisher`'s `INSERT ... ON CONFLICT` (not literal `MERGE`) is the right call given documented PostgreSQL concurrency behavior, and the six E2E-driven fixes mentioned in the task context (schema grants, ingress body-size, DAG pause state, MinIO policy, heartbeat env override, `duration_ms` persistence) all verify correctly in the current code.
+**Methodology beyond static reading:** for every claimed fix, I read the current, full file content (not just the diff), then independently verified with tooling rather than trusting the plan summaries:
+- `git diff 603a9a2..HEAD` for these 9 files, to see precisely what changed since the prior review.
+- `ruff check` against all 9 files (including a targeted `--select BLE001` run against `cli.py` to verify a claim made in a code comment) — **all checks passed**.
+- `mypy` against the 5 non-test source files — **no issues found**.
+- Live execution of the new/updated tests against real testcontainers PostgreSQL 18 + MinIO (not mocks): all 3 integration test files (`test_metadata_repository.py`, `test_discover_files.py`, `test_run_ingest.py` — 30 tests total) and the new unit test file (`test_csv_processor_cli.py` — 2 tests) pass cleanly, including every test specifically written to reproduce the original CR-01/CR-02/WR-01 defects.
 
-That said, tracing the run-lifecycle state machine end to end surfaced two genuine correctness defects that undermine the platform's own stated core value ("no data is ever silently dropped... corrupted"; "can be traced, explained... and trusted"):
+**Verdict on the three targeted fixes: all three are genuinely and correctly closed**, not superficially. Details and evidence below in "Verified Fixes."
 
-1. A race condition where the heartbeat thread can silently revert a `SUCCEEDED` run's status back to `RUNNING` after the publish transaction has already committed.
-2. A non-deterministic duplicate-file lookup (`LIMIT 1` with no `ORDER BY`) that, once two or more files share identical content — an explicitly designed-for and tested scenario — can cause a legitimate, not-yet-ingested file to be silently and permanently excluded from every future discovery pass.
+**New findings from this round:** the fixes themselves introduce no regressions in the paths they touch, but the review surfaced quality gaps in the code these plans *added* — primarily in the brand-new `scripts/repair-duplicate-file-lineage.py` backfill tool (2 Warnings: its diagnostic/repair queries are narrower than they present themselves as being) plus two lower-severity Info items (a residual, low-impact heartbeat race distinct from CR-01, and zero test coverage for the new repair script).
 
-Six further Warnings and three Info items are listed below, mostly clustered around the run's status-lifecycle (`FAILED` is never actually written anywhere), a docstring/implementation mismatch on the "always write a receipt" contract, an unused/never-set `try_number` source, unvalidated identifiers reaching raw SQL/filesystem paths, and a couple of stale comments/docstrings that no longer match the code they describe.
+**Carried-over findings:** `WR-02` through `WR-06` and `IN-01` through `IN-03` from the prior review were not part of this round's assignment. Where their cited code happens to live in one of this round's 9 files (`cli.py`, `postgres.py`, `run.py`), I incidentally re-observed the current code while reading these files for the primary task and confirmed the underlying condition is still present — see "Carried Over" below for exactly which ones that applies to. Where their cited code lives entirely outside this round's 9 files, I have no new evidence either way and list them as pure pointers, per the review's scope.
 
-## Critical Issues
+## Verified Fixes (This Round)
 
-### CR-01: Heartbeat thread can silently revert a `SUCCEEDED` run's status back to `RUNNING`
+### CR-01 (prior review) — Heartbeat thread reverting a `SUCCEEDED` run back to `RUNNING` — CLOSED
 
-**File:** `packages/dataplat/src/dataplat/pipeline/run.py:190-197` (unconditional heartbeat write) interacting with `packages/dataplat/src/dataplat/pipeline/run.py:291-331` (commit → DROP TABLE → stop-signal window) and `packages/dataplat/src/dataplat/metadata/postgres.py:401-429` (`update_ingestion_run_status` has no status guard)
+**Fix location:** `packages/dataplat/src/dataplat/metadata/postgres.py:365-390` (new `heartbeat_ingestion_run` method, `WHERE run_id = %s AND status = 'RUNNING'` guard), `packages/dataplat/src/dataplat/metadata/repository.py:320-357` (matching `Protocol` declaration), `packages/dataplat/src/dataplat/pipeline/run.py:202-208` (`_heartbeat_loop` now calls `heartbeat_ingestion_run` instead of the unconditional `update_ingestion_run_status`).
 
-**Issue:** `_heartbeat_loop`'s body is:
+This is a correct fix, not a cosmetic one. The race window itself still exists (a heartbeat tick can still land after the publish transaction commits `SUCCEEDED` and before `stop_heartbeat.set()` runs) — but the write that tick performs is now a guarded `UPDATE ... WHERE status = 'RUNNING'`, so it silently affects zero rows once the run is terminal, instead of unconditionally overwriting `status` back to `RUNNING` with a fresh 5-minute lease. I confirmed the `MetadataRepository` Protocol and the `PostgresMetadataRepository` implementation have byte-for-byte matching keyword-only signatures (`run_id`, `lease_expires_at`, `rows_read`, `rows_parsed`), so there is no call-site/type mismatch.
 
-```python
-while not stop_event.wait(interval_seconds):
-    ctx.metadata.update_ingestion_run_status(
-        run_id=run_id, status="RUNNING",
-        lease_expires_at=datetime.now(tz=UTC) + _LEASE_DURATION,
-        rows_read=progress.rows_read, rows_parsed=progress.rows_parsed,
-    )
-```
+**Empirically verified**, live against testcontainers PostgreSQL 18: `test_heartbeat_ingestion_run_updates_a_running_row`, `test_heartbeat_ingestion_run_is_a_noop_once_the_run_is_no_longer_running` (`test_metadata_repository.py`), `test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status`, `test_heartbeat_writes_a_live_nonzero_rows_read_while_running_before_return` (`test_run_ingest.py`) — all 4 pass. The terminal-status test in particular drives `_heartbeat_loop` directly on its own thread against an already-`SUCCEEDED` run for up to 5 seconds and asserts `status` never leaves `SUCCEEDED` on every poll — this is a genuine regression test for the exact race, not a happy-path check.
 
-`stop_event.wait(interval_seconds)` returns `False` (letting the loop body run once more) whenever the interval elapses *before* `stop_event.set()` is called — even if `set()` happens a moment later. In `run_ingest`, `stop_heartbeat.set()` is only called inside the `finally` block (line 330), which runs *after* the publish transaction has already committed `status='SUCCEEDED'` (the `with ctx.db.connection() as conn, conn.transaction():` block ending around line 322) *and* after the trailing `DROP TABLE IF EXISTS {staging_result.staging_table}` (line 328) has executed. If the heartbeat's timer elapses during that window, the thread performs one more `update_ingestion_run_status(status="RUNNING", lease_expires_at=<now+5min>, ...)` call. The generated SQL in `postgres.py` (`UPDATE meta.ingestion_runs SET status = %s, ... WHERE run_id = %s`) carries **no `WHERE status = ...` guard**, so this write unconditionally overwrites the just-committed `'SUCCEEDED'` status back to `'RUNNING'` with a fresh 5-minute lease.
+### CR-02 (prior review) — Non-deterministic `find_file_by_content_hash` silently excluding a legitimate file — CLOSED
 
-This is not a purely theoretical window: `airflow/dags/csv_ingest_customers.py`'s `ingest` task explicitly sets `DATAPLAT_HEARTBEAT_INTERVAL_SECONDS=2` (`_INGEST_EXTRA_ENV_VARS`), which increases the chance of the timer landing inside the (normally short, but non-zero) commit→drop-table→stop-signal window.
+**Fix location:** `packages/dataplat/src/dataplat/metadata/postgres.py:162-192` (`ORDER BY file_id ASC` added before `LIMIT 1`, line 187), `packages/dataplat/src/dataplat/metadata/repository.py:89-119` (matching Protocol docstring), plus a new one-off, dataset-agnostic live-data repair tool, `scripts/repair-duplicate-file-lineage.py`, for rows the old non-deterministic behavior already left corrupted before this fix was deployed.
 
-**Impact:** `meta.ingestion_runs.status` — the platform's own audit-trail system of record — can end up reading `'RUNNING'` for a run that actually succeeded. Because `claim_ingestion_run`'s `WHERE` clause treats `status = 'RUNNING' AND lease_expires_at < now()` as reclaimable, once the phantom lease expires a subsequent `discover_files`/retry pass can re-claim and fully re-execute the run — re-staging and re-publishing already-loaded data — and `finalize_publication`'s second write then overwrites `rows_loaded`/`duration_ms` with the second run's numbers (likely near-zero, since `MergePublisher`'s own `_record_hash IS DISTINCT FROM` guard suppresses the republish), corrupting the historical audit trail for a run that genuinely succeeded with real data.
+I traced `dataplat/discovery.py`'s (unchanged, out-of-scope-but-read-for-context) rediscovery-correction logic against the new deterministic query by hand for a 3-file duplicate-content group (first file, then a second, then a third arriving across separate `discover_files` passes) and confirmed it now converges correctly: the lowest `file_id` in a content-hash group is always `find_file_by_content_hash`'s stable answer, so the "is this a rediscovery of my own row, or a genuine duplicate of an earlier row" branch in `discovery.py` gets a consistent answer on every call, for every file in the group.
 
-**Fix:** make the heartbeat's write self-guarding so it can never regress a terminal status, e.g. a dedicated repository method with a `WHERE ... AND status = 'RUNNING'` clause:
+**Empirically verified**, live: `test_find_file_by_content_hash_resolves_to_the_lowest_file_id_deterministically` (`test_metadata_repository.py`, asserts the same answer across 5 repeated calls) and `test_three_way_duplicate_content_resolves_deterministically_across_reruns` (`test_discover_files.py`, the actual `discover_files` reproduction of the exact accumulation shape that produced the live `file_id=10` orphan) — both pass.
 
-```python
-# metadata/postgres.py
-def heartbeat_ingestion_run(
-    self, *, run_id: int, lease_expires_at: datetime, rows_read: int, rows_parsed: int,
-) -> None:
-    with self._pool.connection() as conn:
-        conn.execute(
-            """
-            UPDATE meta.ingestion_runs
-               SET lease_expires_at = %s, rows_read = %s, rows_parsed = %s
-             WHERE run_id = %s AND status = 'RUNNING'
-            """,
-            (lease_expires_at, rows_read, rows_parsed, run_id),
-        )
-```
+### WR-01 (prior review) — `ingest()` not writing a Receipt for non-`DataPlatformError` exceptions — CLOSED
 
-and have `_heartbeat_loop` call this instead of the generic `update_ingestion_run_status(status="RUNNING", ...)`. A stray post-terminal write then becomes a silent no-op instead of a status regression.
+**Fix location:** `packages/csv-processor/src/csv_processor/cli.py:188-214` (new `_failure_receipt(doc)` helper, deduplicating the `Receipt(...)` construction), `:277-296` (`except DataPlatformError:` retained first, new `except Exception:` added second, both calling `_failure_receipt(doc)` then `raise`).
 
-### CR-02: Non-deterministic duplicate lookup can silently and permanently exclude a legitimate file from ingestion
+Confirmed the except-clause ordering is correct (Python evaluates clauses top-to-bottom; `DataPlatformError` — itself an `Exception` subclass, confirmed in `dataplat/errors.py` — is listed first, so it is never shadowed by the broader clause below it) and that the new clause never intercepts `BaseException`-only families (`KeyboardInterrupt`, `SystemExit`) since it only catches `Exception`. Also confirmed `dataplat.cli.main()` (the actual process entry point) catches *only* `DataPlatformError` plus click's own control-flow exceptions — any other exception, including the `RuntimeError` these new tests inject, propagates all the way out of `main()` uncaught — so this fix in `csv_processor.cli.ingest()` is the only place in the call chain that could ever write a Receipt for that failure class; there is no double-write or redundant-catch concern with the outer boundary.
 
-**File:** `packages/dataplat/src/dataplat/metadata/postgres.py:162-178` (`find_file_by_content_hash`, no `ORDER BY`) consumed by `packages/dataplat/src/dataplat/discovery.py:178-217`
+One inline comment in the new code makes a specific, checkable claim: *"No blind-except lint suppression is needed here: ruff's BLE001 check does not fire on a branch that always re-raises rather than swallowing the exception."* I verified this directly (`uv run ruff check cli.py --select BLE001` → `All checks passed!`) — the claim is accurate, not just plausible-sounding.
 
-**Issue:** `find_file_by_content_hash`'s SQL is:
+**Empirically verified**, live: `test_ingest_writes_a_failed_receipt_for_a_non_dataplatformerror_exception` (a raw `RuntimeError`, not wrapped by `DataPlatformError`, still results in a `status="FAILED"`/`run_id=-1` Receipt on disk, then still propagates so Airflow observes the non-zero exit) and `test_ingest_dataplatformerror_path_is_unaffected_by_the_new_except_clause` (the pre-existing `DataPlatformError` path is byte-for-byte unaffected) — both pass, via the real `dataplat.cli.main()` entry point (not a mocked Click runner).
 
-```sql
-SELECT file_id FROM meta.files
- WHERE dataset_id = %s AND content_sha256 = %s
- LIMIT 1
-```
+## Carried Over From Prior Review (Not Re-Assessed)
 
-There is no `ORDER BY`. PostgreSQL's own documentation is explicit that without one, which row `LIMIT 1` returns is unspecified whenever more than one row matches. `discover_files` (`discovery.py:178-217`) relies on an implicit assumption that when *re-discovering* an object whose own `meta.files` row already exists, this lookup returns *that same row* — this is exactly what the "rediscovery correction" comment at `discovery.py:196-217` depends on to clear a wrongly self-referential `duplicate_of_file_id`:
+The following are unchanged from the prior review dated 2026-08-13 (commit `603a9a2`). Per this round's assignment, they are out of scope for fresh investigation. Where I incidentally re-read their cited file this round for the primary task, I note that below; where I did not, I list them as a pure pointer only.
 
-```python
-if duplicate_of_file_id is not None and file_id == existing_file_id:
-    duplicate_of_file_id = None
-    file_id = metadata.create_file(..., duplicate_of_file_id=None)
-```
-
-That assumption only holds when at most one row shares a given `content_sha256`. Once a *second* file with identical content genuinely exists — an explicitly designed-for, tested scenario (D-13's duplicate detection; see `tests/integration/test_discover_files.py::test_duplicate_content_is_skipped`) — `find_file_by_content_hash` can, with no guarantee either way, return a *different* duplicate's `file_id` instead of the object's own row on a later rediscovery pass. If that happens for a file whose ingestion run is still `PENDING` (not yet processed), `discover_files` incorrectly marks it `duplicate_of_file_id = <some other file>` and `continue`s (`discovery.py:227`, "D-13 skip policy: no batch, no run, no assignment document") *before* ever re-offering its already-created `PENDING` run as a Dynamic-Task-Mapping candidate. Because the underlying rows and query plan don't change between passes, nothing about this codebase causes the situation to self-correct on a later attempt — the file's `meta.ingestion_runs` row can stay `PENDING` forever, its data silently never loaded, with no error raised anywhere.
-
-**Impact:** this directly contradicts the platform's stated Core Value ("no data is ever silently dropped, duplicated, or corrupted") for a scenario (multiple arrivals of byte-identical content) the platform is explicitly built and tested to handle.
-
-**Fix:** make the lookup deterministic by always resolving to the earliest-created ("true original") row:
-
-```python
-row = conn.execute(
-    """
-    SELECT file_id FROM meta.files
-     WHERE dataset_id = %s AND content_sha256 = %s
-     ORDER BY file_id ASC
-     LIMIT 1
-    """,
-    (dataset_id, content_sha256),
-).fetchone()
-```
-
-This restores the invariant `discover_files`'s self-correction logic already assumes: rediscovering an object's own row and looking up a genuine duplicate's "original" both resolve to the same, stable file consistently across calls.
+- **WR-02** — No code path ever writes `meta.ingestion_runs.status = 'FAILED'`. *Incidentally re-confirmed*: `postgres.py`'s `claim_ingestion_run` (line 345) still treats `status IN ('PENDING', 'FAILED')` as reclaimable, and `run.py`/`cli.py` (both read in full this round) still contain no call that ever sets `status="FAILED"` anywhere — WR-01's fix writes a `Receipt` to the XCom *file*, which is a different, parallel concern from the `meta.ingestion_runs` *database row*'s status; it does not touch the latter. WR-02 remains genuinely open.
+- **WR-03** — `attempt`/`try_number` is always `1` (`AIRFLOW_TASK_TRY_NUMBER` is never set by any KPO invocation). *Incidentally re-confirmed on the `cli.py` side*: `attempt=int(os.environ.get("AIRFLOW_TASK_TRY_NUMBER", "1")))` is still present, now at line 259. The other half of this finding (`airflow/dags/_common/kpo.py`) was not read this round — no new evidence there either way.
+- **WR-04** — A single row that fails to cast at publish time aborts the entire file's publish (`load/publish/merge.py`, `load/staging.py`, `csv_processor/source.py`). None of those files are in this round's scope — pure pointer, no new evidence.
+- **WR-05** — SQL identifiers built from an unvalidated config field, `DatasetConfig.dataset` (`config/model.py`, `load/staging.py`, `load/publish/merge.py`). None of those files are in this round's scope — pure pointer, no new evidence.
+- **WR-06** — `--dataset` CLI argument builds a filesystem path with no traversal guard. *Incidentally re-confirmed*: `Path(f"configs/datasets/{dataset}.yaml")` (`cli.py:150`, inside `discover()`) is unchanged and still has no validation ahead of it.
+- **IN-01** — `Receipt.rows_deduplicated`'s docstring doesn't capture what the field actually measures (`models/receipt.py`, `pipeline/run.py`). *Incidentally re-confirmed on the `run.py` side*: the `rows_deduplicated = max(staging_result.rows_parsed - result.rows_affected, 0)` computation and its caveat-laden inline comment are unchanged (now lines 349-357); I also re-read `models/receipt.py` for cross-reference and its docstring at line 32 still reads "Number of rows collapsed by deduplication" with no caveat, even though it is outside this round's formal 9-file scope.
+- **IN-02** — `_build_common()` doesn't close the pool if `pool.open()` raises after `create_pool()` succeeds (`cli.py:71-87`). *Incidentally re-confirmed*: the function is byte-for-byte unchanged. While re-reading it this round I also noticed the same leak class is broader than the original wording: if `S3ObjectStore(...)` (the very next line after `pool.open(wait=True)` succeeds) raises instead, the already-opened `pool` is *also* never assigned to the caller's own `pool` variable in `ingest()`/`discover()` (since `pool, metadata, objects = _build_common()` fails atomically), so it leaks the same way. The original fix suggestion (wrap `_build_common()`'s own body in try/except-and-close) already covers this broader case too, with no change needed to the suggested fix itself.
+- **IN-03** — Stale comment in `scripts/ingest-demo.py` contradicts the current implementation. That file is not in this round's scope — pure pointer, no new evidence.
 
 ## Warnings
 
-### WR-01: `ingest()`'s "receipt on every exit path" contract is violated for non-`DataPlatformError` exceptions
+### WR-07: The new repair script only detects `duplicate_of_file_id IS NULL`, not an existing wrong (non-`NULL`) value
 
-**File:** `packages/csv-processor/src/csv_processor/cli.py:199-201` (docstring claim), `:207-263` (try/except), `:247` (`except DataPlatformError:`)
+**File:** `scripts/repair-duplicate-file-lineage.py:111-122` (`_DIAGNOSTIC_SQL`), `:124-136` (`_REPAIR_SQL`)
 
-**Issue:** the docstring states: *"A `Receipt` is written to the XCom path on every exit path, success or failure."* The actual handler only catches `DataPlatformError`:
+**Issue:** Both the diagnostic `SELECT` and the repair `UPDATE` filter on `f.duplicate_of_file_id IS NULL`:
 
-```python
-try:
-    ...
-    receipt = run_ingest(ctx, heartbeat_interval_seconds=heartbeat_interval_seconds)
-    _write_xcom(receipt)
-except DataPlatformError:
-    _write_xcom(Receipt(run_id=doc.run_id if doc is not None else -1, status="FAILED", ...))
-    raise
-finally:
-    if pool is not None:
-        pool.close()
+```sql
+WHERE f.file_id <> g.original_file_id
+  AND f.duplicate_of_file_id IS NULL
 ```
 
-A cast failure inside `MergePublisher`'s publish `INSERT` (see WR-04 below) surfaces as a raw `psycopg.errors.DataError`, not a `DataPlatformError` — as would any other unexpected exception (network error not wrapped by `StorageError`, `MemoryError`, etc.). Every one of those exits the process with **no** Receipt/XCom written at all, contradicting the documented "every exit path" contract. (Operationally this is non-fatal — Airflow still observes the pod's non-zero exit and marks the task failed via `get_logs=True` output — but the structured Receipt this command promises never gets produced for this whole failure class.)
+This is narrower than the actual defect class the old, non-deterministic `LIMIT 1` (no `ORDER BY`) could produce. Before the fix, `find_file_by_content_hash` could return *any* matching row, not only `NULL` vs. the true original. Concretely: with a 3-file content group `[5, 7, 9]`, if file `9` was discovered while `find_file_by_content_hash` happened to return `7` (a genuine duplicate, but not the group minimum) instead of `5`, `9.duplicate_of_file_id` would be persisted as `7` — a real value, not `NULL`, but still the *wrong* one (it should point at `5`, the true original, per this script's own `MIN(file_id)` convention and per the fixed `find_file_by_content_hash`'s new `ORDER BY file_id ASC`). This script's diagnostic query cannot see that row at all (it isn't `NULL`), so it is neither reported as an "orphan" nor repaired, and the tool's own closing message — `"Re-verified: zero orphaned duplicate files remain."` — would be printed even though a real mis-attribution still exists in `meta.files`.
 
-**Fix:** broaden the except clause (or add a second one) so a Receipt is genuinely always written:
+This is not a hypothetical edge case invented for this review: it is a direct, provable consequence of the exact non-determinism this whole script exists to clean up after (`LIMIT 1` with no `ORDER BY` can return *any* matching row, not just `NULL`-vs-original). There is currently zero automated test coverage for this script (see IN-05) that would have caught the gap.
 
-```python
-except DataPlatformError:
-    _write_xcom(Receipt(run_id=doc.run_id if doc is not None else -1, status="FAILED", ...))
-    raise
-except Exception:
-    _write_xcom(Receipt(run_id=doc.run_id if doc is not None else -1, status="FAILED", ...))
-    raise
+**Fix:** widen the match condition to catch both shapes — "unset" and "set to the wrong file" — using `IS DISTINCT FROM`, which correctly treats `NULL` as distinct from any non-null value without the three-valued-logic pitfalls of `<>`/`!=`:
+
+```sql
+-- both _DIAGNOSTIC_SQL and _REPAIR_SQL:
+ WHERE f.file_id <> g.original_file_id
+   AND f.duplicate_of_file_id IS DISTINCT FROM g.original_file_id
 ```
 
-### WR-02: No code path ever writes `meta.ingestion_runs.status = 'FAILED'`
+### WR-08: The repair script's correctness invariant silently assumes every dataset's `duplicate_policy` is `"skip"`
 
-**File:** `packages/dataplat/src/dataplat/metadata/postgres.py:331` (`claim_ingestion_run`'s `WHERE` clause references `'FAILED'` as reclaimable) and `packages/dataplat/src/dataplat/pipeline/run.py` (`run_ingest` never writes it)
+**File:** `scripts/repair-duplicate-file-lineage.py:29-32` (module docstring's "generic and dataset-agnostic ... on any dataset" claim), `:84-100` (`_CONTENT_GROUPS_CTE`)
 
-**Issue:** `claim_ingestion_run`'s `WHERE status IN ('PENDING', 'FAILED')` clause is written as if some code path transitions a row to `'FAILED'`, but nothing in this codebase does. `run_ingest`'s own docstring says explicitly: *"This function catches nothing: a run-fatal exception... propagates OUT of run_ingest uncaught... The only thing this function ever guarantees on every exit path... is that its own heartbeat thread is stopped."* When staging or publish raises, the row is left at `status='RUNNING'` with a live 5-minute lease — indistinguishable from a genuinely in-progress run until the lease naturally expires. Even after Airflow's own `retries=3` are exhausted and the task is permanently failed, the row still reads `'RUNNING'`, never `'FAILED'`. `scripts/ingest-demo.py:96-108`'s own comment already confirms this gap explicitly: *"'FAILED' is a legitimate persisted value too... even though no call site in this phase's code currently sets it."*
+**Issue:** `_CONTENT_GROUPS_CTE` treats *every* `(dataset_id, content_sha256)` group with more than one row as a group whose non-original members *should* have `duplicate_of_file_id` set to `MIN(file_id)`:
 
-**Impact:** `meta.ingestion_runs` — the audit surface this platform's traceability promise rests on — cannot currently distinguish "genuinely still running" from "permanently abandoned after exhausting retries" without also cross-referencing `lease_expires_at` against wall-clock time and Airflow's own task-instance history.
-
-**Fix:** wrap `run_ingest`'s work (or its caller, `csv_processor.cli.ingest()`) so a run-fatal exception updates `status='FAILED'` (with `error_type`/`error_message`, both already tracked as updatable fields in `_INGESTION_RUN_UPDATABLE_FIELDS`) before re-raising.
-
-### WR-03: `attempt`/`try_number` is always `1` — the environment variable it reads is never set
-
-**File:** `packages/csv-processor/src/csv_processor/cli.py:229`; `packages/dataplat/src/dataplat/models/identity.py:105`; `airflow/dags/_common/kpo.py` (the only place `env_vars` is built for these pods)
-
-**Issue:** `RunContext.attempt` (passed to `claim_ingestion_run` as `try_number`) is resolved via:
-
-```python
-attempt=int(os.environ.get("AIRFLOW_TASK_TRY_NUMBER", "1")),
-```
-
-No `KubernetesPodOperator` invocation in this codebase ever sets `AIRFLOW_TASK_TRY_NUMBER` — `common_kpo_kwargs()` in `_common/kpo.py` builds exactly four env vars (`DATAPLAT_DB_DSN`, `DATAPLAT_S3_ACCESS_KEY`, `DATAPLAT_S3_SECRET_KEY`, `DATAPLAT_S3_ENDPOINT_URL`) plus, for `ingest` only, `DATAPLAT_HEARTBEAT_INTERVAL_SECONDS`. This means `attempt` — and therefore `meta.ingestion_runs.try_number` — will always record `1`, even on a task's third real Airflow retry, degrading the audit trail's accuracy.
-
-**Fix:** add a Jinja-templated env var to the `ingest` task's KPO invocation:
-
-```python
-k8s.V1EnvVar(name="AIRFLOW_TASK_TRY_NUMBER", value="{{ ti.try_number }}")
-```
-
-### WR-04: A single row that fails to cast at publish time aborts the entire file's publish
-
-**File:** `packages/dataplat/src/dataplat/load/publish/merge.py:50-71` (casts at line 57: `customer_id::int, ..., birth_date::date, event_ts::timestamptz`); `packages/dataplat/src/dataplat/load/staging.py` (business columns staged as unchecked TEXT); `packages/csv-processor/src/csv_processor/source.py` (structural CSV parsing only — field count, never field content — is validated anywhere upstream)
-
-**Issue:** `StagingLoader` deliberately stores every business column as unvalidated TEXT (its own "Pitfall 9" comment: *"A COPY never fails on a bad date/number here — that becomes a later, set-based validation pass"*). No such validation pass exists anywhere between staging and publish in this phase's `run_ingest` pipeline — `RaggedRowGuard` (the only stage wired in) checks field *count*, never field *content*. `MergePublisher`'s `_PUBLISH_SQL` then performs hard `::int`/`::date`/`::timestamptz` casts on **every** staged row inside one `INSERT ... SELECT` statement. A single malformed value anywhere in the file — an empty `birth_date`, a non-numeric `customer_id`, an unparsable `event_ts` (exactly the "real-world messy CSV" inputs this platform's README names as its target problem) — aborts the whole statement, so the *entire file's* publish fails, not just the offending row. Because staging reproduces the identical malformed value on every retry, all of Airflow's `retries=3` fail identically, permanently blocking that file's ingestion until a human manually intervenes; there is no partial-success or quarantine path in this phase.
-
-**Fix (scoped to this phase):** catch the cast failure around the publish `INSERT`, surface it as a clear, actionable `DataPlatformError` naming the offending row where feasible, rather than a raw `psycopg.errors.DataError`. Full mitigation (per-row validation before publish, quarantine routing) is already anticipated as later-phase work — this finding is to make sure the current failure mode is at least diagnosable, not to demand the full feature now.
-
-### WR-05: SQL identifiers built from an unvalidated config field (`DatasetConfig.dataset`)
-
-**File:** `packages/dataplat/src/dataplat/config/model.py:130` (`dataset: str`, no format constraint); consumed unquoted at `packages/dataplat/src/dataplat/load/staging.py:163,169,182-185,224-225` and via the `staging_table` parameter at `packages/dataplat/src/dataplat/load/publish/merge.py:117-118`
-
-**Issue:** `StagingLoader.load()` builds `staging_table = f"staging.{ctx.config.dataset}__r{ctx.run.run_id}"` and interpolates it unquoted into `DROP TABLE`, `CREATE UNLOGGED TABLE`, and `COPY ... FROM STDIN` statements; `MergePublisher.publish()` interpolates the same value into `INSERT ... FROM {staging_table}`. `DatasetConfig.dataset` is a bare `str` with no character-set/pattern validator, so nothing at the config-loading boundary stops a `configs/datasets/*.yaml` document from containing a `dataset` value that breaks the generated SQL, or — should config provenance ever become less trusted than "hand-authored, git-committed YAML" (a change the codebase's own forward-looking comments anticipate for later phases/multi-dataset support) — enables SQL injection into these statements.
-
-**Fix:** add a Pydantic field validator restricting `dataset` to a safe identifier pattern:
-
-```python
-from pydantic import field_validator
-import re
-
-_DATASET_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-class DatasetConfig(BaseModel):
-    ...
-    @field_validator("dataset")
-    @classmethod
-    def _dataset_is_a_safe_identifier(cls, value: str) -> str:
-        if not _DATASET_NAME_RE.fullmatch(value):
-            raise ValueError(f"dataset must match {_DATASET_NAME_RE.pattern!r}, got {value!r}")
-        return value
-```
-
-### WR-06: `--dataset` CLI argument builds a filesystem path with no traversal guard
-
-**File:** `packages/csv-processor/src/csv_processor/cli.py:129-152`, specifically `Path(f"configs/datasets/{dataset}.yaml")` at line 150
-
-**Issue:** `discover`'s `--dataset` option is interpolated directly into a filesystem path with no validation:
-
-```python
-config = load_config(
-    Path(f"configs/datasets/{dataset}.yaml"),
-    defaults_path=Path("configs/defaults.yaml"),
+```sql
+WITH content_groups AS (
+    SELECT dataset_id, content_sha256, MIN(file_id) AS original_file_id, COUNT(*) AS group_size
+      FROM meta.files
+     GROUP BY dataset_id, content_sha256
+    HAVING COUNT(*) > 1
 )
 ```
 
-Not reachable via the current wiring — `airflow/dags/csv_ingest_customers.py:126` always passes the literal `"customers"` — but the CLI is a real, directly-invokable entrypoint (`ENTRYPOINT ["dataplat"]`; `docker run <image> dataplat discover --dataset <value>`) running as the `csv-processor` service account with mounted DB/S3 credentials. A value such as `--dataset "../../../etc/passwd"` would attempt to resolve outside `configs/datasets/`. Shares its root cause with WR-05 (`dataset` carries no format constraint anywhere).
+That invariant only holds for datasets configured with `duplicate_policy: skip` (`dataplat.discovery.discover_files` only sets `duplicate_of_file_id` — ever — when `config.source.duplicate_policy == "skip"`; see `discovery.py:182`). `SourceConfig.duplicate_policy` (`dataplat/config/model.py`) is a free-form `str`, and its own docstring explicitly anticipates more values later ("the only value *this phase* defines is `\"skip\"`"). The query has no join to dataset config and no per-dataset awareness at all — it operates on raw `meta.files` rows across every dataset in the cluster. Today this is **not exploitable** — the one committed dataset config (`configs/datasets/customers.yaml`) uses `duplicate_policy: skip`, so the invariant happens to hold everywhere it could currently run. But the script's own docstring explicitly advertises itself as "generic and dataset-agnostic ... it repairs every orphaned duplicate-content group it finds, on any dataset" — that claim is only true as long as every dataset ever onboarded keeps `duplicate_policy: skip`, which nothing in this script (or the schema) enforces or even checks. The very first dataset onboarded with a different policy would have any of its legitimately-independent, same-content files force-linked by a future run of this tool.
 
-**Fix:** validate the CLI's own `--dataset` value before constructing the path (the same pattern as WR-05's proposed fix would also close this, once it fires early enough — but the CLI itself should not rely solely on the Pydantic model, since the path is built *before* `load_config`/model validation runs):
+**Fix:** either scope the query to datasets actually using the `skip` policy, or fail loudly rather than silently when it can't determine that. A minimal, cheap guard given this script's manual, one-off nature — surface a loud warning naming the affected datasets rather than assuming:
 
 ```python
-import re
-
-_DATASET_ARG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-@click.option("--dataset", required=True, callback=lambda ctx, param, value: (
-    value if _DATASET_ARG_RE.fullmatch(value)
-    else (_ for _ in ()).throw(click.BadParameter("must be a safe identifier"))
-))
+# Before repairing, cross-check duplicate_policy for every affected dataset
+# against configs/datasets/<name>.yaml (or meta.config_versions' stored
+# config_document); refuse (or --force) if any affected dataset's current
+# policy is not "skip", since this script's whole correctness invariant
+# depends on it.
 ```
 
 ## Info
 
-### IN-01: `Receipt.rows_deduplicated`'s docstring doesn't capture what the field actually measures
+### IN-04: Heartbeat write has no claim-owner fencing (narrower, lower-impact cousin of CR-01)
 
-**File:** `packages/dataplat/src/dataplat/models/receipt.py:32` (docstring: *"Number of rows collapsed by deduplication"*); actual computation at `packages/dataplat/src/dataplat/pipeline/run.py:338-346`
+**File:** `packages/dataplat/src/dataplat/metadata/postgres.py:365-390`, `packages/dataplat/src/dataplat/pipeline/run.py:163-208`
 
-**Issue:** `run.py`'s own inline comment candidly explains `rows_deduplicated = max(rows_parsed - rows_affected, 0)` also counts rows suppressed as no-op republishes of already-identical content (via `MergePublisher`'s `_record_hash IS DISTINCT FROM` guard), not only genuine within-batch `DISTINCT ON` collapses: *"This phase does not separately track 'collapsed by DISTINCT ON...' from 'suppressed as a no-op write by the WHERE guard'... a finer split is Phase 9's... territory."* `Receipt.rows_deduplicated`'s public docstring — the one place a Receipt consumer would look — doesn't carry that caveat, so a large `rows_deduplicated` figure could be misread as "many duplicate records in this file" when it may simply mean "this file's content hasn't changed since last time."
+**Issue:** CR-01's fix correctly guards `heartbeat_ingestion_run` against a *terminal*-status regression (`WHERE run_id = %s AND status = 'RUNNING'`). It does not, and was not designed to, guard against a *same*-status write from a stale claim generation: if a pod's heartbeat thread survives long enough (process alive, but its main staging/publish work stalled) for its own claim's lease to expire and a retrying pod to reclaim the same `run_id` (still setting `status='RUNNING'`, now under a new `k8s_pod_name`), the original pod's next heartbeat tick still matches this `WHERE` clause and will overwrite the new claimant's `rows_read`/`rows_parsed` (and refresh `lease_expires_at`, harmlessly extending it) with the old pod's own, possibly-stale progress numbers.
 
-**Fix:** copy `run.py`'s caveat into `Receipt.rows_deduplicated`'s docstring.
+This is scored as Info rather than Warning because: (1) `rows_read`/`rows_parsed` are documented, explicitly, as live-progress-only fields for an external poller — not the authoritative record, which is `rows_loaded` written once, atomically, by `finalize_publication` inside the publish transaction; (2) `lease_expires_at` can only ever be pushed *forward* by a stale write (`datetime.now(tz=UTC) + _LEASE_DURATION` computed fresh at write time), never backward, so it cannot cause a lease to expire early or a claim to be incorrectly granted/refused; (3) triggering it requires a fairly specific double fault (a pod's main thread stalls long enough to lose its lease while its heartbeat thread and process both remain alive) that is architecturally narrower than CR-01's window (which fired on every single successful run, deterministically, once the timing lined up).
 
-### IN-02: `_build_common()` doesn't close the pool if `pool.open()` raises after `create_pool()` succeeds
+**Fix (optional hardening, not required for correctness of the current fix):** fence the `UPDATE` by claim owner as well as status, e.g. add `AND k8s_pod_name = %s` (passing the current pod's own identity, already resolved in `run_ingest` via `os.environ.get("HOSTNAME", "unknown")` for `claim_ingestion_run`) to `heartbeat_ingestion_run`'s `WHERE` clause:
 
-**File:** `packages/csv-processor/src/csv_processor/cli.py:71-87`
-
-**Issue:**
-
-```python
-pool = create_pool(dsn)
-pool.open(wait=True)
+```sql
+UPDATE meta.ingestion_runs
+   SET lease_expires_at = %s, rows_read = %s, rows_parsed = %s
+ WHERE run_id = %s AND status = 'RUNNING' AND k8s_pod_name = %s
 ```
 
-If `create_pool(dsn)` succeeds but `pool.open(wait=True)` then raises, the locally-created `ConnectionPool` is discarded without `.close()` ever being called — its background worker/connections aren't explicitly torn down. Low real-world impact given the short-lived, single-shot CLI/pod lifecycle (process exit reclaims everything), but a `try`/`except`-and-close is the more correct pattern.
+### IN-05: The new repair script has zero automated test coverage
 
-**Fix:**
+**File:** `scripts/repair-duplicate-file-lineage.py` (whole file)
 
-```python
-pool = create_pool(dsn)
-try:
-    pool.open(wait=True)
-except Exception:
-    pool.close()
-    raise
-```
+**Issue:** No test file anywhere in the repository references this script (`grep -rl "repair-duplicate-file-lineage" --include="*.py"` matches only the script itself). Its own module docstring references "the idempotency proof in this module's own acceptance criteria," which — if it exists — lives in planning artifacts (`04-10-PLAN.md`), not in `pytest`-collected, CI-enforced code. This is precisely why the two completeness gaps in WR-07/WR-08 were not caught before landing: nothing regression-tests `_find_orphans`/`_repair_orphans`'s SQL against a seeded multi-row duplicate-content group.
 
-### IN-03: Stale comment in `scripts/ingest-demo.py` contradicts the current (already-fixed) implementation
-
-**File:** `scripts/ingest-demo.py:111-117`
-
-**Issue:** the comment reads:
-
-```
-# `r.duration_ms` is never actually populated by `finalize_publication`
-# (dataplat/metadata/postgres.py only sets status/finished_at/rows_loaded/
-# report_uri) -- COALESCE to a value computed from started_at/finished_at
-```
-
-`PostgresMetadataRepository.finalize_publication` (`packages/dataplat/src/dataplat/metadata/postgres.py:388-399`) *does* set `duration_ms` — per the task context, this was one of the fixes already landed during this phase's live E2E verification. The comment (and the `deferred-items.md` entry it references) is now stale and could mislead a future reader into believing the gap still exists.
-
-**Fix:** update the comment to note `duration_ms` is now persisted directly, and that the `COALESCE` fallback is retained only as a defensive presentational fallback (e.g. for a row that was never finalized), not as a workaround for a known persistence gap.
+**Fix:** `_find_orphans`/`_repair_orphans` already take a plain `psycopg.Connection` and contain no `kubectl`/port-forward logic themselves — only `main()` and the `_port_forwarded_analytics`/`_read_analytics_credentials` helpers need a live cluster. Add `tests/integration/test_repair_duplicate_file_lineage.py` exercising `_find_orphans`/`_repair_orphans` directly against the existing `migrated_dsn` testcontainers fixture: seed a 3-row content-duplicate group with one row's `duplicate_of_file_id` deliberately `NULL` and (after fixing WR-07) one deliberately wrong-non-null, assert the diagnostic finds both, the repair UPDATE fixes both, and a second `_find_orphans` call afterward returns empty (the same idempotency property `--dry-run` and the module docstring already claim but do not currently prove in CI).
 
 ---
 
-_Reviewed: 2026-08-13T23:21:59Z_
+_Reviewed: 2026-08-14T06:52:48Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
