@@ -52,7 +52,7 @@ FILE ?=
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
-        ingest-demo
+        ingest-demo vault-unseal vault-bootstrap vault-verify
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -161,6 +161,15 @@ minio-creds:                   ## D-14: print live MinIO credentials, shell-sour
 ingest-demo:                    ## D-14: upload FILE and wait for the real sensor-driven pipeline [plan 04-09]
 	@if [ -z "$(FILE)" ]; then echo "ERROR: FILE is required, e.g. make ingest-demo FILE=tests/fixtures/csv/01_simple.csv" >&2; exit 1; fi
 	$(RUN_CLUSTER) python scripts/ingest-demo.py --file $(FILE)
+
+vault-unseal:                   ## D-02: init-or-unseal against .secrets/vault-init.json [plan 05-01]
+	$(RUN_CLUSTER) python scripts/vault-unseal.py
+
+vault-bootstrap:                ## idempotent Vault admin bootstrap: mounts, auth method, roles/policies, audit device [plan 05-01]
+	$(RUN_CLUSTER) python scripts/vault-bootstrap.py
+
+vault-verify:                    ## INFRA-06: run tests/e2e/vault against the live cluster [plan 05-01]
+	$(RUN_CLUSTER) pytest tests/e2e/vault -q
 
 cluster-verify:                 ## D-16: run tests/e2e/cluster and tests/e2e/slice against the live cluster [plan 02-02, extended 04-09]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
