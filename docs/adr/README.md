@@ -20,13 +20,17 @@ preview. If the decision has not been made yet, there is nothing to record.
 | [0006](0006-unmaintained-upstream-artifacts.md) | This platform knowingly runs three unmaintained upstream artifacts, each with a named migration target and a dated trigger | accepted | 2026-08-12 |
 | [0007](0007-helm-4-over-helm-3.md) | Helm 4.2.3 is adopted over the documented Helm 3.21.3 fallback | accepted | 2026-08-12 |
 | [0008](0008-pipeline-composition-seam.md) | Pipeline composition is `Source` → `RecordChunk` → `Stage` → `Publisher`, not README §68's flat taxonomy | accepted | 2026-08-13 |
+| [0009](0009-openbao-licence-escape-hatch.md) | Vault's BUSL-1.1 licence is accepted for this milestone; OpenBao is the named migration target | accepted | 2026-08-14 |
 
 Records 0002 through 0005 are the decisions Phase 1 actually takes. 0002 is the
 headline departure from README §68/§75; 0003 and 0004 are its physical
 consequences; 0005 is the phase's design decision about the fixture corpus. 0006
 is Phase 2's supply-chain risk acceptance from the Package Legitimacy Audit; 0007
 is the phase's Helm 4 compatibility gate result. 0008 is Phase 3's composition
-seam — the piece of README §68's departure ADR-0002 did not itself settle.
+seam — the piece of README §68's departure ADR-0002 did not itself settle. 0009
+is Phase 5's licence-risk acceptance for Vault, fulfilling the record this table's
+own "Deliberately deferred records" section had already reserved before Phase 5
+began.
 
 `0000-template.md` is the template. `0000` is its permanent number; it is never a
 record and never appears in the table above.
@@ -90,7 +94,7 @@ migration trigger becomes a meaningful, observable condition:
 
 | Prospective record | Target phase | Why not now |
 |---|---|---|
-| Vault is BUSL-1.1 and IBM-owned; OpenBao is the API-compatible escape hatch | **Phase 5** | Nothing is deployed against Vault until Phase 5. The licence assessment is real but has no consequence to record yet. |
+| *(none currently outstanding)* | — | — |
 
 ## Adding a record
 
