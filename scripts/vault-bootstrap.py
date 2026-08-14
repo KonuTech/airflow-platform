@@ -21,6 +21,12 @@ step). It creates, if not already present:
       corrected by plan 05-03 using this same audit-log-reading discipline
       -- never widened to a wildcard or multiple SAs as a shortcut
   (g) a `file` audit device at `/vault/audit/audit.log`
+  (h) the two `etl` KV secret VALUES (plan 05-02) -- `etl/analytics-db`
+      (`dsn`) and `etl/minio` (`access_key`/`secret_key`) -- sourced from
+      the live `csv-processor-db`/`csv-processor-s3` Kubernetes Secrets
+      `scripts/etl-secrets.sh` already created (Phase 4), so the value the
+      KPO pod reads through `vault://` is identical to the value it read
+      through `secretKeyRef` before this plan's swap
 
 Every step is idempotent: re-running this script against an already-
 bootstrapped Vault performs zero writes and prints "already present" for
@@ -36,6 +42,7 @@ prints a secret value, token, or key.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import shutil
@@ -72,6 +79,15 @@ path "airflow/data/connections/*" { capabilities = ["read"] }
 """
 
 _AUDIT_DEVICE_PATH = "/vault/audit/audit.log"
+
+# (h) The two live Kubernetes Secrets `scripts/etl-secrets.sh` already
+# created (Phase 4) -- the SOURCE of the KV values this step writes, never
+# printed. `_MINIO_APP_ACCESS_KEY` is the same fixed, non-secret literal
+# `scripts/etl-secrets.sh`'s own `MINIO_APP_ACCESS_KEY` hardcodes.
+_ETL_NAMESPACE = "etl"
+_DB_SECRET_NAME = "csv-processor-db"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
+_S3_SECRET_NAME = "csv-processor-s3"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
+_MINIO_APP_ACCESS_KEY = "etl-app"
 
 
 def _versions_env_variable(name: str) -> str:
@@ -299,11 +315,111 @@ def _ensure_audit_device(client: hvac.Client) -> None:
     print("audit device file/: created")
 
 
-def bootstrap(client: hvac.Client) -> None:
+def _kubectl_get_secret_field(kubectl_context: str, *, namespace: str, name: str, key: str) -> str:
+    """Read one base64-decoded field from a live Kubernetes Secret.
+
+    Same read mechanism `scripts/etl-secrets.sh`'s own
+    `_read_minio_app_secret_key` uses -- `kubectl get secret ... -o
+    jsonpath=...` piped through a base64 decode -- reimplemented here via
+    `subprocess.run` rather than shelling out to that script, since this is
+    the one place `etl`'s own two dev credentials (D-01's migration source)
+    are read to populate Vault. Never prints the decoded value.
+
+    Args:
+        kubectl_context: The kubectl context to read through.
+        namespace: The Secret's namespace.
+        name: The Secret's name.
+        key: The Secret's `.data` key to read.
+
+    Returns:
+        The field's decoded value.
+
+    Raises:
+        RuntimeError: The `kubectl get` call fails (e.g. the Secret or key
+            does not exist).
+    """
+    kubectl_bin = _require_kubectl()
+    proc = subprocess.run(  # noqa: S603
+        [
+            kubectl_bin,
+            "--context",
+            kubectl_context,
+            "get",
+            "secret",
+            "-n",
+            namespace,
+            name,
+            "-o",
+            f"jsonpath={{.data.{key}}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        msg = f"kubectl get secret -n {namespace} {name} (field {key!r}) failed: {proc.stderr}"
+        raise RuntimeError(msg)
+    return base64.b64decode(proc.stdout).decode("utf-8")
+
+
+def _ensure_etl_secrets(client: hvac.Client, kubectl_context: str) -> None:
+    """(h) Populate `etl/analytics-db` and `etl/minio`'s KV secret VALUES, if not already present.
+
+    Guard: attempt `read_secret_version` first; a successful read means the
+    secret is already present (skip, unchanged). On `hvac.exceptions.
+    InvalidPath` (Vault's 404-shaped "not found"), source the value from the
+    live `csv-processor-db`/`csv-processor-s3` Kubernetes Secrets
+    `scripts/etl-secrets.sh` already created (Phase 4) and write it. Never
+    prints either value.
+
+    Args:
+        client: An `hvac.Client` authenticated with the root token.
+        kubectl_context: The kubectl context to read the source Secrets
+            through.
+    """
+    try:
+        client.secrets.kv.v2.read_secret_version(mount_point="etl", path="analytics-db")
+        print("secret etl/analytics-db: already present")
+    except hvac.exceptions.InvalidPath:
+        dsn = _kubectl_get_secret_field(
+            kubectl_context,
+            namespace=_ETL_NAMESPACE,
+            name=_DB_SECRET_NAME,
+            key="dsn",
+        )
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="etl",
+            path="analytics-db",
+            secret={"dsn": dsn},
+        )
+        print("secret etl/analytics-db: created")
+
+    try:
+        client.secrets.kv.v2.read_secret_version(mount_point="etl", path="minio")
+        print("secret etl/minio: already present")
+    except hvac.exceptions.InvalidPath:
+        secret_key = _kubectl_get_secret_field(
+            kubectl_context,
+            namespace=_ETL_NAMESPACE,
+            name=_S3_SECRET_NAME,
+            key="secret_key",
+        )
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="etl",
+            path="minio",
+            secret={"access_key": _MINIO_APP_ACCESS_KEY, "secret_key": secret_key},
+        )
+        print("secret etl/minio: created")
+
+
+def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
     """Run every idempotent bootstrap step against an authenticated, unsealed `client`.
 
     Args:
         client: An `hvac.Client` authenticated with the root token.
+        kubectl_context: The kubectl context `_ensure_etl_secrets` reads the
+            source Kubernetes Secrets through.
 
     Raises:
         RuntimeError: `client`'s Vault is sealed -- bootstrap never
@@ -345,6 +461,8 @@ def bootstrap(client: hvac.Client) -> None:
 
     _ensure_audit_device(client)
 
+    _ensure_etl_secrets(client, kubectl_context)
+
 
 def main() -> int:
     """Port-forward to Vault, authenticate with the root token, then bootstrap it.
@@ -358,7 +476,7 @@ def main() -> int:
         root_token = _read_root_token()
         with _port_forwarded_vault(kubectl_context) as local_port:
             client = hvac.Client(url=f"http://127.0.0.1:{local_port}", token=root_token)
-            bootstrap(client)
+            bootstrap(client, kubectl_context)
     except (RuntimeError, hvac.exceptions.VaultError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

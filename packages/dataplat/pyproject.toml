@@ -14,6 +14,7 @@ dependencies = [
   "pydantic>=2.13,<3",
   "structlog>=26,<27",
   "click>=8.4,<9",
+  "hvac>=2.4,<3",
 ]
 
 # NOTE: no dependency on csv-processor, in either direction of this file.

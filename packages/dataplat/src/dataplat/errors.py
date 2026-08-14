@@ -93,7 +93,7 @@ class StorageError(DataPlatformError):
 class SecretResolutionError(DataPlatformError):
     """An opaque secret reference could not be resolved to a value.
 
-    Raised when a ``SecretRef`` (``env://``, ``file://``, or an unrecognized
-    scheme such as ``vault://`` before Phase 5 implements it) cannot be
-    turned into a usable secret value.
+    Raised when a ``SecretRef`` (``env://``, ``file://`` or ``vault://``, or
+    an unrecognized/malformed scheme) cannot be turned into a usable secret
+    value.
     """
