@@ -344,3 +344,62 @@ def test_batching_cap_defers_excess(
         ).fetchone()
     assert pending_count is not None
     assert pending_count[0] == 3
+
+
+def test_three_way_duplicate_content_resolves_deterministically_across_reruns(
+    repository: PostgresMetadataRepository,
+    object_store: S3ObjectStore,
+    migrated_dsn: str,
+) -> None:
+    """CR-02 (04-10 gap closure): reproduces the exact scenario behind the live `file_id=10` orphan.
+
+    Three sequential `discover_files` passes grow one duplicate-content group
+    from 1 file to 2 to 3 -- the same accumulation shape 04-VERIFICATION.md
+    observed producing a live, broken row (`duplicate_of_file_id IS NULL`
+    while not being the group's minimum `file_id`). Every non-original file
+    in the group must end the third pass pointing at the group's single
+    lowest `file_id`, and the lowest-`file_id` row itself must keep
+    `duplicate_of_file_id IS NULL`.
+    """
+    dataset_name = "discover_three_way_dup_proof"
+    dataset_id = repository.get_or_create_dataset(dataset_name)
+    config_version_id = _insert_config_version(migrated_dsn, dataset_id=dataset_id)
+    config = _make_config(path="customers/three_way_dup_proof/")
+    payload = b"customer_id,name\n1,Alice\n"
+
+    def _discover() -> list[Any]:
+        return discover_files(
+            metadata=repository,
+            objects=object_store,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+            config=config,
+            config_version_id=config_version_id,
+            config_hash=_CONFIG_HASH,
+            processor_image=_PROCESSOR_IMAGE,
+            processor_version=_PROCESSOR_VERSION,
+        )
+
+    object_store.put_object("raw", "customers/three_way_dup_proof/a.csv", payload)
+    _discover()
+    object_store.put_object("raw", "customers/three_way_dup_proof/b.csv", payload)
+    _discover()
+    object_store.put_object("raw", "customers/three_way_dup_proof/c.csv", payload)
+    _discover()
+
+    with psycopg.connect(migrated_dsn) as conn:
+        rows = conn.execute(
+            """
+            SELECT object_uri, file_id, duplicate_of_file_id FROM meta.files
+             WHERE dataset_id = %s ORDER BY file_id
+            """,
+            (dataset_id,),
+        ).fetchall()
+
+    assert len(rows) == 3
+    original_file_id = min(row[1] for row in rows)
+    for _object_uri, file_id, duplicate_of_file_id in rows:
+        if file_id == original_file_id:
+            assert duplicate_of_file_id is None
+        else:
+            assert duplicate_of_file_id == original_file_id

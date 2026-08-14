@@ -769,3 +769,41 @@ def test_create_file_is_idempotent_and_stores_duplicate_of_file_id(
     assert first_file_id == second_file_id
     assert _count_files(migrated_dsn, dataset_id=dataset_id, object_uri=object_uri) == 1
     assert _read_duplicate_of_file_id(migrated_dsn, first_file_id) == original_file_id
+
+
+# --- find_file_by_content_hash (04-10 gap closure: CR-02) -------------------
+#
+# Deterministic duplicate-file resolution: PostgreSQL documents `LIMIT 1`
+# with no `ORDER BY` as unspecified once more than one row matches a WHERE
+# clause -- `discovery.py`'s rediscovery-correction logic depends on this
+# method returning the SAME row across repeated calls for the same content,
+# and the live cluster's `file_id=10` orphan (04-VERIFICATION.md) is what
+# happens when that assumption breaks.
+
+
+def test_find_file_by_content_hash_resolves_to_the_lowest_file_id_deterministically(
+    repository: PostgresMetadataRepository,
+) -> None:
+    dataset_id = repository.get_or_create_dataset("find_file_deterministic_proof")
+    content_sha256 = hashlib.sha256(b"three-way duplicate content, CR-02").digest()
+
+    file_ids = [
+        repository.create_file(
+            dataset_id=dataset_id,
+            object_uri=f"s3://raw/customers/deterministic-{index}.csv",
+            content_sha256=content_sha256,
+            hash_version=1,
+            size_bytes=10,
+            filename=f"deterministic-{index}.csv",
+            status="DISCOVERED",
+        )
+        for index in range(3)
+    ]
+
+    expected = min(file_ids)
+    for _ in range(5):
+        resolved = repository.find_file_by_content_hash(
+            dataset_id=dataset_id,
+            content_sha256=content_sha256,
+        )
+        assert resolved == expected
