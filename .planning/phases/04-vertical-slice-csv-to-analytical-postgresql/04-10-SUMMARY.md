@@ -159,6 +159,26 @@ None -- no external service configuration required. The live cluster's `csv_proc
 - `meta.ingestion_runs`/`meta.files` semantics -- which Phase 9's incremental/backfill/CDC/SCD work builds directly on (per `STATE.md`) -- are now both more deterministic (CR-02) and audit-trail-safe against the heartbeat race (CR-01) before that later phase adds more weight on top.
 - No blockers. WR-01 (receipt-on-every-exit-path) and the other `04-REVIEW.md` Warnings remain open, out of scope for this gap-closure plan (which targeted only CR-01/CR-02 and CR-02's live fallout, per its own objective).
 
+## Self-Check: PASSED
+
+All created/modified files verified present on disk:
+- FOUND: `.planning/phases/04-vertical-slice-csv-to-analytical-postgresql/04-10-SUMMARY.md`
+- FOUND: `scripts/repair-duplicate-file-lineage.py`
+- FOUND: `packages/dataplat/src/dataplat/metadata/repository.py`
+- FOUND: `packages/dataplat/src/dataplat/metadata/postgres.py`
+- FOUND: `packages/dataplat/src/dataplat/pipeline/run.py`
+- FOUND: `tests/integration/test_metadata_repository.py`
+- FOUND: `tests/integration/test_run_ingest.py`
+- FOUND: `tests/integration/test_discover_files.py`
+
+All commit hashes verified present in `git log --oneline --all`:
+- FOUND: `944d0f9` (test, CR-01 RED)
+- FOUND: `18808cf` (feat, CR-01 GREEN)
+- FOUND: `453192a` (test, CR-02 baseline)
+- FOUND: `9b59385` (fix, CR-02)
+- FOUND: `3ca8a74` (feat, live repair)
+- FOUND: `d98b6de` (docs, this summary)
+
 ---
 *Phase: 04-vertical-slice-csv-to-analytical-postgresql*
 *Completed: 2026-08-14*
