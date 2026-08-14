@@ -282,7 +282,7 @@ Plans:
 
 **Wave 1**
 
-- [ ] 05-01-PLAN.md — Vault deployed: namespace, both Helm values profiles, scripted unseal (D-02), idempotent bootstrap (mounts, auth method, both roles/policies, audit device), restart-persistence proof (wave 1)
+- [x] 05-01-PLAN.md — Vault deployed: namespace, both Helm values profiles, scripted unseal (D-02), idempotent bootstrap (mounts, auth method, both roles/policies, audit device), restart-persistence proof (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
