@@ -1,8 +1,8 @@
 ---
 phase: 05-vault-secrets-workload-identity
-reviewed: 2026-08-14T00:00:00Z
+reviewed: 2026-08-14T21:01:07Z
 depth: standard
-files_reviewed: 34
+files_reviewed: 35
 files_reviewed_list:
   - airflow/dags/_common/kpo.py
   - docs/adr/0009-openbao-licence-escape-hatch.md
@@ -38,302 +38,247 @@ files_reviewed_list:
   - tests/policy/test_values_profiles.py
   - tests/unit/test_csv_processor_cli.py
   - tests/unit/test_secrets_resolver.py
+  - tests/unit/test_vault_bootstrap.py
 findings:
-  critical: 2
+  critical: 0
   warning: 7
   info: 2
-  total: 11
+  total: 9
 status: issues_found
 ---
 
 # Phase 05: Code Review Report
 
-**Reviewed:** 2026-08-14T00:00:00Z
+**Reviewed:** 2026-08-14T21:01:07Z
 **Depth:** standard
-**Files Reviewed:** 34
+**Files Reviewed:** 35
 **Status:** issues_found
 
 ## Summary
 
-This phase's steady-state design is sound: the `vault://` opaque-reference scheme,
-the exact non-wildcard ServiceAccount role bindings, the KV v2 least-privilege
-policies (`etl/data/analytics-db`, `etl/data/minio` as exact paths, not globs), the
-audit-log tooling's deliberate refusal to ever read a `request`/`response` body, and
-the e2e test suite's non-vacuity controls are all well-built and match what the
-accompanying documentation claims for the **already-bootstrapped, currently-live**
-cluster.
+This is a re-review of the same file set an earlier `05-REVIEW.md` pass covered before
+gap-closure plan 05-06 landed. Both of that earlier review's Critical findings were
+independently re-verified against the current code and are now **confirmed fixed**:
+`_ensure_policy()` (`scripts/vault-bootstrap.py:288-324`) now reads the live policy body
+back via `read_policy()` and re-applies on drift (the former CR-02), and
+`_ensure_etl_secrets`/`_ensure_airflow_secrets` (`scripts/vault-bootstrap.py:565-700`) no
+longer depend on the three deleted Kubernetes Secrets — they source `etl/analytics-db`
+from a fresh `kubectl exec`-driven `ALTER ROLE` against the live CNPG primary and
+`etl/minio`/`airflow/connections/minio_default` from the live `data/minio-app` Secret
+(the former CR-01), with a dedicated offline regression suite
+(`tests/unit/test_vault_bootstrap.py`) now guarding both fixes. `docs/secrets-architecture.md`'s
+SEC-13 section was also rewritten to honestly scope what was and wasn't re-proven (a
+scoped Vault-only reinstall, not a full `kind delete cluster` rebuild), so the earlier
+review's WR-07 (overstated reproducibility claim) is resolved too. No new Critical-tier
+defect was found in this pass.
 
-The defects found here are concentrated in two places the "already-live" framing
-doesn't cover: (1) **`scripts/vault-bootstrap.py`'s idempotent "ensure" functions
-converge on presence, not on the target state** — a changed policy body or a changed
-namespace/policy-list binding on an existing role silently fails to apply on re-run,
-undermining the "least-privilege is maintainable over time" property this phase is
-supposed to deliver; and (2) **the bootstrap script's hardcoded dependency on three
-Kubernetes Secrets that no longer exist anywhere in this codebase's automation**,
-which breaks `make vault-bootstrap` on a genuinely fresh cluster — directly
-contradicting SEC-13 and this document's own claimed reproducibility. A smaller set
-of warnings covers incomplete exception handling in the new Vault-auth code path
-(`resolve_secret()` / `_build_common()`), a crash risk in the audit-tail tool on
-structurally-valid-but-null JSON fields, and a version-pinning gap for the Vault
-server image relative to this repo's own enforced convention.
+The steady-state design remains sound: the `vault://` opaque-reference scheme, the
+non-wildcard ServiceAccount role bindings, the least-privilege KV v2 policies (exact
+paths, never globs), the audit-tail tool's deliberate refusal to read `request`/`response`
+bodies, and the e2e suite's non-vacuity controls are all well-built.
+
+What remains open is a set of exception-handling and drift-detection gaps that were
+already present before 05-06 and were out of that plan's stated scope (it targeted only
+SEC-13/CR-01/CR-02): `resolve_secret()`'s `vault://` branch still does not catch every
+exception type its own `_vault_client()` helper can raise, `discover()` still lacks the
+catch-all-exception fix `ingest()` received in an earlier phase, `_ensure_kubernetes_role()`
+still only drift-corrects one of the four fields it accepts, `vault-audit-tail.py` still
+has an unguarded `None`-vs-absent-key crash risk, and Vault's own server/image version is
+still the only component in `helm/versions.env` without a companion pinned version key.
+Two additional, previously unflagged issues were found in this pass: a URI-parsing gap in
+`resolve_secret()`'s `file://` branch that silently drops a path segment instead of
+failing closed (currently unreachable — no call site uses `file://` yet), and a
+concrete illustration of copy-paste drift between the four duplicated
+`_port_forwarded_vault` helpers.
 
 Not re-flagged: `tls_disable = 1`, the single-share Shamir unseal, and the BUSL-1.1
-licence acceptance. All three are already argued in depth with a named migration
-trigger (ADR-0009, `docs/secrets-architecture.md` §2/§6, T-05-02/T-05-05) — re-listing
-an already-reasoned, explicitly-accepted risk here would not add information.
-
-## Critical Issues
-
-### CR-01: `vault-bootstrap.py` cannot bootstrap a genuinely fresh cluster — its only credential source was deleted
-
-**File:** `scripts/vault-bootstrap.py:416-463` (`_ensure_etl_secrets`) and `scripts/vault-bootstrap.py:466-504` (`_ensure_airflow_secrets`)
-**Issue:**
-
-`_ensure_etl_secrets`/`_ensure_airflow_secrets` populate `etl/analytics-db`,
-`etl/minio`, and `airflow/connections/minio_default`'s KV *values* by reading three
-Kubernetes Secrets — `csv-processor-db`, `csv-processor-s3` (namespace `etl`) and
-`airflow-minio-connection` (namespace `airflow`) — via `_kubectl_get_secret_field`
-(lines 367-413), on the branch taken whenever the corresponding Vault KV path does
-not yet exist (`except hvac.exceptions.InvalidPath:`, lines 434, 451, 492).
-
-`scripts/etl-secrets.sh` was the **only** script that ever created those three
-Secrets, and it was deleted outright in plan 05-03 once the migration completed
-(confirmed: `find . -iname etl-secrets.sh` returns nothing; every remaining
-reference to it in this repo is a comment/docstring, not a creation site — verified
-by grepping every `.sh`/`.py`/`.yaml`/`Makefile` in the repo). `scripts/stages/75-etl.sh`'s
-own header comment documents the deletion explicitly. No other script creates these
-three specific names — `scripts/minio-credentials.sh` creates `minio-root`/`minio-app`
-(different names, different fields: `rootUser`/`rootPassword`/`secretKey`), and
-`scripts/airflow-metadata-secret.sh` creates `airflow-metadata`/`airflow-fernet-key`/
-`airflow-api-secret-key` (unrelated to MinIO).
-
-Consequence: on a genuinely fresh cluster (`make cluster-down && make cluster-up`,
-which destroys the kind nodes and their PVCs, then `make vault-unseal &&
-make vault-bootstrap`), Vault has no KV data yet, so `_ensure_etl_secrets` takes the
-`InvalidPath` branch, calls `_kubectl_get_secret_field(..., name="csv-processor-db",
-...)`, which shells out to `kubectl get secret -n etl csv-processor-db` — a Secret
-that is never created by any current stage script — and raises `RuntimeError`. This
-propagates out of `bootstrap()` to `main()`'s `except (RuntimeError,
-hvac.exceptions.VaultError)` handler, which prints an error and returns exit code 1.
-By this point `bootstrap()` has already run every earlier step successfully (KV
-mounts, kubernetes auth method, both policies, both roles, the audit device — see
-the call order at lines 523-604), so Vault is left **partially bootstrapped: every
-structural object exists, but no credential value is ever written**. Every KPO pod's
-`resolve_secret("vault://etl/...")` and Airflow's `VaultBackend` lookup of
-`minio_default` then fail — the entire platform is unusable after a cluster rebuild,
-with no documented recovery path.
-
-This directly contradicts `docs/secrets-architecture.md`'s own SEC-13 claim (see
-WR-07 below) and this project's WSL2-realistic assumption that a cluster rebuild is
-routine, not a rare edge case (`docs/adr/0009-openbao-licence-escape-hatch.md`'s own
-"a cluster restart is a realistic every-morning event" framing, and
-`test_dev_secrets_reproducible.py`'s own module docstring, which documents this
-exact "clean checkout" path as the intended manual verification for SEC-13's other
-half).
-
-**Fix:** Point the two `_ensure_*_secrets` functions at Secrets that are actually
-still created by live automation, mirroring the pattern
-`scripts/airflow-metadata-secret.sh` already uses for the metadata DB (sourcing from
-CNPG's own generated `airflow-db-app` Secret rather than a hand-rolled one):
-
-```python
-# etl/minio#secret_key: source from the still-live minio-app Secret
-# (scripts/minio-credentials.sh), field "secretKey" -- not the deleted
-# csv-processor-s3.
-secret_key = _kubectl_get_secret_field(
-    kubectl_context, namespace="data", name="minio-app", key="secretKey",
-)
-
-# etl/analytics-db#dsn: source from CNPG's own generated analytics-db-app
-# Secret (helm/values/local/cnpg-analytics.yaml: "generates the
-# analytics-db-app Secret itself, D-14") -- not the deleted csv-processor-db.
-```
-
-For `airflow/connections/minio_default#conn_uri`, either construct the URI from the
-same `minio-app` Secret at bootstrap time (mirroring how the value was originally
-assembled), or accept that this one field has no live source and make bootstrap
-prompt for / generate it explicitly rather than silently depending on a Secret nothing
-creates. Either way, add an e2e or policy test that actually exercises "Vault has no
-KV data yet" (not just "Vault is already fully populated," which is all
-`test_dev_secrets_reproducible.py` currently proves) so this class of regression is
-caught automatically rather than only on a manual clean-checkout run.
-
-### CR-02: `_ensure_policy()` never re-applies a changed policy body — least-privilege edits silently don't take effect
-
-**File:** `scripts/vault-bootstrap.py:279-286`
-**Issue:**
-
-```python
-def _ensure_policy(client: hvac.Client, name: str, policy_hcl: str) -> None:
-    """(c)/(e) Write a policy, if not already present under `name`."""
-    existing = client.sys.list_policies()["data"]["policies"]
-    if name in existing:
-        print(f"policy {name}: already present")
-        return
-    client.sys.create_or_update_policy(name=name, policy=policy_hcl)
-    print(f"policy {name}: created")
-```
-
-This checks only whether a policy **name** exists, never whether its live HCL body
-matches the `policy_hcl` argument this run is passing. If `_CSV_PROCESSOR_POLICY` or
-`_AIRFLOW_POLICY` (lines 86-93) is edited in a future change — for example, to
-**narrow** access after discovering a mistake, which is exactly the kind of
-least-privilege correction this platform's own threat model exists to support — a
-re-run of this idempotent bootstrap against the already-bootstrapped, live Vault
-(the script's own documented, normal way to apply a change) silently prints "already
-present" and skips the write. The old, wider policy stays live. Nothing in this
-script, and nothing in `tests/e2e/vault/test_dev_secrets_reproducible.py`'s
-`_snapshot()` (which captures roles, mounts, audit devices and KV versions, but never
-a policy's own body — `tests/e2e/vault/test_dev_secrets_reproducible.py:100-112`),
-would ever surface that the intended tightening did not take effect.
-
-This is a real regression relative to this same file's own precedent:
-`_ensure_kubernetes_role` (lines 289-354) was specifically extended in plan 05-03 to
-detect and correct drift in `bound_service_account_names` for exactly this reason
-("plan 05-03's whole point is correcting the `airflow` role's plan-05-01-era best
-guess... so this now reads the EXISTING role's live binding and re-writes it... only
-when it differs"). The identical problem exists one level down, in the policy body
-itself — the actual permission grant — and was not given the same treatment.
-
-**Fix:** Compare the live policy body against `policy_hcl` (e.g.
-`client.sys.read_policy(name=name)["data"]["rules"]` or the equivalent `hvac` call)
-and re-write when it differs, using the same "already present" / "drifted -- correcting"
-print-branch shape `_ensure_kubernetes_role` already establishes:
-
-```python
-def _ensure_policy(client: hvac.Client, name: str, policy_hcl: str) -> None:
-    existing = client.sys.list_policies()["data"]["policies"]
-    if name in existing:
-        current_hcl = client.sys.read_policy(name=name)["data"]["policy"]
-        if current_hcl.strip() == policy_hcl.strip():
-            print(f"policy {name}: already present")
-            return
-        print(f"policy {name}: body drifted -- correcting")
-    client.sys.create_or_update_policy(name=name, policy=policy_hcl)
-    print(f"policy {name}: {'updated' if name in existing else 'created'}")
-```
+licence acceptance. All three are already argued in depth with a named migration trigger
+(ADR-0009, `docs/secrets-architecture.md` §2/§6, T-05-02/T-05-05) — re-listing an
+already-reasoned, explicitly-accepted risk here would not add information.
 
 ## Warnings
 
-### WR-01: `resolve_secret()`'s vault branch doesn't catch connectivity/filesystem errors, breaking its own fail-closed contract
+### WR-01: `resolve_secret()`'s vault branch doesn't catch every exception `_vault_client()` can raise
 
-**File:** `packages/dataplat/src/dataplat/secrets/resolver.py:33-55, 91-109`
-**Issue:** `_vault_client()` (lines 33-55) does three things that can each raise an
-exception type the caller (`resolve_secret`'s vault branch, lines 91-109) does not
-handle: `os.environ["VAULT_ADDR"]` / `os.environ["VAULT_K8S_ROLE"]` raise `KeyError`
-if unset; `token_path.read_text(...)` raises `OSError` (e.g. `FileNotFoundError`) if
-the pod's ServiceAccount token isn't mounted; and `client.auth.kubernetes.login(...)`
-can raise `requests.exceptions.ConnectionError`/`Timeout` (not a subclass of
-`hvac.exceptions.VaultError`) if Vault is transiently unreachable — a realistic
-scenario immediately after a `vault-0` restart or a DNS blip. `_vault_client()` is
-called *inside* the vault branch's `try:` (line 99), but that branch only catches
-`hvac.exceptions.VaultError` and `KeyError` (lines 104, 107). A `ConnectionError` or
-`OSError` from `_vault_client()` propagates as a raw, undocumented exception type,
-contradicting the module's own docstring: "A raw, unresolved reference string is
-never returned from any code path; every unsupported case raises instead" (implying a
-single, well-typed `SecretResolutionError` surface) and the module-level docstring's
-"fails closed on everything else" framing.
-**Fix:** Wrap the whole vault branch's body (including the `_vault_client()` call) in
-a broader `except Exception as exc:` that still re-raises as `SecretResolutionError`,
-or give `_vault_client()` its own try/except that converts `KeyError`/`OSError`/
-`requests.exceptions.RequestException` into a `SecretResolutionError` at the source,
-so every failure mode funnels through the one documented exception type.
+**File:** `packages/dataplat/src/dataplat/secrets/resolver.py:33-55` (`_vault_client`) and `:91-109` (the `vault://` branch of `resolve_secret`)
+**Issue:** `_vault_client()` does three things, each of which can raise an exception
+type the caller does not handle:
 
-### WR-02: `except KeyError` in the same block conflates two unrelated failure causes
+- `os.environ["VAULT_ADDR"]` (line 48) and `os.environ["VAULT_K8S_ROLE"]` (line 51) raise
+  `KeyError` if either is unset on the pod.
+- `token_path.read_text(encoding="utf-8")` (line 52) raises `OSError`
+  (`FileNotFoundError` in the common case) if the projected ServiceAccount token isn't
+  present at the expected path.
+- `client.auth.kubernetes.login(...)` (lines 50-53) can raise
+  `requests.exceptions.ConnectionError`/`Timeout` if Vault is transiently unreachable —
+  a realistic scenario immediately after a `vault-0` restart. These are not subclasses
+  of `hvac.exceptions.VaultError`; hvac only wraps Vault API *response* errors in that
+  hierarchy, not transport-level failures from the underlying `requests` call.
+
+`_vault_client()` is invoked *inside* the `try:` at line 99, but that block only catches
+`hvac.exceptions.VaultError` (line 104) and `KeyError` (line 107). An `OSError` or a
+`requests.exceptions.ConnectionError` from `_vault_client()` propagates as a raw,
+undocumented exception type, contradicting the module's own docstring promise: "A raw,
+unresolved reference string is never returned from any code path; every unsupported case
+raises instead" (lines 68-76), and the module-level docstring's "fails closed on
+everything else" framing (line 1).
+**Fix:** Wrap the client-setup step separately so every failure mode funnels through the
+one documented exception type:
+
+```python
+try:
+    client = _vault_client()
+except (KeyError, OSError) as exc:
+    msg = f"vault client setup failed for ref {ref!r}: {exc}"
+    raise SecretResolutionError(msg, context={"ref": ref}) from exc
+try:
+    secret = client.secrets.kv.v2.read_secret_version(mount_point=mount_point, path=path)
+except hvac.exceptions.VaultError as exc:
+    msg = f"vault read failed for ref {ref!r}: {exc}"
+    raise SecretResolutionError(msg, context={"ref": ref}) from exc
+```
+
+and either add `requests.exceptions.RequestException` to both `except` clauses, or give
+`_vault_client()` its own internal `try/except Exception` that re-raises a single,
+already-typed error before this function ever sees it.
+
+### WR-02: The `except KeyError` clause conflates two unrelated failure causes
 
 **File:** `packages/dataplat/src/dataplat/secrets/resolver.py:107-109`
-**Issue:** The `except KeyError as exc:` clause is written to catch
-`secret["data"]["data"][field]` (an unknown field in a *successfully-read* secret),
-but because `_vault_client()` is called in the same `try:`, a `KeyError` from
-`os.environ["VAULT_ADDR"]`/`os.environ["VAULT_K8S_ROLE"]` (see WR-01) lands in the
-same clause and is mis-reported as:
-`"vault secret at {mount_point}/{path} has no field {field!r}"` — actively
-misleading when the real cause is a missing environment variable on the pod, not a
-missing field in an otherwise-successful Vault read.
-**Fix:** Once WR-01 separates `_vault_client()`'s own failure modes from the KV-read
-failure modes, this clause will only ever see genuine missing-field cases and the
-message will be accurate again.
+**Issue:** Because `_vault_client()` is called inside the same `try:` that the
+`except KeyError` clause guards (see WR-01), a `KeyError` from
+`os.environ["VAULT_ADDR"]`/`os.environ["VAULT_K8S_ROLE"]` — a missing environment
+variable on the pod — lands in the clause written for `secret["data"]["data"][field]`
+(an unknown field in an *already-successfully-read* secret) and is reported as:
 
-### WR-03: `discover()` lacks the WR-01 (04-REVIEW.md) catch-all-exception fix that `ingest()` already received
-
-**File:** `packages/csv-processor/src/csv_processor/cli.py:154-208` (except clause at 197-205)
-**Issue:** `ingest()` (lines 240-323) was fixed, per its own docstring, so that
-`_write_xcom(_failure_receipt(doc))` runs for **any** exception, not only
-`DataPlatformError` — the docstring cites 04-REVIEW.md's WR-01 finding by name.
-`discover()`'s `_build_common()` call (line 171) is the exact same function, now
-doing Vault authentication as its first action (this phase's own addition), and per
-WR-01/WR-02 above that authentication path can raise a raw `KeyError`/`OSError`/
-`ConnectionError` that is not a `DataPlatformError`. `discover()`'s except clause
-(line 197) only catches `DataPlatformError`:
-
-```python
-    except DataPlatformError as exc:
-        _write_xcom({"status": "FAILED", ...})
-        raise
-    finally:
-        if pool is not None:
-            pool.close()
+```
+vault secret at etl/analytics-db has no field 'dsn'
 ```
 
-There is no `except Exception:` fallback. A non-`DataPlatformError` failure inside
-`_build_common()` (newly more likely because of the Vault-auth code path this phase
-introduced) propagates with **no** `{"status": "FAILED", ...}` XCom payload ever
-written — the pod still fails (Airflow still sees the non-zero exit code), but the
-forensic detail this command's own docstring promises ("writes a
-`{"status": "FAILED", ...}` payload for forensic `kubectl logs`/`cat` inspection...
-before re-raising") is silently skipped for exactly the failure class this phase
-added.
-**Fix:** Add the same `except Exception:` clause `ingest()` has, writing the
-`{"status": "FAILED", "error_type": type(exc).__name__, "error_message": str(exc)}`
-payload before re-raising.
+even when the real cause is a missing `VAULT_ADDR`/`VAULT_K8S_ROLE` env var and no
+Vault call was ever made. This directly conflicts with this project's own stated Core
+Value ("can be traced, explained... trusted") — a developer debugging a misconfigured
+pod is pointed at the wrong root cause. `tests/unit/test_secrets_resolver.py` does not
+cover this path either (`test_vault_scheme_wraps_a_missing_field_as_secret_resolution_error`
+only exercises a genuinely-missing field on a successful read), so nothing currently
+catches this regression.
+**Fix:** Once WR-01 separates `_vault_client()`'s own failure modes from the KV-read
+failure modes (moving the `_vault_client()` call out of the block guarded by
+`except KeyError`), this clause will only ever see genuine missing-field cases and the
+message becomes accurate again.
 
-### WR-04: `_ensure_kubernetes_role()`'s drift correction only checks `bound_service_account_names`, not namespaces, policies, or TTLs
+### WR-03: `discover()` still lacks the catch-all-exception fix `ingest()` already received
 
-**File:** `scripts/vault-bootstrap.py:289-354` (comparison at 335-344)
-**Issue:** The function accepts `bound_service_account_namespaces`, `policies`,
-`ttl` and `max_ttl` as part of the role definition, but the drift check that decides
-whether to skip the `create_role` call only compares `bound_service_account_names`:
+**File:** `packages/csv-processor/src/csv_processor/cli.py:152-208` (except clause at 197-205); compare `ingest()` at `:240-323` (except clauses at 300-319)
+**Issue:** `ingest()`'s own docstring documents that it writes a FAILED `Receipt` "on
+every exit path... for ANY exception -- not only `DataPlatformError`" (lines 251-254),
+and its code has both an `except DataPlatformError:` (line 300) and an
+`except Exception:` (line 303) clause to deliver that guarantee. `discover()` calls the
+exact same `_build_common()` (line 171) — now doing Vault authentication as its first
+action — but its except clause only catches `DataPlatformError`:
 
 ```python
-    current_sas = sorted(current.get("bound_service_account_names") or [])
-    target_sas = sorted(bound_service_account_names)
-    if current_sas == target_sas:
+except DataPlatformError as exc:
+    _write_xcom({"status": "FAILED", "error_type": type(exc).__name__, "error_message": str(exc)})
+    raise
+finally:
+    if pool is not None:
+        pool.close()
+```
+
+There is no `except Exception:` fallback. A non-`DataPlatformError` failure anywhere in
+`discover()`'s try body — `_build_common()` (see WR-01's uncaught exception types),
+`load_config()`, `ConfigRegistry(pool).sync(...)`, `metadata.get_or_create_dataset(...)`,
+or `discover_files(...)` — propagates with **no** `{"status": "FAILED", ...}` XCom
+payload ever written. The pod still fails (Airflow still observes the non-zero exit
+code), but the forensic detail `discover()`'s own docstring promises ("writes a
+`{"status": "FAILED", ...}` payload for forensic `kubectl logs`/`cat` inspection...
+before re-raising") is silently skipped for exactly this failure class.
+**Fix:** Add the same `except Exception:` clause `ingest()` has:
+
+```python
+except DataPlatformError as exc:
+    _write_xcom({"status": "FAILED", "error_type": type(exc).__name__, "error_message": str(exc)})
+    raise
+except Exception as exc:
+    _write_xcom({"status": "FAILED", "error_type": type(exc).__name__, "error_message": str(exc)})
+    raise
+finally:
+    if pool is not None:
+        pool.close()
+```
+
+### WR-04: `_ensure_kubernetes_role()`'s drift correction only checks `bound_service_account_names`
+
+**File:** `scripts/vault-bootstrap.py:327-392` (comparison at 365-376)
+**Issue:** The function accepts `bound_service_account_namespaces`, `policies`, `ttl`
+and `max_ttl` as part of a role's definition, but the drift check that decides whether
+to skip the `create_role()` call only compares `bound_service_account_names`:
+
+```python
+current_sas = sorted(current.get("bound_service_account_names") or [])
+target_sas = sorted(bound_service_account_names)
+if current_sas == target_sas:
+    print(f"role {name}: already present")
+    return
+```
+
+If a future change widens/narrows `bound_service_account_namespaces` or the `policies`
+list attached to a role while the SA-name set stays identical, a re-run of this
+idempotent bootstrap against an already-bootstrapped Vault silently reports "already
+present" and never applies the change — the same defect class `_ensure_policy()`
+(lines 288-324) was specifically rewritten to fix (that function's own docstring, lines
+298-300, claims it reuses "the same... convergence shape `_ensure_kubernetes_role`
+already established for role bindings" — an overstatement, since only one of that
+function's four accepted fields is actually drift-corrected). `tests/e2e/vault/test_dev_secrets_reproducible.py`'s
+`_snapshot()` captures each role's *entire* live definition before/after a same-Vault
+re-run, so it would catch this only if the target values themselves changed between two
+runs — which a same-binary idempotency test structurally cannot exercise.
+**Fix:** Extend the comparison to every field the caller can vary:
+
+```python
+if already_exists:
+    current = client.auth.kubernetes.read_role(name=name)
+    current_binding = (
+        sorted(current.get("bound_service_account_names") or []),
+        sorted(current.get("bound_service_account_namespaces") or []),
+        sorted(current.get("policies") or []),
+    )
+    target_binding = (
+        sorted(bound_service_account_names),
+        sorted(bound_service_account_namespaces),
+        sorted(policies),
+    )
+    if current_binding == target_binding:
         print(f"role {name}: already present")
         return
+    print(f"role {name}: binding drifted -- correcting")
 ```
-
-If a future change widens/narrows `bound_service_account_namespaces` (e.g. adding a
-second namespace) or the `policies` list attached to a role, while the SA-name set
-stays the same, a re-run silently returns early and never applies the change —
-the same class of silent-drift problem as CR-02, one level up (the role's own
-authorization surface, not just the policy body it points at).
-**Fix:** Extend the comparison to cover every field this function accepts:
-`bound_service_account_namespaces`, `policies`, and (if Vault's role-read response
-exposes them consistently) `ttl`/`max_ttl`, not just `bound_service_account_names`.
 
 ### WR-05: `vault-audit-tail.py` can crash on a structurally-valid entry with an explicit JSON `null` field
 
-**File:** `scripts/vault-audit-tail.py:161-190`
+**File:** `scripts/vault-audit-tail.py:174-177` (`_format_entry`), unprotected call site at `:216` (`render`)
 **Issue:**
 
 ```python
-def _format_entry(entry: dict[str, Any]) -> str:
-    timestamp = entry.get("time", "?")
-    path = entry.get("request", {}).get("path", "?")
-    metadata = entry.get("auth", {}).get("metadata") or {}
+timestamp = entry.get("time", "?")
+path = entry.get("request", {}).get("path", "?")
+
+metadata = entry.get("auth", {}).get("metadata") or {}
 ```
 
-`dict.get(key, default)` only substitutes `default` when `key` is **absent**, not
-when it is present with value `null`. If a Vault audit-log entry ever carries
-`"request": null` or `"auth": null` — plausible for pre-authentication or
-error-path entries, i.e. exactly the denied-login rows this tool exists to render
-clearly per its own module docstring's SEC-08 framing — `entry.get("request", {})`
-returns `None`, and `.get("path", "?")` on `None` raises `AttributeError`.
-`render()` (lines 193-217) calls `_format_entry(entry)` with no protection around
-this call — only the JSON-decode step has a try/except (lines 211-215) — so a single
-such entry crashes rendering of the **entire** requested tail window, directly
-contradicting the module docstring's explicit promise: "this tool never crashes over
-one bad line."
+`dict.get(key, default)` only substitutes `default` when `key` is **absent**, not when
+it is present with value `null`. If a Vault audit-log entry ever carries
+`"request": null` or `"auth": null` — plausible for pre-authentication or error-path
+entries, exactly the denied-login rows this tool exists to render clearly per its own
+SEC-08 framing — `entry.get("request", {})` returns `None`, and `.get("path", "?")` on
+`None` raises `AttributeError`. The same applies to `entry.get("auth", {})`: the
+trailing `or {}` on the `metadata` line only guards against `.get("metadata")` itself
+returning `None`; it never runs if `entry.get("auth", {})` already raised. `render()`
+(lines 193-217) calls `_format_entry(entry)` at line 216 with no protection — only the
+JSON-decode step (lines 211-215) has a try/except — so a single such entry crashes
+rendering of the **entire** requested tail window, contradicting the module docstring's
+explicit promise: "this tool never crashes over one bad line."
 **Fix:** Guard against an explicit `null`, not just an absent key:
 
 ```python
@@ -341,88 +286,133 @@ path = (entry.get("request") or {}).get("path", "?")
 metadata = (entry.get("auth") or {}).get("metadata") or {}
 ```
 
-### WR-06: Vault's server/image version is not independently pinned, unlike every other component in this repo
+### WR-06: Vault's server/image version has no companion pinned key, unlike every other component
 
-**File:** `helm/versions.env:20-27`
-**Issue:** Every other chart-based component in this file pins its chart version
-**and** its deployed image/app version as two separate keys —
-`MINIO_CHART_VERSION` / `MINIO_IMAGE_TAG`, `AIRFLOW_CHART_VERSION` /
-`AIRFLOW_IMAGE_TAG` — specifically because (per this project's own MinIO trap table)
-letting a chart's default image tag silently determine the deployed binary version is
-the exact anti-pattern this project's version-pinning discipline exists to prevent.
-`VAULT_CHART_VERSION=0.34.0` (line 27) has no companion `VAULT_IMAGE_TAG`/
-`VAULT_VERSION` key, and neither `helm/values/local/vault.yaml` nor
-`helm/values/ci/vault.yaml` sets `server.image.tag` (or equivalent) to override it.
-The deployed Vault **server** binary version (`2.0.3` today, per chart `0.34.0`'s
-default `appVersion`) therefore floats with whatever the chart's own default happens
-to be, and a future `VAULT_CHART_VERSION` bump could silently change the running
-Vault major/minor version with no corresponding, reviewable literal change anywhere
-this project's own `test_pinned_tool_versions_agree.py`-style discipline would catch.
-This is also a determinism gap relative to `.claude/CLAUDE.md`'s own constraint:
-"Same source data + configuration + processor version yields the same logical
-result... unavoidable non-determinism must be documented."
+**File:** `helm/versions.env:27` (compare `:23-26`)
+**Issue:** Every other chart-based component in this file pins its chart version **and**
+its deployed image/app version as two separate keys — `MINIO_CHART_VERSION` /
+`MINIO_IMAGE_TAG`, `AIRFLOW_CHART_VERSION` / `AIRFLOW_IMAGE_TAG` — specifically because
+(per this project's own documented MinIO trap) letting a chart's default image tag
+silently determine the deployed binary version is the exact anti-pattern this project's
+version-pinning discipline exists to prevent. `VAULT_CHART_VERSION=0.34.0` has no
+companion `VAULT_IMAGE_TAG`/`VAULT_VERSION` key, and neither `helm/values/local/vault.yaml`
+nor `helm/values/ci/vault.yaml` sets `server.image.tag` (both fully read for this
+review — no `image:` block appears in either). The deployed Vault **server** binary
+version (`2.0.3` today, per chart `0.34.0`'s default `appVersion`) therefore floats with
+whatever the chart's own default happens to be; a future `VAULT_CHART_VERSION` bump could
+silently change the running Vault major/minor version with no corresponding, reviewable
+literal anywhere in this repo. This is also a determinism gap relative to
+`.claude/CLAUDE.md`'s own constraint on documented, controlled non-determinism.
 **Fix:** Add an explicit `VAULT_IMAGE_TAG=2.0.3` (or `VAULT_VERSION=2.0.3`) key to
-`helm/versions.env`, and set `server.image.tag` in both values files from it (or via
-whatever override mechanism the other pinned components use), matching the
-MinIO/Airflow pattern.
+`helm/versions.env`, and set `server.image.tag` (or the chart's equivalent override) in
+both values files from it, matching the MinIO/Airflow pattern.
 
-### WR-07: `docs/secrets-architecture.md`'s SEC-13 reproducibility claim is very likely false, given CR-01
+### WR-07: `resolve_secret()`'s `file://` branch silently drops a path segment instead of failing closed
 
-**File:** `docs/secrets-architecture.md:230-239`
-**Issue:** This section states the manual verification procedure "run
-`make cluster-down && make cluster-up && make vault-unseal && make vault-bootstrap &&
-make vault-verify` from a clean checkout and confirm every Vault e2e test passes with
-no manual intervention beyond those four commands" as the documented, expected
-behavior for SEC-13's fresh-cluster half. Given CR-01, `make vault-bootstrap` will
-fail on exactly that sequence, on the current codebase, because its two credential-
-sourcing steps depend on Kubernetes Secrets that plan 05-03 deleted with no
-replacement. This document's own header states a self-imposed rigor bar — "Phase 5's
-own STRIDE threat register (T-05-12) treats an overstated claim in this document as a
-threat to this platform's Core Value... nothing here is stated without a citation to
-what actually proved it" — and nothing in the phase's SUMMARY/VALIDATION artifacts
-indicates this exact four-command sequence was re-run *after* plan 05-03 deleted
-`scripts/etl-secrets.sh` (05-04's own `test_dev_secrets_reproducible.py` only proves
-re-run idempotency against an *already-bootstrapped* Vault, never a fresh one — see
-that file's own docstring, "deliberately NOT run here").
-**Fix:** Once CR-01 is fixed, re-run the documented four-command sequence from an
-actual clean checkout and confirm it before leaving this claim as stated; until then,
-mark this section as a known gap rather than a proven guarantee.
+**File:** `packages/dataplat/src/dataplat/secrets/resolver.py:85-90`
+**Issue:**
+
+```python
+if parsed.scheme == "file":
+    try:
+        return Path(parsed.path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        ...
+```
+
+`urlsplit()` treats everything between `scheme://` and the next `/` as the URI's
+`netloc` (host), not part of `.path`. A `file://` reference with exactly two slashes
+before a relative-looking segment — e.g. a plausible typo `file://vault/audit/foo`
+instead of the correct `file:///vault/audit/foo` — parses to `netloc="vault"`,
+`path="/audit/foo"`; `Path(parsed.path)` silently reads from `/audit/foo`, **dropping
+the `vault` segment entirely**, rather than raising. This directly contradicts the
+module's own stated design guarantee: "Any unrecognized scheme, and any malformed or
+schemeless reference, raises rather than silently passing the raw reference through.
+That fail-closed behavior is SEC-15's entire point" (module docstring, lines 6-11) — the
+`file://` branch is the one scheme where a malformed reference is not rejected but
+silently reinterpreted as a different path. `tests/unit/test_secrets_resolver.py`'s own
+`test_file_scheme_returns_the_stripped_file_contents` only exercises the well-formed
+three-slash form (`f"file://{secret_file}"` where `secret_file` is always an absolute
+`tmp_path`), so this edge case is untested. **Currently unreachable in production:** a
+repo-wide search confirms no call site anywhere in this codebase actually constructs a
+`file://` reference today (only `env://` and `vault://` are used by `kpo.py`/`cli.py`),
+so the practical blast radius is nil until a future caller adopts this scheme.
+**Fix:** Reject any `file://` reference carrying a non-empty `netloc`, since a
+well-formed local-file reference should never have one:
+
+```python
+if parsed.scheme == "file":
+    if parsed.netloc:
+        msg = f"malformed file:// ref (unexpected host component {parsed.netloc!r}): {ref!r}"
+        raise SecretResolutionError(msg, context={"ref": ref})
+    try:
+        return Path(parsed.path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        ...
+```
 
 ## Info
 
 ### IN-01: `.secrets/vault-init.json` has a brief default-permission window before `chmod`
 
-**File:** `scripts/vault-unseal.py:189-201`
+**File:** `scripts/vault-unseal.py:198-201`
 **Issue:**
 
 ```python
-    _INIT_FILE.write_text(json.dumps(payload), encoding="utf-8")
-    os.chmod(_INIT_FILE, 0o600)
+_INIT_FILE.write_text(json.dumps(payload), encoding="utf-8")
+os.chmod(_INIT_FILE, 0o600)  # noqa: PTH101
 ```
 
-Between `write_text()` and `chmod()`, the file briefly exists at the process's
-default `umask`-derived permissions (commonly `0o644`) before being tightened to
-`0o600`. Low practical risk given this is explicitly a single-user, local-only
-WSL2 tool with no other untrusted local user in scope, but it's a cheap fix.
-**Fix:** Create the file pre-restricted, e.g.
-`fd = os.open(_INIT_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)` then
-`os.fdopen(fd, "w")`, so the permissive window never exists.
+Between `write_text()` and `chmod()`, the file briefly exists at the process's default
+`umask`-derived permissions (commonly `0o644`) before being tightened to `0o600`. Low
+practical risk given this is explicitly a single-user, local-only WSL2 tool with no
+other untrusted local user in scope, but the fix is cheap and this file holds the
+cluster's Vault root token.
+**Fix:** Create the file pre-restricted:
 
-### IN-02: Stale comments in `scripts/vault-bootstrap.py` reference the now-deleted `scripts/etl-secrets.sh` as if it still exists
+```python
+fd = os.open(_INIT_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(json.dumps(payload))
+```
 
-**File:** `scripts/vault-bootstrap.py:26, 36, 375, 422, 473`
-**Issue:** Several docstrings describe the source Secrets as "already created (Phase
-4)" by `scripts/etl-secrets.sh` in the present tense, e.g. line 375: "the live
-`csv-processor-db`/`csv-processor-s3` Kubernetes Secrets `scripts/etl-secrets.sh`
-already created (Phase 4)." That script no longer exists (see CR-01) — these
-comments are the same stale assumption baked into prose, and likely contributed to
-CR-01 going unnoticed, since the code's own documentation asserts a source of truth
-that is no longer there to check against.
-**Fix:** Once CR-01 is fixed, update these comments to describe the new (live)
-credential source rather than the deleted script.
+### IN-02: The duplicated `_port_forwarded_vault` helper has already drifted between its four copies
+
+**File:** `scripts/vault-bootstrap.py:240-243`, `scripts/vault-unseal.py:183-186` vs. `tests/e2e/vault/conftest.py:193-198`, `tests/e2e/vault/test_unseal_survives_restart.py:125-130`
+**Issue:** This repository deliberately duplicates small helpers rather than sharing
+them through a library module (stated explicitly in several of these functions' own
+docstrings). The two `scripts/*.py` copies' cleanup is:
+
+```python
+finally:
+    proc.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=10)
+```
+
+while both `tests/e2e/vault/*.py` copies are:
+
+```python
+finally:
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+```
+
+The script-side copies never escalate to `SIGKILL` if the `kubectl port-forward`
+process ignores `SIGTERM` within 10s — the timeout is silently swallowed and the
+process can be left running, orphaned, still holding its local port. This is a small,
+concrete illustration of the exact copy-paste drift risk the "duplicate, don't share"
+convention invites: two of the four copies already disagree on a real behavior, not
+just formatting. Low impact (`kubectl port-forward` reliably honors `SIGTERM`), but
+worth fixing given how many places this exact snippet is now pasted.
+**Fix:** Add the same `except subprocess.TimeoutExpired: proc.kill()` escalation to
+both `scripts/vault-bootstrap.py` and `scripts/vault-unseal.py`'s copies.
 
 ---
 
-_Reviewed: 2026-08-14T00:00:00Z_
+_Reviewed: 2026-08-14T21:01:07Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
