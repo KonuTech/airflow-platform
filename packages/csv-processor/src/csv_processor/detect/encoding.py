@@ -64,6 +64,8 @@ from typing import TYPE_CHECKING, Final
 import chardet
 from charset_normalizer import from_bytes
 
+from dataplat.errors import EncodingDetectionError
+
 if TYPE_CHECKING:
     from charset_normalizer.models import CharsetMatch, CharsetMatches
 
@@ -256,3 +258,34 @@ def _looks_like_unmarked_wide_encoding(sample: bytes) -> bool:
     if not sample:
         return False
     return (sample.count(0) / len(sample)) > _WIDE_CHAR_NUL_RATIO_THRESHOLD
+
+
+def decode_strict(sample: bytes, detection: EncodingDetection) -> str:
+    """Decode ``sample`` with ``detection.encoding``, raising on any invalid byte.
+
+    Proves the corpus's own stated policy: "the reader must declare
+    strict/replace/surrogateescape... the default (strict) raises, so the
+    choice cannot be made by accident" -- ``errors="strict"`` is used
+    unconditionally here; a configurable error-handling mode is not this
+    plan's concern.
+
+    Args:
+        sample: The raw bytes to decode.
+        detection: A prior ``detect_encoding`` result naming the encoding to
+            decode with.
+
+    Returns:
+        The decoded text.
+
+    Raises:
+        EncodingDetectionError: ``sample`` contains a byte sequence that is
+            not valid under ``detection.encoding``.
+    """
+    try:
+        return sample.decode(detection.encoding, errors="strict")
+    except UnicodeDecodeError as exc:
+        msg = f"cannot decode sample as {detection.encoding!r}: {exc}"
+        raise EncodingDetectionError(
+            msg,
+            context={"diagnostic_code": "undecodable-bytes", "encoding": detection.encoding},
+        ) from exc

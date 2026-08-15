@@ -34,7 +34,8 @@ from charset_normalizer import from_bytes
 from tools.corpus.generators import generate_corpus
 from tools.corpus.manifest import load_manifest
 
-from csv_processor.detect.encoding import EncodingDetection, detect_encoding
+from csv_processor.detect.encoding import EncodingDetection, decode_strict, detect_encoding
+from dataplat.errors import EncodingDetectionError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -229,3 +230,28 @@ def test_two_detectors_disagreeing_returns_undetermined_not_a_guess() -> None:
     cn_name = codecs.lookup(cn_best.encoding).name if cn_best is not None else None
     if cn_name != cd_name:
         assert detection.source == "undetermined"
+
+
+def test_decode_strict_raises_undecodable_bytes_on_39s_spliced_garbage(corpus: Path) -> None:
+    """39_utf8_invalid_sequences.csv: decode_strict raises with the corpus's own diagnostic code."""
+    sample = (corpus / "39_utf8_invalid_sequences.csv").read_bytes()
+    detection = EncodingDetection("utf-8", 1.0, "contract")
+
+    with pytest.raises(EncodingDetectionError) as exc_info:
+        decode_strict(sample, detection)
+
+    assert exc_info.value.context["diagnostic_code"] == "undecodable-bytes"
+    assert exc_info.value.context["encoding"] == "utf-8"
+
+
+def test_decode_strict_succeeds_on_genuinely_valid_bytes() -> None:
+    """decode_strict is not just a raiser -- it returns the decoded text on clean input."""
+    detection = EncodingDetection("utf-8", 1.0, "contract")
+    assert decode_strict(b"id,name\n1,ok\n", detection) == "id,name\n1,ok\n"
+
+
+def test_cp1250_and_windows_1250_canonicalize_to_the_same_codec() -> None:
+    """Pitfall 6: "cp1250" (charset-normalizer) and "Windows-1250" (chardet) are one codec."""
+    # The fact `_best_corroborating_match`'s canonicalization step depends on,
+    # proven directly against stdlib rather than through any corpus fixture.
+    assert codecs.lookup("cp1250").name == codecs.lookup("Windows-1250").name == "cp1250"
