@@ -588,17 +588,19 @@ HAVING now() - COALESCE(MAX(f.discovered_at), d.created_at)
 
 **If this table is empty:** N/A — see entries above. Every `[ASSUMED]`-tagged claim in this document is captured here.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should the custom Airflow image also carry `otel` for the CI (LocalExecutor) profile, or is CI exempt entirely?**
    - What we know: D-16 (Claude's discretion, already exercised in ROADMAP-level planning) leans toward CI staying template/lint-only with monitoring disabled; CI's `helm/values/ci/airflow.yaml` should therefore NOT set `otel_on: True` regardless of what the image contains.
    - What's unclear: whether CI's `manifests` job (which does `helm template` + `kubeconform`) needs the custom image reference to exist at all, or whether CI can keep referencing the stock image tag since it never actually deploys it.
    - Recommendation: build ONE custom image, reference it in both values profiles' `defaultAirflowTag` (consistency, avoids a second image to maintain), but leave `otel_on` unset/False in the CI values file. The image build itself does not need to run in CI unless CI later gains a live-cluster job that exercises tracing end to end (not currently planned per D-16).
+   - **RESOLVED:** Followed exactly as recommended. Plan 07-04 Task 1 builds ONE `docker/airflow/Dockerfile`/`make image-airflow` target (no second, CI-only image). Plan 07-04 Task 2 repoints `defaultAirflowRepository`/`defaultAirflowTag` to that same image in BOTH `helm/values/local/airflow.yaml` and `helm/values/ci/airflow.yaml`, sets `config.traces.otel_on: "True"` in the `local` profile ONLY, and leaves it unset in `ci` — confirmed by Plan 07-04 Task 2's own acceptance criteria (`grep -n "otel_on" helm/values/local/airflow.yaml` matches; `grep -n "otel_on" helm/values/ci/airflow.yaml` returns no match).
 
 2. **Does `apache-airflow[otel]`'s actual dependency list include a psycopg-instrumentation package that would auto-instrument Airflow's OWN metadata-DB queries?**
    - What we know: the `otel` extra's exact package list is not enumerated in Airflow's own docs (only "Required for OpenTelemetry metrics/traces" is stated).
    - What's unclear: whether installing it has any incidental effect on Airflow's own metadata-DB query visibility (out of scope for this phase either way, since Airflow's metadata DB is explicitly not part of this phase's trace scope).
    - Recommendation: not worth resolving before planning; verify by inspecting the built image's `pip list` output once `docker/airflow/Dockerfile` exists (cheap, one build).
+   - **RESOLVED:** Deferred exactly as recommended — not investigated further during planning (out of this phase's trace scope either way, since Airflow's own metadata-DB queries are never part of OBS-10's traced path). The recommended cheap-verification step is exercised as a side effect of Plan 07-04 Task 1's own acceptance criteria, which already runs `docker run --rm airflow:test pip list | grep -i opentelemetry` against the built image — no separate investigation needed.
 
 ## Environment Availability
 
