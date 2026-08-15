@@ -4,6 +4,15 @@ Covers ``hash_config()``'s canonicalization stability (same hash across
 repeated calls and key-reordered YAML, a different hash on any value
 change) and ``load_config()``'s merge-then-validate-then-wrap-errors
 behavior.
+
+``_CUSTOMERS_DOCUMENT``/``_CUSTOMERS_DOCUMENT_REORDERED`` carry a
+``columns:`` block (06-02 Task 1/3) purely to stay valid: Phase 6 makes
+``columns:`` a required ``DatasetConfig`` field (D-18), so both documents
+need the same update ``test_batching_config.py`` needed for the identical
+reason. The block is identical (same list order) in both documents --
+list element order is semantic and deliberately untouched by this test's
+"reorder dict keys" exercise, unlike the five sections that already
+demonstrate it.
 """
 
 from __future__ import annotations
@@ -38,6 +47,32 @@ _CUSTOMERS_DOCUMENT = {
     },
     "load": {"strategy": "merge", "target": "normalized.customers"},
     "batching": {"max_units_per_run": 100},
+    "columns": [
+        {
+            "name": "customer_id",
+            "type": "string",
+            "nullable": False,
+            "required": True,
+            "business_key": True,
+            "description": "Natural business key for a customer record",
+        },
+        {"name": "name", "type": "string", "nullable": False, "required": True},
+        {"name": "country", "type": "string", "nullable": False, "required": True},
+        {
+            "name": "birth_date",
+            "type": "date",
+            "nullable": True,
+            "required": True,
+            "format": "%Y-%m-%d",
+        },
+        {
+            "name": "event_ts",
+            "type": "timestamp",
+            "nullable": False,
+            "required": True,
+            "format": "%Y-%m-%dT%H:%M:%S%z",
+        },
+    ],
 }
 
 # Same document, deliberately reordered at every dict level: dataplat.config.
@@ -62,6 +97,32 @@ _CUSTOMERS_DOCUMENT_REORDERED = {
     },
     "config_schema_version": 1,
     "dataset": "customers",
+    "columns": [
+        {
+            "name": "customer_id",
+            "type": "string",
+            "nullable": False,
+            "required": True,
+            "business_key": True,
+            "description": "Natural business key for a customer record",
+        },
+        {"name": "name", "type": "string", "nullable": False, "required": True},
+        {"name": "country", "type": "string", "nullable": False, "required": True},
+        {
+            "name": "birth_date",
+            "type": "date",
+            "nullable": True,
+            "required": True,
+            "format": "%Y-%m-%d",
+        },
+        {
+            "name": "event_ts",
+            "type": "timestamp",
+            "nullable": False,
+            "required": True,
+            "format": "%Y-%m-%dT%H:%M:%S%z",
+        },
+    ],
 }
 
 

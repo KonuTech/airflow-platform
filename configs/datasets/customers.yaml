@@ -37,3 +37,40 @@ load:
   target: normalized.customers
 batching:
   max_units_per_run: 100
+
+# columns: is D-18's source of truth for per-column type/nullable/required/
+# business_key/semantics, cross-validated against deduplication.keys above
+# (customer_id here is business_key: true, matching keys: [customer_id]).
+# Column order matches normalized.customers's real column order and the
+# strptime formats verified against tests/fixtures/slice-corpus.yaml's
+# generator manifest (birth_date renders as "1950-03-14"; event_ts renders
+# as "2026-01-05T08:15:00Z" -- %z accepts a literal "Z" as UTC since
+# Python 3.7). The opt-in filename-mask and normalization/locale blocks are
+# deliberately absent from this file: customers has no filename-mask
+# delivery shape (D-10) and no numeric/currency columns needing a locale
+# profile (D-12's consequence) -- not an oversight.
+columns:
+  - name: customer_id
+    type: string
+    nullable: false
+    required: true
+    business_key: true
+    description: "Natural business key for a customer record"
+  - name: name
+    type: string
+    nullable: false
+    required: true
+  - name: country
+    type: string
+    nullable: false
+    required: true
+  - name: birth_date
+    type: date
+    nullable: true
+    required: true
+    format: "%Y-%m-%d"
+  - name: event_ts
+    type: timestamp
+    nullable: false
+    required: true
+    format: "%Y-%m-%dT%H:%M:%S%z"

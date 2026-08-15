@@ -14,3 +14,12 @@
 # meta.config_versions row for each one.
 
 config_schema_version: 1
+
+# Schema-evolution policy defaults (D-03/D-04). Flat top-level keys, not a
+# nested `schema_evolution:` block: load_config's merge is
+# `{**defaults, **dataset}` — top-level only (config/loader.py) — so a dataset
+# overriding one sub-key of a nested block would silently lose every sibling
+# default (Pitfall 7). A dataset overrides either key individually if it
+# needs different behavior; neither is required to override both.
+schema_evolution_on_new_column: evolve
+schema_evolution_on_missing_or_retyped_column: freeze
