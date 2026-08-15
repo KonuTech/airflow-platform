@@ -157,3 +157,9 @@ None — no external service configuration required.
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+- All 9 files claimed created/modified (7 source/test files + REQUIREMENTS.md + this SUMMARY.md) confirmed present on disk.
+- All 4 commit hashes (`bf740d9`, `3d2fdc5`, `c25516a`, `6ea1d3c`) confirmed present in `git log --oneline --all`.
+- No missing items.
