@@ -109,3 +109,75 @@ def test_a_simultaneous_addition_and_disappearance_raises_breaking_dominates() -
 
     assert exc_info.value.context["diagnostic_code"] == "schema-column-disappeared"
     assert exc_info.value.context["column"] == "amount"
+
+
+def test_classify_schema_change_has_no_cross_call_state_leakage_d05() -> None:
+    """D-05: a breaking classification for one file never affects another file's call.
+
+    ``classify_schema_change`` is called PER FILE and is pure (no globals,
+    no caching, no I/O) -- this proves that property empirically rather
+    than just asserting it: a breaking call immediately followed by an
+    unrelated compatible call must not raise, and the reverse must also
+    hold. If any hidden module-level state existed, a breaking call could
+    poison a later, unrelated compatible call (or vice versa) -- exactly
+    the cross-file blocking D-05 rules out, matching Phase 4's existing
+    independent-per-file Dynamic-Task-Mapping architecture (no new
+    run-level or batch-level gating logic is needed here).
+    """
+    breaking_old = [{"name": "amount", "type": "integer"}]
+    breaking_new = [{"name": "amount", "type": "decimal"}]
+    compatible_old = [{"name": "id", "type": "string"}]
+    compatible_new = [{"name": "id", "type": "string"}, {"name": "note", "type": "string"}]
+
+    with pytest.raises(IncompatibleSchemaError):
+        classify_schema_change(breaking_old, breaking_new)
+
+    # Immediately after a breaking call: an unrelated compatible call must
+    # NOT raise, proving the preceding breaking call left no state behind.
+    findings = classify_schema_change(compatible_old, compatible_new)
+    assert len(findings) == 1
+    assert findings[0].change_type == "column_added"
+
+    # And the reverse direction: a compatible call followed immediately by
+    # a breaking call still raises exactly as it would in isolation.
+    with pytest.raises(IncompatibleSchemaError):
+        classify_schema_change(breaking_old, breaking_new)
+
+
+# QUAL-12 requires schema evolution to be tested for compatible and
+# breaking changes. That is proven by this whole file, but these two
+# tests are named explicitly so a future reader can find where SCHEMA-04
+# and SCHEMA-05 are proven without grepping.
+#
+# Corpus-fixture scope note: the corpus fixture named 16_extra_columns.csv
+# (tagged for SCHEMA-05 among other requirements) is deliberately NOT
+# reused here. That fixture's expectations describe ROW-LEVEL surplus
+# fields -- some data rows in that file simply have more fields than the
+# header -- which is RaggedRowGuard's existing row-shape handling over in
+# the pipeline engine module, a different concern from this function's
+# HEADER-LEVEL column-name-list comparison. No fixture in the corpus
+# actually exercises header-level schema evolution end-to-end; that is
+# expected, not a gap -- this capability is corpus-independent domain
+# logic per 06-PATTERNS.md's "No Analog Found" table, and its test oracle
+# is this plan's own behavior specification, proven by the synthetic
+# cases in this file, not the corpus.
+def test_compatible_change_is_tested() -> None:
+    old = [{"name": "id", "type": "string"}]
+    new = [{"name": "id", "type": "string"}, {"name": "region", "type": "string"}]
+
+    findings = classify_schema_change(old, new)
+
+    assert len(findings) == 1
+    assert findings[0].change_type == "column_added"
+    assert findings[0].column == "region"
+
+
+def test_breaking_change_is_tested() -> None:
+    old = [{"name": "id", "type": "string"}, {"name": "region", "type": "string"}]
+    new = [{"name": "id", "type": "string"}]
+
+    with pytest.raises(IncompatibleSchemaError) as exc_info:
+        classify_schema_change(old, new)
+
+    assert exc_info.value.context["diagnostic_code"] == "schema-column-disappeared"
+    assert exc_info.value.context["column"] == "region"

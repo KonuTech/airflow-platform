@@ -35,6 +35,14 @@ row is staged, and every raise carries a ``diagnostic_code`` plus the
 offending column name (and both types, for a retype) in ``context`` --
 T-06-31's mitigation -- so a breaking classification is diagnosable without
 reading source code.
+
+**D-05** (a breaking classification in one file's task never blocks sibling
+files in the same batch/run) holds structurally, not by any run-level
+gating logic: ``classify_schema_change`` is called PER FILE and is pure --
+no globals, no caching, no I/O, no shared mutable state across calls. Two
+back-to-back calls, one breaking and one compatible, can never contaminate
+each other; this is a property to document and test, not code to write --
+see ``tests/unit/schema/test_evolution.py``'s dedicated D-05 proof test.
 """
 
 from __future__ import annotations
