@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from dataplat.models.record import RecordChunk
     from dataplat.pipeline.protocol import PipelineContext
 
-type _RowOutcome = tuple[str, ...] | RejectedRecord
+type _RowOutcome = tuple[str | bool | None, ...] | RejectedRecord
 
 _SPREADSHEET_EPOCHS: frozenset[str] = frozenset({"1900", "1904"})
 _TIME_COMPONENT_DIRECTIVES: tuple[str, ...] = ("%H", "%M", "%S")
@@ -141,7 +141,9 @@ def _resolve_excel_1900_serial(serial: int) -> dt.date | None:
     return base + dt.timedelta(days=serial)
 
 
-def _replace_field(row: tuple[str, ...], index: int, value: str) -> tuple[str, ...]:
+def _replace_field(
+    row: tuple[str | bool | None, ...], index: int, value: str
+) -> tuple[str | bool | None, ...]:
     """Return a copy of ``row`` with the field at ``index`` replaced by ``value``."""
     return (*row[:index], value, *row[index + 1 :])
 
@@ -299,18 +301,17 @@ class DateNormalizer(StreamingStage):
             string, unparseable rows entirely) minus the rows this stage
             rejected, plus one ``RejectedRecord`` per rejected row.
         """
-        kept: list[tuple[str, ...]] = []
+        kept: list[tuple[str | bool | None, ...]] = []
         rejected: list[RejectedRecord] = []
         for i, row in enumerate(chunk.rows):
             row_number = chunk.first_ordinal + i
-            # RecordChunk.rows is declared tuple[str, ...], but a nullable
-            # date/timestamp column's field may already be the real Python
-            # None here -- normalized to absent by an upstream
-            # NullTokenNormalizer (plan 06-11 Task 1's platform-wide
-            # convention) before this stage ever runs. cast() makes that
-            # narrower-than-declared runtime reality explicit for mypy
-            # rather than silently widening RecordChunk.rows' own type,
-            # which is out of this plan's file scope (models/record.py).
+            # RecordChunk.rows is declared tuple[str | bool | None, ...]
+            # (plan 06-11 Task 1's platform-wide convention), but THIS
+            # stage's declared column is never boolean-typed -- only a
+            # NullTokenNormalizer for this same nullable column (run before
+            # this stage, plan 06-16's wiring) can have already replaced its
+            # field with the real Python None. cast() makes that
+            # column-scoped narrowing explicit for mypy.
             raw_value = cast("str | None", row[self.column_index])
             if raw_value is None:
                 kept.append(row)
@@ -332,7 +333,7 @@ class DateNormalizer(StreamingStage):
         return StageResult(chunk=chunk.replace(rows=tuple(kept)), rejected=rejected, findings=[])
 
     def _parse_plain_format(
-        self, raw_value: str, row_number: int, row: tuple[str, ...]
+        self, raw_value: str, row_number: int, row: tuple[str | bool | None, ...]
     ) -> _RowOutcome:
         """Parse ``raw_value`` under ``self.format``, returning the updated row or a rejection.
 
@@ -384,7 +385,7 @@ class DateNormalizer(StreamingStage):
         return _replace_field(row, self.column_index, iso_value)
 
     def _parse_naive_local(
-        self, raw_value: str, row_number: int, row: tuple[str, ...], zone: ZoneInfo
+        self, raw_value: str, row_number: int, row: tuple[str | bool | None, ...], zone: ZoneInfo
     ) -> _RowOutcome:
         """Parse ``raw_value`` as a naive local time and classify/resolve it against ``zone``.
 
@@ -441,7 +442,7 @@ class DateNormalizer(StreamingStage):
         return _replace_field(row, self.column_index, resolved_utc.isoformat())
 
     def _parse_spreadsheet_serial(
-        self, raw_value: str, row_number: int, row: tuple[str, ...]
+        self, raw_value: str, row_number: int, row: tuple[str | bool | None, ...]
     ) -> _RowOutcome:
         """Convert ``raw_value`` from a spreadsheet serial integer.
 

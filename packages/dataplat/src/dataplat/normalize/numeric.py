@@ -66,19 +66,18 @@ _PERCENT_DIVISOR: Final = Decimal(100)
 _RAW_LINE_DELIMITER: Final = ","
 
 
-def _replace_field(row: tuple[str, ...], index: int, value: str | None) -> tuple[str, ...]:
+def _replace_field(
+    row: tuple[str | bool | None, ...], index: int, value: str | None
+) -> tuple[str | bool | None, ...]:
     """Return ``row`` with the field at ``index`` replaced by ``value``.
 
     ``value`` may be ``None`` when a contract-declared null sentinel
-    (corpus fixture 59) matches. ``RecordChunk.rows`` is typed
-    ``tuple[tuple[str, ...], ...]`` within this plan's own file scope
-    (``packages/dataplat/src/dataplat/normalize/numeric.py`` and its test
-    only); plan 06-11 Task 1 widens that element type to
-    ``tuple[str | None, ...]`` in ``dataplat.models.record`` itself -- the
-    platform-wide ``None`` convention this stage participates in without
-    owning. The ``# type: ignore`` below documents that expected, temporary
-    mismatch rather than an oversight; it is expected to become unnecessary
-    once plan 06-11 merges.
+    (corpus fixture 59) matches. ``row``'s element type is
+    ``str | bool | None``, matching ``RecordChunk.rows`` (widened by plan
+    06-11 Task 1's platform-wide ``None``/``bool`` convention): a field
+    belonging to some OTHER column may already have been normalized to
+    ``None`` or ``bool`` by an earlier-run stage before this one sees the
+    row.
 
     Args:
         row: The row to copy. Never mutated.
@@ -88,9 +87,22 @@ def _replace_field(row: tuple[str, ...], index: int, value: str | None) -> tuple
     Returns:
         A new row tuple with only the field at ``index`` changed.
     """
-    fields: list[str | None] = list(row)
+    fields: list[str | bool | None] = list(row)
     fields[index] = value
-    return tuple(fields)  # type: ignore[arg-type]
+    return tuple(fields)
+
+
+def _row_to_raw_line(row: tuple[str | bool | None, ...]) -> str:
+    """Reconstruct a diagnostic ``raw_line`` from a possibly-partially-normalized row.
+
+    A field belonging to some OTHER column may already have been replaced
+    with the real Python ``None`` or ``bool`` by an earlier-run stage
+    (plan 06-11's platform-wide convention) before this stage ever sees the
+    row -- ``str.join`` cannot accept those directly. ``None`` renders as
+    empty (matching how an absent value would have appeared in the original
+    unquoted CSV text); ``bool`` renders via ``str()``.
+    """
+    return _RAW_LINE_DELIMITER.join("" if field is None else str(field) for field in row)
 
 
 class NumericNormalizer(StreamingStage):
@@ -206,7 +218,7 @@ class NumericNormalizer(StreamingStage):
             declared null sentinel) and whose ``rejected`` holds one
             ``RejectedRecord`` per row this stage could not accept.
         """
-        kept: list[tuple[str, ...]] = []
+        kept: list[tuple[str | bool | None, ...]] = []
         rejected: list[RejectedRecord] = []
 
         for i, row in enumerate(chunk.rows):
@@ -249,7 +261,7 @@ class NumericNormalizer(StreamingStage):
                             "significant digits than the file actually carries, which "
                             "is a different, wrong identifier -- never coerced"
                         ),
-                        raw_line=_RAW_LINE_DELIMITER.join(row),
+                        raw_line=_row_to_raw_line(row),
                         error_column=self._column_name,
                     )
                 )
@@ -268,7 +280,7 @@ class NumericNormalizer(StreamingStage):
                             f"below the declared width {self._fixed_width}; the missing "
                             "character(s) are not recoverable from the file"
                         ),
-                        raw_line=_RAW_LINE_DELIMITER.join(row),
+                        raw_line=_row_to_raw_line(row),
                         error_column=self._column_name,
                     )
                 )
@@ -285,7 +297,7 @@ class NumericNormalizer(StreamingStage):
                             f"{self._column_name}={raw_value!r} is not a valid numeric "
                             "value under this column's declared locale profile"
                         ),
-                        raw_line=_RAW_LINE_DELIMITER.join(row),
+                        raw_line=_row_to_raw_line(row),
                         error_column=self._column_name,
                     )
                 )
