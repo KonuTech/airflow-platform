@@ -146,3 +146,12 @@ None - no external service configuration required.
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+All 7 claimed files verified present on disk (`tests/integration/test_staging_normalization.py`,
+`packages/dataplat/src/dataplat/load/staging.py`, `packages/dataplat/src/dataplat/discovery.py`,
+`packages/csv-processor/src/csv_processor/cli.py`, `tests/unit/test_discovery.py`,
+`tests/integration/test_discover_files.py`, `.planning/phases/06-universal-csv-engine-schema-contracts-normalization/deferred-items.md`).
+All 4 claimed commit hashes verified present in `git log --oneline --all`
+(`b69fec6`, `48d7472`, `76aab7b`, `540150b`). No missing items.
