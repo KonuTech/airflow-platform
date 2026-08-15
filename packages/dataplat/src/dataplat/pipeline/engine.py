@@ -83,7 +83,7 @@ class RaggedRowGuard(StreamingStage):
             source text -- see ``RejectedRecord.raw_line``'s docstring
             (WR-04).
         """
-        kept: list[tuple[str, ...]] = []
+        kept: list[tuple[str | bool | None, ...]] = []
         rejected: list[RejectedRecord] = []
         for i, row in enumerate(chunk.rows):
             if len(row) != chunk.expected_field_count:
@@ -94,7 +94,20 @@ class RaggedRowGuard(StreamingStage):
                         error_message=(
                             f"expected {chunk.expected_field_count} fields, got {len(row)}"
                         ),
-                        raw_line=self._field_delimiter.join(row),
+                        # `RecordChunk.rows`'s element type widened to admit
+                        # `None`/`bool` (plan 06-11, for normalizers staged
+                        # after this guard) -- `str.join` needs `str`, so a
+                        # non-str field is defensively rendered rather than
+                        # assumed away. In practice a ragged row reaching
+                        # this guard is always pre-normalization `str` only
+                        # fields; this is belt-and-braces, not a behavior
+                        # change for any currently-possible input.
+                        raw_line=self._field_delimiter.join(
+                            field
+                            if isinstance(field, str)
+                            else ("" if field is None else str(field))
+                            for field in row
+                        ),
                     )
                 )
                 continue  # never pad or truncate (polars #10585, CONTEXT.md D-01)
