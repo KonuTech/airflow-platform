@@ -22,8 +22,36 @@ class RecordChunk:
     """A bounded slice of parsed rows, addressed by ordinal, not byte offset.
 
     Attributes:
-        rows: The parsed rows in this chunk, each a tuple of raw field
-            strings in source column order.
+        rows: The parsed rows in this chunk, each a tuple of fields in
+            source column order. Every field starts life as a raw ``str``
+            (exactly what ``csv.reader`` returns), but plan 06-11 widens
+            this element type to ``str | None | bool`` -- the first stage in
+            the codebase to widen a row's field type beyond ``str``. This is
+            load-bearing, not a per-class stylistic choice:
+
+            - ``None`` is the platform-wide representation of an absent
+              field, written by
+              ``dataplat.normalize.boolean_null.NullTokenNormalizer`` when a
+              raw value exactly matches a contract-declared NULL token
+              (never a substring match; fixture 24's ``"NULL Industries"``
+              trap).
+            - ``bool`` is a normalized boolean column's mapped value,
+              written by ``dataplat.normalize.boolean_null.BooleanNormalizer``
+              when a raw value exactly matches a contract-declared true/false
+              token. An unmapped value is rejected outright rather than
+              defaulted (fixture 60), so a surviving boolean-column field is
+              always genuinely ``True``/``False``, never a guess.
+
+            Every normalizer staged AFTER a ``NullTokenNormalizer`` for the
+            same column -- including ``BooleanNormalizer`` for its own
+            column, and ``dataplat.normalize.unicode.UnicodeNormalizer`` for
+            every column, since it runs unconditionally LAST over the whole
+            row (plan 06-16's wiring) -- MUST treat an already-non-``str``
+            field (``None`` or ``bool``) as "already normalized, pass
+            through unchanged", never re-parsed, transformed or rejected as
+            if it were a string. Later Wave-2 plans (dates, numerics) may
+            widen this further; treat this docstring as the running record
+            of what a field may legitimately be, not a closed set.
         first_ordinal: The 0-based row ordinal of ``rows[0]`` within the
             file. This is the resume/checkpoint value — never a byte offset,
             since resuming inside a quoted multiline field is not possible.
@@ -31,7 +59,7 @@ class RecordChunk:
             expected to have, from the detected or configured header.
     """
 
-    rows: tuple[tuple[str, ...], ...]
+    rows: tuple[tuple[str | bool | None, ...], ...]
     first_ordinal: int
     expected_field_count: int
 

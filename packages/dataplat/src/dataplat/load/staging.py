@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.engine import RaggedRowGuard, run_streaming
@@ -196,7 +196,15 @@ class StagingLoader:
                 stream.chunks(),
                 stages=[RaggedRowGuard()],
             ):
-                surviving_rows = result.chunk.rows
+                # `RecordChunk.rows`'s element type widened to `str | bool |
+                # None` (plan 06-11), for normalizers this loader does not
+                # yet run: `stages=[RaggedRowGuard()]` above is the only
+                # stage in this call, and it never introduces a non-str
+                # field, so every field reaching the hash computation below
+                # is still genuinely `str`. Narrowed locally rather than
+                # widening `enriched_rows`/the hash encoding to tolerate
+                # types this call path can never actually produce.
+                surviving_rows = cast("tuple[tuple[str, ...], ...]", result.chunk.rows)
                 rows_in_chunk = len(surviving_rows)
                 rows_read += rows_in_chunk + len(result.rejected)
                 rows_rejected += len(result.rejected)
