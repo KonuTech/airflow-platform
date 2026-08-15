@@ -15,7 +15,9 @@ code under test here.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+import pytest
 
 from dataplat.models.identity import RunContext
 from dataplat.models.record import RecordChunk
@@ -35,11 +37,11 @@ def _make_context() -> PipelineContext:
     """
     return PipelineContext(
         run=RunContext(run_id=1, idempotency_key="test-run"),
-        config=None,  # type: ignore[arg-type] -- unused by the code under test
-        metadata=None,  # type: ignore[arg-type] -- unused by the code under test
-        objects=None,  # type: ignore[arg-type] -- unused by the code under test
-        db=None,  # type: ignore[arg-type] -- unused by the code under test
-        log=None,  # type: ignore[arg-type] -- unused by the code under test
+        config=None,  # type: ignore[arg-type]  # unused by the code under test
+        metadata=None,  # type: ignore[arg-type]  # unused by the code under test
+        objects=None,  # type: ignore[arg-type]  # unused by the code under test
+        db=None,  # type: ignore[arg-type]  # unused by the code under test
+        log=None,  # type: ignore[arg-type]  # unused by the code under test
     )
 
 
@@ -56,7 +58,7 @@ def _chunk(rows: list[tuple[str | None, ...]], *, first_ordinal: int = 0) -> Rec
     """
     width = len(rows[0]) if rows else 0
     return RecordChunk(
-        rows=tuple(rows),  # type: ignore[arg-type] -- see docstring: a field may be None
+        rows=tuple(rows),  # type: ignore[arg-type]  # see docstring: a field may be None
         first_ordinal=first_ordinal,
         expected_field_count=width,
     )
@@ -65,6 +67,18 @@ def _chunk(rows: list[tuple[str | None, ...]], *, first_ordinal: int = 0) -> Rec
 def _single_rejected(result_rejected: list[RejectedRecord]) -> RejectedRecord:
     assert len(result_rejected) == 1
     return result_rejected[0]
+
+
+def _field(rows: tuple[tuple[str, ...], ...], row_idx: int, col_idx: int) -> str | None:
+    """Read one field from ``RecordChunk.rows`` honestly typed as ``str | None``.
+
+    ``RecordChunk.rows`` is declared ``tuple[str, ...]``, but a
+    None-passthrough row genuinely carries the real Python ``None`` at
+    runtime (see ``_chunk()``'s docstring) -- this cast makes that explicit
+    for mypy instead of a bare index producing a statically-impossible
+    (and therefore ``unreachable``-flagged) ``is None`` comparison.
+    """
+    return cast("str | None", rows[row_idx][col_idx])
 
 
 # --- fixtures 22/23: format decides, the rendering carries no evidence -----
@@ -165,13 +179,8 @@ def test_ambiguous_dm_vs_md_dates_are_decided_by_the_declared_format_not_guessed
 def test_two_digit_year_pivot_missing_raises_before_any_row_is_processed() -> None:
     # A missing pivot is a contract-authoring mistake, not a row-level
     # problem -- it must fail loudly at construction time.
-    try:
+    with pytest.raises(ValueError, match="two_digit_year_pivot"):
         DateNormalizer(column_index=0, column_name="d", format="%d/%m/%y")
-    except ValueError as exc:
-        assert "two_digit_year_pivot" in str(exc)
-    else:  # pragma: no cover - defensive; the line above must always raise
-        msg = "expected ValueError for a missing two_digit_year_pivot"
-        raise AssertionError(msg)
 
 
 def test_two_digit_year_pivot_declared_reproduces_fixture_53_iso_values() -> None:
@@ -267,40 +276,23 @@ def test_excel_serial_45880_under_1904_epoch_differs_from_1900_epoch() -> None:
 
 
 def test_format_and_spreadsheet_epoch_both_supplied_raises() -> None:
-    try:
+    with pytest.raises(ValueError, match=r"format.*spreadsheet_epoch"):
         DateNormalizer(
             column_index=0,
             column_name="d",
             format="%Y-%m-%d",
             spreadsheet_epoch="1900",
         )
-    except ValueError as exc:
-        assert "format" in str(exc)
-        assert "spreadsheet_epoch" in str(exc)
-    else:  # pragma: no cover - defensive; the line above must always raise
-        msg = "expected ValueError when both format and spreadsheet_epoch are supplied"
-        raise AssertionError(msg)
 
 
 def test_neither_format_nor_spreadsheet_epoch_supplied_raises() -> None:
-    try:
+    with pytest.raises(ValueError, match=r"format.*spreadsheet_epoch"):
         DateNormalizer(column_index=0, column_name="d")
-    except ValueError as exc:
-        assert "format" in str(exc)
-        assert "spreadsheet_epoch" in str(exc)
-    else:  # pragma: no cover - defensive; the line above must always raise
-        msg = "expected ValueError when neither format nor spreadsheet_epoch is supplied"
-        raise AssertionError(msg)
 
 
 def test_unsupported_spreadsheet_epoch_raises() -> None:
-    try:
+    with pytest.raises(ValueError, match="1899"):
         DateNormalizer(column_index=0, column_name="d", spreadsheet_epoch="1899")
-    except ValueError as exc:
-        assert "1899" in str(exc)
-    else:  # pragma: no cover - defensive; the line above must always raise
-        msg = "expected ValueError for an unsupported spreadsheet_epoch"
-        raise AssertionError(msg)
 
 
 # --- acceptance criteria's literal smoke-test invocation --------------------
@@ -327,7 +319,8 @@ def test_none_field_passes_through_unchanged_in_plain_format_branch() -> None:
     result = normalizer.apply(_make_context(), chunk)
 
     assert result.rejected == []
-    assert result.chunk.rows == ((None,),)
+    assert len(result.chunk.rows) == 1
+    assert _field(result.chunk.rows, 0, 0) is None
 
 
 def test_none_field_passes_through_unchanged_in_spreadsheet_epoch_branch() -> None:
@@ -337,7 +330,7 @@ def test_none_field_passes_through_unchanged_in_spreadsheet_epoch_branch() -> No
     result = normalizer.apply(_make_context(), chunk)
 
     assert result.rejected == []
-    assert result.chunk.rows[0][0] is None
+    assert _field(result.chunk.rows, 0, 0) is None
 
 
 # --- fixture 59: a sentinel is a contract decision, not a universal rule ---
@@ -355,9 +348,9 @@ def test_fixture_59_sentinel_rows_pass_through_once_pre_normalized_to_none() -> 
     result = normalizer.apply(_make_context(), chunk)
 
     assert result.rejected == []
-    assert result.chunk.rows[0][0] is None
+    assert _field(result.chunk.rows, 0, 0) is None
     assert result.chunk.rows[1][0] == "2026-06-30"
-    assert result.chunk.rows[2][0] is None
+    assert _field(result.chunk.rows, 2, 0) is None
 
 
 def test_fixture_59_zero_date_sentinel_is_refused_by_strptime_if_not_pre_normalized() -> None:
