@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from typing import TextIO
 
+    from structlog.typing import FilteringBoundLogger
+
     from dataplat.config.model import DatasetConfig
     from dataplat.metadata.repository import MetadataRepository
     from dataplat.schema.repository import SchemaRepository
@@ -104,6 +106,488 @@ class DiscoveredUnit:
     run_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PartRegistration:
+    """One multipart-group member's post-registration identity (this plan, 06-18).
+
+    Purely local bookkeeping for ``discover_files``'s own per-group loop --
+    never leaves this module. Carries exactly what building that group's
+    ``FileAssignment``/``link_batch_file`` calls needs, once per part, so the
+    per-part registration step (``_hash_and_register_file``) and the
+    per-group assembly step that follows it stay decoupled.
+
+    Attributes:
+        key: The part's object key, relative to ``config.source.bucket``
+            (``MultipartGroup.ordered_object_uris``'s own convention).
+        file_id: The part's registered ``meta.files.file_id``.
+        content_sha256_hex: The part's own content hash, lowercase
+            hex-encoded.
+        size_bytes: The part's size, in bytes.
+    """
+
+    key: str
+    file_id: int
+    content_sha256_hex: str
+    size_bytes: int
+
+
+def _hash_and_register_file(
+    *,
+    metadata: MetadataRepository,
+    objects: ObjectStore,
+    dataset_id: int,
+    config: DatasetConfig,
+    obj: ObjectSummary,
+) -> tuple[int, str, bytes, bool]:
+    """Hash one listed object's raw bytes and idempotently register it in ``meta.files``.
+
+    Extracted, as a pure refactor with NO behavior change (this plan,
+    06-18), from what used to be ``discover_files``'s own per-object loop
+    body -- every part of a CSV-11 multipart group needs this SAME
+    per-object lineage (its own ``meta.files`` row, its own content-hash
+    dedup check against ``find_file_by_content_hash``, its own
+    rediscovery-vs-duplicate self-correction), for the identical reasons the
+    ungrouped per-object path already has one. Both ``discover_files``'s
+    ungrouped per-object loop and its per-group loop call this function once
+    per object.
+
+    Args:
+        metadata: Typed CRUD surface over ``meta.files``.
+        objects: Object-store read surface, for the raw-bytes streaming
+            hash.
+        dataset_id: The owning dataset's ``meta.datasets.dataset_id``.
+        config: The dataset's already-validated, resolved configuration.
+        obj: The listed object to hash and register.
+
+    Returns:
+        ``(file_id, content_sha256_hex, content_sha256, is_duplicate)`` --
+        ``is_duplicate`` reflects the FINAL determination, after this
+        function's own rediscovery-self-correction (re-registering an
+        object_uri already known from a prior ``discover_files`` call is
+        never mistaken for a genuine D-13 content duplicate).
+    """
+    object_uri = f"s3://{config.source.bucket}/{obj.key}"
+    filename = obj.key.rsplit("/", 1)[-1]
+
+    # Raw-bytes hash via TextIOWrapper.buffer (its own public, documented
+    # binary-buffer attribute -- NOT StreamingBody's forbidden private
+    # internal state; see storage/objectstore.py's module docstring).
+    # Hashing genuine bytes, rather than decoding then re-encoding text,
+    # keeps content_sha256 correct independent of any encoding assumption,
+    # even though CONTEXT.md D-01 hardcodes UTF-8 for this phase's own
+    # parsing path.
+    digest = hashlib.sha256()
+    with objects.get_object(config.source.bucket, obj.key) as stream:
+        while True:
+            byte_chunk = stream.buffer.read(_HASH_CHUNK_BYTES)
+            if not byte_chunk:
+                break
+            digest.update(byte_chunk)
+    content_sha256 = digest.digest()
+    content_sha256_hex = digest.hexdigest()
+
+    existing_file_id = metadata.find_file_by_content_hash(
+        dataset_id=dataset_id,
+        content_sha256=content_sha256,
+    )
+    is_duplicate = existing_file_id is not None and config.source.duplicate_policy == "skip"
+    duplicate_of_file_id = existing_file_id if is_duplicate else None
+
+    file_id = metadata.create_file(
+        dataset_id=dataset_id,
+        object_uri=object_uri,
+        content_sha256=content_sha256,
+        hash_version=_FILE_HASH_VERSION,
+        size_bytes=obj.size_bytes,
+        filename=filename,
+        status="DISCOVERED",
+        duplicate_of_file_id=duplicate_of_file_id,
+    )
+
+    # find_file_by_content_hash cannot distinguish "a DIFFERENT object_uri
+    # already holds this content" (a genuine D-13 duplicate) from "THIS
+    # object_uri was already discovered in a prior discover_files call" (a
+    # rediscovery of the same file) -- both return the same content-hash
+    # match. If the row create_file just upserted IS the row
+    # find_file_by_content_hash found, this is a rediscovery, not a
+    # duplicate: correct the wrongly self-referential duplicate_of_file_id
+    # back to None with a follow-up idempotent call, so re-running discovery
+    # never leaves a file permanently marked as a duplicate of itself.
+    if duplicate_of_file_id is not None and file_id == existing_file_id:
+        duplicate_of_file_id = None
+        file_id = metadata.create_file(
+            dataset_id=dataset_id,
+            object_uri=object_uri,
+            content_sha256=content_sha256,
+            hash_version=_FILE_HASH_VERSION,
+            size_bytes=obj.size_bytes,
+            filename=filename,
+            status="DISCOVERED",
+            duplicate_of_file_id=None,
+        )
+
+    return file_id, content_sha256_hex, content_sha256, duplicate_of_file_id is not None
+
+
+def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely distinct input; see discover_files
+    *,
+    metadata: MetadataRepository,
+    objects: ObjectStore,
+    dataset_id: int,
+    dataset_name: str,
+    config: DatasetConfig,
+    config_version_id: int,
+    config_hash: str,
+    processor_image: str,
+    processor_version: str,
+    schema_version_term: str,
+    group: MultipartGroup,
+    objects_by_key: Mapping[str, ObjectSummary],
+    log: FilteringBoundLogger,
+) -> DiscoveredUnit | None:
+    """Discover one CSV-11 multipart group: hash/register every part, dedup-check, batch+run.
+
+    Extracted from `discover_files`'s own per-group loop body (this plan,
+    06-18) purely to keep that function's cyclomatic complexity within this
+    codebase's lint gate (ruff C901/PLR0912/PLR0915) -- NO behavior change
+    from before this extraction. `discover_files`'s per-group loop calls
+    this function once per `MultipartGroup` its own `group_multipart_units`
+    call produced.
+
+    Args:
+        metadata: Typed CRUD surface over `meta.files`/`meta.batches`/
+            `meta.batch_files`/`meta.ingestion_runs`.
+        objects: Object-store read/write surface.
+        dataset_id: The owning dataset's `meta.datasets.dataset_id`.
+        dataset_name: The dataset's unique name.
+        config: The dataset's already-validated, resolved configuration.
+        config_version_id: The `meta.config_versions` row this run is
+            configured by.
+        config_hash: That config version's canonical-JSON sha256 hash.
+        processor_image: The container image digest that will execute the
+            resulting run.
+        processor_version: The `dataplat` distribution version discovering
+            this group.
+        schema_version_term: The idempotency-key schema-version term
+            (Pitfall 5), resolved once per `discover_files` call.
+        group: The multipart group to discover.
+        objects_by_key: Every listed object, keyed by its object key --
+            resolves `group.ordered_object_uris` back to their
+            `ObjectSummary`.
+        log: The structured logger `discover_files` itself already holds.
+
+    Returns:
+        A new `DiscoveredUnit` for this group, or `None` when ANY part was a
+        content duplicate (D-13, T-06-33 -- the WHOLE group is withheld this
+        call) or the group's run already `SUCCEEDED`.
+    """
+    parts: list[_PartRegistration] = []
+    any_duplicate = False
+    for key in group.ordered_object_uris:
+        part_obj = objects_by_key[key]
+        (
+            part_file_id,
+            part_content_sha256_hex,
+            _part_content_sha256,
+            part_is_duplicate,
+        ) = _hash_and_register_file(
+            metadata=metadata,
+            objects=objects,
+            dataset_id=dataset_id,
+            config=config,
+            obj=part_obj,
+        )
+        any_duplicate = any_duplicate or part_is_duplicate
+        parts.append(
+            _PartRegistration(
+                key=key,
+                file_id=part_file_id,
+                content_sha256_hex=part_content_sha256_hex,
+                size_bytes=part_obj.size_bytes,
+            ),
+        )
+
+    if any_duplicate:
+        # T-06-33 (this plan's own threat register): a group-level skip, not
+        # a silent one -- every part above was already idempotently
+        # recorded in meta.files regardless (_hash_and_register_file's own
+        # create_file upsert), so a fresh non-duplicate replacement part
+        # resolves this group on the very next discover_files call. No
+        # batch, no run, no assignment document for ANY part this call.
+        log.info(
+            "discovery.object_evaluated",
+            dataset=dataset_name,
+            decision="DUPLICATE_GROUP",
+            group_key=group.group_key,
+        )
+        return None
+
+    # Order-sensitive (ordered_object_uris is already numerically
+    # part-ordered) and deterministic, mirroring the ungrouped path's own
+    # single-file content_sha256_hex -- a rerun over an unchanged part-set
+    # reaches the identical group hash, and therefore the identical
+    # batch_key/idempotency_key below.
+    group_content_sha256_hex = hashlib.sha256(
+        "|".join(part.content_sha256_hex for part in parts).encode(),
+    ).hexdigest()
+
+    batch_key = f"{dataset_name}:{group_content_sha256_hex[:16]}"
+    # get_or_create_batch, NEVER create_batch -- see _hash_and_register_file's
+    # own sibling reasoning; batch_key is a pure function of the group's
+    # combined content.
+    batch_id = metadata.get_or_create_batch(
+        dataset_id=dataset_id,
+        batch_key=batch_key,
+        status="OPEN",
+    )
+    # One batch, every part linked at its own 1-based delivery position --
+    # link_batch_file's own docstring already generalizes sequence_no for
+    # exactly this multi-part case.
+    for sequence_no, part in enumerate(parts, start=1):
+        metadata.link_batch_file(
+            batch_id=batch_id,
+            file_id=part.file_id,
+            sequence_no=sequence_no,
+        )
+
+    # Pitfall 5: APPENDS the schema-version term -- never reorders or
+    # replaces the first four (see this module's own docstring). Substitutes
+    # ONLY the content-hash term with the group's own order-sensitive
+    # combined hash.
+    idempotency_key = hashlib.sha256(
+        f"{dataset_name}|{group_content_sha256_hex}|{config_hash}|{processor_image}|"
+        f"{schema_version_term}".encode(),
+    ).hexdigest()
+
+    run_id, status = metadata.get_or_create_ingestion_run(
+        idempotency_key=idempotency_key,
+        dataset_id=dataset_id,
+        file_id=None,  # no single file identifies a multi-file run
+        batch_id=batch_id,
+        config_version_id=config_version_id,
+        processor_version=processor_version,
+        processor_image_digest=processor_image,
+    )
+
+    if status == "SUCCEEDED":
+        log.info(
+            "discovery.object_evaluated",
+            dataset=dataset_name,
+            decision="ALREADY_SUCCEEDED",
+            group_key=group.group_key,
+        )
+        return None
+
+    first_part, *rest_parts = parts
+    assignment = AssignmentDocument(
+        assignment_version=1,
+        run_id=run_id,
+        idempotency_key=idempotency_key,
+        dataset=dataset_name,
+        config_version_id=config_version_id,
+        config_hash=config_hash,
+        file=FileAssignment(
+            file_id=first_part.file_id,
+            object_uri=f"s3://{config.source.bucket}/{first_part.key}",
+            content_sha256=first_part.content_sha256_hex,
+            size_bytes=first_part.size_bytes,
+        ),
+        additional_parts=tuple(
+            FileAssignment(
+                file_id=part.file_id,
+                object_uri=f"s3://{config.source.bucket}/{part.key}",
+                content_sha256=part.content_sha256_hex,
+                size_bytes=part.size_bytes,
+            )
+            for part in rest_parts
+        ),
+        batch=BatchAssignment(batch_key=batch_key, batch_id=batch_id),
+    )
+    assignment_key = f"assignments/{dataset_name}/{run_id}.json"
+    objects.put_object(
+        bucket="metadata",
+        key=assignment_key,
+        body=assignment.model_dump_json().encode("utf-8"),
+    )
+
+    log.info(
+        "discovery.object_evaluated",
+        dataset=dataset_name,
+        decision="NEW_GROUP",
+        group_key=group.group_key,
+    )
+    return DiscoveredUnit(
+        assignment_uri=f"s3://metadata/{assignment_key}",
+        idempotency_key=idempotency_key,
+        run_id=run_id,
+    )
+
+
+def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely distinct input; see discover_files
+    *,
+    metadata: MetadataRepository,
+    objects: ObjectStore,
+    dataset_id: int,
+    dataset_name: str,
+    config: DatasetConfig,
+    config_version_id: int,
+    config_hash: str,
+    processor_image: str,
+    processor_version: str,
+    schema_version_term: str,
+    obj: ObjectSummary,
+    filename_facets_by_object: Mapping[str, Mapping[str, object]] | None,
+    log: FilteringBoundLogger,
+) -> DiscoveredUnit | None:
+    """Discover one ungrouped object: hash/register, dedup-check, batch+run, freeze an assignment.
+
+    Extracted from `discover_files`'s own per-object loop body (this plan,
+    06-18) purely to keep that function's cyclomatic complexity within this
+    codebase's lint gate (ruff C901/PLR0912/PLR0915) once
+    `_process_multipart_group` was added alongside it -- NO behavior change
+    from before this extraction.
+
+    Args:
+        metadata: Typed CRUD surface over `meta.files`/`meta.batches`/
+            `meta.batch_files`/`meta.ingestion_runs`.
+        objects: Object-store read/write surface.
+        dataset_id: The owning dataset's `meta.datasets.dataset_id`.
+        dataset_name: The dataset's unique name.
+        config: The dataset's already-validated, resolved configuration.
+        config_version_id: The `meta.config_versions` row this run is
+            configured by.
+        config_hash: That config version's canonical-JSON sha256 hash.
+        processor_image: The container image digest that will execute the
+            resulting run.
+        processor_version: The `dataplat` distribution version discovering
+            this object.
+        schema_version_term: The idempotency-key schema-version term
+            (Pitfall 5), resolved once per `discover_files` call.
+        obj: The ungrouped object to discover.
+        filename_facets_by_object: `discover_files`'s own parameter of the
+            same name (D-11), passed straight through.
+        log: The structured logger `discover_files` itself already holds.
+
+    Returns:
+        A new `DiscoveredUnit` for this object, or `None` when it was a
+        content duplicate (D-13) or its run already `SUCCEEDED`.
+    """
+    object_uri = f"s3://{config.source.bucket}/{obj.key}"
+
+    # D-11, signature-addition-only this plan (see discover_files' own
+    # `filename_facets_by_object` Args entry): surfaced only in this
+    # function's own log lines below, never persisted -- no dataset declares
+    # a filename mask yet (D-10), so this is `None` for every real call this
+    # phase.
+    business_date_facet: object | None = None
+    if filename_facets_by_object is not None:
+        object_facets = filename_facets_by_object.get(object_uri)
+        if object_facets is not None:
+            business_date_facet = object_facets.get("business_date")
+
+    file_id, content_sha256_hex, _content_sha256, is_duplicate = _hash_and_register_file(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=dataset_id,
+        config=config,
+        obj=obj,
+    )
+
+    if is_duplicate:
+        log.info(
+            "discovery.object_evaluated",
+            dataset=dataset_name,
+            object_uri=object_uri,
+            content_sha256_prefix=content_sha256_hex[:12],
+            decision="DUPLICATE",
+            business_date=business_date_facet,
+        )
+        return None  # D-13 skip policy: no batch, no run, no assignment document
+
+    batch_key = f"{dataset_name}:{content_sha256_hex[:16]}"
+    # get_or_create_batch, NEVER create_batch: batch_key is a pure function
+    # of content_sha256, so a rerun over an unchanged object reaches this
+    # line with the SAME batch_key every time (this is a rediscovery, not a
+    # genuinely new batch -- the same reasoning as create_file's own
+    # idempotent upsert above). create_batch's plain INSERT would raise
+    # UniqueViolation against uq_batches_dataset_batch_key on exactly this
+    # rerun path.
+    batch_id = metadata.get_or_create_batch(
+        dataset_id=dataset_id,
+        batch_key=batch_key,
+        status="OPEN",
+    )
+    # One-file-one-batch: this phase's documented simplification
+    # (03-RESEARCH.md) -- sequence_no is always 1. link_batch_file is itself
+    # idempotent (ON CONFLICT DO NOTHING on its composite PK), so re-linking
+    # the same (batch_id, file_id) pair on a rerun is harmless.
+    metadata.link_batch_file(batch_id=batch_id, file_id=file_id, sequence_no=1)
+
+    # Pitfall 5: APPENDS the schema-version term -- never reorders or
+    # replaces the first four (see this module's own docstring).
+    idempotency_key = hashlib.sha256(
+        f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}|"
+        f"{schema_version_term}".encode(),
+    ).hexdigest()
+
+    run_id, status = metadata.get_or_create_ingestion_run(
+        idempotency_key=idempotency_key,
+        dataset_id=dataset_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        config_version_id=config_version_id,
+        processor_version=processor_version,
+        processor_image_digest=processor_image,
+    )
+
+    if status == "SUCCEEDED":
+        log.info(
+            "discovery.object_evaluated",
+            dataset=dataset_name,
+            object_uri=object_uri,
+            content_sha256_prefix=content_sha256_hex[:12],
+            decision="ALREADY_SUCCEEDED",
+            business_date=business_date_facet,
+        )
+        return None
+
+    assignment = AssignmentDocument(
+        assignment_version=1,
+        run_id=run_id,
+        idempotency_key=idempotency_key,
+        dataset=dataset_name,
+        config_version_id=config_version_id,
+        config_hash=config_hash,
+        file=FileAssignment(
+            file_id=file_id,
+            object_uri=object_uri,
+            content_sha256=content_sha256_hex,
+            size_bytes=obj.size_bytes,
+        ),
+        batch=BatchAssignment(batch_key=batch_key, batch_id=batch_id),
+    )
+    assignment_key = f"assignments/{dataset_name}/{run_id}.json"
+    objects.put_object(
+        bucket="metadata",
+        key=assignment_key,
+        body=assignment.model_dump_json().encode("utf-8"),
+    )
+
+    log.info(
+        "discovery.object_evaluated",
+        dataset=dataset_name,
+        object_uri=object_uri,
+        content_sha256_prefix=content_sha256_hex[:12],
+        decision="NEW",
+        business_date=business_date_facet,
+    )
+    return DiscoveredUnit(
+        assignment_uri=f"s3://metadata/{assignment_key}",
+        idempotency_key=idempotency_key,
+        run_id=run_id,
+    )
+
+
 def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input; see module docstring
     *,
     metadata: MetadataRepository,
@@ -120,21 +604,28 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
 ) -> list[DiscoveredUnit]:
     """List, hash, dedup-check, freeze and cap one dataset's discoverable files.
 
-    Sequence, once per call: (1) list every object under
-    ``config.source.bucket``/``config.source.path``, sorted by key -- so
-    the same inputs always produce the same manifest (ORCH-08's
-    frozen-manifest requirement extends to determinism, not merely to
-    "frozen after writing"). (2) For each object, stream its raw bytes
+    Sequence, once per call: (0) when ``config.source.multipart_pattern`` is
+    set (CSV-11, plan 06-18), partition the listing into multipart-group
+    candidates and the remainder via ``group_multipart_units`` -- every
+    other dataset (``multipart_pattern is None``, e.g. ``customers``) skips
+    this step entirely and behaves exactly as before this plan. (1) list
+    every object under ``config.source.bucket``/``config.source.path``,
+    sorted by key -- so the same inputs always produce the same manifest
+    (ORCH-08's frozen-manifest requirement extends to determinism, not
+    merely to "frozen after writing"). (2) For each object (each multipart
+    group's every member, each ungrouped object), stream its raw bytes
     through ``hashlib.sha256()`` in bounded chunks -- the object is never
     loaded whole into memory. (3) Check ``meta.files`` for a content-hash
     duplicate under a DIFFERENT ``object_uri`` (D-13); when found and
     ``config.source.duplicate_policy == "skip"``, record the file with
-    ``duplicate_of_file_id`` set and stop -- no batch, no run, no
-    assignment document for it. (4) Otherwise, create a one-file batch
-    (this phase's documented one-file-one-batch simplification),
-    pre-allocate an ingestion run (idempotent -- a run already
-    ``SUCCEEDED`` is skipped, everything else is re-offered), and freeze
-    an ``AssignmentDocument`` to
+    ``duplicate_of_file_id`` set and stop -- no batch, no run, no assignment
+    document for it (for a multipart group, ANY duplicate part stops the
+    WHOLE group, T-06-33). (4) Otherwise, create a one-file batch (or, for a
+    multipart group, one batch spanning every part -- this phase's
+    documented one-file-one-batch simplification generalizes to
+    one-group-one-batch), pre-allocate an ingestion run (idempotent -- a run
+    already ``SUCCEEDED`` is skipped, everything else is re-offered), and
+    freeze an ``AssignmentDocument`` to
     ``s3://metadata/assignments/<dataset_name>/<run_id>.json``. (5) Cap the
     result at ``config.batching.max_units_per_run``, deterministically
     (never by listing order, which S3-compatible stores do not guarantee
@@ -222,176 +713,70 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
     current_schema = schema.get_current(dataset_id)
     schema_version_term = "" if current_schema is None else str(current_schema.version)
 
+    # Step 0 (this plan, 06-18): partition `listed` into multipart-group
+    # candidates (keys matching `multipart_pattern` anywhere -- `re.search`,
+    # deliberately looser than `group_multipart_units`'s own internal
+    # `re.fullmatch` grouping check) and the remainder, which stays exactly
+    # as `listed` for the pre-existing per-object loop below. When no
+    # `multipart_pattern` is configured (`None` -- e.g. `customers`), no
+    # partition happens at all: `remaining` is `listed` unchanged and
+    # `groups` is empty, so the per-object loop's behavior is unchanged from
+    # before this plan (this dataset's own regression guarantee).
+    multipart_pattern = config.source.multipart_pattern
+    groups: list[MultipartGroup] = []
+    if multipart_pattern is None:
+        remaining = listed
+    else:
+        multipart_candidates: list[ObjectSummary] = []
+        remaining = []
+        for obj in listed:
+            if re.search(multipart_pattern, obj.key):
+                multipart_candidates.append(obj)
+            else:
+                remaining.append(obj)
+        groups = group_multipart_units(multipart_candidates, pattern=multipart_pattern)
+
     candidates: list[DiscoveredUnit] = []
-    for obj in listed:
-        object_uri = f"s3://{config.source.bucket}/{obj.key}"
-        filename = obj.key.rsplit("/", 1)[-1]
 
-        # D-11, signature-addition-only this plan (see this function's own
-        # `filename_facets_by_object` Args entry): surfaced only in this
-        # loop's own log lines below, never persisted -- no dataset declares
-        # a filename mask yet (D-10), so this is `None` for every real call
-        # this phase.
-        business_date_facet: object | None = None
-        if filename_facets_by_object is not None:
-            object_facets = filename_facets_by_object.get(object_uri)
-            if object_facets is not None:
-                business_date_facet = object_facets.get("business_date")
-
-        # Raw-bytes hash via TextIOWrapper.buffer (its own public, documented
-        # binary-buffer attribute -- NOT StreamingBody's forbidden private
-        # internal state; see storage/objectstore.py's module docstring).
-        # Hashing genuine bytes, rather than decoding then re-encoding text,
-        # keeps content_sha256 correct independent of any encoding
-        # assumption, even though CONTEXT.md D-01 hardcodes UTF-8 for this
-        # phase's own parsing path.
-        digest = hashlib.sha256()
-        with objects.get_object(config.source.bucket, obj.key) as stream:
-            while True:
-                byte_chunk = stream.buffer.read(_HASH_CHUNK_BYTES)
-                if not byte_chunk:
-                    break
-                digest.update(byte_chunk)
-        content_sha256 = digest.digest()
-        content_sha256_hex = digest.hexdigest()
-
-        existing_file_id = metadata.find_file_by_content_hash(
-            dataset_id=dataset_id,
-            content_sha256=content_sha256,
-        )
-        is_duplicate = existing_file_id is not None and config.source.duplicate_policy == "skip"
-        duplicate_of_file_id = existing_file_id if is_duplicate else None
-
-        file_id = metadata.create_file(
-            dataset_id=dataset_id,
-            object_uri=object_uri,
-            content_sha256=content_sha256,
-            hash_version=_FILE_HASH_VERSION,
-            size_bytes=obj.size_bytes,
-            filename=filename,
-            status="DISCOVERED",
-            duplicate_of_file_id=duplicate_of_file_id,
-        )
-
-        # find_file_by_content_hash cannot distinguish "a DIFFERENT
-        # object_uri already holds this content" (a genuine D-13 duplicate)
-        # from "THIS object_uri was already discovered in a prior
-        # discover_files call" (a rediscovery of the same file) -- both
-        # return the same content-hash match. If the row create_file just
-        # upserted IS the row find_file_by_content_hash found, this is a
-        # rediscovery, not a duplicate: correct the wrongly self-
-        # referential duplicate_of_file_id back to None with a follow-up
-        # idempotent call, so re-running discovery never leaves a file
-        # permanently marked as a duplicate of itself.
-        if duplicate_of_file_id is not None and file_id == existing_file_id:
-            duplicate_of_file_id = None
-            file_id = metadata.create_file(
+    if groups:
+        objects_by_key = {obj.key: obj for obj in listed}
+        for group in groups:
+            group_unit = _process_multipart_group(
+                metadata=metadata,
+                objects=objects,
                 dataset_id=dataset_id,
-                object_uri=object_uri,
-                content_sha256=content_sha256,
-                hash_version=_FILE_HASH_VERSION,
-                size_bytes=obj.size_bytes,
-                filename=filename,
-                status="DISCOVERED",
-                duplicate_of_file_id=None,
+                dataset_name=dataset_name,
+                config=config,
+                config_version_id=config_version_id,
+                config_hash=config_hash,
+                processor_image=processor_image,
+                processor_version=processor_version,
+                schema_version_term=schema_version_term,
+                group=group,
+                objects_by_key=objects_by_key,
+                log=log,
             )
+            if group_unit is not None:
+                candidates.append(group_unit)
 
-        if duplicate_of_file_id is not None:
-            log.info(
-                "discovery.object_evaluated",
-                dataset=dataset_name,
-                object_uri=object_uri,
-                content_sha256_prefix=content_sha256_hex[:12],
-                decision="DUPLICATE",
-                business_date=business_date_facet,
-            )
-            continue  # D-13 skip policy: no batch, no run, no assignment document
-
-        batch_key = f"{dataset_name}:{content_sha256_hex[:16]}"
-        # get_or_create_batch, NEVER create_batch: batch_key is a pure
-        # function of content_sha256, so a rerun over an unchanged object
-        # reaches this line with the SAME batch_key every time (this is a
-        # rediscovery, not a genuinely new batch -- the same reasoning as
-        # create_file's own idempotent upsert above). create_batch's plain
-        # INSERT would raise UniqueViolation against
-        # uq_batches_dataset_batch_key on exactly this rerun path.
-        batch_id = metadata.get_or_create_batch(
+    for obj in remaining:
+        object_unit = _process_ungrouped_object(
+            metadata=metadata,
+            objects=objects,
             dataset_id=dataset_id,
-            batch_key=batch_key,
-            status="OPEN",
-        )
-        # One-file-one-batch: this phase's documented simplification
-        # (03-RESEARCH.md) -- sequence_no is always 1. link_batch_file is
-        # itself idempotent (ON CONFLICT DO NOTHING on its composite PK),
-        # so re-linking the same (batch_id, file_id) pair on a rerun is
-        # harmless.
-        metadata.link_batch_file(batch_id=batch_id, file_id=file_id, sequence_no=1)
-
-        # Pitfall 5: APPENDS the schema-version term -- never reorders or
-        # replaces the first four (see this module's own docstring).
-        idempotency_key = hashlib.sha256(
-            f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}|"
-            f"{schema_version_term}".encode(),
-        ).hexdigest()
-
-        run_id, status = metadata.get_or_create_ingestion_run(
-            idempotency_key=idempotency_key,
-            dataset_id=dataset_id,
-            file_id=file_id,
-            batch_id=batch_id,
-            config_version_id=config_version_id,
-            processor_version=processor_version,
-            processor_image_digest=processor_image,
-        )
-
-        if status == "SUCCEEDED":
-            log.info(
-                "discovery.object_evaluated",
-                dataset=dataset_name,
-                object_uri=object_uri,
-                content_sha256_prefix=content_sha256_hex[:12],
-                decision="ALREADY_SUCCEEDED",
-                business_date=business_date_facet,
-            )
-            continue
-
-        assignment = AssignmentDocument(
-            assignment_version=1,
-            run_id=run_id,
-            idempotency_key=idempotency_key,
-            dataset=dataset_name,
+            dataset_name=dataset_name,
+            config=config,
             config_version_id=config_version_id,
             config_hash=config_hash,
-            file=FileAssignment(
-                file_id=file_id,
-                object_uri=object_uri,
-                content_sha256=content_sha256_hex,
-                size_bytes=obj.size_bytes,
-            ),
-            batch=BatchAssignment(batch_key=batch_key, batch_id=batch_id),
+            processor_image=processor_image,
+            processor_version=processor_version,
+            schema_version_term=schema_version_term,
+            obj=obj,
+            filename_facets_by_object=filename_facets_by_object,
+            log=log,
         )
-        assignment_key = f"assignments/{dataset_name}/{run_id}.json"
-        objects.put_object(
-            bucket="metadata",
-            key=assignment_key,
-            body=assignment.model_dump_json().encode("utf-8"),
-        )
-
-        log.info(
-            "discovery.object_evaluated",
-            dataset=dataset_name,
-            object_uri=object_uri,
-            content_sha256_prefix=content_sha256_hex[:12],
-            decision="NEW",
-            business_date=business_date_facet,
-        )
-        candidates.append(
-            DiscoveredUnit(
-                assignment_uri=f"s3://metadata/{assignment_key}",
-                idempotency_key=idempotency_key,
-                run_id=run_id,
-            ),
-        )
+        if object_unit is not None:
+            candidates.append(object_unit)
 
     if len(candidates) > config.batching.max_units_per_run:
         excess = len(candidates) - config.batching.max_units_per_run

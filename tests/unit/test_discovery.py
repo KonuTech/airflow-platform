@@ -51,6 +51,7 @@ from dataplat.discovery import (
     open_multipart_stream,
 )
 from dataplat.errors import FileInspectionError
+from dataplat.models.assignment import AssignmentDocument
 from dataplat.storage.objectstore import ObjectSummary, open_text_stream
 
 if TYPE_CHECKING:
@@ -190,6 +191,10 @@ class _FakeMetadataRepository:
     files_by_uri: dict[str, _FakeFileRow] = field(default_factory=dict)
     runs_by_key: dict[str, _FakeRunRow] = field(default_factory=dict)
     batches_by_key: dict[tuple[int, str], int] = field(default_factory=dict)
+    # 06-18: was a no-op (`del batch_id, file_id, sequence_no`) -- now records
+    # every link so multipart-group tests can assert `sequence_no` ordering
+    # against a shared `batch_id`.
+    batch_file_links: list[tuple[int, int, int]] = field(default_factory=list)
     _next_file_id: int = 1
     _next_batch_id: int = 1
     _next_run_id: int = 1
@@ -238,7 +243,7 @@ class _FakeMetadataRepository:
         return batch_id
 
     def link_batch_file(self, *, batch_id: int, file_id: int, sequence_no: int) -> None:
-        del batch_id, file_id, sequence_no
+        self.batch_file_links.append((batch_id, file_id, sequence_no))
 
     def get_or_create_ingestion_run(  # noqa: PLR0913 -- mirrors the real Protocol's column set
         self,
@@ -648,3 +653,190 @@ def test_open_multipart_stream_reassembles_two_real_parts_into_one_twenty_row_da
     # reader that treats each object as a file ... silently drops a
     # record").
     assert data_rows[10][0] == "000011"
+
+
+# --- Task 1 (06-18-PLAN.md): group_multipart_units wired into discover_files's
+# --- real object-listing step ------------------------------------------------
+
+
+def _multipart_config(*, max_units_per_run: int = 100) -> DatasetConfig:
+    """Mirrors ``_skip_config()``, adding a real ``multipart_pattern`` (06-18-PLAN.md Task 1)."""
+    return DatasetConfig(
+        dataset=_DATASET_NAME,
+        config_schema_version=1,
+        source=SourceConfig(
+            type="csv",
+            bucket="raw",
+            path="customers/",
+            change_semantics="snapshot",
+            duplicate_policy="skip",
+            multipart_pattern=_MULTIPART_PATTERN,
+        ),
+        deduplication=DeduplicationConfig(
+            strategy="business_key_latest",
+            keys=["customer_id"],
+            order_by=["event_ts desc"],
+        ),
+        load=LoadConfig(strategy="merge", target="normalized.customers"),
+        batching=BatchingConfig(max_units_per_run=max_units_per_run),
+        columns=[
+            ColumnContract(
+                name="customer_id",
+                type="string",
+                nullable=False,
+                required=True,
+                business_key=True,
+                description="Natural business key for a customer record",
+            ),
+            ColumnContract(name="name", type="string", nullable=False, required=True),
+            ColumnContract(name="country", type="string", nullable=False, required=True),
+            ColumnContract(
+                name="birth_date",
+                type="date",
+                nullable=True,
+                required=True,
+                format="%Y-%m-%d",
+            ),
+            ColumnContract(
+                name="event_ts",
+                type="timestamp",
+                nullable=False,
+                required=True,
+                format="%Y-%m-%dT%H:%M:%S%z",
+            ),
+        ],
+    )
+
+
+def test_discover_files_groups_a_two_part_multipart_delivery_into_one_unit() -> None:
+    """06-18-PLAN.md Task 1's own must_have: a two-part delivery discovers as exactly ONE
+
+    ingestion run with ONE frozen ``AssignmentDocument`` (``file`` + ``additional_parts``) --
+    proven through the real ``discover_files`` call path, not ``group_multipart_units`` alone.
+    """
+    objects = _FakeObjectStore()
+    objects.put("raw", "customers/g1/part-00000", b"id,name\n1,Alice\n")
+    objects.put("raw", "customers/g1/part-00001", b"2,Bob\n")
+    metadata = _FakeMetadataRepository()
+
+    units = discover_files(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=_DATASET_ID,
+        dataset_name=_DATASET_NAME,
+        config=_multipart_config(),
+        config_version_id=_CONFIG_VERSION_ID,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
+    )
+
+    assert len(units) == 1
+    # Every part still gets its own meta.files row (per-part lineage), even
+    # though only ONE run/assignment covers the whole group.
+    assert len(metadata.files_by_uri) == 2
+    assert len(metadata.runs_by_key) == 1
+    assert len(objects.written) == 1
+
+    (written_body,) = objects.written.values()
+    doc = AssignmentDocument.model_validate_json(written_body)
+    assert doc.file.object_uri == "s3://raw/customers/g1/part-00000"
+    assert len(doc.additional_parts) == 1
+    assert doc.additional_parts[0].object_uri == "s3://raw/customers/g1/part-00001"
+
+
+def test_discover_files_links_multipart_group_members_with_ascending_sequence_no() -> None:
+    """``link_batch_file``'s own docstring already generalizes ``sequence_no`` for the multi-file
+
+    case -- multipart (this plan) is its first real consumer: both parts link to the SAME
+    ``batch_id``, at ascending 1-based ``sequence_no`` positions.
+    """
+    objects = _FakeObjectStore()
+    objects.put("raw", "customers/g1/part-00000", b"id,name\n1,Alice\n")
+    objects.put("raw", "customers/g1/part-00001", b"2,Bob\n")
+    metadata = _FakeMetadataRepository()
+
+    discover_files(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=_DATASET_ID,
+        dataset_name=_DATASET_NAME,
+        config=_multipart_config(),
+        config_version_id=_CONFIG_VERSION_ID,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
+    )
+
+    assert len(metadata.batch_file_links) == 2
+    batch_ids = {batch_id for batch_id, _file_id, _sequence_no in metadata.batch_file_links}
+    assert len(batch_ids) == 1
+    sequence_numbers = sorted(
+        sequence_no for _batch_id, _file_id, sequence_no in metadata.batch_file_links
+    )
+    assert sequence_numbers == [1, 2]
+
+
+def test_discover_files_with_no_multipart_pattern_keeps_the_two_parts_independent() -> None:
+    """06-18-PLAN.md Task 1's own explicit regression proof: the SAME two objects, discovered under
+
+    ``_skip_config()`` (no ``multipart_pattern``), produce the OLD two-independent-units behavior,
+    completely unaffected by this plan's grouping logic -- ``customers``' real case.
+    """
+    objects = _FakeObjectStore()
+    objects.put("raw", "customers/g1/part-00000", b"id,name\n1,Alice\n")
+    objects.put("raw", "customers/g1/part-00001", b"2,Bob\n")
+    metadata = _FakeMetadataRepository()
+
+    units = discover_files(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=_DATASET_ID,
+        dataset_name=_DATASET_NAME,
+        config=_skip_config(),
+        config_version_id=_CONFIG_VERSION_ID,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
+    )
+
+    assert len(units) == 2
+    assert len(metadata.batch_file_links) == 2
+    # Each part is its own batch (sequence_no always 1, one-file-one-batch) --
+    # never linked to a shared batch_id the way the grouped path is above.
+    batch_ids = [batch_id for batch_id, _file_id, _sequence_no in metadata.batch_file_links]
+    assert len(set(batch_ids)) == 2
+    sequence_numbers = {
+        sequence_no for _batch_id, _file_id, sequence_no in metadata.batch_file_links
+    }
+    assert sequence_numbers == {1}
+
+
+def test_discover_files_propagates_the_gap_error_for_an_incomplete_multipart_group() -> None:
+    """``group_multipart_units``'s own gap detection (06-08) propagates uncaught out of
+
+    ``discover_files`` -- this plan adds no new handling for that case, it is already 06-08's job.
+    """
+    objects = _FakeObjectStore()
+    objects.put("raw", "customers/g1/part-00000", b"id,name\n1,Alice\n")
+    objects.put("raw", "customers/g1/part-00002", b"3,Carol\n")
+    metadata = _FakeMetadataRepository()
+
+    with pytest.raises(FileInspectionError) as exc_info:
+        discover_files(
+            metadata=metadata,
+            objects=objects,
+            dataset_id=_DATASET_ID,
+            dataset_name=_DATASET_NAME,
+            config=_multipart_config(),
+            config_version_id=_CONFIG_VERSION_ID,
+            config_hash=_CONFIG_HASH,
+            processor_image=_PROCESSOR_IMAGE,
+            processor_version=_PROCESSOR_VERSION,
+            schema=_fake_schema(),
+        )
+
+    assert exc_info.value.context["diagnostic_code"] == "multipart-group-incomplete"
