@@ -20,3 +20,24 @@ and are unrelated to `columns:`/`DatasetConfig`.
 
 None of these affect runtime behavior (all four test files pass under `pytest`); they are
 static-analysis gaps a future cleanup pass should close.
+
+## From plan 06-16
+
+Found while running `pytest tests/unit -q` as this plan's own required regression
+verification. Unrelated to any file this plan modifies
+(`packages/dataplat/src/dataplat/load/staging.py`,
+`packages/dataplat/src/dataplat/discovery.py`,
+`packages/csv-processor/src/csv_processor/cli.py`,
+`tests/unit/test_discovery.py`, `tests/integration/test_discover_files.py`,
+`tests/integration/test_staging_normalization.py`) — confirmed via `git status`/`git log`
+that `compression.py`/`test_compression.py` were last touched by plan 06-08, merged into
+this worktree's Wave-2 base, before this plan's session began.
+
+| File | Test | Issue |
+|------|------|-------|
+| `tests/unit/test_compression.py` | `test_bomb_guard_property_never_exceeds_ceiling_by_more_than_one_bounded_chunk` | Hypothesis-discovered boundary case `decompressed_size=1_000_001` (`ceiling=1_000_000`, one byte over): `open_compressed_stream`'s bomb guard trips with `bytes_read_before_trip == decompressed_size` (`1000001 == 1000001`) rather than strictly less, failing the property's own `bytes_read_before_trip < decompressed_size` assertion. Off-by-one at the exact `ceiling + 1` boundary in `open_compressed_stream`'s bounded-read loop (plan 06-08), not something plan 06-16 touches or introduces. |
+
+Verified isolated: `pytest tests/unit -q` (no `-x`) shows exactly this one failure out of
+367 collected tests; every other test, including all of this plan's own new/modified
+tests, passes. A future cleanup pass (or plan 06-08's own follow-up) should tighten the
+bomb guard's boundary condition.

@@ -44,6 +44,7 @@ from dataplat.models.receipt import Receipt
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
 from dataplat.pipeline.run import run_ingest
+from dataplat.schema.repository import SchemaRepository
 from dataplat.secrets.resolver import resolve_secret
 from dataplat.storage.db import create_pool
 from dataplat.storage.objectstore import S3ObjectStore
@@ -169,6 +170,13 @@ def discover(dataset: str) -> None:
     pool: ConnectionPool | None = None
     try:
         pool, metadata, objects = _build_common()
+        # SchemaRepository(pool) mirrors `metadata = PostgresMetadataRepository(pool)`
+        # just above -- the same `pool` `_build_common()` already opened.
+        # Built locally here, not added to `_build_common()`'s own shared
+        # return tuple: `ingest()` (the sibling command sharing that helper)
+        # has no use for a `SchemaRepository`, so this stays scoped to its
+        # one real caller (plan 06-16).
+        schema = SchemaRepository(pool)
         config = load_config(
             Path(f"configs/datasets/{dataset}.yaml"),
             defaults_path=Path("configs/defaults.yaml"),
@@ -186,6 +194,7 @@ def discover(dataset: str) -> None:
             config_hash=record.config_hash,
             processor_image=os.environ.get("DATAPLAT_PROCESSOR_IMAGE", "unknown"),
             processor_version=resolve_version(),
+            schema=schema,
         )
         _write_xcom(
             {

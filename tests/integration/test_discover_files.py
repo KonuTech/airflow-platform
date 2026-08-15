@@ -37,6 +37,7 @@ from dataplat.config.model import (
 )
 from dataplat.discovery import discover_files
 from dataplat.metadata.postgres import PostgresMetadataRepository
+from dataplat.schema.repository import SchemaRepository
 from dataplat.storage.db import create_pool
 from dataplat.storage.objectstore import S3ObjectStore
 
@@ -165,6 +166,17 @@ def repository(migrated_dsn: str) -> Iterator[PostgresMetadataRepository]:
         pool.close()
 
 
+@pytest.fixture
+def schema(migrated_dsn: str) -> Iterator[SchemaRepository]:
+    """A `SchemaRepository` backed by an opened pool over the migrated database."""
+    pool = create_pool(migrated_dsn)
+    pool.open(wait=True)
+    try:
+        yield SchemaRepository(pool)
+    finally:
+        pool.close()
+
+
 def _read_assignment(object_store: S3ObjectStore, assignment_uri: str) -> str:
     """Read back one frozen assignment document's raw JSON text from its `s3://metadata/...` URI."""
     key = assignment_uri.removeprefix("s3://metadata/")
@@ -175,6 +187,7 @@ def test_rerun_produces_identical_manifest(
     repository: PostgresMetadataRepository,
     object_store: S3ObjectStore,
     migrated_dsn: str,
+    schema: SchemaRepository,
 ) -> None:
     """ORCH-08: a rerun over an unchanged object set is frozen (identical), not merely non-crashing.
 
@@ -205,6 +218,7 @@ def test_rerun_produces_identical_manifest(
             config_hash=_CONFIG_HASH,
             processor_image=_PROCESSOR_IMAGE,
             processor_version=_PROCESSOR_VERSION,
+            schema=schema,
         )
 
     def _row_counts() -> tuple[int, int]:
@@ -252,6 +266,7 @@ def test_duplicate_content_is_skipped(
     repository: PostgresMetadataRepository,
     object_store: S3ObjectStore,
     migrated_dsn: str,
+    schema: SchemaRepository,
 ) -> None:
     """D-13: the same bytes under a second `object_uri` is recorded as a duplicate, never run."""
     dataset_name = "discover_dup_proof"
@@ -273,6 +288,7 @@ def test_duplicate_content_is_skipped(
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=schema,
     )
 
     assert len(units) == 1
@@ -304,6 +320,7 @@ def test_business_date_stays_null(
     repository: PostgresMetadataRepository,
     object_store: S3ObjectStore,
     migrated_dsn: str,
+    schema: SchemaRepository,
 ) -> None:
     """`meta.files.business_date` is never populated by discovery (README §67 determinism)."""
     dataset_name = "discover_bizdate_proof"
@@ -322,6 +339,7 @@ def test_business_date_stays_null(
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=schema,
     )
 
     with psycopg.connect(migrated_dsn) as conn:
@@ -337,6 +355,7 @@ def test_batching_cap_defers_excess(
     repository: PostgresMetadataRepository,
     object_store: S3ObjectStore,
     migrated_dsn: str,
+    schema: SchemaRepository,
 ) -> None:
     """ORCH-03: the cap limits the RETURNED units; the excess is deferred, never dropped."""
     dataset_name = "discover_cap_proof"
@@ -361,6 +380,7 @@ def test_batching_cap_defers_excess(
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=schema,
     )
 
     assert len(units) == 1
@@ -381,6 +401,7 @@ def test_three_way_duplicate_content_resolves_deterministically_across_reruns(
     repository: PostgresMetadataRepository,
     object_store: S3ObjectStore,
     migrated_dsn: str,
+    schema: SchemaRepository,
 ) -> None:
     """CR-02 (04-10 gap closure): reproduces the exact scenario behind the live `file_id=10` orphan.
 
@@ -409,6 +430,7 @@ def test_three_way_duplicate_content_resolves_deterministically_across_reruns(
             config_hash=_CONFIG_HASH,
             processor_image=_PROCESSOR_IMAGE,
             processor_version=_PROCESSOR_VERSION,
+            schema=schema,
         )
 
     object_store.put_object("raw", "customers/three_way_dup_proof/a.csv", payload)

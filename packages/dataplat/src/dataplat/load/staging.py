@@ -1,10 +1,26 @@
 """``StagingLoader`` — chunked ``COPY`` into a clean, retry-safe, all-TEXT staging table.
 
 Streams whatever ``Source`` ``ctx.source`` resolves to through
-``[RaggedRowGuard()]`` via ``dataplat.pipeline.engine.run_streaming``, and
+``self._build_stages(ctx)`` via ``dataplat.pipeline.engine.run_streaming``, and
 ``COPY``-ies every surviving chunk's rows into
 ``staging.<dataset>__r<run_id>`` -- one throwaway, ``UNLOGGED`` table per
 ingestion-run attempt (LOAD-05).
+
+``_build_stages(ctx)`` (plan 06-16) assembles, in fixed order: ``RaggedRowGuard()``
+first (an already-structurally-wrong row never reaches value-level
+normalization); then, per ``ColumnContract`` in ``ctx.config.columns``, that
+column's ``NullTokenNormalizer`` -- constructed ONLY when the column is
+``nullable: true`` -- immediately followed by its type-specific normalizer
+(``DateNormalizer`` for ``date``/``timestamp``, ``NumericNormalizer`` for
+``decimal``/``integer``, ``BooleanNormalizer`` for ``boolean``); and finally
+exactly one ``UnicodeNormalizer()``, unconditionally, LAST, over every column
+of every row (D-15 -- no per-dataset opt-out). The nullable-column ordering --
+``NullTokenNormalizer`` before its own column's type-specific normalizer,
+never after -- is a documented platform invariant, not an implementation
+accident: it is what keeps an empty/null-token value on a nullable column
+(``customers.birth_date`` is the platform's one real case) from being wrongly
+rejected as an invalid calendar date, or later crashing ``UnicodeNormalizer``
+with a ``TypeError`` when it reaches a field that should already be ``None``.
 
 Two corrections this module encodes, both verified against real PostgreSQL
 this phase (04-RESEARCH.md):
@@ -26,15 +42,29 @@ this phase (04-RESEARCH.md):
 
 ``_record_hash`` is computed exactly once, here, in Python (Pitfall 10 /
 PITFALLS C6: never recomputed in SQL) -- a canonical, pipe-joined encoding
-over the row's business values in ``target_columns`` order.
+over the row's business values in ``target_columns`` order, taken AFTER every
+stage in ``_build_stages(ctx)`` has run (plan 06-16): normalization MUST
+precede hashing (the exact edge
+``dataplat.normalize.unicode.UnicodeNormalizer``'s own module docstring
+names), so this hash is genuinely NFC-invariant in the real pipeline, not
+merely in each normalizer's own isolated unit test. A field already
+normalized to ``None`` (absent) or ``bool`` (a normalized boolean) is
+rendered as ``""``/``str(value)`` respectively before joining -- mirroring
+``dataplat.normalize.numeric._row_to_raw_line``'s own convention for a
+partially-normalized row -- never passed to ``str.join`` directly, which
+raises ``TypeError`` on a non-``str`` element.
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from dataplat.normalize.boolean_null import BooleanNormalizer, NullTokenNormalizer
+from dataplat.normalize.dates import DateNormalizer
+from dataplat.normalize.numeric import NumericNormalizer
+from dataplat.normalize.unicode import UnicodeNormalizer
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.engine import RaggedRowGuard, run_streaming
 
@@ -43,7 +73,14 @@ if TYPE_CHECKING:
 
     from psycopg import Connection
 
-    from dataplat.pipeline.protocol import PipelineContext
+    from dataplat.config.model import NormalizationConfig
+    from dataplat.pipeline.protocol import PipelineContext, StreamingStage
+
+# `ColumnContract.type` values (dataplat.config.model) that route to
+# DateNormalizer / NumericNormalizer respectively -- mirrors
+# `dates.py`/`numeric.py`'s own module-level frozenset-constant convention.
+_DATE_LIKE_TYPES: frozenset[str] = frozenset({"date", "timestamp"})
+_NUMERIC_TYPES: frozenset[str] = frozenset({"decimal", "integer"})
 
 # The six embedded lineage columns every staged/normalized row carries,
 # verbatim from `migrations/versions/0005_normalized_customers.py` --
@@ -59,6 +96,34 @@ _LINEAGE_COLUMN_TYPES: tuple[tuple[str, str], ...] = (
     ("_record_hash_version", "smallint"),
 )
 _LINEAGE_COLUMN_NAMES: tuple[str, ...] = tuple(name for name, _ in _LINEAGE_COLUMN_TYPES)
+
+
+def _null_tokens_for_column(
+    normalization: NormalizationConfig | None,
+    column_name: str,
+) -> tuple[str, ...]:
+    """Resolve one nullable column's exact-match NULL-token set for its ``NullTokenNormalizer``.
+
+    D-14: with no ``normalization`` block at all (``customers``' real case),
+    the platform default is the empty string only. When a profile IS
+    declared, a column's tokens are the dataset-wide
+    ``normalization.null_tokens`` UNION this column's own
+    ``normalization.null_sentinels`` entry --
+    ``NormalizationConfig.null_sentinels``'s own docstring: "Checked in
+    addition to ``null_tokens``".
+
+    Args:
+        normalization: The dataset's normalization profile, or ``None``.
+        column_name: The column to resolve tokens for.
+
+    Returns:
+        The exact-match token tuple to hand to this column's
+        ``NullTokenNormalizer``.
+    """
+    if normalization is None:
+        return ("",)  # D-14 default
+    sentinels = normalization.null_sentinels.get(column_name, [])
+    return (*normalization.null_tokens, *sentinels)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +149,7 @@ class StagingResult:
 
 
 class StagingLoader:
-    """Streams a ``Source`` through ``RaggedRowGuard`` into a per-run staging table."""
+    """Streams a ``Source`` through this run's normalizer stages into a per-run staging table."""
 
     name = "staging"
 
@@ -113,6 +178,137 @@ class StagingLoader:
         """
         self._target_columns = target_columns
         self._chunk_size = chunk_size
+
+    def _build_stages(self, ctx: PipelineContext) -> list[StreamingStage]:
+        """Assemble this run's normalizer pipeline from ``ctx.config`` (plan 06-16).
+
+        Always starts with ``RaggedRowGuard()`` -- the existing row-shape
+        guard runs first, before any value-level normalization touches a row
+        that is already structurally wrong. Then, for each ``ColumnContract``
+        in ``ctx.config.columns``, at that column's actual index within
+        ``self._target_columns`` (found by name -- never assumed to align
+        positionally): a nullable column's ``NullTokenNormalizer`` FIRST,
+        immediately followed by its type-specific normalizer -- this order,
+        never reversed, is what keeps an empty/null-token value from being
+        wrongly rejected as an invalid calendar date (``customers.birth_date``
+        is the platform's one real, nullable typed column). Ends with exactly
+        one ``UnicodeNormalizer()``, unconditionally, last (D-15: no
+        per-dataset opt-out).
+
+        Args:
+            ctx: The current pipeline context. Only ``ctx.config`` is read.
+
+        Returns:
+            The ordered stage list for this run's ``run_streaming(...)`` call.
+
+        Raises:
+            ValueError: A ``ColumnContract.name`` has no corresponding entry
+                in ``self._target_columns`` -- a genuine contract/target-
+                schema mismatch this phase's architecture has no other place
+                to catch.
+        """
+        stages: list[StreamingStage] = [RaggedRowGuard()]
+        normalization = ctx.config.normalization
+
+        for column in ctx.config.columns:
+            try:
+                column_index = self._target_columns.index(column.name)
+            except ValueError as exc:
+                msg = (
+                    f"ColumnContract {column.name!r} has no corresponding entry in "
+                    f"target_columns {self._target_columns!r} -- a contract/"
+                    "target-schema mismatch"
+                )
+                raise ValueError(msg) from exc
+
+            # FIRST: this column's NullTokenNormalizer, when nullable --
+            # BEFORE its own type-specific normalizer below, never after.
+            if column.nullable:
+                stages.append(
+                    NullTokenNormalizer(
+                        column_index=column_index,
+                        column_name=column.name,
+                        null_tokens=_null_tokens_for_column(normalization, column.name),
+                    ),
+                )
+
+            # THEN: exactly one type-specific normalizer, per the column's
+            # declared type. The nullable column's own NullTokenNormalizer
+            # (just above) is never duplicated here.
+            if column.type in _DATE_LIKE_TYPES:
+                stages.append(
+                    DateNormalizer(
+                        column_index=column_index,
+                        column_name=column.name,
+                        format=column.format,
+                        two_digit_year_pivot=(
+                            normalization.two_digit_year_pivot
+                            if normalization is not None
+                            else None
+                        ),
+                        spreadsheet_epoch=(
+                            normalization.spreadsheet_epoch if normalization is not None else None
+                        ),
+                        timezone=normalization.timezone if normalization is not None else None,
+                        ambiguous_time_policy=(
+                            normalization.ambiguous_time_policy
+                            if normalization is not None
+                            else "reject"
+                        ),
+                    ),
+                )
+            elif column.type in _NUMERIC_TYPES:
+                stages.append(
+                    NumericNormalizer(
+                        column_index=column_index,
+                        column_name=column.name,
+                        decimal_separator=(
+                            normalization.decimal_separator if normalization is not None else "."
+                        ),
+                        thousands_separator=(
+                            normalization.thousands_separator if normalization is not None else None
+                        ),
+                        currency_symbols=(
+                            tuple(normalization.currency_symbols)
+                            if normalization is not None
+                            else ()
+                        ),
+                        percent_as_fraction=(
+                            normalization.percent_as_fraction if normalization is not None else True
+                        ),
+                        negative_style=(
+                            normalization.negative_style
+                            if normalization is not None
+                            else "leading-minus"
+                        ),
+                        reject_scientific_notation=column.reject_scientific_notation,
+                        fixed_width=column.fixed_width,
+                    ),
+                )
+            elif column.type == "boolean":
+                stages.append(
+                    BooleanNormalizer(
+                        column_index=column_index,
+                        column_name=column.name,
+                        true_tokens=(
+                            tuple(normalization.boolean_true_tokens)
+                            if normalization is not None
+                            else ()
+                        ),
+                        false_tokens=(
+                            tuple(normalization.boolean_false_tokens)
+                            if normalization is not None
+                            else ()
+                        ),
+                    ),
+                )
+
+        # LAST: unconditionally, for every dataset, regardless of whether
+        # ctx.config.normalization is set at all (D-15: no per-dataset
+        # opt-out) -- other normalizers above may still be matching
+        # not-yet-NFC-normalized raw tokens for their own lookups.
+        stages.append(UnicodeNormalizer())
+        return stages
 
     def load(
         self,
@@ -194,17 +390,16 @@ class StagingLoader:
             for chunk_ordinal, result in run_streaming(
                 ctx,
                 stream.chunks(),
-                stages=[RaggedRowGuard()],
+                stages=self._build_stages(ctx),
             ):
-                # `RecordChunk.rows`'s element type widened to `str | bool |
-                # None` (plan 06-11), for normalizers this loader does not
-                # yet run: `stages=[RaggedRowGuard()]` above is the only
-                # stage in this call, and it never introduces a non-str
-                # field, so every field reaching the hash computation below
-                # is still genuinely `str`. Narrowed locally rather than
-                # widening `enriched_rows`/the hash encoding to tolerate
-                # types this call path can never actually produce.
-                surviving_rows = cast("tuple[tuple[str, ...], ...]", result.chunk.rows)
+                # `RecordChunk.rows`'s element type is `str | bool | None`
+                # (plan 06-11's platform-wide convention): `self._build_stages(ctx)`
+                # (plan 06-16) now threads real normalizers through this call,
+                # so a field may genuinely be `None` (a nullable column's
+                # absent value, e.g. `customers.birth_date`) or `bool` (a
+                # normalized boolean column) by the time it reaches the hash
+                # computation below -- handled there, never assumed away.
+                surviving_rows = result.chunk.rows
                 rows_in_chunk = len(surviving_rows)
                 rows_read += rows_in_chunk + len(result.rejected)
                 rows_rejected += len(result.rejected)
@@ -213,9 +408,22 @@ class StagingLoader:
                 for row in surviving_rows:
                     # C6 / Pitfall 10: computed exactly once, in Python, here
                     # -- canonical pipe-joined encoding, fixed column order
-                    # from `target_columns`. Never recomputed in SQL at
-                    # publish time.
-                    record_hash = hashlib.sha256("|".join(row).encode("utf-8")).digest()
+                    # from `target_columns`, taken AFTER every stage in
+                    # `_build_stages(ctx)` has run (plan 06-16): normalization
+                    # precedes hashing, so an NFC/NFD pair collapses to the
+                    # SAME hash here, not only in each normalizer's own unit
+                    # test. Never recomputed in SQL at publish time. A field
+                    # already normalized to `None` (a nullable column's
+                    # absent value) or `bool` (a normalized boolean) is
+                    # rendered as `""`/`str(value)` before joining --
+                    # mirroring `dataplat.normalize.numeric._row_to_raw_line`'s
+                    # own convention -- since `str.join` raises `TypeError` on
+                    # a non-`str` element.
+                    record_hash = hashlib.sha256(
+                        "|".join("" if field is None else str(field) for field in row).encode(
+                            "utf-8",
+                        ),
+                    ).digest()
                     enriched_rows.append(
                         (
                             *row,
