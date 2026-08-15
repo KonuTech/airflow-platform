@@ -327,7 +327,41 @@ Plans:
   4. A file from three schema versions ago reprocesses under its historical schema version, not the newest, and its batch records dataset, schema version, schema hash, processor version and timestamp.
   5. Processing the same file twice yields an identical output hash, DST gap and overlap timestamps round-trip correctly, and a file larger than the pod's memory limit loads in bounded memory.
 
-**Plans**: TBD
+**Plans**: 17 plans in 5 waves
+
+Plans:
+
+**Wave 1**
+
+- [ ] 06-01-PLAN.md — Foundations: detection-library deps, .zip corpus generator support, meta.schema_versions migration
+- [ ] 06-02-PLAN.md — Shared contracts: DatasetConfig columns/filename/normalization/csv extensions, diagnostics catalog, SourceError/SchemaError hierarchy, customers.yaml activation
+
+**Wave 2** *(blocked on Wave 1 completion — eleven plans, the phase's best parallelization opportunity)*
+
+- [ ] 06-03-PLAN.md — Filename mask detector (CSV-01)
+- [ ] 06-04-PLAN.md — Encoding detector (CSV-02/03)
+- [ ] 06-05-PLAN.md — Dialect detector (CSV-04/05/06)
+- [ ] 06-06-PLAN.md — Header/metadata/footer detector (CSV-07/08, SCHEMA-02)
+- [ ] 06-07-PLAN.md — Schema type inference (SCHEMA-01)
+- [ ] 06-08-PLAN.md — Compression (.gz/.zip) and multi-part delivery grouping (CSV-11, LOAD-07)
+- [ ] 06-09-PLAN.md — Date/timestamp normalizer + DST-correctness property test (CSV-09, QUAL-17)
+- [ ] 06-10-PLAN.md — Numeric normalizer (CSV-10 numeric half)
+- [ ] 06-11-PLAN.md — Boolean/NULL normalizer + Unicode NFC normalizer (CSV-10 boolean/null half, CSV-12)
+- [ ] 06-12-PLAN.md — Schema versioning + repository + historical hash-match resolution (SCHEMA-03, SCHEMA-06)
+- [ ] 06-13-PLAN.md — Schema evolution classification (SCHEMA-04, SCHEMA-05, QUAL-12)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 06-14-PLAN.md — Wire the five detectors + compression into CsvSource.inspect()/open()
+- [ ] 06-16-PLAN.md — Wire the four normalizers into StagingLoader; discovery.py idempotency-key/business-date extensions
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 06-15-PLAN.md — Wire schema versioning/evolution into CsvSource.inspect()
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 06-17-PLAN.md — Determinism property test (QUAL-16)
 
 **Research stage**: S7. **Skip `--research-phase`** — pure Python over a fixture corpus; STACK.md has chosen `charset-normalizer` `3.4.9` + `chardet` `7.5.1` (behind a BOM sniff and a contract override) and `clevercsv` `0.8.5` for detection only.
 
@@ -565,7 +599,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 | 3. `dataplat` Core Library & Metadata Control Plane | 0/TBD | Not started | - |
 | 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/9 | Planned | - |
 | 5. Vault Secrets & Workload Identity | 2/5 | In Progress | - |
-| 6. Universal CSV Engine, Schema Contracts & Normalization | 0/TBD | Not started | - |
+| 6. Universal CSV Engine, Schema Contracts & Normalization | 0/17 | Planned | - |
 | 7. Observability, Metrics, Tracing & Lineage | 0/TBD | Not started | - |
 | 8. Validation, Quarantine & Metadata Control-Plane Completion | 0/TBD | Not started | - |
 | 9. ETL Correctness — Dedup, Incremental, Backfill & Recovery | 0/TBD | Not started | - |
