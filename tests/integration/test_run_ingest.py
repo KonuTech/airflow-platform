@@ -358,6 +358,77 @@ def test_successful_run_publishes_and_marks_everything_succeeded(env: _Env) -> N
     assert not _staging_table_exists(env.migrated_dsn, run_id)  # dropped after publish (Pitfall 2)
 
 
+def test_successful_run_records_its_resolved_schema_version_on_the_run(env: _Env) -> None:
+    """Post-wave-5 code review verification Gap 1: ``meta.ingestion_runs.schema_version_id``
+    must actually be populated by a real ``run_ingest()`` call, not just resolved and
+    discarded inside ``CsvSource.open()``.
+
+    Mirrors ``_seed_pending_run``/``_make_ctx`` but wires ``CsvSource(dataset_id=...)`` --
+    the existing shared helpers deliberately omit ``dataset_id`` (skips schema resolution
+    entirely), so this test builds its own context rather than changing behavior every
+    other test in this file relies on.
+    """
+    dataset_id = env.metadata.get_or_create_dataset("run_ingest_schema_version_proof")
+    config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
+    csv_bytes = _csv_bytes(2, start_id=9_200_001)
+    object_key = "customers/schema_version_proof.csv"
+    env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
+    file_id = env.metadata.create_file(
+        dataset_id=dataset_id,
+        object_uri=f"s3://{env.scratch_bucket}/{object_key}",
+        content_sha256=hashlib.sha256(csv_bytes).digest(),
+        hash_version=1,
+        size_bytes=len(csv_bytes),
+        filename="schema_version_proof.csv",
+        status="DISCOVERED",
+    )
+    batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key="schema_version_proof:2026-08-15:1",
+        status="OPEN",
+    )
+    run_id, _ = env.metadata.get_or_create_ingestion_run(
+        idempotency_key="run_ingest_schema_version_proof:1",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+        file_id=file_id,
+        batch_id=batch_id,
+    )
+    ctx = PipelineContext(
+        run=RunContext(
+            run_id=run_id,
+            idempotency_key="run_ingest_schema_version_proof:1",
+            file_id=file_id,
+            batch_id=batch_id,
+        ),
+        config=_make_config(),
+        metadata=env.metadata,
+        objects=env.objects,
+        db=env.pool,
+        log=get_logger(),
+        source=CsvSource(bucket=env.scratch_bucket, key=object_key, dataset_id=dataset_id),
+    )
+
+    receipt = run_ingest(ctx)
+
+    assert receipt.status == "SUCCEEDED"
+    with psycopg.connect(env.migrated_dsn) as conn:
+        row = conn.execute(
+            "SELECT schema_version_id FROM meta.ingestion_runs WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()
+        version_row = conn.execute(
+            "SELECT dataset_id FROM meta.schema_versions WHERE schema_version_id = %s",
+            (row[0] if row else None,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] is not None  # NOT NULL -- the exact gap this test closes
+    assert version_row is not None
+    assert version_row[0] == dataset_id  # points at THIS run's own dataset's schema history
+
+
 # --- Behavior 2: already-SUCCEEDED -> SKIPPED_DUPLICATE --------------------
 
 

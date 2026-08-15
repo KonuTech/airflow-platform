@@ -409,6 +409,7 @@ class PostgresMetadataRepository(MetadataRepository):
         finished_at: datetime,
         duration_ms: int,
         report_uri: str | None,
+        schema_version_id: int | None = None,
     ) -> None:
         """See `MetadataRepository.finalize_publication`.
 
@@ -433,10 +434,11 @@ class PostgresMetadataRepository(MetadataRepository):
                    finished_at = %s,
                    rows_loaded = %s,
                    duration_ms = %s,
-                   report_uri = %s
+                   report_uri = %s,
+                   schema_version_id = %s
              WHERE run_id = %s
             """,
-            (finished_at, rows_loaded, duration_ms, report_uri, run_id),
+            (finished_at, rows_loaded, duration_ms, report_uri, schema_version_id, run_id),
         )
 
     def update_ingestion_run_status(self, *, run_id: int, status: str, **fields: object) -> None:

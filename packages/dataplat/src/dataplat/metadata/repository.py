@@ -391,14 +391,15 @@ class MetadataRepository(Protocol):
         finished_at: datetime,
         duration_ms: int,
         report_uri: str | None,
+        schema_version_id: int | None = None,
     ) -> None:
         """Mark a file, batch and run SUCCEEDED, inside the caller's own open transaction.
 
         Maps to three sequential UPDATEs -- ``meta.files.status =
         'PROCESSED'``, ``meta.batches.status = 'PUBLISHED'``,
         ``meta.ingestion_runs`` (``status = 'SUCCEEDED'``, `finished_at`,
-        `rows_loaded`, `duration_ms`, `report_uri`) -- all issued against
-        `conn`.
+        `rows_loaded`, `duration_ms`, `report_uri`, `schema_version_id`) --
+        all issued against `conn`.
 
         The one exception on this Protocol: every other method opens its
         own connection from the pool; this one never does. `conn` must
@@ -432,6 +433,15 @@ class MetadataRepository(Protocol):
                 mirrors `Receipt.report_uri`'s own docstring) -- the column
                 is nullable (migration 0004), so this is a real, intended
                 value, not a workaround.
+            schema_version_id: The `meta.schema_versions` row this run's
+                file resolved to (SCHEMA-03/06), from `StagingResult.
+                schema_version_id`. `None` when the `Source` never resolved
+                one (no `dataset_id` wired, or a non-schema-versioned
+                `Source` implementation) -- the column is nullable
+                (migration 0004, closed by migration 0009's FK), so this is
+                a real, intended value for that case, not a workaround.
+                Defaults to `None` so a caller pre-dating this parameter
+                keeps compiling unchanged.
         """
         ...
 

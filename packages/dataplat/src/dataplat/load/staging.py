@@ -150,12 +150,19 @@ class StagingResult:
             COPY-ed into ``staging_table``.
         rows_rejected: Rows ``RaggedRowGuard`` rejected (field-count
             mismatch) and did not stage.
+        schema_version_id: ``ctx.source``'s resolved ``meta.schema_versions``
+            row id (SCHEMA-03/06), read back from ``ctx.source.last_profile``
+            after ``open()`` completes -- a ``Source`` implementation not
+            wired for schema resolution (no ``last_profile`` attribute, or
+            one that never populated it) leaves this ``None``, never an
+            error (post-wave-5 code review verification Gap 1).
     """
 
     staging_table: str
     rows_read: int
     rows_parsed: int
     rows_rejected: int
+    schema_version_id: int | None = None
 
 
 class StagingLoader:
@@ -509,9 +516,18 @@ class StagingLoader:
                 if on_progress is not None:
                     on_progress(rows_read, rows_parsed)
 
+        # `source` may be any Source implementation -- `last_profile` is a
+        # CsvSource-specific attribute (deliberately not part of the generic
+        # Source protocol, which a future non-CSV Source need not implement
+        # any schema-versioning concept for), so this is read defensively.
+        resolved_profile = getattr(source, "last_profile", None)
+        schema_version_id = (
+            resolved_profile.schema_version_id if resolved_profile is not None else None
+        )
         return StagingResult(
             staging_table=staging_table,
             rows_read=rows_read,
             rows_parsed=rows_parsed,
             rows_rejected=rows_rejected,
+            schema_version_id=schema_version_id,
         )

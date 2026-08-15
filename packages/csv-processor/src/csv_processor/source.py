@@ -378,6 +378,16 @@ class CsvSource(Source):
         self.dataset_id = dataset_id
         self.additional_keys = additional_keys
         self.chunk_size = chunk_size
+        # Set by open() from its own internal inspect() call -- the only
+        # way a caller holding this same CsvSource instance (StagingLoader.
+        # load()) can read the resolved profile back after open()'s context
+        # manager exits, without a second, duplicate inspect() call (which
+        # would re-run real SchemaRepository DB writes) and without adding
+        # a CSV-specific concept to the generic Source protocol every future
+        # non-CSV Source would otherwise have to implement (post-wave-5 code
+        # review verification Gap 1: meta.ingestion_runs.schema_version_id
+        # was never populated because nothing read this value back).
+        self.last_profile: CsvProfile | None = None
 
     @contextlib.contextmanager
     def open(self, ctx: PipelineContext) -> Iterator[CsvRecordStream]:
@@ -430,6 +440,7 @@ class CsvSource(Source):
                 06-05's ``to_stdlib_dialect`` design).
         """
         profile = self.inspect(ctx)
+        self.last_profile = profile
         # Reconstructed, not the rich detector result itself: `CsvProfile`
         # deliberately stores only `delimiter`/`quotechar`/`dialect_declined`
         # (dataplat must never hold a `csv_processor.detect.*` type). This

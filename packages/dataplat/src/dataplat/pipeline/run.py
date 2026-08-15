@@ -330,6 +330,7 @@ def run_ingest(
                 finished_at=finished_at,
                 duration_ms=duration_ms,
                 report_uri=None,
+                schema_version_id=staging_result.schema_version_id,
             )
 
         # Pitfall 2: an explicit DROP after the publish transaction has
