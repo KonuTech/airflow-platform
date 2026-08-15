@@ -3,10 +3,15 @@
 Every assertion is checked against a fixture's own ``expect:`` block, never
 restated independently -- ``tests/fixtures/corpus.yaml``'s own framing:
 "Phase 6's detector tests are a parametrised loop over these declarations."
-Only fixtures 01, 11, 12, 13, 18, 19, 48, 49, 63 and 64 -- the ones whose
+Only fixtures 01, 11, 12, 13, 14, 18, 19, 48, 49, 63 and 64 -- the ones whose
 ``covers:`` list names CSV-07 or CSV-08 -- are exercised here (06-06-PLAN.md's
-own ``<objective>``). Fixtures 13/48/63/64 are extended with footer/
-duplicate-name/repeated-header assertions by this same module's own Task 2.
+own ``<objective>``).
+
+``48_duplicate_header_names_case_variant.csv`` is deliberately excluded from
+the generic "matches corpus declaration" loop below: once duplicate-name
+rejection exists, calling ``detect_header`` on it raises rather than
+returning -- it is tested separately, alongside 14, in
+``test_detect_header_rejects_duplicate_header_names``.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from tools.corpus.generators import generate_corpus
 from tools.corpus.manifest import load_manifest
 
 from csv_processor.detect.header import detect_header
+from dataplat.errors import FileInspectionError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -27,8 +33,9 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = REPO_ROOT / "tests" / "fixtures" / "corpus.yaml"
 
-# Every corpus fixture whose `covers:` list includes CSV-07 or CSV-08 -- the
-# ten fixtures pinned specifically to exercise this detector's edge cases.
+# Every corpus fixture whose `covers:` list includes CSV-07 or CSV-08 and
+# whose declared outcome is a normal (non-raising) `detect_header` return.
+# `48_duplicate_header_names_case_variant.csv` is covered separately below.
 HEADER_FIXTURE_NAMES = (
     "01_simple.csv",
     "11_no_header.csv",
@@ -36,9 +43,14 @@ HEADER_FIXTURE_NAMES = (
     "13_footer.csv",
     "18_empty.csv",
     "19_only_header.csv",
-    "48_duplicate_header_names_case_variant.csv",
     "49_header_with_leading_trailing_spaces.csv",
     "63_repeated_header_mid_file.csv",
+    "64_footer_totals_with_different_column_count.csv",
+)
+
+# The two footer fixtures, checked for footer_row_indices/footer_row_count.
+FOOTER_FIXTURE_NAMES = (
+    "13_footer.csv",
     "64_footer_totals_with_different_column_count.csv",
 )
 
@@ -116,3 +128,94 @@ def test_detect_header_trimmed_header_equals_raw_header_by_default() -> None:
     result = detect_header(rows)
     assert result.trimmed_header == result.raw_header
     assert result.raw_header == (" id ", " name ")
+
+
+@pytest.mark.parametrize("fixture_name", FOOTER_FIXTURE_NAMES)
+def test_detect_header_identifies_footer_rows(
+    fixture_name: str, corpus: Path, declared: Mapping[str, Mapping[str, Any]]
+) -> None:
+    """Footer rows are found by their differing field count, and excluded from the data count."""
+    expect = declared[fixture_name]
+    rows = _rows_for(corpus / fixture_name)
+
+    result = detect_header(rows)
+
+    assert list(result.footer_row_indices) == expect["footer_row_indices"]
+    assert len(result.footer_row_indices) == expect["footer_row_count"]
+    kept_data_rows = (
+        len(rows)
+        - 1  # the header row itself
+        - len(result.footer_row_indices)
+        - len(result.repeated_header_row_indices)
+    )
+    assert kept_data_rows == expect["data_rows"]
+
+
+def test_detect_header_identifies_a_repeated_header_mid_file(
+    corpus: Path, declared: Mapping[str, Mapping[str, Any]]
+) -> None:
+    """A concatenated export's re-embedded header line is found and excluded, not loaded."""
+    expect = declared["63_repeated_header_mid_file.csv"]
+    rows = _rows_for(corpus / "63_repeated_header_mid_file.csv")
+
+    result = detect_header(rows)
+
+    assert list(result.repeated_header_row_indices) == expect["repeated_header_row_indices"]
+    kept_data_rows = (
+        len(rows) - 1 - len(result.footer_row_indices) - len(result.repeated_header_row_indices)
+    )
+    assert kept_data_rows == expect["data_rows"]
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "check_colliding_names"),
+    [
+        ("14_duplicate_columns.csv", False),
+        ("48_duplicate_header_names_case_variant.csv", True),
+    ],
+)
+def test_detect_header_rejects_duplicate_header_names(
+    fixture_name: str,
+    *,
+    check_colliding_names: bool,
+    corpus: Path,
+    declared: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Exact (14) and case-variant (48) duplicate names both raise, never rename or last-wins."""
+    expect = declared[fixture_name]
+    rows = _rows_for(corpus / fixture_name)
+
+    with pytest.raises(FileInspectionError) as exc_info:
+        detect_header(rows)
+
+    assert exc_info.value.context["diagnostic_code"] == "duplicate-header-names"
+    colliding = exc_info.value.context["colliding_names"]
+    assert isinstance(colliding, list)
+    if check_colliding_names:
+        assert set(colliding) == set(expect["colliding_names"])
+    else:
+        assert expect["duplicated_name"] in colliding
+
+
+def test_detect_header_skip_footer_rows_override_skips_without_scoring() -> None:
+    """csv.skip_footer_rows takes precedence over heuristic footer scoring when non-zero."""
+    rows = [
+        ("id", "name", "amount"),
+        ("1", "Kowalski", "10.00"),
+        ("2", "Nowak", "20.00"),
+        ("not", "scored", "at-all"),  # same field count as the header -- shape alone misses it
+    ]
+    result = detect_header(rows, skip_footer_rows=1)
+    assert result.footer_row_indices == (3,)
+
+
+def test_detect_header_footer_patterns_override_matches_a_configured_regex() -> None:
+    """csv.footer_patterns classifies a same-shaped trailing row as footer via regex match."""
+    rows = [
+        ("id", "name", "amount"),
+        ("1", "Kowalski", "10.00"),
+        ("2", "Nowak", "20.00"),
+        ("TOTAL", "", "30.00"),  # same field count as the header -- shape alone misses it
+    ]
+    result = detect_header(rows, footer_patterns=[r"^TOTAL$"])
+    assert result.footer_row_indices == (3,)
