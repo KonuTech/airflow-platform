@@ -92,8 +92,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **SCHEMA-01**: Types are inferred conservatively — `001234` stays a string when it may be an identifier — *(DoD 23)*
 - [ ] **SCHEMA-02**: Explicit YAML data contracts declare types, nullability, required columns, business keys and semantics, and incoming data is validated against them — *(DoD 24)*
 - [x] **SCHEMA-03**: Schemas are versioned, and each batch records dataset, schema version, schema hash, processor version and processing timestamp — *(DoD 25)*
-- [ ] **SCHEMA-04**: Added, removed, renamed, reordered and retyped columns are classified as compatible or breaking, per a configurable per-dataset policy — *(DoD 26)*
-- [ ] **SCHEMA-05**: Drift against previously observed schemas is detected and *reported*, never silently adapted to — *(DoD 27)*
+- [x] **SCHEMA-04**: Added, removed, renamed, reordered and retyped columns are classified as compatible or breaking, per a configurable per-dataset policy — *(DoD 26)*
+- [x] **SCHEMA-05**: Drift against previously observed schemas is detected and *reported*, never silently adapted to — *(DoD 27)*
 - [x] **SCHEMA-06**: Historical files process under their historical schema version rather than being forced through the newest — *(DoD 51)*
 - [x] **SCHEMA-07**: Processing configuration is versioned and hashed, and every run records which config version produced it — *(Gap 9)*
 
@@ -189,7 +189,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-09**: Idempotency is tested, including the assertion that a re-run produces zero additional rows — *(DoD 83)*
 - [ ] **QUAL-10**: Deduplication is tested within files, across files and across batches — *(DoD 84)*
 - [ ] **QUAL-11**: Backfills are tested for idempotency and historical schema resolution — *(DoD 85)*
-- [ ] **QUAL-12**: Schema evolution is tested for compatible and breaking changes — *(DoD 86)*
+- [x] **QUAL-12**: Schema evolution is tested for compatible and breaking changes — *(DoD 86)*
 - [ ] **QUAL-13**: CDC is tested including ordering and replayed events — *(DoD 87)*
 - [ ] **QUAL-14**: SCD is tested including late-arriving corrections and idempotent re-application — *(DoD 88)*
 - [ ] **QUAL-15**: Failure and recovery scenarios from §84 are tested — pod crash, database unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, CDC ordering, secret rotation, unauthorized secret access — *(DoD 89)*
@@ -330,8 +330,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SCHEMA-01 | Phase 6 | Pending |
 | SCHEMA-02 | Phase 6 | Pending |
 | SCHEMA-03 | Phase 6 | Complete |
-| SCHEMA-04 | Phase 6 | Pending |
-| SCHEMA-05 | Phase 6 | Pending |
+| SCHEMA-04 | Phase 6 | Complete |
+| SCHEMA-05 | Phase 6 | Complete |
 | SCHEMA-06 | Phase 6 | Complete |
 | SCHEMA-07 | Phase 3 | Complete |
 | VALID-01 | Phase 8 | Pending |
@@ -403,7 +403,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-09 | Phase 4 | Complete |
 | QUAL-10 | Phase 9 | Pending |
 | QUAL-11 | Phase 9 | Pending |
-| QUAL-12 | Phase 6 | Pending |
+| QUAL-12 | Phase 6 | Complete |
 | QUAL-13 | Phase 10 | Pending |
 | QUAL-14 | Phase 10 | Pending |
 | QUAL-15 | Phase 11 | Pending |
