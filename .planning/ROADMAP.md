@@ -338,17 +338,17 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion — eleven plans, the phase's best parallelization opportunity)*
 
-- [ ] 06-03-PLAN.md — Filename mask detector (CSV-01)
-- [ ] 06-04-PLAN.md — Encoding detector (CSV-02/03)
-- [ ] 06-05-PLAN.md — Dialect detector (CSV-04/05/06)
-- [ ] 06-06-PLAN.md — Header/metadata/footer detector (CSV-07/08, SCHEMA-02)
-- [ ] 06-07-PLAN.md — Schema type inference (SCHEMA-01)
-- [ ] 06-08-PLAN.md — Compression (.gz/.zip) and multi-part delivery grouping (CSV-11, LOAD-07)
-- [ ] 06-09-PLAN.md — Date/timestamp normalizer + DST-correctness property test (CSV-09, QUAL-17)
-- [ ] 06-10-PLAN.md — Numeric normalizer (CSV-10 numeric half)
-- [ ] 06-11-PLAN.md — Boolean/NULL normalizer + Unicode NFC normalizer (CSV-10 boolean/null half, CSV-12)
-- [ ] 06-12-PLAN.md — Schema versioning + repository + historical hash-match resolution (SCHEMA-03, SCHEMA-06)
-- [ ] 06-13-PLAN.md — Schema evolution classification (SCHEMA-04, SCHEMA-05, QUAL-12)
+- [x] 06-03-PLAN.md — Filename mask detector (CSV-01)
+- [x] 06-04-PLAN.md — Encoding detector (CSV-02/03)
+- [x] 06-05-PLAN.md — Dialect detector (CSV-04/05/06)
+- [x] 06-06-PLAN.md — Header/metadata/footer detector (CSV-07/08, SCHEMA-02)
+- [x] 06-07-PLAN.md — Schema type inference (SCHEMA-01)
+- [x] 06-08-PLAN.md — Compression (.gz/.zip) and multi-part delivery grouping (CSV-11, LOAD-07)
+- [x] 06-09-PLAN.md — Date/timestamp normalizer + DST-correctness property test (CSV-09, QUAL-17)
+- [x] 06-10-PLAN.md — Numeric normalizer (CSV-10 numeric half)
+- [x] 06-11-PLAN.md — Boolean/NULL normalizer + Unicode NFC normalizer (CSV-10 boolean/null half, CSV-12)
+- [x] 06-12-PLAN.md — Schema versioning + repository + historical hash-match resolution (SCHEMA-03, SCHEMA-06)
+- [x] 06-13-PLAN.md — Schema evolution classification (SCHEMA-04, SCHEMA-05, QUAL-12)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
