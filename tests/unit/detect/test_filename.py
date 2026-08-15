@@ -64,7 +64,7 @@ def test_whole_string_anchor_rejects_a_filename_matching_only_a_prefix() -> None
 
 
 def test_whole_string_anchor_rejects_prefix_match_on_optional_seq_mask() -> None:
-    """The plan's own acceptance-criteria filename: prefix rejection with an optional facet present."""
+    """The plan's acceptance-criteria filename: prefix rejection with an optional facet present."""
     compiled = compile_mask("{dataset}_{country}_{business_date:%Y%m%d}[_{seq:03d}].csv")
 
     result = match_filename(compiled, "customers_PL_20260815_extra.csv")
