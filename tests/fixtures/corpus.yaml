@@ -58,6 +58,9 @@
 # own wording is "grow the corpus as edge cases are discovered", and growth here
 # is one manifest entry plus one digest line. A case found in Phase 6 or in
 # production belongs in this file, not in a test module's private fixture.
+# Phase 6 plan 01 is the first instance of that growth: it adds a 70th fixture,
+# `71_zipped.csv.zip`, `.zip`'s counterpart to `61_gzipped.csv.gz`, exercising
+# CSV-11's previously-uncovered `.zip` half.
 #
 # Declaration order is append-friendly on purpose. Existing entries are never
 # moved: a fixture inserted between two others adds one line to CORPUS.sha256,
@@ -529,6 +532,20 @@ fixtures:
     compression: gzip
     gzip_mtime: 0
     gzip_filename: ""
+    expect:
+      decompresses_to: "01_simple.csv"
+      data_rows: 20
+
+  # `.zip`'s counterpart to 61_gzipped.csv.gz above, added in Phase 6 to give
+  # CSV-11's `.zip` half real corpus coverage (Pitfall 8: no `.zip` fixture
+  # existed before this phase). `gzip_mtime`/`gzip_filename` do not apply
+  # here — those are gzip-specific header fields with no zip equivalent once
+  # `ZipInfo.date_time` is pinned to zip's own minimum representable date.
+  - name: "71_zipped.csv.zip"
+    covers: [CSV-11]
+    generator: wrapper
+    wraps: "01_simple.csv"
+    compression: zip
     expect:
       decompresses_to: "01_simple.csv"
       data_rows: 20

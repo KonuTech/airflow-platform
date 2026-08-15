@@ -66,6 +66,7 @@ import gzip
 import hashlib
 import random
 import unicodedata
+import zipfile
 from decimal import ROUND_CEILING, ROUND_FLOOR
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -402,26 +403,39 @@ def _write_wrapper(fixture: Fixture, out_dir: Path, path: Path) -> None:
         )
         raise GeneratorError(msg)
 
-    if fixture.compression != "gzip":  # pragma: no cover - guarded at load time
+    if fixture.compression == "gzip":
+        # R5: mtime=0 and filename="" are non-negotiable. gzip embeds the
+        # current wall-clock time and the source file name in its header, so
+        # without both of these two runs a second apart produce different
+        # bytes.
+        with (
+            path.open("wb") as raw,
+            target.open("rb") as source,
+            gzip.GzipFile(
+                fileobj=raw,
+                mode="wb",
+                compresslevel=_GZIP_LEVEL,
+                mtime=fixture.gzip_mtime,
+                filename=fixture.gzip_filename,
+            ) as compressed,
+        ):
+            while chunk := source.read(_READ_CHUNK):
+                compressed.write(chunk)
+    elif fixture.compression == "zip":
+        # R5's zip counterpart: ZipInfo.date_time defaults to the current
+        # wall-clock time, which would make this fixture exactly as
+        # non-reproducible across runs as an unpinned gzip mtime. 1980-01-01
+        # is ZIP's minimum representable date, pinned explicitly rather than
+        # left to the default.
+        member = zipfile.ZipInfo(filename=fixture.wraps, date_time=(1980, 1, 1, 0, 0, 0))
+        with (
+            path.open("wb") as raw,
+            zipfile.ZipFile(raw, mode="w") as archive,
+        ):
+            archive.writestr(member, target.read_bytes())
+    else:  # pragma: no cover - guarded at load time
         msg = f"{fixture.name}: unsupported compression {fixture.compression!r}"
         raise GeneratorError(msg)
-
-    # R5: mtime=0 and filename="" are non-negotiable. gzip embeds the current
-    # wall-clock time and the source file name in its header, so without both
-    # of these two runs a second apart produce different bytes.
-    with (
-        path.open("wb") as raw,
-        target.open("rb") as source,
-        gzip.GzipFile(
-            fileobj=raw,
-            mode="wb",
-            compresslevel=_GZIP_LEVEL,
-            mtime=fixture.gzip_mtime,
-            filename=fixture.gzip_filename,
-        ) as compressed,
-    ):
-        while chunk := source.read(_READ_CHUNK):
-            compressed.write(chunk)
 
 
 def _bom_for(encoding: str) -> bytes:
