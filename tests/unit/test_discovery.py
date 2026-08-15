@@ -84,7 +84,6 @@ class _FakeSchemaRepository:
 
     def get_current(self, dataset_id: int) -> None:
         del dataset_id
-        return None
 
 
 def _fake_schema() -> SchemaRepository:

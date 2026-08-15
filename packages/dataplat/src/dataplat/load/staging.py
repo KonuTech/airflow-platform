@@ -266,9 +266,7 @@ class StagingLoader:
                             normalization.decimal_separator if normalization is not None else "."
                         ),
                         thousands_separator=(
-                            normalization.thousands_separator
-                            if normalization is not None
-                            else None
+                            normalization.thousands_separator if normalization is not None else None
                         ),
                         currency_symbols=(
                             tuple(normalization.currency_symbols)
@@ -276,9 +274,7 @@ class StagingLoader:
                             else ()
                         ),
                         percent_as_fraction=(
-                            normalization.percent_as_fraction
-                            if normalization is not None
-                            else True
+                            normalization.percent_as_fraction if normalization is not None else True
                         ),
                         negative_style=(
                             normalization.negative_style
