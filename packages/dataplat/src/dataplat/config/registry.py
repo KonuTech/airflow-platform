@@ -125,8 +125,18 @@ class ConfigRegistry:
             call — ``is_new=False`` when nothing was written.
         """
         config_hash, hash_version = hash_config(config)
+        freshness = config.freshness
+        expected_frequency = freshness.expected_frequency if freshness is not None else None
+        warn_after = freshness.warn_after if freshness is not None else None
+        fail_after = freshness.fail_after if freshness is not None else None
         with self._pool.connection() as conn, conn.cursor() as cur:
-            dataset_id = self._resolve_dataset_id(cur, dataset_name)
+            dataset_id = self._resolve_dataset_id(
+                cur,
+                dataset_name,
+                expected_frequency=expected_frequency,
+                warn_after=warn_after,
+                fail_after=fail_after,
+            )
             current = cur.execute(
                 """
                 SELECT config_version_id, version, config_hash
@@ -219,7 +229,14 @@ class ConfigRegistry:
         return DatasetConfig.model_validate(found[0])
 
     @staticmethod
-    def _resolve_dataset_id(cur: Cursor[Any], dataset_name: str) -> int:
+    def _resolve_dataset_id(
+        cur: Cursor[Any],
+        dataset_name: str,
+        *,
+        expected_frequency: str | None = None,
+        warn_after: str | None = None,
+        fail_after: str | None = None,
+    ) -> int:
         """Return ``dataset_name``'s ``dataset_id``, inserting the row if absent.
 
         A single atomic ``INSERT ... ON CONFLICT DO UPDATE`` (CR-03), never a
@@ -240,20 +257,44 @@ class ConfigRegistry:
         ``sync()`` for the same (already-existing) dataset still blocks
         until this one commits or rolls back.
 
+        ``expected_frequency``/``warn_after``/``fail_after`` (07-CONTEXT.md
+        D-08, OBS-01/OBS-09) ride the same upsert: each binds through a
+        ``%s::interval`` placeholder, so PostgreSQL parses the interval
+        literal server-side (binding ``None`` resolves to ``NULL``
+        correctly through the same placeholder) and each is also set on
+        conflict, exactly like ``dataset_name`` -- so a dataset whose
+        ``freshness:`` block is later removed from its YAML correctly nulls
+        these columns back out on the next ``sync()``, never leaving stale
+        freshness state behind.
+
         Args:
             cur: An open cursor on the transaction ``sync()`` is running.
             dataset_name: The dataset's unique name.
+            expected_frequency: A PostgreSQL interval literal naming this
+                dataset's expected delivery frequency, or ``None`` when
+                freshness is not tracked for this dataset.
+            warn_after: A PostgreSQL interval literal naming the grace
+                period before a WARN-severity freshness threshold, or
+                ``None``.
+            fail_after: A PostgreSQL interval literal naming the grace
+                period before a FAIL-severity freshness threshold, or
+                ``None``.
 
         Returns:
             The dataset's ``dataset_id``.
         """
         row = cur.execute(
             """
-            INSERT INTO meta.datasets (dataset_name) VALUES (%s)
+            INSERT INTO meta.datasets
+                (dataset_name, expected_frequency, freshness_warn_after, freshness_fail_after)
+            VALUES (%s, %s::interval, %s::interval, %s::interval)
             ON CONFLICT (dataset_name) DO UPDATE
-                SET dataset_name = EXCLUDED.dataset_name
+                SET dataset_name = EXCLUDED.dataset_name,
+                    expected_frequency = EXCLUDED.expected_frequency,
+                    freshness_warn_after = EXCLUDED.freshness_warn_after,
+                    freshness_fail_after = EXCLUDED.freshness_fail_after
             RETURNING dataset_id
             """,
-            (dataset_name,),
+            (dataset_name, expected_frequency, warn_after, fail_after),
         ).fetchone()
         return int(_require_row(row, "meta.datasets insert returned no row")[0])

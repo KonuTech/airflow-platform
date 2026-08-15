@@ -333,6 +333,49 @@ class CsvParsingConfig(BaseModel):
     header_case_sensitive: bool = True
 
 
+class FreshnessConfig(BaseModel):
+    """A dataset's opt-in data-freshness tracking block (OBS-01, OBS-09).
+
+    Absent entirely when a dataset has no freshness expectation to track
+    (07-CONTEXT.md D-08) — this is what makes OBS-09's "no file currently
+    available" (stays quiet, structurally) distinct from "file expected but
+    missing" (alerts): a dataset with no ``freshness:`` block never enters
+    the freshness-breach condition's result set at all, not because a flag
+    says so, but because ``meta.datasets.expected_frequency`` is ``NULL``
+    for it. Flows through ``ConfigRegistry.sync()`` into three new nullable
+    ``meta.datasets`` columns (migration 0010) on every sync; removing this
+    block from a dataset's YAML correctly nulls those columns back out on
+    the next sync.
+
+    Attributes:
+        expected_frequency: A PostgreSQL interval literal (e.g. ``"1 day"``)
+            naming how often this dataset expects a new file/successful
+            run. Required whenever this block is present. Parsing stays
+            server-side via a ``::interval`` cast at the SQL layer — never a
+            Python interval parser (STACK.md's date/time discipline extends
+            here: this project never guesses at ambiguous string formats in
+            application code).
+        warn_after: An additional grace period layered on top of
+            ``expected_frequency`` before a WARN-severity threshold fires,
+            as a PostgreSQL interval literal, or ``None`` for no separate
+            warn threshold.
+        fail_after: An additional grace period layered on top of
+            ``expected_frequency`` before a FAIL-severity threshold fires,
+            as a PostgreSQL interval literal, or ``None`` for no separate
+            fail threshold. Ordering (``warn_after <= fail_after``) is
+            enforced by PostgreSQL at query time in the freshness
+            alert condition, not by this model: both are opaque interval
+            literals a naive Python string comparison cannot safely order
+            without a parser, so no model validator attempts it here.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expected_frequency: str
+    warn_after: str | None = None
+    fail_after: str | None = None
+
+
 class DatasetConfig(BaseModel):
     """The complete, validated configuration for one dataset.
 
@@ -361,6 +404,9 @@ class DatasetConfig(BaseModel):
         normalization: The dataset's opt-in locale/normalization profile,
             or ``None`` when the dataset has no numeric/currency/boolean
             columns needing one (D-12's consequence).
+        freshness: The dataset's opt-in data-freshness expectation, or
+            ``None`` when this dataset has no freshness expectation to
+            track (07-CONTEXT.md D-08) — ``customers.yaml`` declares one.
         csv: Structural CSV-parsing overrides. Defaults to "detect
             everything" (``CsvParsingConfig``'s own field defaults).
         schema_evolution_on_new_column: Policy applied when a file
@@ -384,6 +430,7 @@ class DatasetConfig(BaseModel):
     columns: list[ColumnContract]
     filename: FilenameMaskConfig | None = None
     normalization: NormalizationConfig | None = None
+    freshness: FreshnessConfig | None = None
     csv: CsvParsingConfig = Field(default_factory=CsvParsingConfig)
     schema_evolution_on_new_column: str = "evolve"
     schema_evolution_on_missing_or_retyped_column: str = "freeze"
