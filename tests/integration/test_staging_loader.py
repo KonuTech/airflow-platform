@@ -21,6 +21,7 @@ import pytest
 
 from dataplat.config.model import (
     BatchingConfig,
+    ColumnContract,
     DatasetConfig,
     DeduplicationConfig,
     LoadConfig,
@@ -79,6 +80,8 @@ class _FakeSource(Source):
 
 
 def _make_config() -> DatasetConfig:
+    # columns= is required (06-02 Task 1/3, D-18) -- added here purely to stay
+    # constructible; StagingLoader itself never reads DatasetConfig.columns.
     return DatasetConfig(
         dataset="customers",
         config_schema_version=1,
@@ -96,6 +99,32 @@ def _make_config() -> DatasetConfig:
         ),
         load=LoadConfig(strategy="merge", target="normalized.customers"),
         batching=BatchingConfig(max_units_per_run=100),
+        columns=[
+            ColumnContract(
+                name="customer_id",
+                type="string",
+                nullable=False,
+                required=True,
+                business_key=True,
+                description="Natural business key for a customer record",
+            ),
+            ColumnContract(name="name", type="string", nullable=False, required=True),
+            ColumnContract(name="country", type="string", nullable=False, required=True),
+            ColumnContract(
+                name="birth_date",
+                type="date",
+                nullable=True,
+                required=True,
+                format="%Y-%m-%d",
+            ),
+            ColumnContract(
+                name="event_ts",
+                type="timestamp",
+                nullable=False,
+                required=True,
+                format="%Y-%m-%dT%H:%M:%S%z",
+            ),
+        ],
     )
 
 
