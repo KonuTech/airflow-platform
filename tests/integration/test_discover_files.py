@@ -22,11 +22,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import psycopg
 import pytest
+from tools.corpus.generators import generate_corpus
+from tools.corpus.manifest import load_manifest
 
+from csv_processor.cli import _parse_s3_uri
+from csv_processor.source import CsvSource
 from dataplat.config.model import (
     BatchingConfig,
     ColumnContract,
@@ -37,6 +42,10 @@ from dataplat.config.model import (
 )
 from dataplat.discovery import discover_files
 from dataplat.metadata.postgres import PostgresMetadataRepository
+from dataplat.models.assignment import AssignmentDocument
+from dataplat.models.identity import RunContext
+from dataplat.observability.logging import get_logger
+from dataplat.pipeline.protocol import PipelineContext
 from dataplat.schema.repository import SchemaRepository
 from dataplat.storage.db import create_pool
 from dataplat.storage.objectstore import S3ObjectStore
@@ -44,9 +53,13 @@ from dataplat.storage.objectstore import S3ObjectStore
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = REPO_ROOT / "tests" / "fixtures" / "corpus.yaml"
+
 _CONFIG_HASH = "config-hash-fixture"
 _PROCESSOR_IMAGE = "sha256:test-processor-image"
 _PROCESSOR_VERSION = "0.1.0"
+_MULTIPART_PATTERN = r"(?P<group>.+)/part-(?P<index>\d+)"
 
 
 def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
@@ -84,11 +97,21 @@ def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
         return int(row[0])
 
 
-def _make_config(*, path: str, max_units_per_run: int = 100) -> DatasetConfig:
+def _make_config(
+    *,
+    path: str,
+    max_units_per_run: int = 100,
+    multipart_pattern: str | None = None,
+) -> DatasetConfig:
     """A locally-constructed `DatasetConfig`, scoped to one test's own `source.path` prefix.
 
     columns= is required (06-02 Task 1/3, D-18) -- added here purely to stay
     constructible; discover_files itself never reads DatasetConfig.columns.
+
+    `multipart_pattern` (06-18-PLAN.md Task 3): opt-in, defaults to `None`
+    so every pre-existing call in this file keeps behaving exactly as
+    before -- only `test_multipart_delivery_becomes_one_logical_dataset`
+    supplies a real one.
     """
     return DatasetConfig(
         dataset="customers",
@@ -99,6 +122,7 @@ def _make_config(*, path: str, max_units_per_run: int = 100) -> DatasetConfig:
             path=path,
             change_semantics="snapshot",
             duplicate_policy="skip",
+            multipart_pattern=multipart_pattern,
         ),
         deduplication=DeduplicationConfig(
             strategy="business_key_latest",
@@ -456,3 +480,98 @@ def test_three_way_duplicate_content_resolves_deterministically_across_reruns(
             assert duplicate_of_file_id is None
         else:
             assert duplicate_of_file_id == original_file_id
+
+
+def test_multipart_delivery_becomes_one_logical_dataset(
+    repository: PostgresMetadataRepository,
+    object_store: S3ObjectStore,
+    migrated_dsn: str,
+    schema: SchemaRepository,
+    tmp_path: Path,
+) -> None:
+    """CSV-11 (06-18-PLAN.md): ``62_multipart_split``'s two real parts discover as ONE ingestion
+
+    run with ONE frozen ``AssignmentDocument``, and a real ``CsvSource`` reads both as one
+    logical 20-row stream -- proven through the REAL ``discover_files`` -> ``AssignmentDocument``
+    -> ``CsvSource.open()`` call chain against real Postgres+MinIO, not
+    ``group_multipart_units``/``open_multipart_stream`` in isolation (already proven by
+    ``tests/unit/test_discovery.py``'s own unit-level tests).
+    """
+    manifest = load_manifest(MANIFEST)
+    generate_corpus(manifest, tmp_path, fast=True)
+    part_dir = tmp_path / "62_multipart_split"
+    part0_bytes = (part_dir / "part-00000").read_bytes()
+    part1_bytes = (part_dir / "part-00001").read_bytes()
+
+    dataset_name = "discover_multipart_proof"
+    dataset_id = repository.get_or_create_dataset(dataset_name)
+    config_version_id = _insert_config_version(migrated_dsn, dataset_id=dataset_id)
+    config = _make_config(path="customers/multipart_proof/", multipart_pattern=_MULTIPART_PATTERN)
+
+    object_store.put_object("raw", "customers/multipart_proof/part-00000", part0_bytes)
+    object_store.put_object("raw", "customers/multipart_proof/part-00001", part1_bytes)
+
+    units = discover_files(
+        metadata=repository,
+        objects=object_store,
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+        config=config,
+        config_version_id=config_version_id,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=schema,
+    )
+
+    assert len(units) == 1
+    doc = AssignmentDocument.model_validate_json(
+        _read_assignment(object_store, units[0].assignment_uri),
+    )
+    assert doc.file.object_uri.endswith("part-00000")
+    assert len(doc.additional_parts) == 1
+    assert doc.additional_parts[0].object_uri.endswith("part-00001")
+
+    with psycopg.connect(migrated_dsn) as conn:
+        batch_rows = conn.execute(
+            """
+            SELECT file_id, sequence_no FROM meta.batch_files
+             WHERE batch_id = %s ORDER BY sequence_no
+            """,
+            (doc.batch.batch_id,),
+        ).fetchall()
+    assert len(batch_rows) == 2
+    assert [row[1] for row in batch_rows] == [1, 2]
+    assert batch_rows[0][0] == doc.file.file_id
+    assert batch_rows[1][0] == doc.additional_parts[0].file_id
+
+    # SAME s3://bucket/key derivation csv_processor.cli.py::ingest() uses
+    # (Task 2), against the SAME frozen AssignmentDocument -- proving the
+    # real production call chain, not a parallel/re-implemented one.
+    source_bucket, source_key = _parse_s3_uri(doc.file.object_uri)
+    additional_keys = tuple(_parse_s3_uri(part.object_uri)[1] for part in doc.additional_parts)
+    source = CsvSource(bucket=source_bucket, key=source_key, additional_keys=additional_keys)
+    ctx = PipelineContext(
+        run=RunContext(run_id=1, idempotency_key="multipart-proof"),
+        config=config,
+        metadata=None,  # type: ignore[arg-type]  # unused by CsvSource.inspect()/.open() with no dataset_id
+        objects=object_store,
+        db=None,  # type: ignore[arg-type]  # unused by CsvSource.inspect()/.open() with no dataset_id
+        log=get_logger(),
+        source=source,
+    )
+
+    rows_recovered: list[tuple[str | bool | None, ...]] = []
+    with source.open(ctx) as stream:
+        for chunk in stream.chunks():
+            rows_recovered.extend(chunk.rows)
+
+    assert len(rows_recovered) == 20
+    # The row immediately after the 10-row part boundary is genuine DATA --
+    # 01_simple.csv's own deterministic row 11 (zero_padded_int id,
+    # start=1 -> "000011"), never mistaken for a header (the exact failure
+    # this fixture exists to catch).
+    assert rows_recovered[10][0] == "000011"
+    # The full id sequence is intact and unduplicated across the part
+    # boundary.
+    assert [row[0] for row in rows_recovered] == [f"{n:06d}" for n in range(1, 21)]
