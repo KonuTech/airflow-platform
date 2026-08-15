@@ -76,9 +76,9 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **CSV-01**: Filenames are parsed via configurable masks and regular expressions, extracting dataset, source, country, business date, version, batch and sequence where present — without assuming any date found is the business date — *(DoD 15)*
 - [ ] **CSV-02**: UTF-8, UTF-8 BOM, UTF-16 LE/BE, Windows-1250, Windows-1252, ISO-8859 variants and ASCII files all parse correctly — *(DoD 16)*
 - [ ] **CSV-03**: Encoding detection returns an encoding with a confidence score, and never claims determinism it does not have — *(DoD 17)*
-- [ ] **CSV-04**: Comma, semicolon, pipe, tab and colon dialects all parse correctly — *(DoD 18)*
-- [ ] **CSV-05**: Delimiter detection is supported and can be overridden by contract — *(DoD 19)*
-- [ ] **CSV-06**: Quoted delimiters, escaped quotes, multiline fields and inconsistent quoting are handled by a real CSV parser — never by string splitting — *(DoD 20)*
+- [x] **CSV-04**: Comma, semicolon, pipe, tab and colon dialects all parse correctly — *(DoD 18)*
+- [x] **CSV-05**: Delimiter detection is supported and can be overridden by contract — *(DoD 19)*
+- [x] **CSV-06**: Quoted delimiters, escaped quotes, multiline fields and inconsistent quoting are handled by a real CSV parser — never by string splitting — *(DoD 20)*
 - [ ] **CSV-07**: Header detection handles header-present, header-absent and header-at-a-later-row cases — *(DoD 21)*
 - [ ] **CSV-08**: Metadata preambles, comments, blank lines, report titles, footers and totals rows are detected and excluded from data — *(DoD 22)*
 - [ ] **CSV-09**: Invalid dates (`2026-02-30`, `31/02/2026`, `2026-13-01`, `not-a-date`) produce explicit validation errors and are never silently coerced or dropped — *(DoD 28)*
@@ -317,9 +317,9 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CSV-01 | Phase 6 | Complete |
 | CSV-02 | Phase 6 | Pending |
 | CSV-03 | Phase 6 | Pending |
-| CSV-04 | Phase 6 | Pending |
-| CSV-05 | Phase 6 | Pending |
-| CSV-06 | Phase 6 | Pending |
+| CSV-04 | Phase 6 | Complete |
+| CSV-05 | Phase 6 | Complete |
+| CSV-06 | Phase 6 | Complete |
 | CSV-07 | Phase 6 | Pending |
 | CSV-08 | Phase 6 | Pending |
 | CSV-09 | Phase 6 | Pending |
