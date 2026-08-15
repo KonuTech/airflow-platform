@@ -120,3 +120,11 @@ None - no external service configuration required. (The test needs a local Docke
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+- FOUND: `tests/property/test_determinism.py`
+- FOUND: `.planning/phases/06-universal-csv-engine-schema-contracts-normalization/06-17-SUMMARY.md`
+- FOUND: commit `620fbd5` (Task 1: feat)
+- FOUND: commit `21c827a` (plan metadata: docs)
+- Live-verified (not merely claimed): `pytest tests/property/test_determinism.py -m integration -x -q` — 2 passed in 20.76s; `pytest tests/unit tests/property tests/regression -q` — 380 passed in 32.36s; `ruff check`/`ruff format --check`/`mypy` all clean on the new file.
