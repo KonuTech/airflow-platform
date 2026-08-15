@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import TYPE_CHECKING, cast
+from zoneinfo import ZoneInfo
 
 from dataplat.models.record import RejectedRecord, StageResult
 from dataplat.observability import metrics
@@ -48,6 +49,8 @@ type _RowOutcome = tuple[str, ...] | RejectedRecord
 
 _SPREADSHEET_EPOCHS: frozenset[str] = frozenset({"1900", "1904"})
 _TIME_COMPONENT_DIRECTIVES: tuple[str, ...] = ("%H", "%M", "%S")
+_OFFSET_DIRECTIVES: tuple[str, ...] = ("%z", "%Z")
+_AMBIGUOUS_TIME_POLICIES: frozenset[str] = frozenset({"reject", "earliest", "latest"})
 
 # Excel/Lotus 1-2-3's 1900 date-system bug: 1900 is treated as a leap year
 # even though it is not (not divisible by 400), inserting a phantom
@@ -60,6 +63,37 @@ _EXCEL_1900_PHANTOM_SERIAL: int = 60
 _EXCEL_1900_BASE_BELOW_PHANTOM: dt.date = dt.date(1899, 12, 31)  # serial < 60
 _EXCEL_1900_BASE_ABOVE_PHANTOM: dt.date = dt.date(1899, 12, 30)  # serial > 60
 _EXCEL_1904_BASE: dt.date = dt.date(1904, 1, 1)  # serial 0; no leap-year bug
+
+
+def classify_naive_local(naive: dt.datetime, zone: ZoneInfo) -> str:
+    """Classify a naive local datetime as nonexistent, ambiguous or unambiguous.
+
+    Verified live (06-RESEARCH.md Code Examples) to exactly reproduce every
+    value in corpus fixture 55 (``55_dst_gap_and_overlap.csv``), including
+    both fold-0/fold-1 UTC pairs. Comparing UTC offsets across ``fold=0``
+    and ``fold=1`` alone would identify both the gap and overlap cases
+    without distinguishing them -- the round-trip-through-UTC check below
+    is what tells them apart: a nonexistent local time (spring-forward gap)
+    does not survive the round trip at all; an ambiguous local time
+    (autumn-overlap) survives it but the two folds resolve to different
+    instants.
+
+    Args:
+        naive: A naive local datetime (no ``tzinfo``) to classify.
+        zone: The IANA zone this datetime is local to.
+
+    Returns:
+        ``"nonexistent"`` if ``naive`` falls in a DST spring-forward gap,
+        ``"ambiguous"`` if it falls in a DST autumn-overlap hour,
+        ``"unambiguous"`` otherwise.
+    """
+    aware_fold0 = naive.replace(tzinfo=zone, fold=0)
+    utc0 = aware_fold0.astimezone(dt.UTC)
+    roundtrip0 = utc0.astimezone(zone).replace(tzinfo=None)
+    if roundtrip0 != naive:
+        return "nonexistent"
+    utc1 = naive.replace(tzinfo=zone, fold=1).astimezone(dt.UTC)
+    return "ambiguous" if utc0 != utc1 else "unambiguous"
 
 
 def _apply_two_digit_year_pivot(parsed: dt.datetime, pivot: int) -> dt.datetime:
@@ -124,7 +158,7 @@ class DateNormalizer(StreamingStage):
 
     name = "date_normalizer"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 -- one keyword per genuinely distinct contract axis; see class docstring
         self,
         *,
         column_index: int,
@@ -132,6 +166,8 @@ class DateNormalizer(StreamingStage):
         format: str | None = None,  # noqa: A002 -- matches ColumnContract.format (config/model.py), this phase's established contract vocabulary
         two_digit_year_pivot: int | None = None,
         spreadsheet_epoch: str | None = None,
+        timezone: str | None = None,
+        ambiguous_time_policy: str = "reject",
     ) -> None:
         """Configure the column this stage parses.
 
@@ -143,7 +179,14 @@ class DateNormalizer(StreamingStage):
             format: The ``strptime`` format string for a rendered
                 date/timestamp column. Mutually exclusive with
                 ``spreadsheet_epoch`` -- exactly one of the two must be
-                supplied.
+                supplied. Used both for the plain (non-timezone-aware)
+                branch and, together with ``timezone``, for the
+                DST-classified naive-local-time branch (fixture 55) -- a
+                column with time components and no ``timezone`` declared
+                and no ``%z``/``%Z`` in its own format is rejected outright
+                (fixture 56: a naive timestamp must not inherit a
+                neighboring row's offset, default to UTC, or default to
+                the server's zone).
             two_digit_year_pivot: The last two-digit year (``0``-``99``)
                 that resolves to the 2000s; required when ``format``
                 contains ``%y`` (fixture 53: a missing pivot is a
@@ -151,12 +194,26 @@ class DateNormalizer(StreamingStage):
             spreadsheet_epoch: ``"1900"`` or ``"1904"`` -- the spreadsheet
                 epoch system a bare serial-integer column is declared under
                 (fixture 54). Mutually exclusive with ``format``.
+            timezone: An IANA zone name (e.g. ``"Europe/Warsaw"``). When
+                set, ``format``-parsed values are treated as naive local
+                times and classified via :func:`classify_naive_local`
+                (fixture 55) rather than accepted as-is. Requires
+                ``format`` to also be set -- a naive local time still needs
+                a strptime format to parse in the first place.
+            ambiguous_time_policy: ``"reject"`` (default), ``"earliest"``
+                or ``"latest"`` -- how an ambiguous naive local time (a DST
+                autumn-overlap hour) resolves when ``timezone`` is set.
+                ``"reject"`` never silently takes the first fold (fixture
+                55's own framing); ``"earliest"``/``"latest"`` resolve via
+                ``fold=0``/``fold=1`` respectively.
 
         Raises:
             ValueError: ``format``/``spreadsheet_epoch`` are both supplied
                 or neither is; ``spreadsheet_epoch`` names an unsupported
-                epoch; or ``format`` contains ``%y`` with no declared
-                ``two_digit_year_pivot``.
+                epoch; ``format`` contains ``%y`` with no declared
+                ``two_digit_year_pivot``; ``timezone`` is set with no
+                ``format``; or ``ambiguous_time_policy`` names an
+                unsupported policy.
         """
         if (format is None) == (spreadsheet_epoch is None):
             msg = (
@@ -170,6 +227,34 @@ class DateNormalizer(StreamingStage):
             msg = (
                 f"unsupported spreadsheet_epoch {spreadsheet_epoch!r}; "
                 f"supported: {sorted(_SPREADSHEET_EPOCHS)}"
+            )
+            raise ValueError(msg)
+        if ambiguous_time_policy not in _AMBIGUOUS_TIME_POLICIES:
+            msg = (
+                f"ambiguous_time_policy must be one of "
+                f"{sorted(_AMBIGUOUS_TIME_POLICIES)}, got {ambiguous_time_policy!r}"
+            )
+            raise ValueError(msg)
+        if timezone is not None and format is None:
+            msg = (
+                f"{type(self).__name__}(timezone=...) requires `format` to "
+                "also be set -- a naive local time still needs a strptime "
+                "format to parse in the first place"
+            )
+            raise ValueError(msg)
+        if (
+            timezone is not None
+            and format is not None
+            and any(directive in format for directive in _OFFSET_DIRECTIVES)
+        ):
+            msg = (
+                f"{type(self).__name__}: `timezone` is for a column whose "
+                f"values are naive local times (fixture 55); format {format!r} "
+                "already carries its own %z/%Z offset, which would conflict "
+                "with -- and be silently overwritten by -- the declared zone. "
+                "Omit `timezone` and let the offset in the data decide "
+                "(fixture 56 rows 1/2), or drop %z/%Z from `format` if every "
+                "value is genuinely naive local time"
             )
             raise ValueError(msg)
         if format is not None and "%y" in format and two_digit_year_pivot is None:
@@ -186,6 +271,9 @@ class DateNormalizer(StreamingStage):
         self.format = format
         self.two_digit_year_pivot = two_digit_year_pivot
         self.spreadsheet_epoch = spreadsheet_epoch
+        self.timezone_name = timezone
+        self.ambiguous_time_policy = ambiguous_time_policy
+        self._zone = ZoneInfo(timezone) if timezone is not None else None
         self._has_two_digit_year = format is not None and "%y" in format
         self._has_time_component = format is not None and any(
             directive in format for directive in _TIME_COMPONENT_DIRECTIVES
@@ -228,11 +316,12 @@ class DateNormalizer(StreamingStage):
                 kept.append(row)
                 continue
 
-            outcome = (
-                self._parse_spreadsheet_serial(raw_value, row_number, row)
-                if self.spreadsheet_epoch is not None
-                else self._parse_plain_format(raw_value, row_number, row)
-            )
+            if self.spreadsheet_epoch is not None:
+                outcome = self._parse_spreadsheet_serial(raw_value, row_number, row)
+            elif self._zone is not None:
+                outcome = self._parse_naive_local(raw_value, row_number, row, self._zone)
+            else:
+                outcome = self._parse_plain_format(raw_value, row_number, row)
             if isinstance(outcome, RejectedRecord):
                 rejected.append(outcome)
             else:
@@ -245,11 +334,23 @@ class DateNormalizer(StreamingStage):
     def _parse_plain_format(
         self, raw_value: str, row_number: int, row: tuple[str, ...]
     ) -> _RowOutcome:
-        """Parse ``raw_value`` under ``self.format``, returning the updated row or a rejection."""
+        """Parse ``raw_value`` under ``self.format``, returning the updated row or a rejection.
+
+        No ``timezone`` is declared for this column (the ``self._zone is not
+        None`` case dispatches to :meth:`_parse_naive_local` instead). If
+        ``self.format`` includes a ``%z``/``%Z`` offset directive,
+        ``strptime`` itself produces an aware datetime and this method
+        resolves it to UTC (fixture 56 rows 1/2). If it has time components
+        but no offset directive, the result is unavoidably naive with no
+        way to resolve it to an instant -- rejected (fixture 56 row 3: a
+        naive timestamp must not inherit a neighboring row's offset,
+        default to UTC, or default to the server's zone).
+        """
         try:
-            # naive on purpose here: this branch is the non-timezone-aware
-            # plain-format path (see the timezone-aware _parse_naive_local
-            # added by Task 2 for the zone-resolving counterpart).
+            # naive on purpose here when self.format has no %z/%Z: this
+            # branch's whole job is to preserve whatever
+            # naive-vs-aware-ness strptime itself produces from the
+            # declared format, never to invent an offset.
             parsed = dt.datetime.strptime(raw_value, cast("str", self.format))  # noqa: DTZ007
         except ValueError as exc:
             return RejectedRecord(
@@ -262,8 +363,82 @@ class DateNormalizer(StreamingStage):
         if self._has_two_digit_year:
             parsed = _apply_two_digit_year_pivot(parsed, cast("int", self.two_digit_year_pivot))
 
-        iso_value = parsed.isoformat() if self._has_time_component else parsed.date().isoformat()
+        if self._has_time_component and parsed.tzinfo is None:
+            return RejectedRecord(
+                source_row_number=row_number,
+                error_type="naive-timestamp-without-a-declared-zone",
+                error_message=(
+                    f"{raw_value!r} has no UTC offset and no `timezone` was "
+                    "declared for this column -- a naive timestamp must not "
+                    "inherit a neighboring row's offset, default to UTC, or "
+                    "default to the server's zone"
+                ),
+                raw_line=raw_value,
+                error_column=self.column_name,
+            )
+
+        if parsed.tzinfo is not None:
+            iso_value = parsed.astimezone(dt.UTC).isoformat()
+        else:
+            iso_value = parsed.date().isoformat()
         return _replace_field(row, self.column_index, iso_value)
+
+    def _parse_naive_local(
+        self, raw_value: str, row_number: int, row: tuple[str, ...], zone: ZoneInfo
+    ) -> _RowOutcome:
+        """Parse ``raw_value`` as a naive local time and classify/resolve it against ``zone``.
+
+        Fixture 55: a nonexistent local time (DST spring-forward gap) is
+        rejected; an ambiguous local time (DST autumn-overlap) is rejected
+        by default (``ambiguous_time_policy="reject"``) or resolved via
+        ``fold=0``/``fold=1`` under ``"earliest"``/``"latest"``; an
+        unambiguous local time resolves directly. The result is always the
+        UTC ISO-8601 instant, never the local wall-clock string.
+        """
+        try:
+            # naive on purpose: this is the whole point of this branch --
+            # classify_naive_local decides the zone attachment explicitly,
+            # never strptime guessing one.
+            naive = dt.datetime.strptime(raw_value, cast("str", self.format))  # noqa: DTZ007
+        except ValueError as exc:
+            return RejectedRecord(
+                source_row_number=row_number,
+                error_type="invalid-calendar-date",
+                error_message=f"{raw_value!r} does not match format {self.format!r}: {exc}",
+                raw_line=raw_value,
+                error_column=self.column_name,
+            )
+        if self._has_two_digit_year:
+            naive = _apply_two_digit_year_pivot(naive, cast("int", self.two_digit_year_pivot))
+
+        classification = classify_naive_local(naive, zone)
+        if classification == "nonexistent":
+            return RejectedRecord(
+                source_row_number=row_number,
+                error_type="nonexistent-local-time",
+                error_message=(
+                    f"{raw_value!r} does not exist in {self.timezone_name} "
+                    "(falls in a daylight-saving spring-forward gap)"
+                ),
+                raw_line=raw_value,
+                error_column=self.column_name,
+            )
+        if classification == "ambiguous" and self.ambiguous_time_policy == "reject":
+            return RejectedRecord(
+                source_row_number=row_number,
+                error_type="ambiguous-local-time-requires-a-declared-fold-policy",
+                error_message=(
+                    f"{raw_value!r} is ambiguous in {self.timezone_name} "
+                    "(falls in a daylight-saving autumn-overlap hour); "
+                    "declare csv.ambiguous_time_policy to resolve it"
+                ),
+                raw_line=raw_value,
+                error_column=self.column_name,
+            )
+
+        fold = 1 if classification == "ambiguous" and self.ambiguous_time_policy == "latest" else 0
+        resolved_utc = naive.replace(tzinfo=zone, fold=fold).astimezone(dt.UTC)
+        return _replace_field(row, self.column_index, resolved_utc.isoformat())
 
     def _parse_spreadsheet_serial(
         self, raw_value: str, row_number: int, row: tuple[str, ...]

@@ -99,6 +99,14 @@ _CORPUS_DERIVED_CODES: Final[frozenset[str]] = frozenset(
 # Wave 2's parallel plans each import an existing constant instead of racing
 # to add one. No raise site exists yet for any of these; each gets its first
 # real raise site in a specific Wave 2 plan of this same phase.
+#
+# "ambiguous-local-time-requires-a-declared-fold-policy" is the one
+# exception to "pre-declared before any raise site exists": plan 06-09's
+# own Task 2 added it (corpus fixture 55 row 2's
+# outcome_row_2 == "requires-a-declared-fold-policy" -- the ten codes
+# pre-seeded above do not cover the "ambiguous, no policy declared" case
+# distinctly from "nonexistent" or "naive, no zone at all"), with its raise
+# site landing in the same commit (dataplat.normalize.dates.DateNormalizer).
 _NEW_THIS_PHASE_CODES: Final[frozenset[str]] = frozenset(
     {
         "filename-does-not-match-mask",
@@ -111,6 +119,7 @@ _NEW_THIS_PHASE_CODES: Final[frozenset[str]] = frozenset(
         "invalid-numeric-value",
         "schema-column-disappeared",
         "schema-column-retyped",
+        "ambiguous-local-time-requires-a-declared-fold-policy",
     },
 )
 
