@@ -136,6 +136,14 @@ None - no external service configuration required.
 - Fixture 52's ambiguous-format behavior is proven at the `DateNormalizer` parsing level (same raw values, two different individually-correct outputs depending on the declared format) but format *detection/decline* itself is explicitly a different plan's territory (CSV-05/schema-profiling) — not started here, not blocking.
 - No blockers for sibling Wave 2 plans: `models/record.py` and `pipeline/engine.py` were read but not modified, and the one cross-file edit (`diagnostics.py`'s new catalog entry) was pre-authorized by this plan's own text specifically to avoid a Wave 2 merge collision.
 
+## Self-Check: PASSED
+
+- FOUND: `packages/dataplat/src/dataplat/normalize/dates.py`
+- FOUND: `tests/unit/normalize/test_dates.py`
+- FOUND: `tests/property/test_dst_correctness.py`
+- FOUND: `.planning/phases/06-universal-csv-engine-schema-contracts-normalization/06-09-SUMMARY.md`
+- FOUND commits: `f182c5d`, `f646a68`, `15b6674`, `a28aa3b`, `7f27e89` (all present in `git log`)
+
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
