@@ -137,3 +137,14 @@ None - no external service configuration required.
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+All 7 claimed files verified present on disk (source.py, profile.py,
+staging.py, cli.py, test_csv_source_inspect.py, test_schema_resolution.py,
+this SUMMARY.md). All 5 claimed commit hashes verified present in
+`git log --oneline --all` (2c7752e, 14d755b, dbb0989, d7fac19, c8bc648).
+`requirements.mark-complete SCHEMA-03 SCHEMA-04 SCHEMA-05 SCHEMA-06` confirmed
+all 4 already marked complete in REQUIREMENTS.md (no-op, `updated: false`) —
+REQUIREMENTS.md left untouched, matching `git status --short` showing no
+diff for it.
