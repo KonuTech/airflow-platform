@@ -74,8 +74,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 ### CSV — Parsing, Detection and Normalization
 
 - [ ] **CSV-01**: Filenames are parsed via configurable masks and regular expressions, extracting dataset, source, country, business date, version, batch and sequence where present — without assuming any date found is the business date — *(DoD 15)*
-- [ ] **CSV-02**: UTF-8, UTF-8 BOM, UTF-16 LE/BE, Windows-1250, Windows-1252, ISO-8859 variants and ASCII files all parse correctly — *(DoD 16)*
-- [ ] **CSV-03**: Encoding detection returns an encoding with a confidence score, and never claims determinism it does not have — *(DoD 17)*
+- [x] **CSV-02**: UTF-8, UTF-8 BOM, UTF-16 LE/BE, Windows-1250, Windows-1252, ISO-8859 variants and ASCII files all parse correctly — *(DoD 16)*
+- [x] **CSV-03**: Encoding detection returns an encoding with a confidence score, and never claims determinism it does not have — *(DoD 17)*
 - [ ] **CSV-04**: Comma, semicolon, pipe, tab and colon dialects all parse correctly — *(DoD 18)*
 - [ ] **CSV-05**: Delimiter detection is supported and can be overridden by contract — *(DoD 19)*
 - [ ] **CSV-06**: Quoted delimiters, escaped quotes, multiline fields and inconsistent quoting are handled by a real CSV parser — never by string splitting — *(DoD 20)*
@@ -181,7 +181,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-01**: Type hints are used consistently across arguments, returns, classes, public APIs, configuration and data models, verified by mypy in CI — *(DoD 71)*
 - [x] **QUAL-02**: Public classes, functions and methods carry docstrings describing purpose, parameters, returns, assumptions, exceptions and side effects — *(DoD 72)*
 - [x] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
-- [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
+- [x] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [x] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
 - [x] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
 - [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
@@ -315,8 +315,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | ORCH-08 | Phase 4 | Complete |
 | ORCH-09 | Phase 4 | Complete |
 | CSV-01 | Phase 6 | Pending |
-| CSV-02 | Phase 6 | Pending |
-| CSV-03 | Phase 6 | Pending |
+| CSV-02 | Phase 6 | Complete |
+| CSV-03 | Phase 6 | Complete |
 | CSV-04 | Phase 6 | Pending |
 | CSV-05 | Phase 6 | Pending |
 | CSV-06 | Phase 6 | Pending |
@@ -395,7 +395,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-01 | Phase 1 | Complete |
 | QUAL-02 | Phase 1 | Complete |
 | QUAL-03 | Phase 3 | Complete |
-| QUAL-04 | Phase 6 | Pending |
+| QUAL-04 | Phase 6 | Complete |
 | QUAL-05 | Phase 4 | Complete |
 | QUAL-06 | Phase 4 | Complete |
 | QUAL-07 | Phase 1 | Complete |
