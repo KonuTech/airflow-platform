@@ -38,6 +38,16 @@ load:
 batching:
   max_units_per_run: 100
 
+# freshness: is D-08's opt-in data-freshness expectation (OBS-01/OBS-09),
+# flowing through ConfigRegistry.sync() into meta.datasets' three new
+# nullable interval columns (migration 0010). A reasonable illustrative
+# value for a daily customer feed: expect a new file at least once per day,
+# WARN 2 hours past that, FAIL 6 hours past that.
+freshness:
+  expected_frequency: "1 day"
+  warn_after: "2 hours"
+  fail_after: "6 hours"
+
 # columns: is D-18's source of truth for per-column type/nullable/required/
 # business_key/semantics, cross-validated against deduplication.keys above
 # (customer_id here is business_key: true, matching keys: [customer_id]).
