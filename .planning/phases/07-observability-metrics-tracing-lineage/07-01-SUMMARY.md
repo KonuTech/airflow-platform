@@ -150,3 +150,16 @@ None - no external service configuration required. `grafana_reader`'s password i
 ---
 *Phase: 07-observability-metrics-tracing-lineage*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+- FOUND: migrations/versions/0010_meta_datasets_freshness.py
+- FOUND: migrations/versions/0011_grafana_reader_role.py
+- FOUND: migrations/versions/0012_meta_v_customers_lineage.py
+- FOUND: tests/integration/test_lineage_view.py
+- FOUND: tests/integration/test_freshness_query.py
+- FOUND: .planning/phases/07-observability-metrics-tracing-lineage/07-01-SUMMARY.md
+- FOUND commit: f9b4692 (Task 1)
+- FOUND commit: 440bfa7 (Task 2)
+- FOUND commit: 7f1cb93 (Task 3)
+- FOUND commit: ef0966d (SUMMARY)
