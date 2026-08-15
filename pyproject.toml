@@ -183,6 +183,7 @@ markers = [
   "regression: permanent test for a specific fixed bug (QUAL-07)",
   "cluster: requires a live kind cluster",
   "manifests: requires rendered manifests under build/ and the pinned helm and kubeconform binaries; excluded from the offline gate",
+  "integration: needs a local Docker daemon (testcontainers PostgreSQL/MinIO); excluded from the offline gate (06-17-PLAN.md)",
 ]
 
 [tool.coverage.run]
