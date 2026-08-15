@@ -53,9 +53,10 @@ updated: 2026-08-15
 | T1-T2 | 06-12 | 2 | SCHEMA-03, SCHEMA-06, QUAL-04 | Schema hashing/versioning; historical hash-match resolution | unit + integration | `pytest tests/unit/schema/test_versioning.py -x -q` / `pytest tests/integration/test_schema_resolution.py -m integration -x -q` | ⬜ pending |
 | T1-T2 | 06-13 | 2 | SCHEMA-04, SCHEMA-05, QUAL-12, QUAL-04 | Compatible (evolve, detect+record) vs. breaking (freeze, `IncompatibleSchemaError`, whole file fails) classification | unit | `pytest tests/unit/schema/test_evolution.py -x -q` | ⬜ pending |
 | T1-T2 | 06-14 | 3 | CSV-02, CSV-11, LOAD-07, QUAL-04 | Five detectors + compression aggregated into a real `CsvProfile`; `CsvSource.open()` consumes it | unit | `pytest tests/unit/test_csv_source_inspect.py -x -q` | ⬜ pending |
-| T1-T3 | 06-16 | 3 | CSV-01, CSV-09, CSV-10, CSV-12, SCHEMA-03, QUAL-04 | Normalizer stages wired into `StagingLoader.load()`; idempotency-key schema-version extension; business_date fallback wiring | unit + integration | `pytest tests/unit/test_discovery.py -x -q` / `pytest tests/integration/test_staging_normalization.py -m integration -x -q` | ⬜ pending |
+| T1-T3 | 06-16 | 3 | CSV-01, CSV-09, CSV-10, CSV-12, SCHEMA-03, QUAL-04 | Normalizer stages wired into `StagingLoader.load()`; idempotency-key schema-version extension (with its required `schema` parameter wired into `csv_processor.cli.discover()`'s real call and `tests/integration/test_discover_files.py`'s pre-existing suite in the same plan); business_date fallback wiring | unit + integration | `pytest tests/unit/test_discovery.py -x -q` / `pytest tests/integration/test_staging_normalization.py tests/integration/test_discover_files.py -m integration -x -q` | ⬜ pending |
 | T1-T2 | 06-15 | 4 | SCHEMA-03, SCHEMA-04, SCHEMA-05, SCHEMA-06 | Schema resolution/classification live in `CsvSource.inspect()`; compatible/breaking/historical proven against a real database | integration | `pytest tests/integration/test_schema_resolution.py -m integration -x -q` | ⬜ pending |
 | T1 | 06-17 | 5 | QUAL-16 | Determinism property: identical source + config + processor version → identical `_record_hash` set | property (integration-tier) | `pytest tests/property/test_determinism.py -m integration -x -q` | ⬜ pending |
+| T1-T3 | 06-18 | 5 | CSV-11 | Multipart delivery (`part-00000`/`part-00001`) groups into ONE ingestion run/`AssignmentDocument`; `CsvSource` reads every part as one logical stream via the real `discover_files`→`CsvSource.open()` call chain; an oversized group is rejected before any file descriptor opens | unit + integration | `pytest tests/unit/test_discovery.py tests/unit/test_csv_source_multipart.py -x -q` / `pytest tests/integration/test_discover_files.py -m integration -x -q` | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -96,5 +97,5 @@ the same behavior automatically.*
 - [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** finalized during planning (`gsd-planner`, 2026-08-15) — real Task/Plan/Wave IDs assigned
-above for all 17 plans across 5 waves, covering all 23 phase requirement IDs (CSV-01…12, SCHEMA-01…06,
+above for all 18 plans across 5 waves, covering all 23 phase requirement IDs (CSV-01…12, SCHEMA-01…06,
 LOAD-07, QUAL-04/12/16/17) with zero gaps, confirmed by an explicit coverage diff at planning time.

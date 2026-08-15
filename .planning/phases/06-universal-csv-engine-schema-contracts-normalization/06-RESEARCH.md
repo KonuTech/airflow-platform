@@ -692,7 +692,7 @@ def downgrade() -> None:
 | A4 | Whole-string anchoring is the right default for filename mask matching (vs. prefix match) | Architecture Patterns Pattern 3 | Low — explicitly named as Claude's Discretion in CONTEXT.md, so a different planner choice here is not a deviation from a locked decision |
 | A5 | A hand-rolled filename-mask compiler is lower total cost than adopting `parse` + hand-writing only the optional-segment layer | Architecture Patterns Pattern 3, Alternatives Considered | Low — both paths still require hand-written code for D-08; the difference is one dependency, not a functional gap |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 **Status (updated during planning, 2026-08-15): all three questions below are resolved by the plan set. Each item's Resolution line names the deciding decision/plan; the original What-we-know/What's-unclear/Recommendation text is left intact below it for the record.**
 
