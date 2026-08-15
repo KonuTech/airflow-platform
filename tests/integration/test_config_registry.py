@@ -12,6 +12,7 @@ not an isolated fixture.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -137,3 +138,42 @@ def test_get_by_id_returns_the_exact_config_that_was_synced(
 def test_get_by_id_raises_storage_error_for_an_unknown_id(registry: ConfigRegistry) -> None:
     with pytest.raises(StorageError):
         registry.get_by_id(999_999_999)
+
+
+def test_sync_persists_freshness_config_to_meta_datasets(
+    registry: ConfigRegistry,
+    customers_config: DatasetConfig,
+    migrated_dsn: str,
+) -> None:
+    """D-08/OBS-01/OBS-09: `sync()` writes freshness columns, not just the config model's fields.
+
+    Proof that ``ConfigRegistry.sync()`` -- the actual mechanism OBS-01/
+    OBS-09 depend on, not a raw-``INSERT``-seeded row -- writes D-08's three
+    freshness columns correctly against a real database. Syncs under a
+    dedicated, isolated dataset name (matching
+    ``test_get_by_id_returns_the_exact_config_that_was_synced``'s own
+    precedent) so this test never disturbs the three existing
+    ``test_sync_*`` tests' shared-row, execution-order-dependent narrative
+    this module's own docstring documents.
+    """
+    assert customers_config.freshness is not None
+
+    registry.sync("freshness_sync_round_trip", customers_config)
+
+    with psycopg.connect(migrated_dsn) as conn:
+        row = conn.execute(
+            """
+            SELECT expected_frequency, freshness_warn_after, freshness_fail_after
+              FROM meta.datasets
+             WHERE dataset_name = %s
+            """,
+            ("freshness_sync_round_trip",),
+        ).fetchone()
+
+    assert row is not None
+    expected_frequency, warn_after, fail_after = row
+    # psycopg's default adapter returns a Postgres `interval` as
+    # `datetime.timedelta` -- never a string comparison here.
+    assert expected_frequency == timedelta(days=1)
+    assert warn_after == timedelta(hours=2)
+    assert fail_after == timedelta(hours=6)

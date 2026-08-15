@@ -251,3 +251,52 @@ def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_cons
         schema="normalized",
         index_name="ix_customers_customer_id",
     )
+
+
+def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> None:
+    """T-07-02 mitigation: `grafana_reader` is SELECT-only, scoped to exactly four objects.
+
+    Queries `pg_roles` (existence, LOGIN, no superuser/createrole) and
+    `information_schema.role_table_grants` (no `INSERT`/`UPDATE`/`DELETE`
+    anywhere; `SELECT` on exactly `meta.datasets`/`meta.files`/
+    `meta.ingestion_runs`/`meta.v_customers_lineage` -- never a direct table
+    grant on `normalized.customers`, whose data the lineage view surfaces
+    under its own owner's privileges instead).
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        role_row = conn.execute(
+            """
+            SELECT rolcanlogin, rolsuper, rolcreaterole
+              FROM pg_roles
+             WHERE rolname = 'grafana_reader'
+            """,
+        ).fetchone()
+        assert role_row is not None, "grafana_reader role does not exist"
+        rolcanlogin, rolsuper, rolcreaterole = role_row
+        assert rolcanlogin is True, "grafana_reader must have LOGIN"
+        assert rolsuper is False, "grafana_reader must not be superuser"
+        assert rolcreaterole is False, "grafana_reader must not be able to create roles"
+
+        grant_rows = conn.execute(
+            """
+            SELECT table_schema, table_name, privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'grafana_reader'
+            """,
+        ).fetchall()
+
+    granted: dict[tuple[str, str], set[str]] = {}
+    for schema, table, privilege in grant_rows:
+        granted.setdefault((schema, table), set()).add(privilege)
+
+    expected_objects = {
+        ("meta", "datasets"),
+        ("meta", "files"),
+        ("meta", "ingestion_runs"),
+        ("meta", "v_customers_lineage"),
+    }
+    assert set(granted.keys()) == expected_objects, (
+        f"grafana_reader must hold grants on exactly {expected_objects}, got {set(granted.keys())}"
+    )
+    for obj, privileges in granted.items():
+        assert privileges == {"SELECT"}, f"{obj}: expected exactly SELECT, got {privileges}"

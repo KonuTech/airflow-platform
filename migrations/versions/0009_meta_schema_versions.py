@@ -93,7 +93,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the FK first, then `meta.schema_versions` (reverse of `upgrade()`)."""
+    """Null referencing rows, drop the FK, then `meta.schema_versions` (reverse of `upgrade()`)."""
+    # Any row's schema_version_id must be nulled before the table it
+    # references is dropped below -- reverting to 0004's original nullable,
+    # unconstrained shape (that migration's own docstring: "the column
+    # lands now -- nullable, no ForeignKey"). Without this, a database
+    # where some other code path has already populated a real
+    # schema_version_id (e.g. a genuine `run_ingest()` call with schema
+    # resolution enabled) would leave the DROP TABLE below unable to
+    # reverse cleanly, and a subsequent re-upgrade's op.create_foreign_key
+    # would then fail with a ForeignKeyViolation against data this
+    # migration's own table no longer holds -- setting a column to NULL is
+    # always permitted under a FK constraint, so this is safe to run before
+    # the constraint is dropped.
+    op.execute("UPDATE meta.ingestion_runs SET schema_version_id = NULL")
     op.drop_constraint(
         "fk_ingestion_runs_schema_version_id",
         "ingestion_runs",

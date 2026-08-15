@@ -49,7 +49,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Revoke every grant this migration added, then drop the role (reverse of `upgrade()`)."""
-    op.execute("REVOKE SELECT ON meta.datasets, meta.files, meta.ingestion_runs FROM grafana_reader")
+    op.execute(
+        "REVOKE SELECT ON meta.datasets, meta.files, meta.ingestion_runs FROM grafana_reader",
+    )
     op.execute("REVOKE USAGE ON SCHEMA normalized FROM grafana_reader")
     op.execute("REVOKE USAGE ON SCHEMA meta FROM grafana_reader")
     op.execute("DROP ROLE grafana_reader")
