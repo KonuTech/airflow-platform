@@ -47,6 +47,8 @@ from csv_processor.detect.dialect import DialectDetection, detect_dialect, to_st
 from csv_processor.detect.encoding import DEFAULT_MIN_CONFIDENCE, decode_strict, detect_encoding
 from csv_processor.detect.filename import parse_filename
 from csv_processor.detect.header import detect_header
+from dataplat.discovery import open_multipart_stream
+from dataplat.errors import FileInspectionError
 from dataplat.models.profile import CsvProfile
 from dataplat.models.record import RecordChunk
 from dataplat.observability import metrics
@@ -56,7 +58,7 @@ from dataplat.schema.versioning import hash_schema
 from dataplat.sources.protocol import RecordStream, Source
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
     from io import TextIOWrapper
 
     from dataplat.pipeline.protocol import PipelineContext
@@ -86,8 +88,17 @@ FIELD_SIZE_LIMIT = 1_048_576
 # by reading more from inside the loop that consumes it.
 _INSPECT_SAMPLE_BYTES: Final[int] = 65_536
 
+# T-06-34 (this plan's own threat register, 06-18): a FIXED, documented
+# ceiling on a CSV-11 multipart group's total part count (1 + len(
+# additional_keys)). Comfortably above 62_multipart_split's real 2-part
+# shape, far below a resource-exhaustion concern -- CsvSource.open() opens
+# every part's stream simultaneously (no part is closed until every part has
+# been read), so an unbounded group would exhaust file descriptors. Checked
+# at CONSTRUCTION time, before any stream ever opens.
+_MAX_MULTIPART_PARTS: Final[int] = 50
 
-def _strip_nul(text_stream: TextIOWrapper) -> Iterator[str]:
+
+def _strip_nul(text_stream: Iterable[str]) -> Iterator[str]:
     r"""Yield ``text_stream``'s physical lines with NUL characters removed.
 
     Iterates ``text_stream`` one physical line at a time -- the exact
@@ -115,7 +126,12 @@ def _strip_nul(text_stream: TextIOWrapper) -> Iterator[str]:
 
     Args:
         text_stream: The already-decoded text stream to filter, opened with
-            ``newline=""`` by its caller.
+            ``newline=""`` by its caller -- or, for a CSV-11 multipart
+            group (this plan, 06-18), ``dataplat.discovery.
+            open_multipart_stream``'s own already-concatenated logical
+            line iterator over several such streams. Either way this
+            function needs only ``Iterable[str]``: one physical line per
+            iteration, nothing more.
 
     Yields:
         Each physical line of ``text_stream``, NUL-stripped, with its
@@ -130,7 +146,7 @@ def _strip_nul(text_stream: TextIOWrapper) -> Iterator[str]:
 
 
 def chunked_records(
-    text_stream: TextIOWrapper,
+    text_stream: Iterable[str],
     *,
     chunk_size: int,
     dialect: type[csv.Dialect] = DIALECT,
@@ -165,7 +181,10 @@ def chunked_records(
         text_stream: An already-decoded text stream, opened with
             ``newline=""`` by its caller (``open_text_stream`` /
             ``ObjectStore.get_object``) so an embedded ``\\r\\n`` inside a
-            quoted field survives unchanged.
+            quoted field survives unchanged -- or, for a CSV-11 multipart
+            group (this plan, 06-18), ``open_multipart_stream``'s own
+            already-concatenated logical line iterator; see ``_strip_nul``'s
+            own Args entry.
         chunk_size: The number of records per yielded chunk. The last chunk
             of a file may hold fewer than ``chunk_size`` records.
         dialect: The ``csv.Dialect`` to construct ``csv.reader`` with.
@@ -222,7 +241,7 @@ class CsvRecordStream(RecordStream):
 
     def __init__(
         self,
-        text_stream: TextIOWrapper,
+        text_stream: Iterable[str],
         *,
         dialect: type[csv.Dialect] = DIALECT,
         preamble_rows: int = 0,
@@ -233,8 +252,12 @@ class CsvRecordStream(RecordStream):
 
         Args:
             text_stream: The already-decoded, ``newline=""`` text stream to
-                read records from. Ownership (closing it) stays with the
-                caller that opened it -- see ``CsvSource.open``.
+                read records from -- or, for a CSV-11 multipart group (this
+                plan, 06-18), ``dataplat.discovery.open_multipart_stream``'s
+                own already-concatenated logical line iterator over every
+                part's stream. Ownership (closing the underlying stream(s))
+                stays with the caller that opened them -- see
+                ``CsvSource.open``.
             dialect: The ``csv.Dialect`` to construct ``csv.reader`` with,
                 passed through to ``chunked_records``. Defaults to
                 ``DIALECT`` (D-01's historical hardcoded comma dialect) for
@@ -297,13 +320,16 @@ class CsvSource(Source):
         key: str,
         *,
         dataset_id: int | None = None,
+        additional_keys: tuple[str, ...] = (),
         chunk_size: int = 1000,
     ) -> None:
-        """Name the CSV object this source reads.
+        """Name the CSV object(s) this source reads.
 
         Args:
             bucket: The bucket the CSV object lives in.
-            key: The object's key within ``bucket``.
+            key: The object's key within ``bucket`` -- for a CSV-11
+                multipart-grouped delivery (plan 06-18), the FIRST part (the
+                one carrying the header; see ``open()``'s own docstring).
             dataset_id: The ``meta.datasets.dataset_id`` this file belongs
                 to. ``inspect()`` needs this to call ``SchemaRepository``
                 methods (SCHEMA-03/04/05/06) -- constructed from ``ctx.db``,
@@ -316,12 +342,41 @@ class CsvSource(Source):
                 breaks. Every real caller that wants schema versioning wired
                 (the ``ingest`` CLI; 06-15-PLAN.md's own live-database
                 integration tests) supplies a real one.
+            additional_keys: The remaining parts of a CSV-11 multipart-
+                grouped delivery (plan 06-18), same ``bucket`` as ``key``,
+                in delivery order. Defaults to ``()`` (empty), which keeps
+                every existing single-file ``CsvSource(...)`` construction
+                working completely unchanged (``open()``'s single-part path
+                is untouched by this plan) -- the same additive-default
+                shape ``AssignmentDocument.additional_parts`` uses.
             chunk_size: The number of records per yielded chunk, passed
                 through to ``CsvRecordStream``. Defaults to 1000.
+
+        Raises:
+            FileInspectionError: ``1 + len(additional_keys)`` exceeds
+                ``_MAX_MULTIPART_PARTS`` (``diagnostic_code=
+                "multipart-group-too-large"``) -- T-06-34's mitigation,
+                checked here, at construction time, before ``open()`` ever
+                opens a single stream.
         """
+        total_parts = 1 + len(additional_keys)
+        if total_parts > _MAX_MULTIPART_PARTS:
+            msg = (
+                f"multipart group has {total_parts} parts, exceeding the "
+                f"{_MAX_MULTIPART_PARTS}-part ceiling"
+            )
+            raise FileInspectionError(
+                msg,
+                context={
+                    "diagnostic_code": "multipart-group-too-large",
+                    "part_count": total_parts,
+                    "max_parts": _MAX_MULTIPART_PARTS,
+                },
+            )
         self.bucket = bucket
         self.key = key
         self.dataset_id = dataset_id
+        self.additional_keys = additional_keys
         self.chunk_size = chunk_size
 
     @contextlib.contextmanager
@@ -353,6 +408,20 @@ class CsvSource(Source):
             detected encoding/dialect/header row -- D-01's former hardcoded
             UTF-8/comma/header-row-0 shape is gone. The underlying stream is
             closed when the context manager exits, even if the body raises.
+            When ``self.additional_keys`` is non-empty (plan 06-18, CSV-11),
+            every part's stream is opened (primary key first, then every
+            additional key in delivery order) and concatenated via
+            ``dataplat.discovery.open_multipart_stream`` into one logical
+            record stream BEFORE ``csv.reader`` is constructed -- the header
+            lives only in the FIRST part (this platform's multi-part
+            convention; see that function's own docstring), so a later
+            part's first physical row is read as genuine data, never
+            mistaken for a header. Every opened stream is closed when the
+            context manager exits, even if a later part's open raises
+            partway through the sequence -- no leaked file handles on a
+            partial-group failure. Compression combined with multipart is
+            explicitly OUT OF SCOPE for this plan (no corpus fixture
+            exercises ``.gz``/``.zip`` multipart parts).
 
         Raises:
             CsvDialectDetectionError: No usable delimiter was ever
@@ -374,42 +443,102 @@ class CsvSource(Source):
         )
         stdlib_dialect = to_stdlib_dialect(dialect_detection)
 
-        raw_stream = ctx.objects.get_object(self.bucket, self.key)
-        # `raw_stream.buffer` -- the already-open `ObjectStore.get_object`
-        # result's own public binary-buffer attribute (never `StreamingBody`'s
-        # forbidden private internal state; storage/objectstore.py's module
-        # docstring, and dataplat.discovery's own precedent) -- gives
-        # `open_compressed_stream` a real byte source regardless of
-        # compression, since that function has no other way to reach the
-        # object's raw bytes through `ObjectStore`'s already-decoding
-        # `get_object` return shape.
-        content_stream = open_compressed_stream(
-            raw_stream.buffer, compression=profile.compression, encoding=profile.encoding
-        )
+        if not self.additional_keys:
+            # UNCHANGED from before this plan (06-18) -- see this method's
+            # own docstring: "do not restructure the single-part path".
+            raw_stream = ctx.objects.get_object(self.bucket, self.key)
+            # `raw_stream.buffer` -- the already-open `ObjectStore.get_object`
+            # result's own public binary-buffer attribute (never `StreamingBody`'s
+            # forbidden private internal state; storage/objectstore.py's module
+            # docstring, and dataplat.discovery's own precedent) -- gives
+            # `open_compressed_stream` a real byte source regardless of
+            # compression, since that function has no other way to reach the
+            # object's raw bytes through `ObjectStore`'s already-decoding
+            # `get_object` return shape.
+            content_stream = open_compressed_stream(
+                raw_stream.buffer, compression=profile.compression, encoding=profile.encoding
+            )
+            try:
+                # `preamble_rows` skips rows BEFORE the header; `chunked_records`
+                # itself then discards exactly one MORE row as the header, so the
+                # total skipped before the first data row is
+                # `preamble_rows + 1 == profile.header_row_index + 1` -- D-01's
+                # header-at-row-0 hardcoding is gone, `profile.header_row_index`
+                # names whichever row detection (or the contract) actually
+                # found. `None` (no header ever found) falls back to 0:
+                # `chunked_records` still discards exactly one row via its own
+                # unconditional header read, matching D-01's original
+                # always-discard-row-0 behavior for this specific,
+                # untested-by-this-plan edge case (corpus fixture
+                # 11_no_header.csv) -- not a regression, an unaddressed gap
+                # carried forward unchanged.
+                preamble_rows = (
+                    profile.header_row_index if profile.header_row_index is not None else 0
+                )
+                yield CsvRecordStream(
+                    content_stream,
+                    dialect=stdlib_dialect,
+                    preamble_rows=preamble_rows,
+                    max_field_bytes=profile.max_field_bytes,
+                    chunk_size=self.chunk_size,
+                )
+            finally:
+                content_stream.close()
+            return
+
+        # CSV-11 multipart (this plan, 06-18): open every part's text stream
+        # using the SAME mechanism the single-part branch above uses
+        # (compression-aware if `profile.compression` is set, plain
+        # otherwise) -- primary key first, then every additional key in
+        # delivery order. Compression combined with multipart is explicitly
+        # OUT OF SCOPE (no corpus fixture exercises .gz/.zip multipart
+        # parts): this branch does not special-case it beyond not crashing
+        # outright.
+        # `raw_streams` keeps a live reference to every outer `get_object()`
+        # TextIOWrapper for this method's whole remaining lifetime -- NOT
+        # just a throwaway loop-local rebound each iteration. Without this,
+        # each earlier iteration's `raw_stream` loses its last reference the
+        # moment the loop variable rebinds, and CPython's refcounting GC
+        # closes it immediately (`TextIOWrapper.__del__` -> `close()`),
+        # which cascades to closing `raw_stream.buffer` too -- the SAME
+        # object `opened_streams[i]`'s own internal `BufferedReader` still
+        # depends on for reads, raising `ValueError: I/O operation on closed
+        # file` the moment `open_multipart_stream` actually starts
+        # iterating (lazily, only once `chunked_records` first pulls from
+        # it). The single-part branch above never hits this because its one
+        # `raw_stream` local never gets reassigned.
+        raw_streams: list[TextIOWrapper] = []
+        opened_streams: list[TextIOWrapper] = []
         try:
-            # `preamble_rows` skips rows BEFORE the header; `chunked_records`
-            # itself then discards exactly one MORE row as the header, so the
-            # total skipped before the first data row is
-            # `preamble_rows + 1 == profile.header_row_index + 1` -- D-01's
-            # header-at-row-0 hardcoding is gone, `profile.header_row_index`
-            # names whichever row detection (or the contract) actually
-            # found. `None` (no header ever found) falls back to 0:
-            # `chunked_records` still discards exactly one row via its own
-            # unconditional header read, matching D-01's original
-            # always-discard-row-0 behavior for this specific,
-            # untested-by-this-plan edge case (corpus fixture
-            # 11_no_header.csv) -- not a regression, an unaddressed gap
-            # carried forward unchanged.
+            for part_key in (self.key, *self.additional_keys):
+                part_raw_stream = ctx.objects.get_object(self.bucket, part_key)
+                raw_streams.append(part_raw_stream)
+                opened_streams.append(
+                    open_compressed_stream(
+                        part_raw_stream.buffer,
+                        compression=profile.compression,
+                        encoding=profile.encoding,
+                    ),
+                )
+            # Concatenates every part's already-open text stream into one
+            # logical physical-line iterator BEFORE `csv.reader` is
+            # constructed -- `open_multipart_stream`'s own docstring: the
+            # header lives only in `opened_streams[0]`.
+            combined_stream = open_multipart_stream(opened_streams)
             preamble_rows = profile.header_row_index if profile.header_row_index is not None else 0
             yield CsvRecordStream(
-                content_stream,
+                combined_stream,
                 dialect=stdlib_dialect,
                 preamble_rows=preamble_rows,
                 max_field_bytes=profile.max_field_bytes,
                 chunk_size=self.chunk_size,
             )
         finally:
-            content_stream.close()
+            # Every opened stream is closed, even if a later part's open
+            # raised partway through the sequence above -- no leaked file
+            # handles on a partial-group failure.
+            for opened_stream in opened_streams:
+                opened_stream.close()
 
     def inspect(self, ctx: PipelineContext) -> CsvProfile:
         """Run every detector once, aggregating their findings into one ``CsvProfile``.
