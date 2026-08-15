@@ -117,7 +117,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **LOAD-04**: File identity, batch identity, record identity and target-row identity are modelled distinctly and never conflated — *(DoD 37)*
 - [x] **LOAD-05**: Loads are transactional — staging table, validation, then atomic publication — so consumers never observe a partially loaded dataset — *(DoD 52)*
 - [ ] **LOAD-06**: After a partial failure the platform determines what succeeded, what remains, and whether retry or rollback is required, without manual log inspection — *(DoD 53)*
-- [ ] **LOAD-07**: Files larger than container memory process in bounded memory with configurable batch size and maximum field/row length — *(DoD 54)*
+- [x] **LOAD-07**: Files larger than container memory process in bounded memory with configurable batch size and maximum field/row length — *(DoD 54)*
 - [x] **LOAD-08**: A batch ledger with `UNIQUE (dataset, batch_key)` plus run-scoped identity (`run_id`, `attempt`) on every staged and loaded row exists from the vertical slice onward — *(PITFALLS #3, research deviation D1)*
 - [x] **LOAD-09**: Publication is single-writer via `pg_advisory_xact_lock` per dataset, using `INSERT … ON CONFLICT` arbitrating on the natural key — `MERGE` is not concurrency-safe — *(Gap 10, PITFALLS #14)*
 - [ ] **LOAD-10**: File integrity is verified before processing — checksum, size, extension, object metadata, transfer completion and optional control file — so partially uploaded files are never ingested — *(Gap 4)*
@@ -349,7 +349,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | LOAD-04 | Phase 4 | Complete |
 | LOAD-05 | Phase 4 | Complete |
 | LOAD-06 | Phase 9 | Pending |
-| LOAD-07 | Phase 6 | Pending |
+| LOAD-07 | Phase 6 | Complete |
 | LOAD-08 | Phase 4 | Complete |
 | LOAD-09 | Phase 4 | Complete |
 | LOAD-10 | Phase 8 | Pending |

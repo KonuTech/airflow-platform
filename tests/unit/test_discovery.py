@@ -17,11 +17,17 @@ against a real MinIO object.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
+from tools.corpus.generators import generate_corpus
+from tools.corpus.manifest import load_manifest
 
 from dataplat.config.model import (
     BatchingConfig,
@@ -31,11 +37,20 @@ from dataplat.config.model import (
     LoadConfig,
     SourceConfig,
 )
-from dataplat.discovery import DiscoveredUnit, discover_files
+from dataplat.discovery import (
+    DiscoveredUnit,
+    discover_files,
+    group_multipart_units,
+    open_multipart_stream,
+)
+from dataplat.errors import FileInspectionError
 from dataplat.storage.objectstore import ObjectSummary, open_text_stream
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = REPO_ROOT / "tests" / "fixtures" / "corpus.yaml"
 
 _DATASET_ID = 1
 _DATASET_NAME = "customers"
@@ -453,3 +468,110 @@ def test_discover_files_hashes_raw_bytes_matching_a_direct_hashlib_computation()
 
     recorded = metadata.files_by_uri["s3://raw/customers/hash-proof.csv"]
     assert recorded.content_sha256 == hashlib.sha256(payload).digest()
+
+
+# --- Task 3: multi-part delivery grouping (06-08-PLAN.md) -------------------
+
+
+_MULTIPART_PATTERN = r"(?P<group>.+)/part-(?P<index>\d+)"
+
+
+def test_group_multipart_units_groups_the_two_part_corpus_fixture_shape() -> None:
+    """`62_multipart_split`'s generated part-key shape (see ``tools/corpus/generators.py::
+
+    output_names``) groups into one ``MultipartGroup`` with both keys in ascending order.
+    """
+    listed = [
+        ObjectSummary(
+            key="62_multipart_split/part-00000",
+            etag="e0",
+            size_bytes=252,
+            last_modified=_LAST_MODIFIED,
+        ),
+        ObjectSummary(
+            key="62_multipart_split/part-00001",
+            etag="e1",
+            size_bytes=248,
+            last_modified=_LAST_MODIFIED,
+        ),
+    ]
+
+    groups = group_multipart_units(listed, pattern=_MULTIPART_PATTERN)
+
+    assert len(groups) == 1
+    assert groups[0].group_key == "62_multipart_split"
+    assert groups[0].ordered_object_uris == (
+        "62_multipart_split/part-00000",
+        "62_multipart_split/part-00001",
+    )
+
+
+def test_group_multipart_units_ignores_objects_that_do_not_match_the_pattern() -> None:
+    listed = [
+        ObjectSummary(
+            key="62_multipart_split/part-00000",
+            etag="e0",
+            size_bytes=252,
+            last_modified=_LAST_MODIFIED,
+        ),
+        ObjectSummary(
+            key="customers/unrelated.csv",
+            etag="e1",
+            size_bytes=10,
+            last_modified=_LAST_MODIFIED,
+        ),
+    ]
+
+    groups = group_multipart_units(listed, pattern=_MULTIPART_PATTERN)
+
+    assert len(groups) == 1
+    assert groups[0].group_key == "62_multipart_split"
+
+
+def test_group_multipart_units_raises_when_a_three_part_group_is_missing_its_middle_part() -> None:
+    listed = [
+        ObjectSummary(
+            key="dataset_x/part-00000", etag="e0", size_bytes=1, last_modified=_LAST_MODIFIED
+        ),
+        ObjectSummary(
+            key="dataset_x/part-00002", etag="e2", size_bytes=1, last_modified=_LAST_MODIFIED
+        ),
+    ]
+
+    with pytest.raises(FileInspectionError) as exc_info:
+        group_multipart_units(listed, pattern=_MULTIPART_PATTERN)
+
+    assert exc_info.value.context["diagnostic_code"] == "multipart-group-incomplete"
+    assert exc_info.value.context["group_key"] == "dataset_x"
+    assert exc_info.value.context["indices"] == [0, 2]
+
+
+def test_open_multipart_stream_reassembles_two_real_parts_into_one_twenty_row_dataset(
+    tmp_path: Path,
+) -> None:
+    """``62_multipart_split``'s two real generated parts become one 20-row logical file,
+
+    the same way ``csv.reader`` already streams a single object -- header consumed
+    once (from part 0 only), and part 1's first row (a genuine data row, not a
+    header) is never dropped.
+    """
+    manifest = load_manifest(MANIFEST)
+    generate_corpus(manifest, tmp_path, fast=True)
+    part_dir = tmp_path / "62_multipart_split"
+    stream0 = (part_dir / "part-00000").open(encoding="utf-8", newline="")
+    stream1 = (part_dir / "part-00001").open(encoding="utf-8", newline="")
+    try:
+        combined = open_multipart_stream([stream0, stream1])
+        rows = list(csv.reader(combined))
+    finally:
+        stream0.close()
+        stream1.close()
+
+    header, *data_rows = rows
+    assert header == ["id", "name", "amount"]
+    assert len(data_rows) == 20
+    # The second part's first row (000011) is present as DATA -- the exact
+    # failure this fixture exists to catch (corpus.yaml's own comment: "a
+    # reader that treats each object as a file ... silently drops a
+    # record").
+    assert data_rows[10][0] == "000011"

@@ -35,16 +35,21 @@ matches.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from dataplat.errors import FileInspectionError
 from dataplat.models.assignment import AssignmentDocument, BatchAssignment, FileAssignment
 from dataplat.observability.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+    from typing import TextIO
+
     from dataplat.config.model import DatasetConfig
     from dataplat.metadata.repository import MetadataRepository
-    from dataplat.storage.objectstore import ObjectStore
+    from dataplat.storage.objectstore import ObjectStore, ObjectSummary
 
 # Bumping this constant is the only sanctioned way to signal a change to the
 # content-hashing recipe below (mirrors dataplat.config.hashing.
@@ -318,3 +323,123 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
         candidates = candidates[: config.batching.max_units_per_run]
 
     return candidates
+
+
+@dataclass(frozen=True, slots=True)
+class MultipartGroup:
+    r"""One multi-part delivery's objects, grouped and ordered for reassembly (CSV-11).
+
+    Attributes:
+        group_key: The shared identity extracted from
+            ``SourceConfig.multipart_pattern``'s named ``group`` capture --
+            every object sharing this key belongs to the same logical
+            dataset.
+        ordered_object_uris: Member keys, ordered by
+            ``multipart_pattern``'s named ``index`` capture, numeric
+            ascending -- ``ordered_object_uris[0]`` is the part carrying the
+            header, per this platform's multi-part convention (see
+            ``open_multipart_stream``'s docstring). These are object KEYS
+            relative to their bucket, not bucket-qualified ``s3://`` URIs --
+            ``group_multipart_units`` receives no bucket argument; a caller
+            wiring this into ``discover_files`` (a later plan -- 06-08-PLAN.md's
+            own ``<verification>`` scope note) is responsible for that
+            qualification.
+    """
+
+    group_key: str
+    ordered_object_uris: tuple[str, ...]
+
+
+def group_multipart_units(listed: Sequence[ObjectSummary], pattern: str) -> list[MultipartGroup]:
+    r"""Partition ``listed`` objects into multi-part delivery groups (CSV-11).
+
+    Matches each object's key against ``pattern`` with a whole-string anchor
+    (``re.fullmatch`` -- mirrors CSV-01's filename-mask whole-string-anchor
+    discipline: a key matching only a fragment of ``pattern`` is not a
+    genuine multi-part member, not a partial match to accept). An object
+    whose key does not match ``pattern`` at all is not part of any group and
+    is silently excluded from the returned list -- this function only
+    identifies and orders multi-part groups among objects that match; it
+    does not validate that every listed object belongs to one.
+
+    Args:
+        listed: Every object under consideration (typically one
+            ``ObjectStore.list_objects`` page/listing).
+        pattern: A regex with two required named capture groups -- ``group``
+            (the shared identity) and ``index`` (the numeric part ordinal),
+            e.g. ``r"(?P<group>.+)/part-(?P<index>\d+)"``
+            (``SourceConfig.multipart_pattern``).
+
+    Returns:
+        One ``MultipartGroup`` per distinct ``group`` capture found, ordered
+        by ``group_key`` for determinism, each with its members ordered by
+        ``index`` ascending.
+
+    Raises:
+        FileInspectionError: A group's ``index`` captures have a gap (e.g.
+            ``part-00000``/``part-00002`` present, ``part-00001`` missing)
+            (``diagnostic_code="multipart-group-incomplete"``) -- never
+            silently skip a missing part.
+    """
+    compiled = re.compile(pattern)
+    members_by_group: dict[str, list[tuple[int, str]]] = {}
+    for obj in listed:
+        match = compiled.fullmatch(obj.key)
+        if match is None:
+            continue  # not a multipart member -- this function groups, never validates coverage
+        group_key = match.group("group")
+        index = int(match.group("index"))
+        members_by_group.setdefault(group_key, []).append((index, obj.key))
+
+    groups: list[MultipartGroup] = []
+    for group_key in sorted(members_by_group):
+        members = sorted(members_by_group[group_key])
+        indices = [index for index, _ in members]
+        expected = list(range(indices[0], indices[0] + len(indices)))
+        if indices != expected:
+            msg = f"multipart group {group_key!r} has a gap in its part indices: {indices}"
+            raise FileInspectionError(
+                msg,
+                context={
+                    "diagnostic_code": "multipart-group-incomplete",
+                    "group_key": group_key,
+                    "indices": indices,
+                },
+            )
+        groups.append(
+            MultipartGroup(
+                group_key=group_key,
+                ordered_object_uris=tuple(key for _, key in members),
+            ),
+        )
+    return groups
+
+
+def open_multipart_stream(streams: Sequence[TextIO]) -> Iterator[str]:
+    """Concatenate several already-open text streams into one logical physical-line iterator.
+
+    Yields every physical line from every stream, in stream order. This
+    platform's multi-part convention puts the header in the FIRST stream
+    ONLY -- verified this session by generating corpus fixture
+    ``62_multipart_split`` and reading its two real parts directly:
+    ``part-00000`` carries the header plus its share of data rows,
+    ``part-00001`` carries pure data, no header line at all
+    (``tools/corpus/generators.py::_write_multipart`` writes
+    ``header + body`` to part 0 and only ``body`` to every later part).
+    Nothing is skipped from a later stream: skipping its first physical
+    line would silently drop a genuine data row -- exactly the failure
+    fixture ``62_multipart_split``'s own corpus comment names ("part-00001's
+    first row is DATA... consuming it as a header silently drops a
+    record").
+
+    Args:
+        streams: Already-open text streams, in part order (``streams[0]``
+            must be the part carrying the header). Ownership (closing them)
+            stays with the caller.
+
+    Yields:
+        Every physical line from every stream, in order -- the first line
+        of ``streams[0]`` is the only header line in the whole sequence.
+    """
+    for stream in streams:
+        yield from stream

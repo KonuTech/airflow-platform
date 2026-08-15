@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SourceConfig(BaseModel):
-    """Where a dataset's source files live and how change is signaled.
+    r"""Where a dataset's source files live and how change is signaled.
 
     Attributes:
         type: Source engine key resolved through ``SOURCE_REGISTRY``, e.g.
@@ -43,6 +43,15 @@ class SourceConfig(BaseModel):
             this dataset under a different ``object_uri`` (D-13, a locked
             decision). Plain ``str``, matching this file's own convention
             — the only value this phase defines is ``"skip"``.
+        multipart_pattern: An opt-in regex naming two capture groups --
+            ``group`` (the shared identity every part of one logical
+            dataset has in common) and ``index`` (the numeric part
+            ordinal) -- e.g. ``r"(?P<group>.+)/part-(?P<index>\d+)"``,
+            matching Spark-style ``part-00000``/``part-00001`` delivery
+            (CSV-11, corpus fixture ``62_multipart_split``). ``None`` when
+            a dataset has no multi-part delivery shape (``customers``
+            does not), mirroring D-10's opt-in pattern for filename masks.
+            Consumed by ``dataplat.discovery.group_multipart_units``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -52,6 +61,7 @@ class SourceConfig(BaseModel):
     path: str
     change_semantics: str
     duplicate_policy: str
+    multipart_pattern: str | None = None
 
 
 class DeduplicationConfig(BaseModel):
