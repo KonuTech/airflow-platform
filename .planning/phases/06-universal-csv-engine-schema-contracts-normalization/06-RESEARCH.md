@@ -694,17 +694,22 @@ def downgrade() -> None:
 
 ## Open Questions
 
+**Status (updated during planning, 2026-08-15): all three questions below are resolved by the plan set. Each item's Resolution line names the deciding decision/plan; the original What-we-know/What's-unclear/Recommendation text is left intact below it for the record.**
+
 1. **How should `.zip` decompression actually be implemented, given it cannot be a pure single-pass stream?**
+   - **Resolution:** confirmed with the user post-research as CONTEXT.md's **D-22a** — `.gz` stays a true zero-compromise stream; `.zip`'s compressed archive bytes are buffered into `io.BytesIO` before opening (bounded by the archive's compressed size, never the decompressed CSV content, never disk), exactly this question's Recommendation below. Implemented by plan **06-08** Task 1 (`open_compressed_stream`).
    - What we know: verified live that `zipfile.ZipFile` requires a seekable underlying stream (raises `BadZipFile` otherwise), while `gzip.GzipFile` has no such requirement. D-21 scopes `.zip` to exactly one CSV member per archive.
    - What's unclear: whether a real `.zip`-delivering dataset will ever produce archives large enough that buffering the *compressed* bytes in memory (the simplest, zero-new-dependency option) becomes a problem. No real dataset uses `.zip` today (only `customers`, which uses neither compression format).
    - Recommendation: adopt the in-memory-buffered-compressed-bytes approach (Architecture Patterns Pattern 4 option a) as the v1 default, explicitly documented as bounded-by-compressed-size rather than truly O(1); flag the ranged-read or `stream-unzip` alternatives as the escape hatch if a real oversized `.zip` dataset appears later. This should be confirmed with the user before Wave C/D starts, since it touches locked decision D-22's literal wording, even though it satisfies D-22's actual underlying intent (never write decompressed data to disk).
 
 2. **What should `min_confidence`'s actual default value be?**
+   - **Resolution:** not pre-picked by research or planning, by design — plan **06-04** Task 1 requires the executor to empirically derive a `DEFAULT_MIN_CONFIDENCE` module constant by running the corrected detection algorithm against every encoding-tagged corpus fixture (05, 06, 07, 26, 27, 40, 41, 68) and recording the smallest threshold that reproduces every fixture's own `encoding_confidence_min`/`encoding_confidence_max` bound — exactly this question's Recommendation below, carried out at implementation time rather than guessed at plan time.
    - What we know: chardet's raw confidence is unusable as the gating signal (Pitfall 2); `1 - chaos` produced 0.914 for one realistic cp1250 sample.
    - What's unclear: the right threshold across the *whole* corpus (fixtures 05, 06, 07, 26, 40, 41, 68 all exercise encoding detection) — one data point isn't enough to pick a number.
    - Recommendation: run the corrected algorithm (Pattern 2) against every encoding-related corpus fixture during implementation and pick the threshold that passes every fixture's `encoding_confidence_min`/`encoding_confidence_max` bound, rather than picking a number in advance.
 
 3. **Does the `.zip` corpus fixture need a distinct name/number, and does it need a corrupted-archive sibling now or later?**
+   - **Resolution:** plan **06-01** Task 2 adds the baseline `.zip` fixture (`71_zipped.csv.zip`, wrapping `01_simple.csv`, growing the declared corpus from 69 to 70 fixtures) as a required task — exactly this question's Recommendation. The corrupted-archive sibling stays discretionary/deferred, as CONTEXT.md already scoped it; it is not added this phase.
    - What we know: no `.zip` fixture exists in the current 69; `_COMPRESSIONS`/`_write_wrapper` need extending regardless (Pitfall 8) for CSV-11's baseline behavior to be provable at all.
    - What's unclear: whether the corrupted/truncated-archive case (already flagged as Claude's Discretion in CONTEXT.md) should land in the same task.
    - Recommendation: add the baseline `.zip` fixture as a required Wave 0/1 task (it's not optional — CSV-11 needs it to be testable at all); leave the corrupted-archive fixture as CONTEXT.md already scoped it (discretionary, "grow the corpus as cases are discovered").
