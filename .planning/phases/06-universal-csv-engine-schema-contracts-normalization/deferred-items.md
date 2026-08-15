@@ -41,3 +41,18 @@ Verified isolated: `pytest tests/unit -q` (no `-x`) shows exactly this one failu
 367 collected tests; every other test, including all of this plan's own new/modified
 tests, passes. A future cleanup pass (or plan 06-08's own follow-up) should tighten the
 bomb guard's boundary condition.
+
+**Resolved (orchestrator, post-wave-3 merge gate):** Re-diagnosed — this was the
+property test's own second assertion being over-strict, not a guard logic bug.
+`open_compressed_stream`'s bomb guard already provides and correctly enforces its real,
+documented guarantee (`bytes_read_before_trip <= ceiling + _BOUNDED_READ_CHUNK_BYTES`,
+already asserted one line above and matching the fixed-payload test's `< 1_000_000`
+check). The removed assertion (`bytes_read_before_trip < decompressed_size`,
+unconditional) is structurally unprovable whenever `decompressed_size` sits within one
+`_BOUNDED_READ_CHUNK_BYTES` chunk of `ceiling`: the guard's final bounded read can
+legitimately drain the entire remaining stream while still tripping, since there is no
+more stream data left to distinguish "before" from "all" — not a bomb-safety violation.
+Fixed by gating that assertion on `decompressed_size > ceiling + _BOUNDED_READ_CHUNK_BYTES`
+(genuine bomb-scale payloads only) in `tests/unit/test_compression.py`. Verified against
+the exact failing case plus 5 independent Hypothesis seeds, full `make test`/`ruff
+check`/`make typecheck` — all clean.

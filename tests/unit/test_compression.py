@@ -264,6 +264,17 @@ def test_bomb_guard_property_never_exceeds_ceiling_by_more_than_one_bounded_chun
         assert exc_info.value.context["diagnostic_code"] == "decompression-bomb-exceeded"
         bytes_read_before_trip = exc_info.value.context["bytes_read_before_trip"]
         assert isinstance(bytes_read_before_trip, int)
-        # Never materializes more than one bounded chunk past the ceiling.
+        # Never materializes more than one bounded chunk past the ceiling --
+        # this is the guard's actual, load-bearing guarantee (matches the
+        # fixed-payload test above).
         assert bytes_read_before_trip <= ceiling + _BOUNDED_READ_CHUNK_BYTES
-        assert bytes_read_before_trip < decompressed_size
+        if decompressed_size > ceiling + _BOUNDED_READ_CHUNK_BYTES:
+            # Only provable once there is genuinely more stream data beyond
+            # the one bounded chunk the guard may read past the ceiling.
+            # When decompressed_size sits within one chunk of the ceiling,
+            # the guard's final bounded read can legitimately drain the
+            # entire remaining stream while still tripping -- there is no
+            # more data left to prove it stopped strictly "before" the end,
+            # and that is not a bomb-safety violation (Hypothesis-found
+            # boundary case: decompressed_size=1_000_001, ceiling=1_000_000).
+            assert bytes_read_before_trip < decompressed_size
