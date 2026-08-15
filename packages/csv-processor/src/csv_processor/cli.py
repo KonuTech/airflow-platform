@@ -285,6 +285,16 @@ def ingest(assignment: str) -> None:
 
         config = ConfigRegistry(pool).get_by_id(doc.config_version_id)
         source_bucket, source_key = _parse_s3_uri(doc.file.object_uri)
+        # `get_or_create_dataset` is idempotent (`discover()`'s own prior
+        # call already created this row -- `discover_files` requires a real
+        # `dataset_id` to run at all) -- this is a read in practice, never a
+        # first insert. Threading a real `dataset_id` into `CsvSource` here
+        # is what actually fires plan 06-15's schema-sync wiring in
+        # production: `dataplat.discovery`'s own idempotency-key formula
+        # (`discovery.py`'s module docstring) already reads
+        # `SchemaRepository.get_current(dataset_id)` in anticipation of this
+        # exact call site populating `meta.schema_versions` for real.
+        dataset_id = metadata.get_or_create_dataset(doc.dataset)
         run = RunContext(
             run_id=doc.run_id,
             idempotency_key=doc.idempotency_key,
@@ -299,7 +309,7 @@ def ingest(assignment: str) -> None:
             objects=objects,
             db=pool,
             log=get_logger(),
-            source=CsvSource(bucket=source_bucket, key=source_key),
+            source=CsvSource(bucket=source_bucket, key=source_key, dataset_id=dataset_id),
         )
         heartbeat_interval_seconds = float(
             os.environ.get("DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", "60.0"),
