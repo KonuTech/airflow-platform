@@ -327,7 +327,7 @@ Plans:
   4. A file from three schema versions ago reprocesses under its historical schema version, not the newest, and its batch records dataset, schema version, schema hash, processor version and timestamp.
   5. Processing the same file twice yields an identical output hash, DST gap and overlap timestamps round-trip correctly, and a file larger than the pod's memory limit loads in bounded memory.
 
-**Plans**: 17 plans in 5 waves
+**Plans**: 18 plans in 5 waves
 
 Plans:
 
@@ -362,6 +362,7 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 
 - [ ] 06-17-PLAN.md — Determinism property test (QUAL-16)
+- [ ] 06-18-PLAN.md — Wire multi-part delivery grouping into discover_files/CsvSource (CSV-11 real-pipeline closure)
 
 **Research stage**: S7. **Skip `--research-phase`** — pure Python over a fixture corpus; STACK.md has chosen `charset-normalizer` `3.4.9` + `chardet` `7.5.1` (behind a BOM sniff and a contract override) and `clevercsv` `0.8.5` for detection only.
 
