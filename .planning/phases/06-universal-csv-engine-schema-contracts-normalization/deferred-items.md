@@ -56,3 +56,38 @@ Fixed by gating that assertion on `decompressed_size > ceiling + _BOUNDED_READ_C
 (genuine bomb-scale payloads only) in `tests/unit/test_compression.py`. Verified against
 the exact failing case plus 5 independent Hypothesis seeds, full `make test`/`ruff
 check`/`make typecheck` — all clean.
+
+## From plan 06-17
+
+Found while running this plan's own third `<verification>` command,
+`pytest tests/integration -m integration -q` ("final full integration sweep for the
+phase"). Result: `77 deselected` (exit code 5, no tests collected) — every one of the 77
+existing tests across the 8 files in `tests/integration/` predates this plan and carries
+no `@pytest.mark.integration` marker. This plan's own `06-17-PLAN.md` verification text
+assumed "the project's existing `@pytest.mark.integration` convention (matching every
+other Docker-dependent test in this repository)" — but a full-repo grep (before this
+plan's own two tests were added) found zero prior uses of this marker anywhere. The REAL,
+actually-established convention for `tests/integration/` is FOLDER-based, not
+marker-based: `make test-integration`'s Makefile recipe is `pytest tests/integration -q`
+(no `-m` filter at all), and `pyproject.toml`'s `markers` list had no `integration` entry
+before this plan added one (Rule 3 auto-fix, required for this plan's OWN
+`tests/property/test_determinism.py -m integration ...` acceptance-criteria commands to
+even collect under `--strict-markers`).
+
+| File | Issue |
+|------|-------|
+| `tests/integration/test_config_registry.py`, `test_discover_files.py`, `test_docker_image.py`, `test_metadata_repository.py`, `test_migrations.py`, `test_objectstore.py`, `test_publish_merge.py`, `test_run_ingest.py`, `test_schema_resolution.py`, `test_staging_loader.py`, `test_staging_normalization.py` | None carry `@pytest.mark.integration` — `pytest tests/integration -m integration -q` selects zero of their tests. |
+| `Makefile` (`test-integration` target) | Runs `pytest tests/integration -q` (a folder path) — would never collect `tests/property/test_determinism.py` even though 06-17-PLAN.md's own `<action>` text says this new test should run "under `make test-integration`". |
+
+Not auto-fixed: touching 8 pre-existing files (~77 tests) to add a marker, or changing
+the Makefile's collection path, is outside this plan's declared
+`files_modified: [tests/property/test_determinism.py]` scope and affects tests this plan
+never touches. `tests/property/test_determinism.py`'s OWN acceptance criteria (direct
+`pytest tests/property/test_determinism.py -m integration ...` invocations) all pass
+independently of this gap — verified live, 2/2 tests passing in 20.76s wall time (14.24s
+of which is one-time testcontainers startup), full `pytest tests/unit tests/property
+tests/regression -q` (380 tests) green. A future cleanup pass should either add
+`@pytest.mark.integration` to the other 8 `tests/integration/` files (making the plan's
+third verification line real) or fold `tests/property/test_determinism.py` into
+`tests/integration/` outright and drop the marker approach for this one file, whichever
+the phase's own maintainers prefer.

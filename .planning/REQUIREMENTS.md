@@ -193,7 +193,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **QUAL-13**: CDC is tested including ordering and replayed events — *(DoD 87)*
 - [ ] **QUAL-14**: SCD is tested including late-arriving corrections and idempotent re-application — *(DoD 88)*
 - [ ] **QUAL-15**: Failure and recovery scenarios from §84 are tested — pod crash, database unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, CDC ordering, secret rotation, unauthorized secret access — *(DoD 89)*
-- [ ] **QUAL-16**: A property test asserts determinism — identical source data, configuration and processor version produce an identical output hash — *(Gap 8)*
+- [x] **QUAL-16**: A property test asserts determinism — identical source data, configuration and processor version produce an identical output hash — *(Gap 8)*
 - [x] **QUAL-17**: Timezone and DST correctness is tested as a property, including DST gap and overlap timestamps — *(Gap 14)*
 
 ### CICD — Continuous Integration and Delivery
@@ -407,7 +407,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-13 | Phase 10 | Pending |
 | QUAL-14 | Phase 10 | Pending |
 | QUAL-15 | Phase 11 | Pending |
-| QUAL-16 | Phase 6 | Pending |
+| QUAL-16 | Phase 6 | Complete |
 | QUAL-17 | Phase 6 | Complete |
 | CICD-01 | Phase 1 | Complete |
 | CICD-02 | Phase 1 | Complete |
