@@ -151,3 +151,7 @@ None - no external service configuration required.
 ---
 *Phase: 07-observability-metrics-tracing-lineage*
 *Completed: 2026-08-16*
+
+## Self-Check: PASSED
+
+All 11 files claimed in this summary confirmed present via `git ls-files` (SUMMARY.md itself plus the 9 plan-declared files plus the 1 Rule-1 deviation file). All 4 claimed commit hashes (`1151d6e`, `594e0dd`, `8878751`, `fcae7a4`) confirmed present via `git log --oneline --all`. No missing items.
