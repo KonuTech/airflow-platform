@@ -333,8 +333,8 @@ Plans:
 
 **Wave 1**
 
-- [ ] 06-01-PLAN.md — Foundations: detection-library deps, .zip corpus generator support, meta.schema_versions migration
-- [ ] 06-02-PLAN.md — Shared contracts: DatasetConfig columns/filename/normalization/csv extensions, diagnostics catalog, SourceError/SchemaError hierarchy, customers.yaml activation
+- [x] 06-01-PLAN.md — Foundations: detection-library deps, .zip corpus generator support, meta.schema_versions migration
+- [x] 06-02-PLAN.md — Shared contracts: DatasetConfig columns/filename/normalization/csv extensions, diagnostics catalog, SourceError/SchemaError hierarchy, customers.yaml activation
 
 **Wave 2** *(blocked on Wave 1 completion — eleven plans, the phase's best parallelization opportunity)*
 
