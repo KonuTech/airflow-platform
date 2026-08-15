@@ -62,16 +62,16 @@ class RaggedRowGuard(StreamingStage):
         """
         self._field_delimiter = field_delimiter
 
-    def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:  # noqa: ARG002
+    def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:
         """Split ``chunk`` into rows matching its expected field count and rows that don't.
 
         Never raises, regardless of how malformed ``chunk.rows`` is (proven
         by the all-rows-ragged case in ``tests/unit/test_pipeline_errors.py``).
 
         Args:
-            ctx: The current pipeline context. Unused: this stage's decision
-                depends only on ``chunk``, and the parameter exists to
-                satisfy ``StreamingStage``.
+            ctx: The current pipeline context. ``ctx.config.dataset`` labels
+                this stage's two ``metrics.increment()`` calls (D-04's
+                bounded label set: ``dataset``+``stage``+``status``).
             chunk: The chunk to check.
 
         Returns:
@@ -113,8 +113,13 @@ class RaggedRowGuard(StreamingStage):
                 continue  # never pad or truncate (polars #10585, CONTEXT.md D-01)
             kept.append(row)
 
-        metrics.increment("rows_rejected", len(rejected))
-        metrics.increment("rows_kept", len(kept))
+        # D-04's bounded label set (dataset+stage+status, never an unbounded
+        # identity like run_id/file_id/batch_id) -- shared here since both
+        # calls below carry the identical dataset/stage pair, differing
+        # only in status.
+        labels = {"dataset": ctx.config.dataset, "stage": self.name}
+        metrics.increment("rows_rejected", len(rejected), status="rejected", **labels)
+        metrics.increment("rows_kept", len(kept), status="kept", **labels)
         return StageResult(chunk=chunk.replace(rows=tuple(kept)), rejected=rejected, findings=[])
 
 
