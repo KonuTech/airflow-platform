@@ -165,15 +165,15 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### OBS — Observability, Lineage and Operations
 
-- [ ] **OBS-01**: Data freshness is tracked — last received, last successful processing, expected frequency and processing delay — *(DoD 59)*
+- [x] **OBS-01**: Data freshness is tracked — last received, last successful processing, expected frequency and processing delay — *(DoD 59)*
 - [x] **OBS-02**: All Python code uses structured application logging that works in local, Docker, Kubernetes and Airflow task-pod contexts — *(DoD 74)*
 - [x] **OBS-03**: No `print()` is used for operational logging — enforced in CI — *(DoD 75)*
 - [x] **OBS-04**: Logs carry contextual fields — filename, object path, dataset, stage, row number, schema version, validation status, duration and Airflow identifiers — *(DoD 76)*
 - [x] **OBS-05**: Passwords, keys, tokens, secrets, unnecessary PII and whole sensitive records are never logged — *(DoD 77)*
 - [ ] **OBS-06**: Operational runbooks document symptoms, diagnosis, recovery, reprocessing and verification for each §89 scenario — *(DoD 112)*
-- [ ] **OBS-07**: Lineage is queryable by SQL — for any row, its source file, object path, checksum, batch, ingestion timestamp, DAG/run/task ID, processor version, schema version and config version — *(Gap 2)*
+- [x] **OBS-07**: Lineage is queryable by SQL — for any row, its source file, object path, checksum, batch, ingestion timestamp, DAG/run/task ID, processor version, schema version and config version — *(Gap 2)*
 - [ ] **OBS-08**: Platform metrics are exposed — `files_processed`, `files_failed`, `rows_processed`, `rows_invalid`, `rows_deduplicated`, `processing_duration`, `validation_failures`, `data_freshness` — with bounded label cardinality, unbounded identity living in the metadata DB — *(Gap 3)*
-- [ ] **OBS-09**: "No file currently available" is distinguished from "file expected but missing", with configurable warning or failure behaviour per expected frequency — *(Gap 6)*
+- [x] **OBS-09**: "No file currently available" is distinguished from "file expected but missing", with configurable warning or failure behaviour per expected frequency — *(Gap 6)*
 - [ ] **OBS-10**: Distributed traces span Airflow task → task pod → processor → PostgreSQL, via explicit W3C `traceparent` propagation — it is not automatic across the pod boundary — *(PROJECT.md decision)*
 
 ### QUAL — Engineering Standards and Test Coverage
@@ -382,15 +382,15 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SCD-10 | Phase 10 | Pending |
 | SCD-11 | Phase 10 | Pending |
 | SCD-12 | Phase 10 | Pending |
-| OBS-01 | Phase 7 | Pending |
+| OBS-01 | Phase 7 | Complete |
 | OBS-02 | Phase 3 | Complete |
 | OBS-03 | Phase 1 | Complete |
 | OBS-04 | Phase 3 | Complete |
 | OBS-05 | Phase 3 | Complete |
 | OBS-06 | Phase 11 | Pending |
-| OBS-07 | Phase 7 | Pending |
+| OBS-07 | Phase 7 | Complete |
 | OBS-08 | Phase 7 | Pending |
-| OBS-09 | Phase 7 | Pending |
+| OBS-09 | Phase 7 | Complete |
 | OBS-10 | Phase 7 | Pending |
 | QUAL-01 | Phase 1 | Complete |
 | QUAL-02 | Phase 1 | Complete |
