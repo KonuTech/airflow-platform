@@ -21,33 +21,10 @@ gaps_resolved:
      gets a contract-declared round-trip proof through decode_strict instead -- the
      actually-recommended path per this project's own 'never guess, contract wins'
      convention for an encoding blind detection cannot reliably identify."
-gaps:
-  - truth: "A file from three schema versions ago reprocesses under its historical schema version, not the newest, and its batch records dataset, schema version, schema hash, processor version and timestamp."
-    status: partial
-    reason: "The historical-resolution mechanism itself is real and live-verified (CsvSource._resolve_schema -> SchemaRepository.resolve_by_hash correctly resolves a file to an older, non-current meta.schema_versions row). But the second half of the truth is false in the running system: the resolved schema_version_id is never written back to meta.ingestion_runs (or anywhere else durable). CsvProfile.schema_version_id is computed inside CsvSource.open() purely as a local variable used to build the CSV reader, then discarded -- it never reaches StagingResult, Receipt, or any MetadataRepository write call. finalize_publication (the only call that marks a run SUCCEEDED with completion data) has no schema_version_id parameter; RunContext has no schema_version_id field; no production code path anywhere calls update_ingestion_run_status(..., schema_version_id=...). meta.ingestion_runs.schema_version_id -- the exact column migration 0009 added an FK for specifically to close this gap -- stays NULL for every real ingestion run forever."
-    artifacts:
-      - path: "packages/csv-processor/src/csv_processor/source.py"
-        issue: "_resolve_schema (lines 686-845) correctly computes schema_version_id but it is consumed only locally inside open() (line 432/657) to build the reader; the value is never surfaced to any caller that could persist it"
-      - path: "packages/dataplat/src/dataplat/pipeline/run.py"
-        issue: "run_ingest's own docstring (line 226) states ctx.source is streamed through StagingLoader 'without ever inspecting' -- finalize_publication (lines 324-333) passes run_id/file_id/batch_id/rows_loaded/finished_at/duration_ms/report_uri only, no schema_version_id"
-      - path: "packages/dataplat/src/dataplat/metadata/postgres.py"
-        issue: "finalize_publication (lines 401-440) and create_ingestion_run/get_or_create_ingestion_run (lines 248-320) have no schema_version_id parameter in their SQL; schema_version_id is only reachable via the generic update_ingestion_run_status(**fields) escape hatch, which no production caller ever invokes with that field"
-      - path: "packages/dataplat/src/dataplat/models/receipt.py"
-        issue: "Receipt (the XCom payload reporting run outcome) also has no schema_version/schema_hash field, so this is not captured anywhere else either"
-    missing:
-      - "A real call site (most naturally inside CsvSource.open() returning the resolved schema_version_id up through StagingResult, or CsvSource exposing the last-resolved profile for run_ingest to read) that ends in ctx.metadata.update_ingestion_run_status(run_id=..., schema_version_id=profile.schema_version_id) or an equivalent field added to finalize_publication's signature"
-      - "An integration test asserting that after a real run_ingest() call, meta.ingestion_runs.schema_version_id for that run_id equals the schema_version_id SchemaRepository resolved for the file -- no such test exists today (test_run_ingest.py has zero references to schema_version anywhere)"
-  - truth: "Every file in the edge-case corpus -- UTF-8 BOM, UTF-16 LE/BE, Windows-1250/1252, ISO-8859, semicolon/pipe/tab/colon dialects, embedded newlines, escaped quotes, inconsistent quoting, metadata preambles, a header at row 7, totals footers, .gz and .zip -- either parses to the expected records or produces a named diagnostic identifying the row."
-    status: partial
-    reason: "The large majority of this list is genuinely, solidly covered by the 70-fixture corpus and its parametrized test suites (verified by direct reading and live test execution): UTF-8 BOM (05), UTF-16 LE with/without BOM (07, 40), Windows-1250 (06, plus two dedicated near-tie-correction tests), comma/semicolon/pipe/tab (01-04), colon (proven via a deliberate, documented hand-built unit test in test_dialect.py since no corpus fixture uses it structurally), embedded newlines (10), escaped/inconsistent quoting (08, 09, 35, 36, 66), metadata preambles (12), totals footers (13, 64), .gz (61) and .zip (71) are all real, passing, live-executed tests. However three items named explicitly in this success criterion have ZERO test coverage anywhere in the repository: Windows-1252, any ISO-8859 variant, and UTF-16 BE (only present as a BOM/alias constant in code, never as actual encoded fixture bytes exercised end-to-end). A repo-wide case-insensitive grep for '1252'/'8859'/'utf-16-be' across tests/ and packages/ finds no fixture, no hand-built unit test, and no documented decision (unlike the colon-delimiter case, which has an explicit, reasoned justification in test_dialect.py) explaining the omission."
-    artifacts:
-      - path: "tests/fixtures/corpus.yaml"
-        issue: "70 fixtures declared; none use windows-1252, any iso-8859-* codec, or utf-16-be as their encoding"
-      - path: "tests/unit/detect/test_encoding.py"
-        issue: "Every test is either corpus-parametrized (so inherits the same gap) or targets cp1250/undetermined/contract-override/alias-canonicalization concerns -- none constructs Windows-1252, ISO-8859, or UTF-16-BE bytes directly"
-    missing:
-      - "A corpus fixture (or, matching the colon-delimiter precedent, a documented hand-built unit test) proving detect_encoding correctly identifies at least one Windows-1252-encoded and one ISO-8859-*-encoded sample"
-      - "A corpus fixture or hand-built test with genuine UTF-16-BE-encoded bytes (with and/or without a BOM) proving decode_strict/detect_encoding round-trip it correctly, not just that 'utf-16-be' canonicalizes to 'utf-16' as a string"
+gaps: []
+# Both gaps found during this verification pass were fixed by the orchestrator
+# immediately afterward -- see gaps_resolved above for what changed and which
+# commits, and the Resolution/body text below for the original findings in full.
 deferred: []
 human_verification: []
 ---
