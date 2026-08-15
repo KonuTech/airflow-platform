@@ -1,10 +1,11 @@
 """Unit tests for ``csv_processor.compression`` -- CSV-11's compression dispatch layer.
 
-Every ``<behavior>`` bullet from 06-08-PLAN.md Task 1 has a test here. The
-``.gz``/``.zip`` fixtures are the corpus's own ``61_gzipped.csv.gz``/
-``71_zipped.csv.zip`` (both wrapping ``01_simple.csv``, generated fresh into
-a temp dir via ``tools.corpus.generators.generate_corpus`` -- never read
-from ``tests/fixtures/csv/``, matching this test suite's existing convention
+Every ``<behavior>`` bullet from 06-08-PLAN.md Task 1 has a test here, plus
+Task 2's decompression-bomb guard. The ``.gz``/``.zip`` fixtures are the
+corpus's own ``61_gzipped.csv.gz``/``71_zipped.csv.zip`` (both wrapping
+``01_simple.csv``, generated fresh into a temp dir via
+``tools.corpus.generators.generate_corpus`` -- never read from
+``tests/fixtures/csv/``, matching this test suite's existing convention
 (``tests/unit/test_corpus_semantic_fixtures.py``).
 
 ``_NonSeekableStream`` mirrors ``botocore.response.StreamingBody``'s real
@@ -18,15 +19,22 @@ stands in for.
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import zipfile
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from tools.corpus.generators import generate_corpus
 from tools.corpus.manifest import load_manifest
 
-from csv_processor.compression import detect_compression, open_compressed_stream
+from csv_processor.compression import (
+    _BOUNDED_READ_CHUNK_BYTES,
+    detect_compression,
+    open_compressed_stream,
+)
 from dataplat.errors import FileInspectionError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,6 +94,9 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def _read_records(text: str) -> list[list[str]]:
     """Parse decoded CSV text into records, mirroring the corpus test suite's own helper."""
     return list(csv.reader(io.StringIO(text)))
+
+
+# --- Task 1: .gz true streaming, .zip's D-22a buffered exception -----------
 
 
 def test_detect_compression_dispatches_by_extension() -> None:
@@ -181,3 +192,78 @@ def test_uncompressed_delegates_unchanged_to_open_text_stream(corpus: Path) -> N
 
     assert records[0] == _EXPECTED_HEADER
     assert len(records) - 1 == _EXPECTED_DATA_ROW_COUNT
+
+
+# --- Task 2: LOAD-07's decompression-bomb bound -----------------------------
+
+
+def _gzip_of_repeated_bytes(decompressed_size: int) -> bytes:
+    """Build a highly-compressible gzip archive of ``decompressed_size`` zero bytes."""
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb") as gz:
+        gz.write(b"0" * decompressed_size)
+    return buffer.getvalue()
+
+
+def test_decompression_bomb_is_caught_within_a_small_ceiling_without_full_materialization() -> None:
+    # 10,000,000 decompressed bytes of a single repeated byte compress to a
+    # tiny archive -- the canonical decompression-bomb shape.
+    bomb_bytes = _gzip_of_repeated_bytes(10_000_000)
+    ceiling = 100_000  # far below the true 10,000,000-byte payload
+    stream = _NonSeekableStream(bomb_bytes)
+
+    text_stream = open_compressed_stream(
+        stream,
+        compression="gzip",
+        encoding="utf-8",
+        max_decompressed_bytes=ceiling,
+    )
+
+    with pytest.raises(FileInspectionError) as exc_info:
+        text_stream.read()
+
+    assert exc_info.value.context["diagnostic_code"] == "decompression-bomb-exceeded"
+    # The guard must trip within a handful of bounded chunk reads, never
+    # after consuming anywhere near the true 10,000,000-byte payload --
+    # bytes_read_before_trip proves it stopped close to the ceiling, not
+    # after fully materializing the bomb.
+    bytes_read_before_trip = exc_info.value.context["bytes_read_before_trip"]
+    assert isinstance(bytes_read_before_trip, int)
+    assert bytes_read_before_trip <= ceiling + _BOUNDED_READ_CHUNK_BYTES
+    assert bytes_read_before_trip < 1_000_000  # nowhere near the 10,000,000-byte bomb
+
+
+@settings(max_examples=20)
+@given(decompressed_size=st.integers(min_value=1, max_value=2_000_000))
+def test_bomb_guard_property_never_exceeds_ceiling_by_more_than_one_bounded_chunk(
+    decompressed_size: int,
+) -> None:
+    """For any decompressed size, the guard either succeeds correctly (under the ceiling)
+
+    or raises having read strictly less than the true payload (over the ceiling) -- proving
+    the ceiling is enforced incrementally across the whole size range, not just the one
+    fixed 10,000,000-byte case above.
+    """
+    ceiling = 1_000_000
+    payload_bytes = _gzip_of_repeated_bytes(decompressed_size)
+    stream = _NonSeekableStream(payload_bytes)
+
+    text_stream = open_compressed_stream(
+        stream,
+        compression="gzip",
+        encoding="utf-8",
+        max_decompressed_bytes=ceiling,
+    )
+
+    if decompressed_size <= ceiling:
+        content = text_stream.read()
+        assert len(content) == decompressed_size
+    else:
+        with pytest.raises(FileInspectionError) as exc_info:
+            text_stream.read()
+        assert exc_info.value.context["diagnostic_code"] == "decompression-bomb-exceeded"
+        bytes_read_before_trip = exc_info.value.context["bytes_read_before_trip"]
+        assert isinstance(bytes_read_before_trip, int)
+        # Never materializes more than one bounded chunk past the ceiling.
+        assert bytes_read_before_trip <= ceiling + _BOUNDED_READ_CHUNK_BYTES
+        assert bytes_read_before_trip < decompressed_size
