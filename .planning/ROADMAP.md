@@ -357,7 +357,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 06-15-PLAN.md — Wire schema versioning/evolution into CsvSource.inspect()
+- [x] 06-15-PLAN.md — Wire schema versioning/evolution into CsvSource.inspect()
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
