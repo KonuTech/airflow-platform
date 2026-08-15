@@ -37,7 +37,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: `dataplat` Core Library & Metadata Control Plane** - The `meta` schema, pipeline engine, `SecretsResolver` and record-chunked CSV reader, tested with testcontainers and no cluster (completed 2026-08-13)
 - [x] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows (completed 2026-08-13)
 - [x] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests (completed 2026-08-14)
-- [ ] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization
+- [x] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization (completed 2026-08-15)
 - [ ] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking
 - [ ] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection
 - [ ] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation
@@ -361,8 +361,8 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 06-17-PLAN.md — Determinism property test (QUAL-16)
-- [ ] 06-18-PLAN.md — Wire multi-part delivery grouping into discover_files/CsvSource (CSV-11 real-pipeline closure)
+- [x] 06-17-PLAN.md — Determinism property test (QUAL-16)
+- [x] 06-18-PLAN.md — Wire multi-part delivery grouping into discover_files/CsvSource (CSV-11 real-pipeline closure)
 
 **Research stage**: S7. **Skip `--research-phase`** — pure Python over a fixture corpus; STACK.md has chosen `charset-normalizer` `3.4.9` + `chardet` `7.5.1` (behind a BOM sniff and a contract override) and `clevercsv` `0.8.5` for detection only.
 
