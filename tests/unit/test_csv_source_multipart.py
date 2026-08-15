@@ -35,6 +35,7 @@ from dataplat.config.model import (
     LoadConfig,
     SourceConfig,
 )
+from dataplat.diagnostics import DIAGNOSTIC_CODES
 from dataplat.errors import FileInspectionError
 from dataplat.models.identity import RunContext
 from dataplat.pipeline.protocol import PipelineContext
@@ -221,3 +222,15 @@ def test_construction_with_51_keys_raises_before_any_stream_opens() -> None:
 
     assert exc_info.value.context["diagnostic_code"] == "multipart-group-too-large"
     assert exc_info.value.context["part_count"] == 51
+
+
+def test_multipart_group_too_large_diagnostic_code_is_in_the_shared_catalog() -> None:
+    """D-24's drift guard, applied to this module's one raise site.
+
+    Keeps ``CsvSource.__init__``'s literal in sync with
+    ``dataplat.diagnostics.DIAGNOSTIC_CODES`` — a rename on either side
+    without the other becomes a failing test here, not a silent mismatch
+    (post-wave-5 code review WR-03: this code existed at a real raise site
+    but was never added to the shared catalog).
+    """
+    assert "multipart-group-too-large" in DIAGNOSTIC_CODES
