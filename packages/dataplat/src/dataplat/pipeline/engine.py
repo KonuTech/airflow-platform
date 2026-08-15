@@ -113,13 +113,22 @@ class RaggedRowGuard(StreamingStage):
                 continue  # never pad or truncate (polars #10585, CONTEXT.md D-01)
             kept.append(row)
 
-        # D-04's bounded label set (dataset+stage+status, never an unbounded
-        # identity like run_id/file_id/batch_id) -- shared here since both
-        # calls below carry the identical dataset/stage pair, differing
-        # only in status.
-        labels = {"dataset": ctx.config.dataset, "stage": self.name}
-        metrics.increment("rows_rejected", len(rejected), status="rejected", **labels)
-        metrics.increment("rows_kept", len(kept), status="kept", **labels)
+        # D-04's bounded label set: dataset+stage+status, never an unbounded
+        # identity like run_id/file_id/batch_id.
+        metrics.increment(
+            "rows_rejected",
+            len(rejected),
+            dataset=ctx.config.dataset,
+            stage=self.name,
+            status="rejected",
+        )
+        metrics.increment(
+            "rows_kept",
+            len(kept),
+            dataset=ctx.config.dataset,
+            stage=self.name,
+            status="kept",
+        )
         return StageResult(chunk=chunk.replace(rows=tuple(kept)), rejected=rejected, findings=[])
 
 
