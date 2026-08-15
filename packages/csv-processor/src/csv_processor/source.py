@@ -21,15 +21,22 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import io
 import itertools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
+from csv_processor.compression import detect_compression, open_compressed_stream
+from csv_processor.detect.dialect import detect_dialect, to_stdlib_dialect
+from csv_processor.detect.encoding import DEFAULT_MIN_CONFIDENCE, decode_strict, detect_encoding
+from csv_processor.detect.filename import parse_filename
+from csv_processor.detect.header import detect_header
+from dataplat.models.profile import CsvProfile
 from dataplat.models.record import RecordChunk
 from dataplat.observability import metrics
 from dataplat.sources.protocol import RecordStream, Source
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from io import TextIOWrapper
 
     from dataplat.pipeline.protocol import PipelineContext
@@ -38,8 +45,21 @@ ENCODING = "utf-8"  # D-01: hardcoded, no encoding detection until Phase 6
 DIALECT = csv.excel  # D-01: hardcoded comma dialect, no dialect detection until Phase 6
 # 1 MiB, explicit and documented -- never left unbounded (an unbounded field
 # limit turns a malformed quote into an out-of-memory kill, PITFALLS.md E1).
-# This is a Phase-3 default; Phase 6 makes it a per-dataset contract field.
+# This was a Phase-3 default; Phase 6's `CsvSource.open()` now sources this
+# bound from `CsvProfile.max_field_bytes` (the dataset contract's own
+# `csv.max_field_bytes`, plan 06-14) instead -- kept defined, and still
+# `chunked_records`'s own default, purely for backward-compat reference and
+# for any caller that constructs a reader with no detected/contract profile
+# at all.
 FIELD_SIZE_LIMIT = 1_048_576
+
+# T-06-30 (this plan's own threat register): a FIXED, documented bound on
+# `CsvSource.inspect()`'s sample read -- matching every detector's own
+# already-established ~64 KiB sample-size convention (STACK.md; the
+# `encoding.py`/`dialect.py` module docstrings). A future edit must widen
+# this only by changing the literal below, visibly, in code review -- never
+# by reading more from inside the loop that consumes it.
+_INSPECT_SAMPLE_BYTES: Final[int] = 65_536
 
 
 def _strip_nul(text_stream: TextIOWrapper) -> Iterator[str]:
@@ -216,3 +236,129 @@ class CsvSource(Source):
             yield CsvRecordStream(text_stream, chunk_size=self.chunk_size)
         finally:
             text_stream.close()
+
+    def inspect(self, ctx: PipelineContext) -> CsvProfile:
+        """Run every detector once, aggregating their findings into one ``CsvProfile``.
+
+        The real implementation of Pattern 1 (06-RESEARCH.md): every
+        detector runs here, once, before any ``RecordStream`` exists --
+        never per-chunk. Reads a single bounded sample --
+        ``_INSPECT_SAMPLE_BYTES`` of the object's DEcompressed bytes
+        (T-06-30: a fixed, documented bound) -- via ``ctx.objects.
+        get_object``'s own public ``TextIOWrapper.buffer`` attribute, the
+        same already-reviewed pattern ``dataplat.discovery.discover_files``
+        uses for its own raw-bytes content hash (never ``StreamingBody``'s
+        forbidden private internal state; ``storage/objectstore.py``'s
+        module docstring). Routing that buffer through ``csv_processor.
+        compression.open_compressed_stream`` means a ``.gz``/``.zip``
+        object's sample is genuinely decompressed CSV content, never opaque
+        archive bytes -- ``open_compressed_stream``'s own ``encoding``
+        argument is a throwaway placeholder here: only ``.buffer.read()``
+        is ever called on its return value, which reads raw bytes and never
+        triggers the text layer's decoding, so the placeholder is never
+        actually consulted.
+
+        Runs, in this exact order (the order matters -- do not reorder):
+
+        1. ``detect_compression`` -- from the object key alone.
+        2. ``detect_encoding`` -- BOM sniff, then contract/charset-normalizer/
+           chardet agreement.
+        3. ``decode_strict`` -- decode the sample with the detected encoding.
+        4. ``detect_dialect`` -- delimiter/quotechar, contract-fallback aware.
+        5. ``detect_header`` -- header/preamble/footer, over the sample split
+           into rows by the detected (or contract-fallback) dialect. Skipped
+           (an empty candidate-row list) when dialect detection declined
+           with no contract fallback -- there is no usable delimiter to
+           split rows with; ``CsvSource.open()`` is where that condition
+           actually raises (plan 06-05's ``to_stdlib_dialect`` design).
+        6. ``parse_filename`` -- only when ``ctx.config.filename`` is set;
+           a ``FilenameParsingError`` propagates uncaught (D-09: reject the
+           whole file).
+
+        Args:
+            ctx: The current pipeline context.
+
+        Returns:
+            The aggregated profile.
+
+        Raises:
+            EncodingDetectionError: The sample cannot be decoded under the
+                detected (or contract-declared) encoding.
+            FileInspectionError: The header row (contract-given or
+                detected) has an exact or case-variant duplicate name, or
+                the object is a corrupted or oversized archive.
+            FilenameParsingError: ``ctx.config.filename`` is set and the
+                object's filename does not match its configured mask (D-09).
+        """
+        compression_kind = detect_compression(self.key)
+        raw_stream = ctx.objects.get_object(self.bucket, self.key)
+        # `encoding="utf-8"` is the throwaway placeholder this method's own
+        # docstring names -- `sample_stream.close()` below cascades through
+        # every layer `open_compressed_stream` built (`gzip.GzipFile`/
+        # `_DecompressionBombGuard`/`zipfile.ZipExtFile`, as applicable) down
+        # to `raw_stream`'s own underlying connection; `raw_stream` itself is
+        # never separately closed.
+        sample_stream = open_compressed_stream(
+            raw_stream.buffer, compression=compression_kind, encoding="utf-8"
+        )
+        try:
+            # `bytes(...)`: `TextIOWrapper.buffer.read()` is typed against
+            # the general `Buffer` protocol (typeshed's `_WrappedBuffer`),
+            # not literally `bytes` -- every real implementation underneath
+            # (`_DecompressionBombGuard`, `gzip.GzipFile`, a raw
+            # `io.BufferedReader`) already returns genuine `bytes` at
+            # runtime, so this is a type-narrowing no-op copy, not a
+            # behavior change.
+            sample_bytes = bytes(sample_stream.buffer.read(_INSPECT_SAMPLE_BYTES))
+        finally:
+            sample_stream.close()
+
+        encoding_detection = detect_encoding(
+            sample_bytes,
+            contract_encoding=ctx.config.csv.encoding,
+            min_confidence=DEFAULT_MIN_CONFIDENCE,
+        )
+        decoded_sample = decode_strict(sample_bytes, encoding_detection)
+        dialect_detection = detect_dialect(
+            decoded_sample, contract_delimiter=ctx.config.csv.delimiter
+        )
+
+        if dialect_detection.delimiter is not None:
+            # Never raises here: `to_stdlib_dialect` only raises when
+            # declined or `delimiter is None`, and this branch already
+            # guards both.
+            stdlib_dialect = to_stdlib_dialect(dialect_detection)
+            candidate_rows = [
+                tuple(row)
+                for row in csv.reader(io.StringIO(decoded_sample), dialect=stdlib_dialect)
+            ]
+        else:
+            candidate_rows = []
+        header_detection = detect_header(
+            candidate_rows,
+            contract_header_row=ctx.config.csv.header_row,
+            header_trim=ctx.config.csv.header_trim,
+        )
+
+        filename_facets: Mapping[str, object]
+        if ctx.config.filename is not None:
+            base_filename = self.key.rsplit("/", 1)[-1]
+            filename_facets = parse_filename(ctx.config.filename, base_filename)
+        else:
+            filename_facets = {}
+
+        return CsvProfile(
+            encoding=encoding_detection.encoding,
+            encoding_confidence=encoding_detection.confidence,
+            encoding_source=encoding_detection.source,
+            delimiter=dialect_detection.delimiter,
+            quotechar=dialect_detection.quotechar,
+            dialect_declined=dialect_detection.declined,
+            header_row_index=header_detection.header_row_index,
+            header=header_detection.trimmed_header,
+            preamble_row_count=header_detection.preamble_row_count,
+            footer_row_count=len(header_detection.footer_row_indices),
+            max_field_bytes=ctx.config.csv.max_field_bytes,
+            compression=compression_kind,
+            filename_facets=filename_facets,
+        )

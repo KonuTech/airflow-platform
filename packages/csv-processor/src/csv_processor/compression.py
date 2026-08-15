@@ -129,6 +129,21 @@ class _DecompressionBombGuard:
         """Report this stream as not seekable -- reading is genuinely one-directional."""
         return False
 
+    def flush(self) -> None:
+        """No-op: a read-only stream never has anything buffered to flush.
+
+        ``io.TextIOWrapper.close()`` unconditionally calls ``self.buffer.flush()``
+        before closing the buffer it wraps -- both the gzip and zip paths hand
+        this guard to ``io.TextIOWrapper`` directly as its ``buffer`` (no
+        intermediate ``io.BufferedReader``), so without this method a
+        fully-successful read still raised ``AttributeError:
+        '_DecompressionBombGuard' object has no attribute 'flush'`` the moment
+        a caller closed the stream -- verified live wiring plan 06-14's real
+        ``CsvSource.open()`` call path, which always closes its stream via a
+        ``finally`` block (mirroring every other stream this codebase opens).
+        """
+        return
+
     def _read_one_bounded_chunk(self, requested: int | None) -> bytes:
         """Perform exactly one bounded call to the real decompressor, checking the ceiling.
 
