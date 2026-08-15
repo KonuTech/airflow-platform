@@ -76,6 +76,21 @@ def test_dataset_config_validates_with_a_real_columns_block() -> None:
     assert config.schema_evolution_on_missing_or_retyped_column == "freeze"
 
 
+def test_dataset_config_rejects_a_misspelled_column_type() -> None:
+    """Post-wave-5 code review WR-02: a ``type`` typo must fail validation, not silently
+    degrade to zero type-specific normalization in ``StagingLoader._build_stages``."""
+    document = {
+        **_VALID_DOCUMENT,
+        "columns": [
+            {**_VALID_DOCUMENT["columns"][0]},
+            {"name": "amount", "type": "dat", "nullable": False, "required": True},
+        ],
+    }
+
+    with pytest.raises(ValidationError, match="type"):
+        DatasetConfig.model_validate(document)
+
+
 def test_dataset_config_fails_loudly_when_columns_is_omitted() -> None:
     """A missing columns: block must fail validation, matching batching's own precedent."""
     document_without_columns = {k: v for k, v in _VALID_DOCUMENT.items() if k != "columns"}

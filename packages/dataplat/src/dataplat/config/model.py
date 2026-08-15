@@ -25,7 +25,25 @@ point has now arrived.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# ColumnContract.type's closed set. Deliberately NOT the "config not code"
+# plain-str-resolved-through-a-registry pattern this module's docstring
+# describes for SourceConfig.type/DeduplicationConfig.strategy/
+# LoadConfig.strategy: those genuinely dispatch through a string-keyed
+# registry elsewhere, so a new valid value really is "a registry entry, not
+# a change to this file." ColumnContract.type has no such registry --
+# StagingLoader._build_stages (dataplat.load.staging) is the ONLY place it
+# is interpreted, via a hardcoded if/elif chain over exactly these six
+# values, with no `else` branch. An unconstrained `str` here does not buy
+# the extensibility the registry pattern buys elsewhere; it only lets a typo
+# (e.g. "date" misspelled "dat") pass DatasetConfig validation cleanly and
+# then silently receive zero type-specific normalization in `_build_stages`
+# (post-wave-5 code review WR-02) -- the opposite of `extra="forbid"`'s own
+# stated purpose one paragraph above.
+_COLUMN_TYPES = Literal["string", "integer", "decimal", "date", "timestamp", "boolean"]
 
 
 class SourceConfig(BaseModel):
@@ -128,9 +146,14 @@ class ColumnContract(BaseModel):
             detection/normalization) and in the target table.
         type: The column's declared type — one of ``"string"``,
             ``"integer"``, ``"decimal"``, ``"date"``, ``"timestamp"``,
-            ``"boolean"``. A closed set expressed as plain ``str``, not a
-            Python ``Enum`` — see the module docstring's "config not code"
-            convention.
+            ``"boolean"``. A closed ``Literal`` set, not the module
+            docstring's "config not code" plain-``str`` convention — that
+            convention is for fields resolved through a string-keyed
+            registry elsewhere (``SourceConfig.type`` etc.); no such
+            registry exists for this field, only ``StagingLoader.
+            _build_stages``'s hardcoded if/elif chain, so an unconstrained
+            ``str`` here would only let a typo silently receive zero
+            type-specific normalization instead of a validation error.
         nullable: Whether a present column's value may be empty.
         required: Whether the column must appear in the file's structure at
             all. ``required: False`` with the column absent from a file is
@@ -159,7 +182,7 @@ class ColumnContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str
-    type: str
+    type: _COLUMN_TYPES
     nullable: bool
     required: bool
     business_key: bool = False
@@ -286,9 +309,16 @@ class CsvParsingConfig(BaseModel):
             footer/totals block. ``0`` when the file has none.
         header_trim: Whether to strip leading/trailing whitespace from each
             header field before matching it against ``columns:``.
-        header_case_sensitive: Whether header-to-``columns:`` name matching
-            is case-sensitive. Defaults to ``True`` — a case difference is
-            reported, never silently reconciled.
+        header_case_sensitive: Reserved for header-to-``columns:`` name
+            matching's case sensitivity. **Not yet wired to any code path**
+            (post-wave-5 code review WR-01): no header-to-contract
+            name-matching step exists anywhere in this codebase today --
+            ``StagingLoader``/``CsvRecordStream`` map a row's fields to
+            ``target_columns`` by physical position alone (see
+            ``csv_processor.detect.header``'s module docstring for why
+            that matching step is a distinct, later concern this field
+            anticipates). Declaring a value here has no observable effect
+            until that step is built. Defaults to ``True``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
