@@ -15,13 +15,16 @@ code under test here.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import TYPE_CHECKING, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from dataplat.diagnostics import DIAGNOSTIC_CODES
 from dataplat.models.identity import RunContext
 from dataplat.models.record import RecordChunk
-from dataplat.normalize.dates import DateNormalizer
+from dataplat.normalize.dates import DateNormalizer, classify_naive_local
 from dataplat.pipeline.protocol import PipelineContext
 
 if TYPE_CHECKING:
@@ -365,3 +368,178 @@ def test_fixture_59_zero_date_sentinel_is_refused_by_strptime_if_not_pre_normali
 
     assert result.chunk.rows == ()
     assert _single_rejected(result.rejected).error_type == "invalid-calendar-date"
+
+
+# --- classify_naive_local: the verified DST classification primitive -------
+
+_WARSAW = ZoneInfo("Europe/Warsaw")
+
+
+def test_classify_naive_local_reproduces_fixture_55_exactly() -> None:
+    # corpus fixture 55_dst_gap_and_overlap.csv's three rows, verified live
+    # against zoneinfo in 06-RESEARCH.md's Code Examples section. Naive on
+    # purpose: classify_naive_local's whole contract is classifying a NAIVE
+    # local datetime against a zone -- passing a tzinfo here would defeat
+    # the very thing under test.
+    assert classify_naive_local(dt.datetime(2026, 3, 29, 2, 30), _WARSAW) == "nonexistent"  # noqa: DTZ001
+    assert classify_naive_local(dt.datetime(2026, 10, 25, 2, 30), _WARSAW) == "ambiguous"  # noqa: DTZ001
+    assert classify_naive_local(dt.datetime(2026, 1, 15, 12, 0), _WARSAW) == "unambiguous"  # noqa: DTZ001
+
+
+# --- fixture 55: DST gap/overlap classification, wired into DateNormalizer -
+
+
+def test_fixture_55_row_1_nonexistent_local_time_is_rejected() -> None:
+    normalizer = DateNormalizer(
+        column_index=0,
+        column_name="ts_local",
+        format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/Warsaw",
+    )
+    chunk = _chunk([("2026-03-29 02:30:00",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.chunk.rows == ()
+    assert _single_rejected(result.rejected).error_type == "nonexistent-local-time"
+
+
+def test_fixture_55_row_2_ambiguous_without_policy_is_rejected_requiring_fold_policy() -> None:
+    # ambiguous_time_policy unset -> defaults to "reject": an ambiguous time
+    # must not silently take the first fold (corpus fixture 55's own words).
+    normalizer = DateNormalizer(
+        column_index=0,
+        column_name="ts_local",
+        format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/Warsaw",
+    )
+    chunk = _chunk([("2026-10-25 02:30:00",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.chunk.rows == ()
+    rejected = _single_rejected(result.rejected)
+    assert rejected.error_type == "ambiguous-local-time-requires-a-declared-fold-policy"
+    assert rejected.error_type in DIAGNOSTIC_CODES
+
+
+def test_fixture_55_row_2_resolves_under_earliest_policy_to_fold_0_utc() -> None:
+    normalizer = DateNormalizer(
+        column_index=0,
+        column_name="ts_local",
+        format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/Warsaw",
+        ambiguous_time_policy="earliest",
+    )
+    chunk = _chunk([("2026-10-25 02:30:00",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.rejected == []
+    assert result.chunk.rows[0][0] == "2026-10-25T00:30:00+00:00"  # row_2_utc_under_fold_0
+
+
+def test_fixture_55_row_2_resolves_under_latest_policy_to_fold_1_utc() -> None:
+    normalizer = DateNormalizer(
+        column_index=0,
+        column_name="ts_local",
+        format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/Warsaw",
+        ambiguous_time_policy="latest",
+    )
+    chunk = _chunk([("2026-10-25 02:30:00",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.rejected == []
+    assert result.chunk.rows[0][0] == "2026-10-25T01:30:00+00:00"  # row_2_utc_under_fold_1
+
+
+def test_fixture_55_row_3_unambiguous_resolves_to_declared_utc() -> None:
+    normalizer = DateNormalizer(
+        column_index=0,
+        column_name="ts_local",
+        format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/Warsaw",
+    )
+    chunk = _chunk([("2026-01-15 12:00:00",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.rejected == []
+    assert result.chunk.rows[0][0] == "2026-01-15T11:00:00+00:00"  # row_3_utc
+
+
+# --- fixture 56: a naive timestamp with no declared zone is refused --------
+
+
+def test_fixture_56_row_3_naive_timestamp_without_declared_zone_is_rejected() -> None:
+    # No `timezone` declared for this column: a naive value must not
+    # inherit a neighboring row's offset, default to UTC, or default to
+    # the server's zone -- it is simply refused.
+    normalizer = DateNormalizer(column_index=0, column_name="ts", format="%Y-%m-%dT%H:%M:%S")
+    chunk = _chunk([("2026-06-30T12:00:00",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.chunk.rows == ()
+    assert _single_rejected(result.rejected).error_type == "naive-timestamp-without-a-declared-zone"
+
+
+def test_fixture_56_rows_1_and_2_resolve_via_an_offset_aware_format() -> None:
+    # Rows 1/2 of fixture 56 use a DIFFERENT format than row 3
+    # (timestamp_format_with_offset vs timestamp_format_naive) -- %z accepts
+    # both an explicit offset and the "Z" zero-offset designator (Python
+    # 3.7+), so both resolve without needing `timezone` declared at all.
+    normalizer = DateNormalizer(column_index=0, column_name="ts", format="%Y-%m-%dT%H:%M:%S%z")
+    chunk = _chunk([("2026-06-30T12:00:00+02:00",), ("2026-06-30T12:00:00Z",)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.rejected == []
+    assert result.chunk.rows[0][0] == "2026-06-30T10:00:00+00:00"  # row_1_utc
+    assert result.chunk.rows[1][0] == "2026-06-30T12:00:00+00:00"  # row_2_utc
+
+
+# --- None passthrough and constructor validation for the timezone branch ---
+
+
+def test_none_field_passes_through_unchanged_in_timezone_branch() -> None:
+    normalizer = DateNormalizer(
+        column_index=0,
+        column_name="ts_local",
+        format="%Y-%m-%d %H:%M:%S",
+        timezone="Europe/Warsaw",
+    )
+    chunk = _chunk([(None,)])
+
+    result = normalizer.apply(_make_context(), chunk)
+
+    assert result.rejected == []
+    assert _field(result.chunk.rows, 0, 0) is None
+
+
+def test_timezone_requires_format_to_be_declared() -> None:
+    # A naive local time still needs a strptime format to parse in the
+    # first place -- `timezone` alone, with no `format`, is meaningless.
+    # spreadsheet_epoch is supplied here specifically so the pre-existing
+    # "exactly one of format/spreadsheet_epoch" check does not fire first,
+    # isolating the NEW timezone-requires-format check this task adds.
+    with pytest.raises(ValueError, match=r"timezone.*format"):
+        DateNormalizer(
+            column_index=0,
+            column_name="ts",
+            spreadsheet_epoch="1900",
+            timezone="Europe/Warsaw",
+        )
+
+
+def test_ambiguous_time_policy_must_be_one_of_the_declared_set() -> None:
+    with pytest.raises(ValueError, match="ambiguous_time_policy"):
+        DateNormalizer(
+            column_index=0,
+            column_name="ts",
+            format="%Y-%m-%d %H:%M:%S",
+            timezone="Europe/Warsaw",
+            ambiguous_time_policy="first-wins",
+        )
