@@ -352,8 +352,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06-14-PLAN.md — Wire the five detectors + compression into CsvSource.inspect()/open()
-- [ ] 06-16-PLAN.md — Wire the four normalizers into StagingLoader; discovery.py idempotency-key/business-date extensions
+- [x] 06-14-PLAN.md — Wire the five detectors + compression into CsvSource.inspect()/open()
+- [x] 06-16-PLAN.md — Wire the four normalizers into StagingLoader; discovery.py idempotency-key/business-date extensions
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
