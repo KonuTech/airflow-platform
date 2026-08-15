@@ -82,9 +82,9 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **CSV-07**: Header detection handles header-present, header-absent and header-at-a-later-row cases — *(DoD 21)*
 - [ ] **CSV-08**: Metadata preambles, comments, blank lines, report titles, footers and totals rows are detected and excluded from data — *(DoD 22)*
 - [ ] **CSV-09**: Invalid dates (`2026-02-30`, `31/02/2026`, `2026-13-01`, `not-a-date`) produce explicit validation errors and are never silently coerced or dropped — *(DoD 28)*
-- [ ] **CSV-10**: Numeric, boolean and NULL values normalize per configuration — decimal comma/point, thousands separators, parenthesised negatives, currency, percentages, scientific notation, `Y/N`, `T/F`, `N/A` — without `1/0` becoming boolean absent evidence — *(DoD 29)*
+- [x] **CSV-10**: Numeric, boolean and NULL values normalize per configuration — decimal comma/point, thousands separators, parenthesised negatives, currency, percentages, scientific notation, `Y/N`, `T/F`, `N/A` — without `1/0` becoming boolean absent evidence — *(DoD 29)*
 - [ ] **CSV-11**: Compressed inputs (`.gz`, `.zip`) and multi-part datasets are supported — absent from all 95 README sections, ubiquitous in real feeds — *(Gap 13)*
-- [ ] **CSV-12**: Unicode normalization (NFC/NFD) is applied before hashing, since NFC/NFD variants of the same value otherwise break deduplication and produce phantom SCD2 versions — *(Gap 16)*
+- [x] **CSV-12**: Unicode normalization (NFC/NFD) is applied before hashing, since NFC/NFD variants of the same value otherwise break deduplication and produce phantom SCD2 versions — *(Gap 16)*
 - [x] **CSV-13**: Files stream through a single `csv.reader` over a `newline=""` wrapper and are chunked in *records*, never by lines or byte offsets, so embedded-newline fields survive — *(PITFALLS #5)*
 
 ### SCHEMA — Inference, Contracts, Versioning and Drift
@@ -181,7 +181,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-01**: Type hints are used consistently across arguments, returns, classes, public APIs, configuration and data models, verified by mypy in CI — *(DoD 71)*
 - [x] **QUAL-02**: Public classes, functions and methods carry docstrings describing purpose, parameters, returns, assumptions, exceptions and side effects — *(DoD 72)*
 - [x] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
-- [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
+- [x] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [x] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
 - [x] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
 - [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
@@ -323,9 +323,9 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CSV-07 | Phase 6 | Pending |
 | CSV-08 | Phase 6 | Pending |
 | CSV-09 | Phase 6 | Pending |
-| CSV-10 | Phase 6 | Pending |
+| CSV-10 | Phase 6 | Complete |
 | CSV-11 | Phase 6 | Pending |
-| CSV-12 | Phase 6 | Pending |
+| CSV-12 | Phase 6 | Complete |
 | CSV-13 | Phase 3 | Complete |
 | SCHEMA-01 | Phase 6 | Pending |
 | SCHEMA-02 | Phase 6 | Pending |
@@ -395,7 +395,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-01 | Phase 1 | Complete |
 | QUAL-02 | Phase 1 | Complete |
 | QUAL-03 | Phase 3 | Complete |
-| QUAL-04 | Phase 6 | Pending |
+| QUAL-04 | Phase 6 | Complete |
 | QUAL-05 | Phase 4 | Complete |
 | QUAL-06 | Phase 4 | Complete |
 | QUAL-07 | Phase 1 | Complete |
