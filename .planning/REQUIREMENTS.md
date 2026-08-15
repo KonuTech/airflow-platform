@@ -74,8 +74,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 ### CSV — Parsing, Detection and Normalization
 
 - [x] **CSV-01**: Filenames are parsed via configurable masks and regular expressions, extracting dataset, source, country, business date, version, batch and sequence where present — without assuming any date found is the business date — *(DoD 15)*
-- [ ] **CSV-02**: UTF-8, UTF-8 BOM, UTF-16 LE/BE, Windows-1250, Windows-1252, ISO-8859 variants and ASCII files all parse correctly — *(DoD 16)*
-- [ ] **CSV-03**: Encoding detection returns an encoding with a confidence score, and never claims determinism it does not have — *(DoD 17)*
+- [x] **CSV-02**: UTF-8, UTF-8 BOM, UTF-16 LE/BE, Windows-1250, Windows-1252, ISO-8859 variants and ASCII files all parse correctly — *(DoD 16)*
+- [x] **CSV-03**: Encoding detection returns an encoding with a confidence score, and never claims determinism it does not have — *(DoD 17)*
 - [x] **CSV-04**: Comma, semicolon, pipe, tab and colon dialects all parse correctly — *(DoD 18)*
 - [x] **CSV-05**: Delimiter detection is supported and can be overridden by contract — *(DoD 19)*
 - [x] **CSV-06**: Quoted delimiters, escaped quotes, multiline fields and inconsistent quoting are handled by a real CSV parser — never by string splitting — *(DoD 20)*
@@ -315,8 +315,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | ORCH-08 | Phase 4 | Complete |
 | ORCH-09 | Phase 4 | Complete |
 | CSV-01 | Phase 6 | Complete |
-| CSV-02 | Phase 6 | Pending |
-| CSV-03 | Phase 6 | Pending |
+| CSV-02 | Phase 6 | Complete |
+| CSV-03 | Phase 6 | Complete |
 | CSV-04 | Phase 6 | Complete |
 | CSV-05 | Phase 6 | Complete |
 | CSV-06 | Phase 6 | Complete |
