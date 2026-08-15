@@ -25,6 +25,7 @@ from dataplat.config.model import (
     DatasetConfig,
     DeduplicationConfig,
     LoadConfig,
+    NormalizationConfig,
     SourceConfig,
 )
 from dataplat.load.staging import StagingLoader
@@ -323,3 +324,108 @@ def test_on_progress_omitted_does_not_raise_and_changes_no_other_behavior(
 
     assert result.rows_parsed == 1
     assert result.rows_rejected == 0
+
+
+# --- post-wave-5 code review WR-04: NumericNormalizer.null_sentinels wiring ---
+
+_SCORE_TARGET_COLUMNS = ("customer_id", "score")
+
+
+def _make_score_config() -> DatasetConfig:
+    """A non-nullable ``decimal`` column with its own declared ``null_sentinels`` entry.
+
+    ``score`` is ``nullable=False`` -- the exact gap WR-04 identified:
+    ``NullTokenNormalizer`` is only constructed for ``nullable: true`` columns
+    (``_build_stages``), so a required numeric column's only path to
+    recognizing a literal absent-value sentinel (corpus fixture 59's
+    documented use case, e.g. ``"N/A"`` meaning "no score recorded" while the
+    field itself must still be present) is ``NumericNormalizer``'s own
+    ``null_sentinels`` parameter.
+    """
+    return DatasetConfig(
+        dataset="score_normalization_proof",
+        config_schema_version=1,
+        source=SourceConfig(
+            type="csv",
+            bucket="raw",
+            path="score-proof/",
+            change_semantics="snapshot",
+            duplicate_policy="skip",
+        ),
+        deduplication=DeduplicationConfig(
+            strategy="business_key_latest",
+            keys=["customer_id"],
+            order_by=["customer_id desc"],
+        ),
+        load=LoadConfig(strategy="merge", target="normalized.score_proof"),
+        batching=BatchingConfig(max_units_per_run=100),
+        normalization=NormalizationConfig(null_sentinels={"score": ["N/A"]}),
+        columns=[
+            ColumnContract(
+                name="customer_id",
+                type="string",
+                nullable=False,
+                required=True,
+                business_key=True,
+            ),
+            ColumnContract(name="score", type="decimal", nullable=False, required=True),
+        ],
+    )
+
+
+def _make_score_context(*, run_id: int, source: _FakeSource) -> PipelineContext:
+    return PipelineContext(
+        run=RunContext(run_id=run_id, idempotency_key=f"score-proof-{run_id}"),
+        config=_make_score_config(),
+        metadata=None,  # type: ignore[arg-type] -- unused by StagingLoader.load()
+        objects=None,  # type: ignore[arg-type] -- unused by StagingLoader.load()
+        db=None,  # type: ignore[arg-type] -- unused by StagingLoader.load()
+        log=None,  # type: ignore[arg-type] -- unused by StagingLoader.load()
+        source=source,
+    )
+
+
+class _ScoreFakeSource(Source):
+    """Mirrors ``_FakeSource`` but sizes ``RecordChunk`` for ``_SCORE_TARGET_COLUMNS``."""
+
+    def __init__(self, rows: tuple[tuple[str, ...], ...]) -> None:
+        self._rows = rows
+
+    @contextlib.contextmanager
+    def open(self, ctx: PipelineContext) -> Iterator[_FakeRecordStream]:  # noqa: ARG002
+        chunk = RecordChunk(
+            rows=self._rows,
+            first_ordinal=0,
+            expected_field_count=len(_SCORE_TARGET_COLUMNS),
+        )
+        yield _FakeRecordStream([chunk])
+
+
+def test_numeric_normalizer_null_sentinels_are_wired_from_the_real_pipeline(
+    conn: psycopg.Connection[Any],
+) -> None:
+    """The declared ``"N/A"`` sentinel becomes NULL; an undeclared blank value still rejects.
+
+    Before this fix, ``StagingLoader._build_stages`` never passed
+    ``null_sentinels=`` to ``NumericNormalizer``, so every real
+    ``NumericNormalizer`` ran with the default empty tuple -- ``"N/A"`` would
+    have failed to parse as a ``Decimal`` and been rejected as
+    ``invalid-numeric-value`` instead of recognized as absent.
+    """
+    rows = (
+        ("1", "42.50"),  # a real value -- parses normally
+        ("2", "N/A"),  # the declared sentinel -- must become NULL, not rejected
+        ("3", "not-a-number"),  # NOT the declared sentinel -- must still reject
+    )
+    ctx = _make_score_context(run_id=201, source=_ScoreFakeSource(rows))
+    loader = StagingLoader(target_columns=_SCORE_TARGET_COLUMNS)
+
+    result = loader.load(ctx, conn)
+
+    assert result.rows_parsed == 2  # "1" and "2" -- "3" rejected
+    assert result.rows_rejected == 1
+
+    staged = conn.execute(
+        f"SELECT customer_id, score FROM {result.staging_table} ORDER BY customer_id",  # noqa: S608
+    ).fetchall()
+    assert staged == [("1", "42.50"), ("2", None)]

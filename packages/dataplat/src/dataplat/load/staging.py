@@ -293,6 +293,25 @@ class StagingLoader:
                         ),
                         reject_scientific_notation=column.reject_scientific_notation,
                         fixed_width=column.fixed_width,
+                        # This column's OWN declared null_sentinels entry only --
+                        # never the platform-wide null_tokens default
+                        # `_null_tokens_for_column` also mixes in for
+                        # `NullTokenNormalizer` above. That default (`[""]`)
+                        # exists for NULLABLE columns; blindly applying it here
+                        # too would make a blank value in a non-nullable numeric
+                        # column silently become an absent value instead of the
+                        # invalid-numeric-value rejection a required field should
+                        # get. A nullable column's own sentinel is already caught
+                        # by NullTokenNormalizer above (constructed first, same
+                        # column) before NumericNormalizer ever sees the raw
+                        # string, so this only ever matters for non-nullable
+                        # columns that still declare a literal absent-value
+                        # sentinel (corpus fixture 59's documented use case).
+                        null_sentinels=(
+                            tuple(normalization.null_sentinels.get(column.name, []))
+                            if normalization is not None
+                            else ()
+                        ),
                     ),
                 )
             elif column.type == "boolean":
