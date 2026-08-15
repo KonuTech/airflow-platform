@@ -112,3 +112,17 @@ None - no external service configuration required.
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+All claimed files verified present on disk:
+- `packages/dataplat/src/dataplat/schema/versioning.py` — FOUND
+- `packages/dataplat/src/dataplat/schema/repository.py` — FOUND
+- `tests/unit/schema/test_versioning.py` — FOUND
+- `tests/integration/test_schema_resolution.py` — FOUND
+- `.planning/phases/06-universal-csv-engine-schema-contracts-normalization/06-12-SUMMARY.md` — FOUND
+
+All claimed commit hashes verified present in `git log --oneline --all`:
+- `3da771f` (Task 1) — FOUND
+- `7a5b343` (Task 2) — FOUND
+- `9209f1a` (SUMMARY) — FOUND
