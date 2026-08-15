@@ -7,7 +7,14 @@ quarantine-policy concept exists until Phase 6/8 (04-03-PLAN.md Interfaces).
 The shape carries a singular ``file``/``batch`` pair, not the array
 ``files`` ARCHITECTURE.md's general shape shows: this phase is
 one-file-one-batch (03-RESEARCH.md's documented simplification), so
-pluralizing now would be premature generality with no consumer.
+pluralizing now would be premature generality with no consumer -- multipart
+delivery (CSV-11, plan 06-18) is now that consumer, and it is served by an
+ADDITIVE optional ``additional_parts`` field (see ``AssignmentDocument``'s
+own docstring below) rather than by the full ``files: tuple[...]``
+pluralization ARCHITECTURE.md originally sketched: the additive shape keeps
+every existing single-file caller (04-03's ``discover_files``, 06-16's
+extensions to it) working completely unchanged, since ``file``/``batch``
+still mean exactly what they always meant.
 
 This model is validated on READ (a later plan's ``ingest`` CLI, running in a
 different pod, calls ``AssignmentDocument.model_validate_json`` before
@@ -86,7 +93,16 @@ class AssignmentDocument(BaseModel):
         config_version_id: The ``meta.config_versions`` row this run is
             configured by.
         config_hash: The canonical-JSON sha256 hash of that config version.
-        file: The single source file this run processes.
+        file: The single source file this run processes -- for a CSV-11
+            multipart-grouped delivery (plan 06-18), the FIRST part
+            (``MultipartGroup.ordered_object_uris[0]``, the part carrying
+            the header).
+        additional_parts: Every remaining part of a CSV-11 multipart-grouped
+            delivery, in delivery order, beyond ``file`` (the first part).
+            Always empty (``()``) for an ordinary single-file assignment --
+            this is the default, so every pre-existing single-file
+            construction of this model (04-03's ``discover_files``, 06-16's
+            extensions to it) continues to work completely unchanged.
         batch: The single batch this run publishes into.
     """
 
@@ -99,4 +115,5 @@ class AssignmentDocument(BaseModel):
     config_version_id: int
     config_hash: str
     file: FileAssignment
+    additional_parts: tuple[FileAssignment, ...] = ()
     batch: BatchAssignment

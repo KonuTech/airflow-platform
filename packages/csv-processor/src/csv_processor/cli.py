@@ -285,6 +285,18 @@ def ingest(assignment: str) -> None:
 
         config = ConfigRegistry(pool).get_by_id(doc.config_version_id)
         source_bucket, source_key = _parse_s3_uri(doc.file.object_uri)
+        # CSV-11 multipart (plan 06-18): every remaining part of a
+        # multipart-grouped delivery, in delivery order -- empty for an
+        # ordinary single-file assignment (`doc.additional_parts`'s own
+        # additive default), so `CsvSource`'s single-part path stays
+        # completely unaffected for every dataset with no
+        # `multipart_pattern` configured. Same `_parse_s3_uri` split
+        # `source_bucket`/`source_key` above already used; only the key is
+        # needed -- every part shares `doc.file.object_uri`'s bucket by
+        # construction (`dataplat.discovery`'s own per-group assembly).
+        additional_keys = tuple(
+            _parse_s3_uri(part.object_uri)[1] for part in doc.additional_parts
+        )
         # `get_or_create_dataset` is idempotent (`discover()`'s own prior
         # call already created this row -- `discover_files` requires a real
         # `dataset_id` to run at all) -- this is a read in practice, never a
@@ -309,7 +321,12 @@ def ingest(assignment: str) -> None:
             objects=objects,
             db=pool,
             log=get_logger(),
-            source=CsvSource(bucket=source_bucket, key=source_key, dataset_id=dataset_id),
+            source=CsvSource(
+                bucket=source_bucket,
+                key=source_key,
+                dataset_id=dataset_id,
+                additional_keys=additional_keys,
+            ),
         )
         heartbeat_interval_seconds = float(
             os.environ.get("DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", "60.0"),
