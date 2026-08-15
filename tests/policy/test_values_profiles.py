@@ -75,7 +75,23 @@ def _is_resource_sizing(path: str) -> bool:
     # names ("every PVC `storage.size` may differ in magnitude without
     # differing in shape") — matching only the lowercase spelling was an
     # incomplete implementation of that argument, not a narrower axis.
-    return "resources" in segments or path.lower().endswith("storage.size")
+    #
+    # `persistence.size` (plan 07-03): the Tempo chart spells its own PVC
+    # knob differently again — a bare `persistence.size`, no "storage"
+    # substring anywhere in the path — verified live via `helm show values
+    # grafana-community/tempo` and confirmed by
+    # test_profiles_diverge_only_on_permitted_axes actually failing on
+    # `helm/values/{local,ci}/tempo.yaml`'s `persistence.size: 2Gi` vs
+    # `500Mi` before this line existed. A third chart, a third real PVC-size
+    # spelling, the exact same "may differ in magnitude, not in shape" class
+    # this axis's own argument already covers — the same incomplete-
+    # implementation gap as the camelCase fix above, one spelling later, not
+    # a new axis.
+    return (
+        "resources" in segments
+        or path.lower().endswith("storage.size")
+        or path.lower().endswith("persistence.size")
+    )
 
 
 def _is_monitoring_enablement(path: str) -> bool:

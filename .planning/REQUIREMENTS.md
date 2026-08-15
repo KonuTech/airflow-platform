@@ -172,9 +172,9 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **OBS-05**: Passwords, keys, tokens, secrets, unnecessary PII and whole sensitive records are never logged — *(DoD 77)*
 - [ ] **OBS-06**: Operational runbooks document symptoms, diagnosis, recovery, reprocessing and verification for each §89 scenario — *(DoD 112)*
 - [x] **OBS-07**: Lineage is queryable by SQL — for any row, its source file, object path, checksum, batch, ingestion timestamp, DAG/run/task ID, processor version, schema version and config version — *(Gap 2)*
-- [ ] **OBS-08**: Platform metrics are exposed — `files_processed`, `files_failed`, `rows_processed`, `rows_invalid`, `rows_deduplicated`, `processing_duration`, `validation_failures`, `data_freshness` — with bounded label cardinality, unbounded identity living in the metadata DB — *(Gap 3)*
+- [x] **OBS-08**: Platform metrics are exposed — `files_processed`, `files_failed`, `rows_processed`, `rows_invalid`, `rows_deduplicated`, `processing_duration`, `validation_failures`, `data_freshness` — with bounded label cardinality, unbounded identity living in the metadata DB — *(Gap 3)*
 - [x] **OBS-09**: "No file currently available" is distinguished from "file expected but missing", with configurable warning or failure behaviour per expected frequency — *(Gap 6)*
-- [ ] **OBS-10**: Distributed traces span Airflow task → task pod → processor → PostgreSQL, via explicit W3C `traceparent` propagation — it is not automatic across the pod boundary — *(PROJECT.md decision)*
+- [x] **OBS-10**: Distributed traces span Airflow task → task pod → processor → PostgreSQL, via explicit W3C `traceparent` propagation — it is not automatic across the pod boundary — *(PROJECT.md decision)*
 
 ### QUAL — Engineering Standards and Test Coverage
 
@@ -389,9 +389,9 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | OBS-05 | Phase 3 | Complete |
 | OBS-06 | Phase 11 | Pending |
 | OBS-07 | Phase 7 | Complete |
-| OBS-08 | Phase 7 | Pending |
+| OBS-08 | Phase 7 | Complete |
 | OBS-09 | Phase 7 | Complete |
-| OBS-10 | Phase 7 | Pending |
+| OBS-10 | Phase 7 | Complete |
 | QUAL-01 | Phase 1 | Complete |
 | QUAL-02 | Phase 1 | Complete |
 | QUAL-03 | Phase 3 | Complete |

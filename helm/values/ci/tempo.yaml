@@ -1,0 +1,25 @@
+# D-06/D-16: this file and helm/values/local/tempo.yaml diverge on EXACTLY
+# one permitted axis -- resource sizing -- because the CI profile shares a
+# 4 CPU / 16 GB GitHub-hosted runner with every other pod the CI job
+# renders, and because CI never actually runs this chart live (D-16). This
+# values file exists so `make manifests`/`make helm-lint` can structurally
+# validate the CI shape, per CICD-07.
+
+tempo:
+  retention: 168h
+
+  # Smaller than local: matches helm/values/ci/vault.yaml's own sizing for
+  # the same reason.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# 500Mi: CI never actually runs this chart live (D-16), so this only needs
+# to be a structurally valid, small PVC size for offline rendering/linting.
+persistence:
+  enabled: true
+  size: 500Mi

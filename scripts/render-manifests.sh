@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# Render both Helm values profiles for all five pinned charts into a
+# Render both Helm values profiles for all seven pinned charts into a
 # gitignored build directory, then validate every rendered document with
 # `kubeconform -strict` against the pinned Kubernetes version (CICD-07).
 #
-# Six `helm template` calls per profile — the `cluster` chart renders TWICE
-# (airflow metadata + analytical), so "all five pinned charts" (ingress-nginx,
-# cloudnative-pg, cluster, minio, airflow) produces six output files. Exactly
-# mirrors scripts/stages/*.sh's chart-ref/namespace/values pairing (D-09) —
-# this is the offline analogue of the live cluster-up path, not a second
-# definition of it.
+# Eight `helm template` calls per profile — the `cluster` chart renders TWICE
+# (airflow metadata + analytical), so "all seven pinned charts" (ingress-nginx,
+# cloudnative-pg, cluster, minio, airflow, otel-collector, tempo — plan 07-03
+# adds the last two) produces eight output files. Exactly mirrors
+# scripts/stages/*.sh's chart-ref/namespace/values pairing (D-09) — this is
+# the offline analogue of the live cluster-up path, not a second definition
+# of it. (Vault is deployed live by scripts/stages/80-vault.sh but was never
+# added to this render loop — a pre-existing gap, out of this plan's scope.)
 #
 # NEVER pipe `helm template` output into `kubectl apply` (02-RESEARCH.md
 # Anti-Patterns): rendering writes to a gitignored build directory only.
@@ -65,6 +67,8 @@ done
 "${helm_bin}" repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null 2>&1 || true
 "${helm_bin}" repo add minio https://charts.min.io >/dev/null 2>&1 || true
 "${helm_bin}" repo add apache-airflow https://airflow.apache.org >/dev/null 2>&1 || true
+"${helm_bin}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null 2>&1 || true
+"${helm_bin}" repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo update >/dev/null
 
 # render_one <profile> <release> <chart-ref> <namespace> <version-var-name> <values-basename>
@@ -95,6 +99,10 @@ for profile in local ci; do
     MINIO_CHART_VERSION minio
   render_one "${profile}" airflow apache-airflow/airflow airflow \
     AIRFLOW_CHART_VERSION airflow
+  render_one "${profile}" otel-collector open-telemetry/opentelemetry-collector monitoring \
+    OTEL_COLLECTOR_CHART_VERSION otel-collector
+  render_one "${profile}" tempo grafana-community/tempo monitoring \
+    TEMPO_CHART_VERSION tempo
 done
 
 echo "==> kubeconform -strict against Kubernetes ${KUBERNETES_VERSION}"

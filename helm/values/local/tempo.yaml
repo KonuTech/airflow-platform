@@ -1,0 +1,43 @@
+# The tracing backend this project genuinely lacks today (`.claude/CLAUDE.md`
+# Section H is explicit that kube-prometheus-stack ships no tracing backend
+# -- "You must add Grafana Tempo... or Jaeger. Budget for it."). Single-
+# binary/monolithic mode (this chart's only mode -- the `tempo-distributed`
+# chart is the separate microservices split, unneeded at this scale).
+#
+# Chart repo resolution (RESEARCH.md Assumption A4, resolved this session):
+# see the comment above TEMPO_CHART_VERSION in helm/versions.env.
+#
+# OTLP ingress (grpc :4317 / http :4318) is the chart's own DEFAULT
+# `tempo.receivers.otlp.protocols.{grpc,http}.endpoint` -- verified via
+# `helm template` this session, not overridden here since the default
+# already matches what helm/values/local/otel-collector.yaml's own
+# `exporters.otlp.endpoint: tempo.monitoring.svc.cluster.local:4317` needs,
+# and the chart's Service already exposes both ports without any values
+# override.
+
+tempo:
+  # D-18: ~7 days. The exact config key is `compactor.compaction.
+  # block_retention` -- this chart's own `tempo.retention` values alias
+  # feeds it directly (confirmed via `helm show values` + `helm template`
+  # this session: the rendered ConfigMap's `compactor.compaction.
+  # block_retention` equals this value verbatim). Expressed in hours
+  # (168h = 7 * 24h) since Tempo's retention parser is a Go
+  # `time.ParseDuration`-shaped string and does not accept a bare "d" unit.
+  retention: 168h
+
+  # Sized like vault.yaml's own local profile (T-05 precedent) -- a single
+  # lightweight, always-on service in this cluster.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# D-17: persistent storage, surviving `cluster-down`/`cluster-up` -- matches
+# vault.yaml's own `dataStorage.enabled: true` pattern. Sized to comfortably
+# hold this project's own traffic at ~7d retention.
+persistence:
+  enabled: true
+  size: 2Gi
