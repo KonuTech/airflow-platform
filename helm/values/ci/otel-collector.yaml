@@ -1,0 +1,59 @@
+# D-06/D-16: this file and helm/values/local/otel-collector.yaml diverge on
+# EXACTLY one permitted axis -- resource sizing -- because the CI profile
+# shares a 4 CPU / 16 GB GitHub-hosted runner with every other pod the CI
+# job renders. Every other key below is IDENTICAL in shape to the local
+# profile. This chart is never deployed live in CI (D-16: monitoring stays
+# offline-template-and-lint-only in CI) -- this values file exists so
+# `make manifests`/`make helm-lint` can structurally validate the CI shape
+# the same way every other pinned chart's CI profile already is, per
+# CICD-07.
+mode: deployment
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  processors:
+    batch: {}
+  exporters:
+    otlp:
+      endpoint: tempo.monitoring.svc.cluster.local:4317
+      tls:
+        insecure: true
+    prometheus:
+      endpoint: 0.0.0.0:8889
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [otlp]
+      metrics:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [prometheus]
+
+ports:
+  prometheus:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+# Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
+# other pod the CI job renders (matches helm/values/ci/vault.yaml's own
+# sizing for the same reason).
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

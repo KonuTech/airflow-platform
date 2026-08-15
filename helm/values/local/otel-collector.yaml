@@ -1,0 +1,85 @@
+# The single cluster-reachable OTLP ingress point (plan 07-03): both
+# Airflow's own traces (a later plan) and `dataplat`'s OTLP metrics/traces
+# (OBS-08/OBS-10) converge here. `mode: deployment` -- a single central
+# collector, not a per-node daemonset -- is the right shape for this
+# cluster's size (one small ETL workload, not a fleet of nodes each needing
+# their own local agent).
+#
+# image.repository is a REQUIRED key as of this chart's pinned 0.169.0: the
+# chart no longer ships an implicit default (a breaking change from earlier
+# versions -- verified empirically this session, `helm template` refuses to
+# render without it, citing the chart's own UPGRADING.md). `otel/
+# opentelemetry-collector-contrib` is the canonical, officially-published
+# OpenTelemetry project image carrying every component this values file's
+# `config:` block references (the `prometheus` EXPORTER specifically is not
+# present in the bare `otelcol` "core" distribution).
+mode: deployment
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+# `config:` deep-merges with the chart's own preset config (verified
+# empirically this session via `helm template`): the chart's default `otlp`
+# receiver, `batch`/`memory_limiter` processors, `debug` exporter and
+# mandatory `health_check` extension all stay defined and are left alone
+# here (untouched keys survive the merge) -- only the keys named below are
+# added or overridden, and only the `traces`/`metrics` pipelines are
+# redirected to this plan's own exporters. The `logs` pipeline is
+# deliberately left at its chart default (out of this plan's scope).
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+  processors:
+    batch: {}
+  exporters:
+    # Tempo's in-cluster Service DNS (plan 07-03's own tempo.yaml, same
+    # `monitoring` namespace). `tls.insecure: true`: local-dev,
+    # in-cluster-only traffic -- matches this project's existing
+    # `sslmode: disable`-style local-dev posture (T-07-08/T-07-10, accepted).
+    otlp:
+      endpoint: tempo.monitoring.svc.cluster.local:4317
+      tls:
+        insecure: true
+    # Scraped by kube-prometheus-stack's `additionalServiceMonitors`
+    # mechanism (plan 07-07) -- deliberately the `prometheus` exporter, not
+    # `prometheusremotewrite` (RESEARCH.md Pitfall 6 / Assumption A5).
+    prometheus:
+      endpoint: 0.0.0.0:8889
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [otlp]
+      metrics:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [prometheus]
+
+# A named `ports:` entry is required for the custom `0.0.0.0:8889`
+# `exporters.prometheus` endpoint above to actually reach the chart's
+# Service/container port map -- the chart's own built-in `metrics` port
+# (8888) is the collector's OWN internal self-telemetry, a different port
+# than the business-metrics exporter this plan configures.
+ports:
+  prometheus:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+# Sized like `vault.yaml`'s own local profile (T-05 precedent): this chart
+# holds no persistent state (it is a pure pipeline), so neither profile
+# needs a `dataStorage`-equivalent PVC block.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
