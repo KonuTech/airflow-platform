@@ -7,12 +7,14 @@ an exception — including the pathological all-rows-ragged case) and
 
 Every ``ctx: PipelineContext`` passed below is a placeholder built by
 ``_make_context()``: neither ``RaggedRowGuard.apply()`` nor ``run_streaming()``
-dereferences any of ``config``/``metadata``/``objects``/``db``/``log`` — only
-``chunk`` and the stage sequence matter to the code under test here.
+dereferences any of ``metadata``/``objects``/``db``/``log`` — only ``chunk``,
+the stage sequence, and (since plan 07-02's D-04 metric labels)
+``config.dataset`` matter to the code under test here.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from dataplat.models.identity import RunContext
@@ -30,12 +32,16 @@ if TYPE_CHECKING:
 def _make_context() -> PipelineContext:
     """Build a placeholder ``PipelineContext`` for stage/engine tests.
 
-    Only ``run`` is populated with a real value; the remaining fields are
-    untouched by any code exercised in this file.
+    Only ``run`` and ``config.dataset`` are populated with real values; the
+    remaining fields are untouched by any code exercised in this file.
+    ``config`` is a ``SimpleNamespace``, not a real ``DatasetConfig`` --
+    ``RaggedRowGuard.apply()`` reads only ``config.dataset`` (D-04's metric
+    label), so a full contract (source/deduplication/load/batching/columns)
+    would be unused ceremony here.
     """
     return PipelineContext(
         run=RunContext(run_id=1, idempotency_key="test-run"),
-        config=None,  # type: ignore[arg-type] -- unused by the code under test
+        config=SimpleNamespace(dataset="test_dataset"),  # type: ignore[arg-type] -- only .dataset is read
         metadata=None,  # type: ignore[arg-type] -- unused by the code under test
         objects=None,  # type: ignore[arg-type] -- unused by the code under test
         db=None,  # type: ignore[arg-type] -- unused by the code under test
