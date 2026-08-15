@@ -207,6 +207,31 @@ def test_single_column_sample_declines_without_raising() -> None:
     assert result.delimiter is None
 
 
+def test_detects_a_colon_delimiter() -> None:
+    """CSV-04 names five dialects -- comma, semicolon, pipe, tab AND colon.
+
+    No corpus fixture uses a colon as its actual field delimiter: the only
+    colon in the whole 70-fixture corpus is
+    ``12_metadata_before_header.csv``'s ``preamble_contains_a_colon_which_is_
+    itself_a_candidate_delimiter`` -- a DECOY inside a metadata preamble that
+    must be correctly ignored (that fixture's own real delimiter is a
+    comma), not a genuine colon-delimited file. Adding a corpus fixture
+    would touch ``tests/fixtures/corpus.yaml``, a shared file outside this
+    plan's declared scope and every other Wave-2 detector plan's own digest
+    oracle. This hand-constructed sample proves ``detect_dialect`` itself
+    handles colon correctly (verified live: ``clevercsv.Detector().detect()``
+    returns ``SimpleDialect(':', '', '')`` for this exact shape), closing
+    the gap between this plan's own ``must_haves.truths`` claim and what the
+    committed corpus can prove.
+    """
+    sample = "id:name:amount\n000001:Kowalski:100.00\n000002:Nowak:200.00\n"
+
+    result = detect_dialect(sample)
+
+    assert result.delimiter == ":"
+    assert result.declined is False
+
+
 @pytest.mark.parametrize("fixture_name", DELIMITER_FIXTURES)
 def test_detect_dialect_never_raises_csv_error(
     fixture_name: str, corpus: Path, fixtures_by_name: Mapping[str, Fixture]
