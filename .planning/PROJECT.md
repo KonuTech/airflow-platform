@@ -210,6 +210,26 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 6 complete (2026-08-15)** — Universal CSV Engine, Schema Contracts & Normalization.
+
+The full detection → normalization → schema-versioning pipeline is real and wired
+end-to-end: 5 detectors (filename, encoding, dialect, header/footer, schema-type
+inference), compression + multi-part delivery, 4 value-level normalizers (dates,
+numeric, boolean/null, Unicode NFC), and schema versioning/evolution classification,
+all built as 18 plans across 5 waves (11-plan Wave 2 was the phase's parallelization
+peak) then merged and integration-tested together. A code review after Wave 5 found
+and the orchestrator fixed a genuine blocker: `CsvSource._resolve_schema` silently
+accepted a column-reordered CSV as schema-compatible and staged its rows into the
+wrong target columns, since `StagingLoader` maps by position only — now rejected with
+a named `schema-columns-reordered` diagnostic before any row stages. Phase
+verification then found and the orchestrator fixed two more gaps: the resolved
+`schema_version_id` was computed but never persisted to `meta.ingestion_runs` (now
+wired through `StagingResult`/`finalize_publication`), and three named encodings
+(Windows-1252, ISO-8859, UTF-16 BE) had zero test coverage (now covered — including
+the discovery that blind statistical detection genuinely cannot disambiguate
+Windows-1252 from near-identical codepages at short sample sizes, itself now pinned
+as a real, asserted detector characteristic).
+
 **Phase 5 complete (2026-08-14)** — Vault Secrets & Workload Identity.
 
 Vault is now the only source of runtime credentials for this platform, and workload
@@ -385,4 +405,4 @@ Standing facts later phases inherit:
   integration tests green during isolated worktree execution.
 
 ---
-*Last updated: 2026-08-14 after Phase 5*
+*Last updated: 2026-08-15 after Phase 6*
