@@ -109,3 +109,12 @@ None - no external service configuration required.
 ---
 *Phase: 06-universal-csv-engine-schema-contracts-normalization*
 *Completed: 2026-08-15*
+
+## Self-Check: PASSED
+
+- FOUND: `packages/dataplat/src/dataplat/normalize/numeric.py`
+- FOUND: `tests/unit/normalize/test_numeric.py`
+- FOUND: `.planning/phases/06-universal-csv-engine-schema-contracts-normalization/06-10-SUMMARY.md`
+- FOUND commit: `3b298bc` (feat(06-10): add NumericNormalizer for CSV-10 locale-aware Decimal parsing)
+- FOUND commit: `02e1547` (docs(06-10): complete NumericNormalizer plan)
+- Verified: `pytest tests/unit -x -q` -> 173 passed; `ruff check`/`ruff format --check` -> clean; `mypy packages/dataplat/src packages/csv-processor/src` -> 0 issues across 48 source files
