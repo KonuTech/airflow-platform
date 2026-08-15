@@ -79,8 +79,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **CSV-04**: Comma, semicolon, pipe, tab and colon dialects all parse correctly — *(DoD 18)*
 - [x] **CSV-05**: Delimiter detection is supported and can be overridden by contract — *(DoD 19)*
 - [x] **CSV-06**: Quoted delimiters, escaped quotes, multiline fields and inconsistent quoting are handled by a real CSV parser — never by string splitting — *(DoD 20)*
-- [ ] **CSV-07**: Header detection handles header-present, header-absent and header-at-a-later-row cases — *(DoD 21)*
-- [ ] **CSV-08**: Metadata preambles, comments, blank lines, report titles, footers and totals rows are detected and excluded from data — *(DoD 22)*
+- [x] **CSV-07**: Header detection handles header-present, header-absent and header-at-a-later-row cases — *(DoD 21)*
+- [x] **CSV-08**: Metadata preambles, comments, blank lines, report titles, footers and totals rows are detected and excluded from data — *(DoD 22)*
 - [x] **CSV-09**: Invalid dates (`2026-02-30`, `31/02/2026`, `2026-13-01`, `not-a-date`) produce explicit validation errors and are never silently coerced or dropped — *(DoD 28)*
 - [x] **CSV-10**: Numeric, boolean and NULL values normalize per configuration — decimal comma/point, thousands separators, parenthesised negatives, currency, percentages, scientific notation, `Y/N`, `T/F`, `N/A` — without `1/0` becoming boolean absent evidence — *(DoD 29)*
 - [ ] **CSV-11**: Compressed inputs (`.gz`, `.zip`) and multi-part datasets are supported — absent from all 95 README sections, ubiquitous in real feeds — *(Gap 13)*
@@ -89,7 +89,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 ### SCHEMA — Inference, Contracts, Versioning and Drift
 
-- [ ] **SCHEMA-01**: Types are inferred conservatively — `001234` stays a string when it may be an identifier — *(DoD 23)*
+- [x] **SCHEMA-01**: Types are inferred conservatively — `001234` stays a string when it may be an identifier — *(DoD 23)*
 - [ ] **SCHEMA-02**: Explicit YAML data contracts declare types, nullability, required columns, business keys and semantics, and incoming data is validated against them — *(DoD 24)*
 - [x] **SCHEMA-03**: Schemas are versioned, and each batch records dataset, schema version, schema hash, processor version and processing timestamp — *(DoD 25)*
 - [x] **SCHEMA-04**: Added, removed, renamed, reordered and retyped columns are classified as compatible or breaking, per a configurable per-dataset policy — *(DoD 26)*
@@ -181,7 +181,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-01**: Type hints are used consistently across arguments, returns, classes, public APIs, configuration and data models, verified by mypy in CI — *(DoD 71)*
 - [x] **QUAL-02**: Public classes, functions and methods carry docstrings describing purpose, parameters, returns, assumptions, exceptions and side effects — *(DoD 72)*
 - [x] **QUAL-03**: Error handling is explicit via a domain exception hierarchy for run-fatal conditions, with row-level data problems flowing as values rather than exceptions, and no silent swallowing — *(DoD 73)*
-- [x] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
+- [ ] **QUAL-04**: Unit tests cover filename parsing, encoding/dialect/header detection, schema inference, structural and type validation, normalization, deduplication, incremental logic and validation reports — *(DoD 78)*
 - [x] **QUAL-05**: Integration tests exercise MinIO → processor → PostgreSQL including storage operations, transactions and quarantine — *(DoD 79)*
 - [x] **QUAL-06**: End-to-end tests exercise CSV → MinIO → Airflow → Kubernetes → processor → PostgreSQL — *(DoD 80)*
 - [x] **QUAL-07**: Every important discovered bug gains a permanent regression test — *(DoD 81)*
@@ -320,14 +320,14 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CSV-04 | Phase 6 | Complete |
 | CSV-05 | Phase 6 | Complete |
 | CSV-06 | Phase 6 | Complete |
-| CSV-07 | Phase 6 | Pending |
-| CSV-08 | Phase 6 | Pending |
+| CSV-07 | Phase 6 | Complete |
+| CSV-08 | Phase 6 | Complete |
 | CSV-09 | Phase 6 | Complete |
 | CSV-10 | Phase 6 | Complete |
 | CSV-11 | Phase 6 | Pending |
 | CSV-12 | Phase 6 | Complete |
 | CSV-13 | Phase 3 | Complete |
-| SCHEMA-01 | Phase 6 | Pending |
+| SCHEMA-01 | Phase 6 | Complete |
 | SCHEMA-02 | Phase 6 | Pending |
 | SCHEMA-03 | Phase 6 | Complete |
 | SCHEMA-04 | Phase 6 | Complete |
@@ -395,7 +395,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-01 | Phase 1 | Complete |
 | QUAL-02 | Phase 1 | Complete |
 | QUAL-03 | Phase 3 | Complete |
-| QUAL-04 | Phase 6 | Complete |
+| QUAL-04 | Phase 6 | Pending |
 | QUAL-05 | Phase 4 | Complete |
 | QUAL-06 | Phase 4 | Complete |
 | QUAL-07 | Phase 1 | Complete |
