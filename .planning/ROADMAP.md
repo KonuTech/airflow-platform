@@ -396,9 +396,9 @@ Plans:
 
 **Wave 1**
 
-- [ ] 07-01-PLAN.md — Control-plane completion: freshness columns, grafana_reader role, meta.v_customers_lineage (OBS-07 in full)
-- [ ] 07-02-PLAN.md — dataplat.observability real OTel SDK backends: metrics.py/tracing.py, bounded D-04 labels
-- [ ] 07-03-PLAN.md — OTel Collector + Tempo infrastructure: monitoring namespace, both chart pairs, offline CI validation
+- [x] 07-01-PLAN.md — Control-plane completion: freshness columns, grafana_reader role, meta.v_customers_lineage (OBS-07 in full)
+- [x] 07-02-PLAN.md — dataplat.observability real OTel SDK backends: metrics.py/tracing.py, bounded D-04 labels
+- [x] 07-03-PLAN.md — OTel Collector + Tempo infrastructure: monitoring namespace, both chart pairs, offline CI validation
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
