@@ -390,7 +390,29 @@ Plans:
   3. A single trace spans Airflow task → task pod → processor → PostgreSQL for one ingestion run, with the context crossing the pod boundary.
   4. A dataset whose file is overdue against its expected frequency reports "expected but missing", while a dataset with no expected arrival reports "none available" and stays quiet — each with configurable warn-or-fail behaviour.
 
-**Plans**: TBD
+**Plans**: 8 plans in 4 waves
+
+Plans:
+
+**Wave 1**
+
+- [ ] 07-01-PLAN.md — Control-plane completion: freshness columns, grafana_reader role, meta.v_customers_lineage (OBS-07 in full)
+- [ ] 07-02-PLAN.md — dataplat.observability real OTel SDK backends: metrics.py/tracing.py, bounded D-04 labels
+- [ ] 07-03-PLAN.md — OTel Collector + Tempo infrastructure: monitoring namespace, both chart pairs, offline CI validation
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07-04-PLAN.md — Custom Airflow image (apache-airflow[otel]) + TracingKubernetesPodOperator (build_pod_request_obj override)
+- [ ] 07-05-PLAN.md — Pod-side trace extraction/capture + runs_started/runs_finished live-gauge counters
+- [ ] 07-06-PLAN.md — Grafana Vault-backed credentials: grafana_reader password + webhook URL, the third Vault-consumer tier
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07-07-PLAN.md — Grafana: three datasources, ServiceMonitor scrape wiring, the 8-metric+3-gauge dashboard, alerting-as-code
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07-08-PLAN.md — Live-cluster proof: real trace propagation (OBS-10) and real alert webhook delivery (D-20)
 
 **Research stage**: S11. **Use `/gsd-plan-phase --research-phase`** — STACK rates metrics and traces MEDIUM. Cross-process trace propagation into KPO pods is **not** built in; the W3C `traceparent` injection recipe is DIY. Airflow's StatsD-XOR-OTel constraint shapes the whole design.
 
@@ -601,7 +623,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 | 4. Vertical Slice — CSV to Analytical PostgreSQL | 0/9 | Planned | - |
 | 5. Vault Secrets & Workload Identity | 2/5 | In Progress | - |
 | 6. Universal CSV Engine, Schema Contracts & Normalization | 0/17 | Planned | - |
-| 7. Observability, Metrics, Tracing & Lineage | 0/TBD | Not started | - |
+| 7. Observability, Metrics, Tracing & Lineage | 0/8 | Planned | - |
 | 8. Validation, Quarantine & Metadata Control-Plane Completion | 0/TBD | Not started | - |
 | 9. ETL Correctness — Dedup, Incremental, Backfill & Recovery | 0/TBD | Not started | - |
 | 10. CDC & Slowly Changing Dimensions | 0/TBD | Not started | - |
