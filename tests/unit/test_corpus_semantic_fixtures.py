@@ -57,13 +57,15 @@ AMBIGUOUS_COMPONENT_CEILING = 12
 # other number in an `expect:` block describes data and is a quoted decimal.
 CONFIDENCE_KEYS = ("encoding_confidence_min", "encoding_confidence_max")
 
-# The sixty-nine fixture names the corpus is complete against, transcribed from
+# The seventy fixture names the corpus is complete against, transcribed from
 # the two sources rather than derived from the manifest. Deriving them from the
 # manifest would make this test a tautology: it would assert that the manifest
 # contains what the manifest contains, and would pass with a fixture missing.
 #
 # README §73 names 01-29. `.planning/research/FEATURES.md` §3.4 adds 30-70.
-# Note that 69 is not a fixture — the second list runs 68 then 70.
+# Note that 69 is not a fixture — the second list runs 68 then 70, then Phase 6
+# plan 01 appends 71_zipped.csv.zip as the corpus's 70th fixture (README §73's
+# own "grow the corpus as edge cases are discovered" policy).
 README_SEVENTY_THREE = (
     "01_simple.csv",
     "02_semicolon.csv",
@@ -137,6 +139,7 @@ FEATURES_THREE_FOUR = (
     "67_row_exceeding_field_size_limit.csv",
     "68_utf8_bom_semicolon_pl_excel.csv",
     "70_empty_last_field_vs_null.csv",
+    "71_zipped.csv.zip",
 )
 
 EXPECTED_FIXTURES = README_SEVENTY_THREE + FEATURES_THREE_FOUR
@@ -441,7 +444,7 @@ def test_no_data_valued_expectation_is_a_binary_float(
 
 def test_the_corpus_is_complete_against_both_sources() -> None:
     # The claim "the corpus is complete" is the one a reader is least able to
-    # check by eye and most likely to believe. Sixty-nine names, no gaps, no
+    # check by eye and most likely to believe. Seventy names, no gaps, no
     # duplicates, no inventions — asserted against a list transcribed from the
     # two sources rather than derived from the manifest.
     manifest = load_manifest(MANIFEST)

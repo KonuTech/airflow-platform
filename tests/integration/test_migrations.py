@@ -3,8 +3,9 @@
 Five properties, each a distinct way the migrations could be wrong even if
 `alembic upgrade head` itself exits 0: the wrong table set, a non-idempotent
 upgrade, a missing/mistyped `hash_version` companion column, a grant wider
-than `SELECT, INSERT, UPDATE`, or an accidental foreign key on
-`ingestion_runs.schema_version_id` before `meta.schema_versions` exists.
+than `SELECT, INSERT, UPDATE`, or a missing foreign key on
+`ingestion_runs.schema_version_id` now that migration 0009 has created its
+referent, `meta.schema_versions`.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ EXPECTED_TABLES = {
     ("meta", "batches"),
     ("meta", "batch_files"),
     ("meta", "ingestion_runs"),
+    ("meta", "schema_versions"),
     ("normalized", "customers"),
 }
 
@@ -45,6 +47,7 @@ GRANTED_TABLES = sorted(EXPECTED_TABLES)
 HASH_VERSION_COLUMNS = [
     ("meta", "files", "hash_version"),
     ("meta", "config_versions", "hash_version"),
+    ("meta", "schema_versions", "hash_version"),
     ("normalized", "customers", "_record_hash_version"),
 ]
 
@@ -139,7 +142,14 @@ def test_etl_app_can_actually_use_the_schemas_it_has_table_grants_in(migrated_ds
             assert usable[0] is True, f"etl_app lacks USAGE on schema {schema!r}"
 
 
-def test_ingestion_runs_schema_version_id_has_no_fk(migrated_dsn: str) -> None:
+def test_ingestion_runs_schema_version_id_has_an_fk_after_0009(migrated_dsn: str) -> None:
+    """Migration 0004 deferred this FK; migration 0009 closes it.
+
+    This test's predecessor asserted the opposite (`rows == []`) and passed
+    BECAUSE the FK did not exist yet -- once migration 0009 landed it would
+    otherwise start failing by design. This inversion is that fix, not an
+    incidental side effect.
+    """
     with psycopg.connect(migrated_dsn) as conn:
         rows = conn.execute(
             """
@@ -154,7 +164,8 @@ def test_ingestion_runs_schema_version_id_has_no_fk(migrated_dsn: str) -> None:
                AND kcu.column_name = 'schema_version_id'
             """,
         ).fetchall()
-    assert rows == [], f"schema_version_id must carry no FK constraint, found: {rows}"
+    assert len(rows) == 1, f"schema_version_id must carry exactly one FK constraint, found: {rows}"
+    assert rows[0][0] == "fk_ingestion_runs_schema_version_id"
 
 
 def _customers_customer_id_constraint_types(dsn: str) -> tuple[str, ...]:

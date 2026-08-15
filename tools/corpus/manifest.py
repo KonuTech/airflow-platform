@@ -60,7 +60,7 @@ _GENERATOR_KINDS: Final[tuple[str, ...]] = (
 )
 _NORMALISATION_FORMS: Final[tuple[str, ...]] = ("NFC", "NFD", "NFKC", "NFKD")
 _PROFILES: Final[tuple[str, ...]] = ("default", "large")
-_COMPRESSIONS: Final[tuple[str, ...]] = ("gzip",)
+_COMPRESSIONS: Final[tuple[str, ...]] = ("gzip", "zip")
 
 # R4: the terminator is always an explicit manifest field, never a writer's
 # default and never a platform-translated "\n".
