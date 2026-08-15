@@ -17,19 +17,34 @@ ARCHITECTURE.md` lines 790-798)::
 ``try_number`` and ``dag_run_id`` are DELIBERATELY ABSENT -- an Airflow
 retry must produce the identical key. This phase's adaptation
 (04-03-PLAN.md Interfaces): ``schema_version_id``/``target_partition``/
-``policy_digest`` have no populated value yet -- no schema-versioning
-concept exists until Phase 6, no partitioning or quarantine-policy concept
-exists until Phase 6/8 -- so this module computes ``idempotency_key =
-sha256(f"{dataset_name}|{content_sha256_hex}|{config_hash}|
-{processor_image}").hexdigest()``. A later phase EXTENDS this formula by
-appending the missing terms once they have real values; it does not
-replace it.
+``policy_digest`` had no populated value at first -- no schema-versioning
+concept existed until Phase 6, no partitioning or quarantine-policy concept
+exists until Phase 6/8 -- so this module originally computed
+``idempotency_key = sha256(f"{dataset_name}|{content_sha256_hex}|
+{config_hash}|{processor_image}").hexdigest()``. Plan 06-16 EXTENDS this
+formula (append-only -- the first four terms are never reordered or
+replaced) by appending a real ``schema_version`` term, resolved once per
+call via ``dataplat.schema.repository.SchemaRepository.get_current()``:
+``idempotency_key = sha256(f"{dataset_name}|{content_sha256_hex}|
+{config_hash}|{processor_image}|{schema_version}").hexdigest()``. A
+dataset with no current schema version yet (its very first discovery run,
+before plan 06-15's schema-sync wiring has ever run for it) contributes an
+empty string for this term rather than blocking discovery -- ``target_partition``/
+``policy_digest`` remain unpopulated, still future-phase territory this
+plan does not touch.
 
 ``meta.files.business_date`` is never populated here, and this module reads
 no wall-clock time and no Airflow scheduling-interval value anywhere
 (README §67 determinism) -- this plan's own acceptance criteria greps this
 file's source for the disallowed call/attribute patterns and requires zero
-matches.
+matches. Plan 06-16 adds an opt-in ``filename_facets_by_object`` parameter
+(D-11) so a caller that HAS already extracted filename facets (mask-derived,
+never wall-clock-derived) can hand this function a per-object
+``business_date`` facet for observability -- this is a signature addition
+only: no dataset declares a filename mask yet (D-10), so no live caller
+populates it this phase, and ``meta.files.business_date`` still has no
+write path here at all (``MetadataRepository.create_file`` accepts no such
+column) -- see that parameter's own docstring for the full scope boundary.
 """
 
 from __future__ import annotations
@@ -44,11 +59,12 @@ from dataplat.models.assignment import AssignmentDocument, BatchAssignment, File
 from dataplat.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
     from typing import TextIO
 
     from dataplat.config.model import DatasetConfig
     from dataplat.metadata.repository import MetadataRepository
+    from dataplat.schema.repository import SchemaRepository
     from dataplat.storage.objectstore import ObjectStore, ObjectSummary
 
 # Bumping this constant is the only sanctioned way to signal a change to the
@@ -99,6 +115,8 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
     config_hash: str,
     processor_image: str,
     processor_version: str,
+    schema: SchemaRepository,
+    filename_facets_by_object: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[DiscoveredUnit]:
     """List, hash, dedup-check, freeze and cap one dataset's discoverable files.
 
@@ -126,10 +144,18 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
 
     ``meta.files.business_date`` is never populated here -- this function
     reads no wall-clock time and no Airflow scheduling-interval value
-    anywhere (see the module docstring).
+    anywhere (see the module docstring). ``filename_facets_by_object`` (D-11)
+    is consulted per-object purely for discovery-log observability -- see its
+    own Args entry below for the full scope boundary.
 
     Idempotency key: see the module docstring for the full formula and its
-    ARCHITECTURE.md Q7 provenance.
+    ARCHITECTURE.md Q7 provenance. This dataset's CURRENT schema version
+    (``schema.get_current(dataset_id)``) is resolved exactly ONCE per call,
+    before the per-object loop -- schema version is dataset-wide, not
+    per-object, and re-resolving it per-object would risk a single
+    ``discover_files`` call spanning two different schema-version terms if a
+    concurrent schema sync landed mid-call, breaking ORCH-08's frozen-manifest
+    determinism.
 
     Args:
         metadata: Typed CRUD surface over ``meta.datasets``/``meta.files``/
@@ -145,6 +171,36 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
             resulting runs.
         processor_version: The ``dataplat`` distribution version
             discovering these files.
+        schema: The dataset's schema-version repository, consulted once
+            (``get_current(dataset_id)``) to append a ``schema_version`` term
+            to the idempotency key (Pitfall 5). When the dataset has no
+            current schema version yet (its very first discovery run, before
+            any schema sync has run for it), the term is an empty string
+            rather than blocking discovery on it -- a dataset's first file
+            establishes its own baseline schema via a later wiring point
+            (plan 06-15's job, not this function's).
+        filename_facets_by_object: A caller-precomputed mapping from
+            ``object_uri`` to that file's already-extracted filename facets
+            (``csv_processor.detect.filename.parse_filename``'s return
+            shape), or ``None`` when no filename mask is configured for this
+            dataset. ``dataplat`` must never import ``csv_processor``
+            (import-linter contract 1), so this function never calls
+            ``parse_filename`` itself -- the caller (``csv_processor.cli.discover``,
+            which is allowed to import both) is responsible for building this
+            map. THIS IS A SIGNATURE ADDITION ONLY, this plan (06-16): no
+            dataset declares a filename mask yet (D-10), so no live caller
+            populates this parameter this phase, and there is no
+            ``meta.files.business_date`` write path here at all
+            (``MetadataRepository.create_file`` accepts no such column) --
+            a present ``business_date`` facet is surfaced only in this
+            function's own discovery log line, for operator visibility, never
+            persisted. D-11's actual priority rule -- a filename-derived
+            business date is a FALLBACK ONLY, consulted strictly when a
+            file's data/content carries no derivable date, and must never
+            override a data-derived one -- has no consuming implementation
+            anywhere in this codebase yet; that remains a future phase's
+            integration point, once a dataset that declares a mask exists to
+            exercise it.
 
     Returns:
         Up to ``config.batching.max_units_per_run`` ``DiscoveredUnit``
@@ -158,10 +214,29 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
         key=lambda summary: summary.key,
     )
 
+    # Resolved ONCE per call, before the per-object loop (see this function's
+    # own docstring): schema version is dataset-wide, not per-object.
+    # Pitfall 5 -- no current schema version yet (this dataset's very first
+    # discovery run) contributes an empty string rather than blocking
+    # discovery on it.
+    current_schema = schema.get_current(dataset_id)
+    schema_version_term = "" if current_schema is None else str(current_schema.version)
+
     candidates: list[DiscoveredUnit] = []
     for obj in listed:
         object_uri = f"s3://{config.source.bucket}/{obj.key}"
         filename = obj.key.rsplit("/", 1)[-1]
+
+        # D-11, signature-addition-only this plan (see this function's own
+        # `filename_facets_by_object` Args entry): surfaced only in this
+        # loop's own log lines below, never persisted -- no dataset declares
+        # a filename mask yet (D-10), so this is `None` for every real call
+        # this phase.
+        business_date_facet: object | None = None
+        if filename_facets_by_object is not None:
+            object_facets = filename_facets_by_object.get(object_uri)
+            if object_facets is not None:
+                business_date_facet = object_facets.get("business_date")
 
         # Raw-bytes hash via TextIOWrapper.buffer (its own public, documented
         # binary-buffer attribute -- NOT StreamingBody's forbidden private
@@ -228,6 +303,7 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
                 object_uri=object_uri,
                 content_sha256_prefix=content_sha256_hex[:12],
                 decision="DUPLICATE",
+                business_date=business_date_facet,
             )
             continue  # D-13 skip policy: no batch, no run, no assignment document
 
@@ -251,8 +327,11 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
         # harmless.
         metadata.link_batch_file(batch_id=batch_id, file_id=file_id, sequence_no=1)
 
+        # Pitfall 5: APPENDS the schema-version term -- never reorders or
+        # replaces the first four (see this module's own docstring).
         idempotency_key = hashlib.sha256(
-            f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}".encode(),
+            f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}|"
+            f"{schema_version_term}".encode(),
         ).hexdigest()
 
         run_id, status = metadata.get_or_create_ingestion_run(
@@ -272,6 +351,7 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
                 object_uri=object_uri,
                 content_sha256_prefix=content_sha256_hex[:12],
                 decision="ALREADY_SUCCEEDED",
+                business_date=business_date_facet,
             )
             continue
 
@@ -303,6 +383,7 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
             object_uri=object_uri,
             content_sha256_prefix=content_sha256_hex[:12],
             decision="NEW",
+            business_date=business_date_facet,
         )
         candidates.append(
             DiscoveredUnit(

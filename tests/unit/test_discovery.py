@@ -6,13 +6,20 @@ against fakes, with the dedicated ``tests/integration/test_discover_files.py``
 Postgres/MinIO. Every ``<behavior>`` bullet from 04-03-PLAN.md Task 2 has a
 test here.
 
-The two fake doubles below implement exactly the ``MetadataRepository``/
-``ObjectStore`` Protocol methods ``discover_files`` calls -- both are
-in-memory, single-dataset-scoped, and use the SAME
+The three fake doubles below implement exactly the ``MetadataRepository``/
+``ObjectStore``/``SchemaRepository`` surface ``discover_files`` calls -- all
+in-memory, single-dataset-scoped, and the object-store fake uses the SAME
 ``dataplat.storage.objectstore.open_text_stream`` bridge the real
 ``S3ObjectStore`` uses, so ``discover_files``'s raw-bytes hashing via
 ``stream.buffer.read(...)`` exercises the identical code path it would
-against a real MinIO object.
+against a real MinIO object. ``_FakeSchemaRepository`` (plan 06-16) is
+duck-typed and ``cast()`` at its call sites rather than subclassed:
+``dataplat.schema.repository.SchemaRepository`` is a concrete class, not a
+``Protocol`` like the other two -- ``cast()`` here is this codebase's own
+established narrowing idiom at exactly this kind of test-double boundary.
+None of this file's tests need a real schema version -- that is the
+Pitfall-5 regression test's own job, exercised directly against the real
+formula, not through this fake.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ import io
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from tools.corpus.generators import generate_corpus
@@ -49,6 +56,8 @@ from dataplat.storage.objectstore import ObjectSummary, open_text_stream
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dataplat.schema.repository import SchemaRepository
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = REPO_ROOT / "tests" / "fixtures" / "corpus.yaml"
 
@@ -59,6 +68,28 @@ _CONFIG_HASH = "config-hash-fixture"
 _PROCESSOR_IMAGE = "sha256:processor-image-fixture"
 _PROCESSOR_VERSION = "0.1.0"
 _LAST_MODIFIED = datetime(2026, 8, 13, tzinfo=UTC)
+
+
+@dataclass
+class _FakeSchemaRepository:
+    """A minimal schema-repository double: ``get_current()`` always reports "no schema yet".
+
+    ``discover_files`` calls only ``get_current(dataset_id)`` -- this fake
+    exists purely so the now-required ``schema`` parameter stays satisfiable
+    without a real database; it never returns a populated
+    ``SchemaVersionRecord``, so every test in this file computes its
+    idempotency key with an empty ``schema_version`` term (Pitfall 5's own
+    documented "no schema yet" fallback).
+    """
+
+    def get_current(self, dataset_id: int) -> None:
+        del dataset_id
+        return None
+
+
+def _fake_schema() -> SchemaRepository:
+    """Build a ``_FakeSchemaRepository``, ``cast()`` to ``SchemaRepository`` for callers."""
+    return cast("SchemaRepository", _FakeSchemaRepository())
 
 
 def _skip_config(*, max_units_per_run: int = 100) -> DatasetConfig:
@@ -256,6 +287,7 @@ def test_discover_files_finds_three_new_objects_and_freezes_three_assignments() 
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     assert len(units) == 3
@@ -295,6 +327,7 @@ def test_discover_files_re_offers_still_pending_runs_on_a_second_call_with_no_ne
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
     assert len(first_units) == 3
 
@@ -308,6 +341,7 @@ def test_discover_files_re_offers_still_pending_runs_on_a_second_call_with_no_ne
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     # Still PENDING -> re-offered: the same 3 run_ids come back, not 0.
@@ -338,6 +372,7 @@ def test_discover_files_re_offers_pending_runs_but_excludes_succeeded_ones() -> 
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
     assert len(first_units) == 3
     # Manually mark exactly one of the three runs SUCCEEDED between calls.
@@ -353,6 +388,7 @@ def test_discover_files_re_offers_pending_runs_but_excludes_succeeded_ones() -> 
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     assert len(second_units) == 2
@@ -375,6 +411,7 @@ def test_discover_files_marks_a_content_duplicate_under_a_different_object_uri()
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     # Only the first (sorted-by-key: original.csv) object gets a run; the
@@ -404,6 +441,7 @@ def test_discover_files_caps_units_deterministically_and_does_not_lose_the_rest(
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     assert len(units) == 2
@@ -440,6 +478,7 @@ def test_discover_files_never_reads_wall_clock_time_and_leaves_business_date_nul
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     # If discover_files ever passed business_date=..., this fake's create_file
@@ -464,10 +503,45 @@ def test_discover_files_hashes_raw_bytes_matching_a_direct_hashlib_computation()
         config_hash=_CONFIG_HASH,
         processor_image=_PROCESSOR_IMAGE,
         processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
     )
 
     recorded = metadata.files_by_uri["s3://raw/customers/hash-proof.csv"]
     assert recorded.content_sha256 == hashlib.sha256(payload).digest()
+
+
+def test_idempotency_key_pitfall_5_schema_version_term_changes_the_key() -> None:
+    """Pitfall 5: the schema-version term is APPENDED, never reordering the first four.
+
+    Reproduces the pre-06-16 4-term formula inline (not by importing dead
+    code -- the old formula no longer exists anywhere in ``discovery.py``)
+    and compares it against the new 5-term formula for the IDENTICAL
+    ``(dataset_name, content_sha256_hex, config_hash, processor_image)``
+    quadruple, with a non-empty ``schema_version`` term. The two keys MUST
+    differ -- this is expected and safe, not a correctness regression: a
+    file reprocessed after this formula change producing a "new-looking"
+    ``meta.ingestion_runs`` row is an accepted, documented consequence
+    (T-06-21 in this plan's threat model). Actual data-duplication
+    protection comes from LOAD-03's content-hash check
+    (``find_file_by_content_hash``) and LOAD-09's ``ON CONFLICT`` merge at
+    publish time -- NEITHER depends on ``idempotency_key`` staying
+    byte-identical across this change.
+    """
+    dataset_name = _DATASET_NAME
+    content_sha256_hex = "deadbeef" * 8
+    config_hash = _CONFIG_HASH
+    processor_image = _PROCESSOR_IMAGE
+    schema_version = "3"
+
+    old_formula_key = hashlib.sha256(
+        f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}".encode(),
+    ).hexdigest()
+    new_formula_key = hashlib.sha256(
+        f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}|"
+        f"{schema_version}".encode(),
+    ).hexdigest()
+
+    assert old_formula_key != new_formula_key
 
 
 # --- Task 3: multi-part delivery grouping (06-08-PLAN.md) -------------------
