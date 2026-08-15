@@ -10,11 +10,17 @@ when configured, ``csv_processor.detect.filename.parse_filename`` -- into
 one ``dataplat.models.profile.CsvProfile``, and ``CsvSource.open()`` now
 actually constructs its reader from what ``inspect()`` found, decompressing
 through ``csv_processor.compression.open_compressed_stream`` when the
-object is ``.gz``/``.zip``. This file's other enduring purpose, proven since
-Phase 3, still holds: one ``csv.reader`` over an
-``io.TextIOWrapper(..., newline="")`` stream, chunked in records -- never
-lines, never byte offsets (PITFALLS.md E1) -- so an embedded newline inside
-a quoted field can never land on a chunk boundary.
+object is ``.gz``/``.zip``. Plan 06-15 closes the loop 06-14 left open:
+when constructed with a ``dataset_id``, ``inspect()`` also resolves/
+classifies this file's schema against that dataset's history via
+``dataplat.schema.evolution.classify_schema_change`` and
+``dataplat.schema.repository.SchemaRepository`` (SCHEMA-03/04/05/06),
+populating ``CsvProfile.schema_version_id``/``compatibility`` for real. This
+file's other enduring purpose, proven since Phase 3, still holds: one
+``csv.reader`` over an ``io.TextIOWrapper(..., newline="")`` stream,
+chunked in records -- never lines, never byte offsets (PITFALLS.md E1) --
+so an embedded newline inside a quoted field can never land on a chunk
+boundary.
 
 ``chunked_records()`` adapts 03-RESEARCH.md's verified core loop (lines
 596-620), generalized (plan 06-14) to skip a detected/contract preamble,
@@ -44,6 +50,9 @@ from csv_processor.detect.header import detect_header
 from dataplat.models.profile import CsvProfile
 from dataplat.models.record import RecordChunk
 from dataplat.observability import metrics
+from dataplat.schema.evolution import classify_schema_change
+from dataplat.schema.repository import SchemaRepository
+from dataplat.schema.versioning import hash_schema
 from dataplat.sources.protocol import RecordStream, Source
 
 if TYPE_CHECKING:
@@ -282,17 +291,37 @@ class CsvRecordStream(RecordStream):
 class CsvSource(Source):
     """A ``Source`` reading one CSV object from ``ctx.objects`` in bounded chunks."""
 
-    def __init__(self, bucket: str, key: str, *, chunk_size: int = 1000) -> None:
+    def __init__(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        dataset_id: int | None = None,
+        chunk_size: int = 1000,
+    ) -> None:
         """Name the CSV object this source reads.
 
         Args:
             bucket: The bucket the CSV object lives in.
             key: The object's key within ``bucket``.
+            dataset_id: The ``meta.datasets.dataset_id`` this file belongs
+                to. ``inspect()`` needs this to call ``SchemaRepository``
+                methods (SCHEMA-03/04/05/06) -- constructed from ``ctx.db``,
+                never a second pool. Defaults to ``None``, which skips
+                schema resolution/classification entirely (``CsvProfile.
+                schema_version_id``/``compatibility`` stay ``None``): the
+                same reasoning ``PipelineContext.source: Source | None =
+                None``'s own docstring gives for defaulting a new field to
+                ``None`` -- no existing ``CsvSource(...)`` construction
+                breaks. Every real caller that wants schema versioning wired
+                (the ``ingest`` CLI; 06-15-PLAN.md's own live-database
+                integration tests) supplies a real one.
             chunk_size: The number of records per yielded chunk, passed
                 through to ``CsvRecordStream``. Defaults to 1000.
         """
         self.bucket = bucket
         self.key = key
+        self.dataset_id = dataset_id
         self.chunk_size = chunk_size
 
     @contextlib.contextmanager
@@ -416,7 +445,12 @@ class CsvSource(Source):
            with no contract fallback -- there is no usable delimiter to
            split rows with; ``CsvSource.open()`` is where that condition
            actually raises (plan 06-05's ``to_stdlib_dialect`` design).
-        6. ``parse_filename`` -- only when ``ctx.config.filename`` is set;
+        6. ``self._resolve_schema`` -- resolves/classifies this file's
+           observed header against ``self.dataset_id``'s recorded schema
+           history (SCHEMA-03/04/05/06, plan 06-15). A no-op returning
+           ``(None, None)`` when ``self.dataset_id`` is ``None`` (this
+           class's own default -- see ``__init__``).
+        7. ``parse_filename`` -- only when ``ctx.config.filename`` is set;
            a ``FilenameParsingError`` propagates uncaught (D-09: reject the
            whole file).
 
@@ -432,6 +466,12 @@ class CsvSource(Source):
             FileInspectionError: The header row (contract-given or
                 detected) has an exact or case-variant duplicate name, or
                 the object is a corrupted or oversized archive.
+            IncompatibleSchemaError: ``self.dataset_id`` is set and this
+                file's observed header is a BREAKING change against its
+                dataset's contract -- a contract-declared column disappeared
+                or was retyped (D-02). Raised before any row is staged:
+                neither ``CsvSource.open()`` nor ``StagingLoader.load()``
+                ever runs for this file.
             FilenameParsingError: ``ctx.config.filename`` is set and the
                 object's filename does not match its configured mask (D-09).
         """
@@ -485,6 +525,10 @@ class CsvSource(Source):
             header_trim=ctx.config.csv.header_trim,
         )
 
+        schema_version_id, compatibility = self._resolve_schema(
+            ctx, header=header_detection.trimmed_header
+        )
+
         filename_facets: Mapping[str, object]
         if ctx.config.filename is not None:
             base_filename = self.key.rsplit("/", 1)[-1]
@@ -506,4 +550,129 @@ class CsvSource(Source):
             max_field_bytes=ctx.config.csv.max_field_bytes,
             compression=compression_kind,
             filename_facets=filename_facets,
+            schema_version_id=schema_version_id,
+            compatibility=compatibility,
         )
+
+    def _resolve_schema(
+        self,
+        ctx: PipelineContext,
+        *,
+        header: tuple[str, ...],
+    ) -> tuple[int | None, str | None]:
+        """Resolve/classify this file's schema against ``self.dataset_id``'s history.
+
+        The real implementation of SCHEMA-03/04/05/06, closing the loop
+        06-14-PLAN.md left open. A no-op -- returns ``(None, None)`` -- when
+        ``self.dataset_id`` is ``None`` (``__init__``'s own default): every
+        caller with no real database to resolve schema versions against
+        (e.g. ``tests/unit/test_csv_source_inspect.py``'s pure fixture-driven
+        detector proofs) keeps working unchanged.
+
+        Builds two column lists shaped for ``dataplat.schema.versioning.
+        hash_schema`` (``name``/``type``/``position``, ARCHITECTURE.md §2.2
+        line 232's ordered shape): ``old_columns`` is ``self.dataset_id``'s
+        CONTRACT-declared baseline (``ctx.config.columns``); ``new_columns``
+        is this file's OBSERVED ``header``, each column's ``type`` taken
+        from ``old_columns``'s matching entry by name when one exists, or
+        the sentinel ``"unknown"`` when it does not -- a genuinely new
+        column has no contract type yet, which is exactly what makes it new.
+
+        On this dataset's first-ever file (``SchemaRepository.get_current``
+        returns ``None``), records the CONTRACT baseline unconditionally as
+        ``version=1`` -- there is nothing to classify against yet. Otherwise
+        calls ``dataplat.schema.evolution.classify_schema_change``: a raised
+        ``IncompatibleSchemaError`` (BREAKING -- D-02) propagates straight
+        out of this method and out of ``inspect()`` in turn, uncaught. A
+        non-empty findings list (a genuinely new column was observed)
+        records the proposal (``derived_from="INFERRED"``, D-01: detect +
+        record only). An empty findings list means this file's structure
+        equals the CONTRACT exactly -- either the dataset's CURRENT schema
+        version (a true ``sync()`` no-op) or, when the current version has
+        since evolved past the contract (a compatible proposal recorded on
+        top of it), an OLDER historical version -- SCHEMA-06, resolved via
+        ``SchemaRepository.resolve_by_hash`` rather than ``sync()``, so
+        reprocessing a historical file never manufactures a spurious new
+        version.
+
+        Args:
+            ctx: The current pipeline context. Only ``ctx.config.columns``
+                (the CONTRACT) and ``ctx.db`` (the pool ``SchemaRepository``
+                is built from -- never a second pool) are read.
+            header: This file's OBSERVED header
+                (``HeaderDetection.trimmed_header``), empty when no header
+                was ever found.
+
+        Returns:
+            ``(schema_version_id, compatibility)`` -- both ``None`` when
+            ``self.dataset_id`` is ``None``; otherwise the resolved/recorded
+            ``meta.schema_versions`` row's own ``schema_version_id`` and
+            ``compatibility`` (always ``"COMPATIBLE"`` -- a ``"BREAKING"``
+            classification raises instead of ever returning one).
+
+        Raises:
+            IncompatibleSchemaError: This file's structure is a BREAKING
+                change against ``self.dataset_id``'s CONTRACT (D-02).
+        """
+        if self.dataset_id is None:
+            return None, None
+
+        contract_types_by_name = {column.name: column.type for column in ctx.config.columns}
+        old_columns: list[dict[str, object]] = [
+            {"name": column.name, "type": column.type, "position": position}
+            for position, column in enumerate(ctx.config.columns)
+        ]
+        new_columns: list[dict[str, object]] = [
+            {
+                "name": name,
+                "type": contract_types_by_name.get(name, "unknown"),
+                "position": position,
+            }
+            for position, name in enumerate(header)
+        ]
+
+        schema_repo = SchemaRepository(ctx.db)
+        current = schema_repo.get_current(self.dataset_id)
+        if current is None:
+            # D-03's bootstrap case: this dataset's first-ever file. Nothing
+            # recorded yet to classify against -- record the CONTRACT
+            # baseline unconditionally; this becomes version=1.
+            record = schema_repo.sync(
+                self.dataset_id,
+                columns=old_columns,
+                derived_from="CONTRACT",
+                compatibility="COMPATIBLE",
+            )
+            return record.schema_version_id, record.compatibility
+
+        findings = classify_schema_change(old_columns, new_columns)
+        if findings:
+            # D-01: a genuinely new column was observed -- detect + record
+            # only. The file still loads using its known/contract columns;
+            # this new column's own values are never persisted anywhere.
+            record = schema_repo.sync(
+                self.dataset_id,
+                columns=new_columns,
+                derived_from="INFERRED",
+                compatibility="COMPATIBLE",
+                breaking_changes=None,
+            )
+            return record.schema_version_id, record.compatibility
+
+        # new_columns == old_columns == the CONTRACT. Distinguish "matches
+        # the CURRENT version" (a true sync() no-op) from "matches an OLDER,
+        # non-current version" (SCHEMA-06: the current version has since
+        # evolved past the contract) by hash -- resolve_by_hash never writes
+        # a spurious new row for a historical file's own historical schema.
+        observed_hash, _hash_version = hash_schema(old_columns)
+        if observed_hash == current.schema_hash:
+            record = schema_repo.sync(
+                self.dataset_id,
+                columns=old_columns,
+                derived_from="CONTRACT",
+                compatibility="COMPATIBLE",
+            )
+            return record.schema_version_id, record.compatibility
+
+        resolved = schema_repo.resolve_by_hash(self.dataset_id, observed_hash)
+        return resolved.schema_version_id, resolved.compatibility

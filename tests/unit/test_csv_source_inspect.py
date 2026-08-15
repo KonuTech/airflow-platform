@@ -238,6 +238,30 @@ def test_open_recovers_exact_row_content_for_01_simple(corpus: Path) -> None:
     assert rows == expected
 
 
+def test_inspect_leaves_schema_fields_none_without_a_dataset_id(corpus: Path) -> None:
+    """``CsvSource`` built with no ``dataset_id`` never touches schema versioning (06-15-PLAN.md).
+
+    ``dataset_id`` defaults to ``None`` -- the same reasoning
+    ``dataplat.pipeline.protocol.PipelineContext.source: Source | None =
+    None``'s own docstring gives for defaulting a new field to ``None`` --
+    so this whole fixture-driven unit-test module (``ctx.db=None``, no real
+    database) keeps working unchanged even though ``CsvSource.inspect()``
+    now also resolves/classifies schema. ``SchemaRepository`` is never
+    constructed at all down this path; the real, live-database proof of
+    schema resolution/classification lives in
+    ``tests/integration/test_schema_resolution.py``, which supplies a real
+    ``dataset_id`` and a real ``ctx.db``.
+    """
+    store = _DiskObjectStore(root=corpus)
+    ctx = _context(store)
+    source = CsvSource(bucket=_BUCKET, key="01_simple.csv")
+
+    profile = source.inspect(ctx)
+
+    assert profile.schema_version_id is None
+    assert profile.compatibility is None
+
+
 def test_open_recovers_01_simples_rows_through_gzip(corpus: Path) -> None:
     """``61_gzipped.csv.gz`` recovers exactly ``01_simple.csv``'s 20 rows through ``open()``."""
     store = _DiskObjectStore(root=corpus)

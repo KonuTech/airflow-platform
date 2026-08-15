@@ -64,6 +64,18 @@ class CsvProfile:
         filename_facets: Every facet extracted from the object's filename
             against the dataset's opt-in filename mask (CSV-01), or an
             empty mapping when the dataset declares no mask (D-10).
+        schema_version_id: The ``meta.schema_versions.schema_version_id``
+            this file's structure resolved/recorded against (SCHEMA-03/04/
+            05/06), populated by ``CsvSource.inspect()``'s own schema-
+            resolution step (06-15-PLAN.md). ``None`` only when the
+            ``CsvSource`` that produced this profile was never given a
+            ``dataset_id`` (``CsvSource.__init__``'s own default) -- every
+            other case resolves to a real row, since a BREAKING
+            classification raises instead of ever returning one.
+        compatibility: The resolved row's ``"COMPATIBLE"`` or ``None`` --
+            never ``"BREAKING"``, since that classification raises
+            ``IncompatibleSchemaError`` (D-02) before ``inspect()`` ever
+            returns. ``None`` exactly when ``schema_version_id`` is ``None``.
     """
 
     encoding: str
@@ -79,3 +91,5 @@ class CsvProfile:
     max_field_bytes: int
     compression: str | None  # None | "gzip" | "zip"
     filename_facets: Mapping[str, object]
+    schema_version_id: int | None
+    compatibility: str | None  # "COMPATIBLE" | None (never "BREAKING" -- that path raises)
