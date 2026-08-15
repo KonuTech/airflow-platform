@@ -81,7 +81,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **CSV-06**: Quoted delimiters, escaped quotes, multiline fields and inconsistent quoting are handled by a real CSV parser — never by string splitting — *(DoD 20)*
 - [ ] **CSV-07**: Header detection handles header-present, header-absent and header-at-a-later-row cases — *(DoD 21)*
 - [ ] **CSV-08**: Metadata preambles, comments, blank lines, report titles, footers and totals rows are detected and excluded from data — *(DoD 22)*
-- [ ] **CSV-09**: Invalid dates (`2026-02-30`, `31/02/2026`, `2026-13-01`, `not-a-date`) produce explicit validation errors and are never silently coerced or dropped — *(DoD 28)*
+- [x] **CSV-09**: Invalid dates (`2026-02-30`, `31/02/2026`, `2026-13-01`, `not-a-date`) produce explicit validation errors and are never silently coerced or dropped — *(DoD 28)*
 - [x] **CSV-10**: Numeric, boolean and NULL values normalize per configuration — decimal comma/point, thousands separators, parenthesised negatives, currency, percentages, scientific notation, `Y/N`, `T/F`, `N/A` — without `1/0` becoming boolean absent evidence — *(DoD 29)*
 - [ ] **CSV-11**: Compressed inputs (`.gz`, `.zip`) and multi-part datasets are supported — absent from all 95 README sections, ubiquitous in real feeds — *(Gap 13)*
 - [x] **CSV-12**: Unicode normalization (NFC/NFD) is applied before hashing, since NFC/NFD variants of the same value otherwise break deduplication and produce phantom SCD2 versions — *(Gap 16)*
@@ -194,7 +194,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **QUAL-14**: SCD is tested including late-arriving corrections and idempotent re-application — *(DoD 88)*
 - [ ] **QUAL-15**: Failure and recovery scenarios from §84 are tested — pod crash, database unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, CDC ordering, secret rotation, unauthorized secret access — *(DoD 89)*
 - [ ] **QUAL-16**: A property test asserts determinism — identical source data, configuration and processor version produce an identical output hash — *(Gap 8)*
-- [ ] **QUAL-17**: Timezone and DST correctness is tested as a property, including DST gap and overlap timestamps — *(Gap 14)*
+- [x] **QUAL-17**: Timezone and DST correctness is tested as a property, including DST gap and overlap timestamps — *(Gap 14)*
 
 ### CICD — Continuous Integration and Delivery
 
@@ -322,7 +322,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CSV-06 | Phase 6 | Complete |
 | CSV-07 | Phase 6 | Pending |
 | CSV-08 | Phase 6 | Pending |
-| CSV-09 | Phase 6 | Pending |
+| CSV-09 | Phase 6 | Complete |
 | CSV-10 | Phase 6 | Complete |
 | CSV-11 | Phase 6 | Pending |
 | CSV-12 | Phase 6 | Complete |
@@ -408,7 +408,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-14 | Phase 10 | Pending |
 | QUAL-15 | Phase 11 | Pending |
 | QUAL-16 | Phase 6 | Pending |
-| QUAL-17 | Phase 6 | Pending |
+| QUAL-17 | Phase 6 | Complete |
 | CICD-01 | Phase 1 | Complete |
 | CICD-02 | Phase 1 | Complete |
 | CICD-03 | Phase 1 | Complete |
