@@ -2,9 +2,8 @@
 
 Every case in 06-07-PLAN.md Task 1's ``<behavior>`` block, plus the corpus-
 grounded assertions Task 1's ``<action>`` names against ``01_simple.csv``,
-``50_excel_scientific_notation_ids.csv`` and ``60_boolean_localized.csv``.
-Task 2's ``infer_schema``/``suggest_column_contracts`` coverage is added in
-this same file by that task's own commit.
+``50_excel_scientific_notation_ids.csv`` and ``60_boolean_localized.csv``,
+followed by Task 2's ``infer_schema``/``suggest_column_contracts`` coverage.
 
 The corpus is generated into a temporary directory rather than read from
 ``tests/fixtures/csv/`` (gitignored, generated on demand), mirroring
@@ -21,7 +20,12 @@ import pytest
 from tools.corpus.generators import generate_corpus
 from tools.corpus.manifest import load_manifest
 
-from csv_processor.detect.schema import infer_column_type
+from csv_processor.detect.schema import (
+    infer_column_type,
+    infer_schema,
+    suggest_column_contracts,
+)
+from dataplat.config.model import ColumnContract
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = REPO_ROOT / "tests" / "fixtures" / "corpus.yaml"
@@ -212,3 +216,47 @@ def test_fixture_60_boolean_localized_clean_english_letters_do_not_infer_boolean
 
     assert result.suggested_type == "string"
     assert result.suggested_type != "boolean"
+
+
+# --- Task 2: infer_schema / suggest_column_contracts ------------------------
+
+
+def test_infer_schema_returns_one_inference_per_header_column() -> None:
+    header = ["id", "amount"]
+    sample_rows = [("000001", "12.50"), ("000002", "9.99")]
+
+    inferences = infer_schema(header, sample_rows)
+
+    assert len(inferences) == 2
+    assert inferences[0].suggested_type == "string"
+    assert inferences[1].suggested_type == "decimal"
+
+
+def test_infer_schema_tolerates_a_ragged_sample_row_without_raising() -> None:
+    header = ["id", "amount"]
+    sample_rows = [("000001", "12.50"), ("000002",)]  # second row is missing amount
+
+    inferences = infer_schema(header, sample_rows)
+
+    assert len(inferences) == 2
+    assert inferences[0].suggested_type == "string"
+
+
+def test_suggest_column_contracts_shape_matches_column_contract_field_names() -> None:
+    suggestions = suggest_column_contracts(["id", "amount"], [("000001", "12.50")])
+
+    assert suggestions[0] == {"name": "id", "type": "string", "nullable": True, "required": True}
+    assert suggestions[1]["name"] == "amount"
+    assert suggestions[1]["type"] == "decimal"
+    assert suggestions[1]["nullable"] is True
+    assert suggestions[1]["required"] is True
+
+
+def test_suggest_column_contracts_round_trips_into_a_real_column_contract() -> None:
+    # Task 2's own acceptance criterion: constructing ColumnContract(**s[0])
+    # from the suggestion dict must not raise.
+    suggestions = suggest_column_contracts(["id", "amount"], [("000001", "12.50")])
+
+    for suggestion in suggestions:
+        contract = ColumnContract(**suggestion)
+        assert contract.name in {"id", "amount"}

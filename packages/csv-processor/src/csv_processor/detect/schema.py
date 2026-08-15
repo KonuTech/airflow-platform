@@ -291,3 +291,54 @@ def _parses_as_decimal(value: str) -> bool:
     except InvalidOperation:
         return False
     return True
+
+
+def infer_schema(
+    header: Sequence[str], sample_rows: Sequence[tuple[str, ...]]
+) -> list[TypeInference]:
+    """Infer one ``TypeInference`` per header column, values gathered positionally.
+
+    Args:
+        header: Column names, in file order.
+        sample_rows: Sampled rows. A row shorter than ``header`` simply
+            contributes no value for the columns past its own length --
+            never an ``IndexError`` -- since a ragged sample row is exactly
+            the kind of messy real-world input this bootstrap helper must
+            survive without crashing.
+
+    Returns:
+        One ``TypeInference`` per ``header`` column, in the same order.
+    """
+    return [
+        infer_column_type([row[index] for row in sample_rows if index < len(row)])
+        for index in range(len(header))
+    ]
+
+
+def suggest_column_contracts(
+    header: Sequence[str], sample_rows: Sequence[tuple[str, ...]]
+) -> list[dict[str, object]]:
+    """Shape ``infer_schema``'s output into draft ``ColumnContract`` dicts.
+
+    A human-readable STARTING POINT for hand-authoring a dataset's
+    ``columns:`` YAML block -- never wired into any automated pipeline
+    (module docstring). ``nullable`` and ``required`` are always suggested
+    ``True``: a sample alone carries no evidence of either, and ``True`` is
+    the conservative choice for both (a column absent or empty in a
+    training sample says nothing about whether it always will be).
+
+    Args:
+        header: Column names, in file order.
+        sample_rows: Sampled rows, values gathered positionally per column.
+
+    Returns:
+        One dict per ``header`` column, in order, with keys matching
+        ``ColumnContract``'s field names (``name``, ``type``, ``nullable``,
+        ``required``) -- constructing ``ColumnContract(**suggestion)`` for
+        any entry never raises.
+    """
+    inferences = infer_schema(header, sample_rows)
+    return [
+        {"name": name, "type": inference.suggested_type, "nullable": True, "required": True}
+        for name, inference in zip(header, inferences, strict=True)
+    ]
