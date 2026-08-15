@@ -45,6 +45,7 @@ from dataplat.config.model import (
     LoadConfig,
     SourceConfig,
 )
+from dataplat.diagnostics import DIAGNOSTIC_CODES
 from dataplat.errors import IncompatibleSchemaError, StorageError
 from dataplat.load.staging import StagingLoader
 from dataplat.metadata.postgres import PostgresMetadataRepository
@@ -595,3 +596,78 @@ def test_inspect_matching_a_historical_schema_resolves_to_the_older_version(
 
     after = _schema_version_rows(migrated_dsn, e2e_dataset_id)
     assert after == before  # no new row -- resolved via resolve_by_hash, not sync()
+
+
+# --- Scenario 5 (orchestrator fix, post-wave-5 code review CR-01): a file whose columns
+# match the contract's names but not their physical order is rejected loudly, never
+# silently staged into the wrong target columns ---
+
+
+_E2E_REORDERED_HEADER = "name,customer_id,country,birth_date,event_ts"
+
+
+def test_inspect_with_reordered_columns_raises_and_records_no_new_row(
+    e2e_dataset_id: int,
+    e2e_object_store: S3ObjectStore,
+    e2e_pool: ConnectionPool,
+    migrated_dsn: str,
+) -> None:
+    """``customer_id``/``name`` swapped in the header, every name/type otherwise unchanged.
+
+    ``classify_schema_change`` alone would call this COMPATIBLE (it compares by name, never
+    position -- ``evolution.py``'s own docstring/tests). ``StagingLoader`` maps a row's
+    fields to ``target_columns`` by position alone, with no header-to-contract name
+    remapping anywhere in this codebase, so silently accepting this file would swap every
+    row's ``customer_id``/``name`` values into each other's target columns -- undetectable
+    even by ``_record_hash``, since that hash is computed over the already-misaligned row.
+    ``CsvSource._resolve_schema`` must catch this itself, before delegating to
+    ``classify_schema_change``'s name-only comparison.
+    """
+    before = _schema_version_rows(migrated_dsn, e2e_dataset_id)
+    assert len(before) == 2  # scenario 4 resolved via resolve_by_hash -- no new row
+
+    _upload_e2e_csv(
+        e2e_object_store,
+        key="scenario5.csv",
+        header=_E2E_REORDERED_HEADER,
+        data_row="Eve,5,FR,1988-05-05,2026-05-01T00:00:00+00:00",
+    )
+    source, ctx = _e2e_source_and_ctx(
+        dataset_id=e2e_dataset_id,
+        object_store=e2e_object_store,
+        pool=e2e_pool,
+        key="scenario5.csv",
+        run_id=95_501,
+    )
+
+    with pytest.raises(IncompatibleSchemaError) as exc_info:
+        source.inspect(ctx)
+
+    assert exc_info.value.context["diagnostic_code"] == "schema-columns-reordered"
+    assert exc_info.value.context["expected_order"] == [
+        "customer_id",
+        "name",
+        "country",
+        "birth_date",
+        "event_ts",
+    ]
+    assert exc_info.value.context["observed_order"] == [
+        "name",
+        "customer_id",
+        "country",
+        "birth_date",
+        "event_ts",
+    ]
+
+    after = _schema_version_rows(migrated_dsn, e2e_dataset_id)
+    assert after == before  # rejected before any schema_versions write
+
+
+def test_schema_columns_reordered_diagnostic_code_is_in_the_shared_catalog() -> None:
+    """D-24's drift guard, applied to this module's reordered-columns raise site.
+
+    Keeps ``CsvSource._resolve_schema``'s literal in sync with
+    ``dataplat.diagnostics.DIAGNOSTIC_CODES`` — a rename on either side
+    without the other becomes a failing test here, not a silent mismatch.
+    """
+    assert "schema-columns-reordered" in DIAGNOSTIC_CODES

@@ -48,7 +48,7 @@ from csv_processor.detect.encoding import DEFAULT_MIN_CONFIDENCE, decode_strict,
 from csv_processor.detect.filename import parse_filename
 from csv_processor.detect.header import detect_header
 from dataplat.discovery import open_multipart_stream
-from dataplat.errors import FileInspectionError
+from dataplat.errors import FileInspectionError, IncompatibleSchemaError
 from dataplat.models.profile import CsvProfile
 from dataplat.models.record import RecordChunk
 from dataplat.observability import metrics
@@ -788,12 +788,52 @@ class CsvSource(Source):
             )
             return record.schema_version_id, record.compatibility
 
-        # new_columns == old_columns == the CONTRACT. Distinguish "matches
-        # the CURRENT version" (a true sync() no-op) from "matches an OLDER,
-        # non-current version" (SCHEMA-06: the current version has since
-        # evolved past the contract) by hash -- resolve_by_hash never writes
-        # a spurious new row for a historical file's own historical schema.
-        observed_hash, _hash_version = hash_schema(old_columns)
+        # `findings` empty means new_columns and old_columns share the exact
+        # same NAME SET (classify_schema_change compares by name only, never
+        # by position -- evolution.py's own docstring/tests). That does NOT
+        # mean the file's physical column ORDER matches the contract's:
+        # StagingLoader._build_stages/load() maps every row field to its
+        # target column by POSITION alone (target_columns.index(...)), with
+        # no header-to-contract name-based remapping anywhere in this
+        # codebase. A file whose header carries the contract's own column
+        # names but in a different physical order would otherwise fall
+        # through this branch as silently "COMPATIBLE" and then have every
+        # row's values written into the wrong target columns during
+        # staging -- undetectable even by _record_hash, since that hash is
+        # computed over the already-misaligned row. D-02's "reported...
+        # never silently adapted to" is taken literally here too: reject
+        # loudly, with a named diagnostic, rather than guess an alignment.
+        new_names_in_order = [str(column["name"]) for column in new_columns]
+        old_names_in_order = [str(column["name"]) for column in old_columns]
+        if new_names_in_order != old_names_in_order:
+            msg = (
+                "this file's columns match the recorded schema's names but not "
+                "their order -- the loader maps values to columns by position, "
+                "so a reordered file cannot be loaded without corrupting data"
+            )
+            raise IncompatibleSchemaError(
+                msg,
+                context={
+                    "diagnostic_code": "schema-columns-reordered",
+                    "expected_order": old_names_in_order,
+                    "observed_order": new_names_in_order,
+                },
+            )
+
+        # new_columns == old_columns == the CONTRACT, in both name and
+        # order. Distinguish "matches the CURRENT version" (a true sync()
+        # no-op) from "matches an OLDER, non-current version" (SCHEMA-06:
+        # the current version has since evolved past the contract) by hash
+        # -- resolve_by_hash never writes a spurious new row for a
+        # historical file's own historical schema. Hashing `new_columns`
+        # (this file's real observed structure) rather than `old_columns`
+        # (the contract) is what makes this genuinely the file's OBSERVED
+        # hash, per this variable's own name -- they are provably identical
+        # in name/position/type at this point (the reorder check above and
+        # classify_schema_change's disappearance/retype checks both already
+        # passed), so this is a correctness/clarity fix, not a behavior
+        # change for any input that reaches this line.
+        observed_hash, _hash_version = hash_schema(new_columns)
         if observed_hash == current.schema_hash:
             record = schema_repo.sync(
                 self.dataset_id,

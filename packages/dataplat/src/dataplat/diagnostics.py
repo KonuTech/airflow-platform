@@ -115,10 +115,12 @@ _NEW_THIS_PHASE_CODES: Final[frozenset[str]] = frozenset(
         "decompression-bomb-exceeded",
         "corrupted-archive",
         "multipart-group-incomplete",
+        "multipart-group-too-large",
         "invalid-calendar-date",
         "invalid-numeric-value",
         "schema-column-disappeared",
         "schema-column-retyped",
+        "schema-columns-reordered",
         "ambiguous-local-time-requires-a-declared-fold-policy",
     },
 )

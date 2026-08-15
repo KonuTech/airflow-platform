@@ -89,7 +89,19 @@ def classify_schema_change(
     schema) against ``new_columns`` (this file's observed schema) by column
     ``name`` -- never by position, so a column list that is merely
     reordered, with every name and type otherwise unchanged, is correctly
-    treated as no change at all.
+    treated as no change AT THE CLASSIFICATION LEVEL this function owns.
+
+    This is deliberately not the whole story end to end: the platform's
+    loader (``dataplat.load.staging.StagingLoader``) maps a row's fields to
+    its target columns by POSITION alone, with no header-to-contract name
+    remapping anywhere in the codebase, so a reordered file cannot actually
+    be loaded correctly even though this classifier alone would call it
+    COMPATIBLE. The caller that owns both facts --
+    ``csv_processor.source.CsvSource._resolve_schema`` -- is responsible for
+    rejecting a reordered file itself (``diagnostic_code
+    == "schema-columns-reordered"``) before ever reaching this function's
+    "no change" outcome for that case in practice; this function's own
+    contract and tests are unchanged.
 
     Breaking conditions are checked for every column in ``old_columns``, in
     the given order, BEFORE any compatible finding is ever returned (D-02's
