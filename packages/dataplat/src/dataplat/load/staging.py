@@ -53,6 +53,16 @@ rendered as ``""``/``str(value)`` respectively before joining -- mirroring
 ``dataplat.normalize.numeric._row_to_raw_line``'s own convention for a
 partially-normalized row -- never passed to ``str.join`` directly, which
 raises ``TypeError`` on a non-``str`` element.
+
+**06-15-PLAN.md addition** -- ``load()`` now truncates a row wider than
+``target_columns`` down to exactly ``len(target_columns)`` fields, right
+before ``_record_hash`` is computed: this is D-01's "the file still loads
+successfully using its known columns" for a genuinely new, contract-unknown
+TRAILING column, which ``CsvSource.inspect()`` has already classified and
+recorded as a schema-evolution proposal (never auto-DDL) before this method
+ever runs. A row narrower than ``target_columns`` is left untouched -- a
+missing contract column is a BREAKING change ``inspect()`` already raises
+on before ``load()`` is ever reached.
 """
 
 from __future__ import annotations
@@ -406,6 +416,28 @@ class StagingLoader:
 
                 enriched_rows: list[tuple[Any, ...]] = []
                 for row in surviving_rows:
+                    # D-01 (06-15-PLAN.md): a file whose OWN header has MORE
+                    # fields than this dataset's contract stages successfully
+                    # using only its KNOWN columns -- a genuinely new
+                    # trailing column is classified and recorded as a
+                    # schema-evolution proposal by `CsvSource.inspect()`
+                    # (`meta.schema_versions`), never auto-loaded here.
+                    # `_build_stages(ctx)` above only ever reads/writes a
+                    # row's first `len(self._target_columns)` positions (its
+                    # own `column_index = self._target_columns.index(...)`
+                    # lookup), so truncating BEFORE the hash below -- never
+                    # after -- is what keeps a new column's own value out of
+                    # `_record_hash` too, matching this docstring's "row's
+                    # business values in target_columns order". A row
+                    # narrower than `target_columns` is a pre-existing,
+                    # separately-guarded case (a missing contract column is
+                    # a BREAKING change `CsvSource.inspect()` already raises
+                    # on before this method ever runs) -- left untouched.
+                    staged_row = (
+                        row[: len(self._target_columns)]
+                        if len(row) > len(self._target_columns)
+                        else row
+                    )
                     # C6 / Pitfall 10: computed exactly once, in Python, here
                     # -- canonical pipe-joined encoding, fixed column order
                     # from `target_columns`, taken AFTER every stage in
@@ -420,13 +452,15 @@ class StagingLoader:
                     # own convention -- since `str.join` raises `TypeError` on
                     # a non-`str` element.
                     record_hash = hashlib.sha256(
-                        "|".join("" if field is None else str(field) for field in row).encode(
+                        "|".join(
+                            "" if field is None else str(field) for field in staged_row
+                        ).encode(
                             "utf-8",
                         ),
                     ).digest()
                     enriched_rows.append(
                         (
-                            *row,
+                            *staged_row,
                             ctx.run.run_id,
                             ctx.run.file_id,
                             ctx.run.batch_id,
