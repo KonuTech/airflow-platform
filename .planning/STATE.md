@@ -93,6 +93,7 @@ None yet.
 
 ### Blockers/Concerns
 
+- **Airflow KubernetesExecutor scheduling defect (new, active as of 2026-08-16)** — `csv_ingest_customers` task instances (observed at varying DAG stages: `ingest` mapped instances, `resolve_window`, `wait_for_files`) get permanently stuck `queued`/`up_for_retry`; the scheduler never redispatches them. Reproduces independent of any Phase 7 code — 8 consecutive DagRuns failed 06:07–16:17 UTC today, starting before phase 07-09's own session began. Blocks OBS-07's live-cluster E2E confirmation (`tests/e2e/observability/test_trace_propagation.py::test_ingest_pod_dag_context_matches_persisted_lineage_row`) — the DB-layer fix itself is proven correct via real-Postgres integration tests and is live-deployed; only the live pod-boundary firing is unconfirmed. 07-VERIFICATION.md carries a developer-accepted override for this specific gap. Needs a dedicated `/gsd:debug` session on the scheduler itself; once resolved, re-run the test above and independently query `SELECT dag_id, dag_run_id, task_id FROM meta.v_customers_lineage ORDER BY run_id DESC LIMIT 1` to close the loop.
 - **kind and helm are not installed** on this machine — Phase 2 prerequisite.
 - Phase 2 must decide kubelet reservations, `maxPods` and `extraMounts` at cluster-creation time; changing them later requires destroying the cluster (PITFALLS #10, #11).
 - `values-ci.yaml` must be written in Phase 2 even though Phase 11's ephemeral-kind E2E consumes it — retrofitting profile parameterization is expensive.
