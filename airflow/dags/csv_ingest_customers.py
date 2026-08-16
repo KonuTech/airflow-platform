@@ -6,8 +6,7 @@ parsing, validation, typing and every DB write happen inside the
 ``csv-processor`` image's ``dataplat discover``/``dataplat ingest`` CLI
 commands, launched only via ``KubernetesPodOperator``'s ``cmds``/``arguments``
 (ORCH-02). Never imports ``dataplat``/``csv_processor`` -- that package is
-not even installed in the real Airflow image (ADR-0004); reached only
-through a pod.
+not even installed in the real Airflow image (ADR-0004); reached only through a pod.
 
 Trigger design (04-CONTEXT.md "File-arrival trigger", D-01..D-04): a
 deferrable ``S3KeySensor`` (D-01, D-02: 30s poke) wakes the DAG, never a
@@ -51,6 +50,7 @@ from airflow.sdk import dag, task
 from kubernetes.client import models as k8s
 
 from _common.kpo import common_kpo_kwargs
+from _common.tracing_kpo import TracingKubernetesPodOperator
 
 log = logging.getLogger(__name__)
 
@@ -130,11 +130,11 @@ def csv_ingest_customers() -> None:
     )
     wait_for_files >> discover
 
-    # Fan-out is bounded upstream by discover_files's own
-    # batching.max_units_per_run cap (plan 04-03), never by anything in this
-    # file; the platform-level [core] max_map_length default (1024) stays
-    # untouched and comfortably above the configured cap.
-    ingest = KubernetesPodOperator.partial(
+    # Fan-out is bounded upstream by discover_files's own batching.max_units_per_run
+    # cap (plan 04-03), never by anything in this file; the platform-level
+    # [core] max_map_length default (1024) stays untouched, comfortably above it.
+    # D-12: ingest is the trace root (OBS-10, see tracing_kpo.py); discover stays plain.
+    ingest = TracingKubernetesPodOperator.partial(
         task_id="ingest",
         cmds=["dataplat"],
         retries=3,

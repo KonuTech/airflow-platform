@@ -37,6 +37,18 @@ from airflow.models import DagBag
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAGS_FOLDER = REPO_ROOT / "airflow" / "dags"
 
+# Module-level, NOT only inside the `dagbag` fixture below (plan 07-04): pytest
+# imports every ancestor `conftest.py` before collecting a directory's test
+# modules, so this bootstrap must run unconditionally here for a test module
+# that imports `_common.*` directly at ITS OWN module level (test_tracing_kpo.py)
+# to resolve that import during COLLECTION -- a fixture body only runs at test
+# EXECUTION time, well after collection-time imports have already been
+# attempted. The fixture's own identical check below stays untouched and is
+# now a redundant (idempotent, harmless) safety net for callers that import
+# this module directly rather than through pytest's conftest discovery.
+if str(DAGS_FOLDER) not in sys.path:
+    sys.path.insert(0, str(DAGS_FOLDER))
+
 
 @pytest.fixture(scope="session")
 def dagbag() -> DagBag:

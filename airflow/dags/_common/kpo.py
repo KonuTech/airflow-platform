@@ -32,6 +32,20 @@ _S3_ENDPOINT_URL = "http://minio.data.svc.cluster.local:9000"
 _VAULT_ADDR = "http://vault.vault.svc.cluster.local:8200"
 _VAULT_K8S_ROLE = "csv-processor"
 
+# OBS-08/OBS-10 (plan 07-04): the standalone OTel Collector chart's real
+# Service DNS -- verified live in 07-03-SUMMARY.md's own Key Decisions
+# (`<release-name>-<chart-name>` fullname convention, NOT the shorter
+# `otel-collector` name a naive guess would produce). Genuinely static: this
+# endpoint never varies per-execution, unlike a per-task TRACEPARENT value
+# (RESEARCH.md Pitfall 2 -- exactly why it belongs here, in the DAG-parse-
+# time dict, and TRACEPARENT does not). Both `discover` and `ingest` get
+# this -- real `dataplat` tracing/metrics available in every task pod; only
+# `ingest` additionally receives a per-execution TRACEPARENT, injected by
+# `TracingKubernetesPodOperator` (tracing_kpo.py), not by this function.
+_OTEL_COLLECTOR_ENDPOINT = (
+    "http://otel-collector-opentelemetry-collector.monitoring.svc.cluster.local:4318"
+)
+
 
 def common_kpo_kwargs(
     *,
@@ -87,6 +101,7 @@ def common_kpo_kwargs(
             k8s.V1EnvVar(name="DATAPLAT_S3_ENDPOINT_URL", value=_S3_ENDPOINT_URL),
             k8s.V1EnvVar(name="VAULT_ADDR", value=_VAULT_ADDR),
             k8s.V1EnvVar(name="VAULT_K8S_ROLE", value=_VAULT_K8S_ROLE),
+            k8s.V1EnvVar(name="OTEL_EXPORTER_OTLP_ENDPOINT", value=_OTEL_COLLECTOR_ENDPOINT),
             *(extra_env_vars or []),
         ],
     }
