@@ -25,6 +25,7 @@ from click.testing import CliRunner
 
 from dataplat.cli import cli, main
 from dataplat.errors import ConfigurationError
+from dataplat.observability import metrics, tracing
 from dataplat.version import resolve_version
 
 
@@ -119,6 +120,46 @@ def test_unknown_option_does_not_crash(capsys: pytest.CaptureFixture[str]) -> No
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
     assert "No such option" in captured.err
+
+
+def test_main_flushes_tracing_and_metrics_on_a_clean_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OBS-08/OBS-10, discovered live (plan 07-07): both providers must be
+    flushed before this short-lived batch process exits, or every span/
+    metric recorded during the run is silently discarded (`configure()`'s
+    own `PeriodicExportingMetricReader`/`BatchSpanProcessor` only export on
+    their own internal timer otherwise -- verified live against a real
+    collector after several genuinely completed ingestion runs produced
+    zero exported series before this fix existed).
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(tracing, "flush", lambda: calls.append("tracing"))
+    monkeypatch.setattr(metrics, "flush", lambda: calls.append("metrics"))
+
+    exit_code = main(["--version"])
+
+    assert exit_code == 0
+    assert calls == ["tracing", "metrics"]
+
+
+def test_main_flushes_tracing_and_metrics_even_when_an_undeclared_exception_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `finally` block must run on the SAME uncaught-exception path
+    `test_an_undeclared_exception_is_not_caught_and_propagates` proves
+    re-raises -- a `try/except/return` without `finally` would miss this
+    exact path, since `RuntimeError` never touches any of `main()`'s own
+    `except` branches.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(tracing, "flush", lambda: calls.append("tracing"))
+    monkeypatch.setattr(metrics, "flush", lambda: calls.append("metrics"))
+
+    with pytest.raises(RuntimeError, match="not a DataPlatformError"):
+        main(["raise-plain-exception"])
+
+    assert calls == ["tracing", "metrics"]
 
 
 def test_unknown_command_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:

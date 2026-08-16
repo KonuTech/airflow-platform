@@ -195,6 +195,30 @@ def main(argv: list[str] | None = None) -> int:
         # EOF/Ctrl-C during a prompt. standalone_mode=True would print
         # "Aborted!" and exit 1; mirror the exit code here (CR-01).
         return 1
+    finally:
+        # OBS-08/OBS-10, discovered live (plan 07-07): `configure()` above
+        # wires a real `PeriodicExportingMetricReader`/`BatchSpanProcessor`
+        # -- both buffer in-process and only export on their own internal
+        # timer (metrics default: 60s) or an explicit flush. This CLI is a
+        # short-lived batch invocation (a real `ingest` run against a small
+        # file completes in ~3s, verified live against a running pod) that
+        # exits long before either internal timer would ever fire on its
+        # own, so every span/metric recorded during THIS process's entire
+        # lifetime was being silently discarded on every single invocation
+        # until this `finally` block existed -- confirmed live: the OTel
+        # Collector's own `/metrics` endpoint showed zero `dataplat`-owned
+        # series after multiple real, successfully-completed ingestion runs
+        # with `tracing.configure()`/`metrics.configure()` correctly wired
+        # to a reachable collector. Runs on EVERY exit path (the success
+        # fallthrough, every `except` branch above, AND an uncaught
+        # exception propagating past this function entirely) -- `finally`
+        # semantics guarantee that; a call placed only after the `try`
+        # block would miss the uncaught-exception path (ARCHITECTURE.md
+        # Sec 4.5's own "propagate loudly, don't paper over" case).
+        # No-op-safe in every case: both `flush()` functions are genuine
+        # no-ops when `configure()` was never given a real endpoint.
+        tracing.flush()
+        metrics.flush()
     return 0
 
 
