@@ -96,7 +96,27 @@ def _is_resource_sizing(path: str) -> bool:
 
 def _is_monitoring_enablement(path: str) -> bool:
     segments = path.split(".")
-    return "metrics" in segments or "monitoring" in segments
+    if "metrics" in segments or "monitoring" in segments:
+        return True
+    # plan 07-04: Airflow's own OTel tracing toggle -- `config.traces.*` (the
+    # chart's own `[traces]` config section) and the top-level `env` key
+    # carrying `OTEL_EXPORTER_OTLP_ENDPOINT` -- is this SAME axis's already-
+    # written argument applied to a third chart, the same incomplete-
+    # implementation gap as the `_is_resource_sizing` PVC-size spellings
+    # above, one config-section name later, not a new axis: CI has no OTel
+    # Collector deployed (D-16), so this chart's own observability toggle is
+    # off there even where local leaves it on, exactly like ingress-nginx's
+    # `controller.metrics.enabled` or CNPG's `monitoring.podMonitorEnabled`.
+    # `config.traces` is a compound key (Airflow's chart names this section
+    # "traces", not "monitoring"/"metrics", so the bare-segment check above
+    # cannot see it). The bare top-level `env` key is permitted here because
+    # today its entire, only content IS this OTel endpoint reference (see
+    # airflow/dags/_common/kpo.py's own separate, per-task-pod env vars for
+    # contrast) -- test_a_fifth_axis_is_reported's sibling non-vacuity
+    # control (cnpg-airflow.yaml's `cluster.initdb.owner`) is unrelated to
+    # both branches added here and keeps proving a genuinely unrelated leaf
+    # difference is still caught.
+    return path == "env" or path.startswith("config.traces")
 
 
 def _is_executor(path: str) -> bool:

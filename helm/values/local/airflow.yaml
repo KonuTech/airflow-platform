@@ -35,9 +35,23 @@
 # identical in both — this is infrastructure wiring, not sizing, and belongs
 # with the other non-diverging keys (plan 04-02).
 
+# plan 07-04: repointed from the stock apache/airflow image to the locally-
+# built, locally-pushed image docker/airflow/Dockerfile produces (`make
+# image-airflow`) -- the stock image was verified live (07-RESEARCH.md) to
+# contain zero opentelemetry packages, so `config.traces.otel_on` below would
+# otherwise either raise ModuleNotFoundError or silently emit zero traces.
+# `defaultAirflowTag` is the git SHA of the commit that introduced
+# docker/airflow/Dockerfile (plan 07-04 Task 1) -- kept in agreement with
+# helm/versions.env's AIRFLOW_IMAGE_TAG and helm/values/ci/airflow.yaml's own
+# defaultAirflowTag by tests/policy/test_supply_chain_guards.py's
+# test_every_image_tag_agrees_with_versions_env. `airflowVersion` stays
+# "3.3.0" unchanged: it is still real apache-airflow==3.3.0 underneath, only
+# with the [otel] extra layered on top -- this key gates the chart's own
+# apiSecretKeySecretName-vs-webserverSecretKeySecretName template branch
+# (see the comment on that key below), not which image is pulled.
 airflowVersion: "3.3.0"
-defaultAirflowRepository: apache/airflow
-defaultAirflowTag: "3.3.0"
+defaultAirflowRepository: localhost:5001/airflow
+defaultAirflowTag: "8b01cc1"
 
 # KubernetesExecutor locally — see the header comment for the argument.
 executor: KubernetesExecutor
@@ -75,6 +89,35 @@ config:
   secrets:
     backend: airflow.providers.hashicorp.secrets.vault.VaultBackend
     backend_kwargs: '{"url": "http://vault.vault.svc.cluster.local:8200", "auth_type": "kubernetes", "kubernetes_role": "airflow", "mount_point": "airflow", "connections_path": "connections", "variables_path": null, "config_path": null, "kv_engine_version": 2}'
+  # OBS-10, local profile ONLY: CI has no OTel Collector deployed (D-16), so
+  # tracing stays off there -- this whole `traces:` block, and the
+  # OTEL_EXPORTER_OTLP_ENDPOINT env var below, are a legitimate local/ci
+  # divergence under the already-permitted "monitoring enablement" axis, not
+  # a fourth undocumented one. `otel_application` names this specific service
+  # in every exported span's resource attributes (CLAUDE.md §H's own
+  # `[traces] otel_on = True`, `otel_application = airflow` example) -- so
+  # Tempo/Grafana can distinguish Airflow's own spans from `dataplat`'s.
+  traces:
+    otel_on: "True"
+    otel_application: "airflow"
+
+# OBS-10, local profile ONLY (see the `traces:` comment above for why this
+# does not also appear in helm/values/ci/airflow.yaml): the chart's top-level
+# `env` key merges into every Airflow component's pod spec, including the
+# workers.kubernetes pod template KubernetesExecutor launches per task
+# instance -- the one process that actually creates the "Airflow-managed
+# task span" TracingKubernetesPodOperator.build_pod_request_obj() (plan
+# 07-04 Task 3) reads via opentelemetry.propagate.inject(). Deliberately the
+# standard OTEL_EXPORTER_OTLP_* env var, not the deprecated otel_host/
+# otel_port config keys (CLAUDE.md §H). Endpoint verified live in
+# 07-03-SUMMARY.md's own Key Decisions: the standalone OTel Collector chart's
+# real Service DNS is `otel-collector-opentelemetry-collector` (the chart's
+# `<release-name>-<chart-name>` fullname convention), NOT the shorter
+# `otel-collector` name this key's own placeholder text in 07-04-PLAN.md
+# guessed -- do not guess without checking, per that plan's own instruction.
+env:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://otel-collector-opentelemetry-collector.monitoring.svc.cluster.local:4318"
 
 data:
   # scripts/airflow-metadata-secret.sh (Task 1) derives this Secret's sole
@@ -111,11 +154,28 @@ dags:
   gitSync:
     enabled: false
 
-# Phase 7 owns metrics (kube-prometheus-stack is not deployed until then, and
-# enabling the OTel collector would disable statsd anyway) — the third D-06
-# axis, disabled in both profiles for now.
+# Phase 7 (plan 07-04) now enables this, in BOTH profiles, per D-02: Airflow's
+# OWN internal metrics (scheduler heartbeat, DAG parse time, etc.) stay on
+# StatsD -> statsd-exporter -> Prometheus, never OTel -- two independent
+# pipelines converge on the same Prometheus rather than one unified OTel
+# pipeline (mature path, existing community Grafana dashboards). Only TRACING
+# uses OTel here (config.traces above, local profile only, per D-16) --
+# `otelCollector.metricsEnabled` must stay false/unset everywhere, the
+# chart's own StatsD-XOR-OTel mutual exclusion (.claude/CLAUDE.md §H). This
+# stays the third D-06 axis (monitoring), now enabled rather than disabled.
+# `resources` is set explicitly (02-RESEARCH.md Pitfall 5 / D-12,
+# tests/policy/test_manifest_resources.py's `test_every_container_is_sized`):
+# the chart deploys statsd-exporter as its own Deployment when enabled, and
+# an unsized container is QoS BestEffort, evicted first.
 statsd:
-  enabled: false
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
 
 triggerer:
   enabled: true

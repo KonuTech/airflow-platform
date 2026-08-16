@@ -20,9 +20,16 @@
 # identical in both — this is infrastructure wiring, not sizing, and belongs
 # with the other non-diverging keys (plan 04-02).
 
+# plan 07-04: repointed to the same custom image helm/values/local/
+# airflow.yaml now uses -- see that file's header comment for the full
+# rationale (stock image verified live to contain zero opentelemetry
+# packages). CI does NOT enable config.traces.otel_on (no OTel Collector
+# deployed here, D-16) -- this image is referenced for consistency (one
+# image to maintain, not two) even though CI's own `manifests` job only
+# templates/lints this chart and never actually pulls or runs the image.
 airflowVersion: "3.3.0"
-defaultAirflowRepository: apache/airflow
-defaultAirflowTag: "3.3.0"
+defaultAirflowRepository: localhost:5001/airflow
+defaultAirflowTag: "8b01cc1"
 
 # LocalExecutor in CI — see helm/values/local/airflow.yaml's header comment
 # for the argument (image-pull + disk, not CPU, is the binding constraint on
@@ -86,9 +93,25 @@ dags:
   gitSync:
     enabled: false
 
-# Monitoring disabled in CI — the third D-06 axis.
+# Phase 7 (plan 07-04) now enables this in BOTH profiles per D-02 -- see
+# helm/values/local/airflow.yaml's matching comment for the full rationale.
+# This chart-bundled statsd-exporter Deployment runs here too even though no
+# Prometheus scrapes it in CI (D-16: the monitoring stack itself is not
+# deployed live in CI, template/lint-only) -- StatsD packets it never
+# receives are simply not sent to anything; harmless, and keeps this the
+# same non-divergence D-02 establishes for the local profile. `resources` is
+# set explicitly for the same BestEffort-QoS reason as local (D-12,
+# tests/policy/test_manifest_resources.py), sized smaller to match this
+# file's own CI-runner-budget convention.
 statsd:
-  enabled: false
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
 
 triggerer:
   enabled: true
