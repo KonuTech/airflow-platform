@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Render both Helm values profiles for all seven pinned charts into a
+# Render both Helm values profiles for all eight pinned charts into a
 # gitignored build directory, then validate every rendered document with
 # `kubeconform -strict` against the pinned Kubernetes version (CICD-07).
 #
-# Eight `helm template` calls per profile — the `cluster` chart renders TWICE
-# (airflow metadata + analytical), so "all seven pinned charts" (ingress-nginx,
+# Nine `helm template` calls per profile — the `cluster` chart renders TWICE
+# (airflow metadata + analytical), so "all eight pinned charts" (ingress-nginx,
 # cloudnative-pg, cluster, minio, airflow, otel-collector, tempo — plan 07-03
-# adds the last two) produces eight output files. Exactly mirrors
+# added these two — and monitoring/kube-prometheus-stack, plan 07-07's own
+# addition) produces nine output files. Exactly mirrors
 # scripts/stages/*.sh's chart-ref/namespace/values pairing (D-09) — this is
 # the offline analogue of the live cluster-up path, not a second definition
 # of it. (Vault is deployed live by scripts/stages/80-vault.sh but was never
@@ -42,6 +43,23 @@
 # exercise. Scoped to exactly one kind so no other kind's validation is
 # weakened.
 #
+# `-skip PrometheusRule,ServiceMonitor,Prometheus,Alertmanager` (plan 07-07,
+# same narrow, well-documented gap class as CustomResourceDefinition above,
+# discovered this session via a live `kubeconform` run): kube-prometheus-
+# stack's own CRD-INSTANCE kinds (not the CustomResourceDefinition
+# meta-resources — those are unconditionally skipped by the entry above and
+# this chart does not even emit any) have no schema in kubeconform's default
+# catalog either. Unlike CNPG's `Cluster`, this project does not vendor a
+# schema for these four kinds: `PrometheusRule`/`ServiceMonitor` carry no
+# container/resource content to validate deeply (pure config the Operator
+# reconciles), and `Prometheus`/`Alertmanager`'s one property this project
+# actually cares about getting right — real `spec.resources`/`spec.replicas`
+# counting toward the CI budget, not silently zero — is already covered by a
+# stronger, more targeted check than a generic JSON-schema validation would
+# be: tests/policy/test_manifest_resources.py's own `custom_resource_
+# requests()` (the same Pitfall-6-avoiding treatment `cluster_requests()`
+# already gives CNPG's `Cluster` kind).
+#
 # Usage: scripts/render-manifests.sh
 # Exit status: non-zero if any chart fails to render, or if kubeconform
 # reports any invalid document.
@@ -69,6 +87,7 @@ done
 "${helm_bin}" repo add apache-airflow https://airflow.apache.org >/dev/null 2>&1 || true
 "${helm_bin}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true
+"${helm_bin}" repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo update >/dev/null
 
 # render_one <profile> <release> <chart-ref> <namespace> <version-var-name> <values-basename>
@@ -103,6 +122,8 @@ for profile in local ci; do
     OTEL_COLLECTOR_CHART_VERSION otel-collector
   render_one "${profile}" tempo grafana-community/tempo monitoring \
     TEMPO_CHART_VERSION tempo
+  render_one "${profile}" monitoring prometheus-community/kube-prometheus-stack monitoring \
+    KUBE_PROMETHEUS_STACK_CHART_VERSION monitoring
 done
 
 echo "==> kubeconform -strict against Kubernetes ${KUBERNETES_VERSION}"
@@ -110,6 +131,6 @@ echo "==> kubeconform -strict against Kubernetes ${KUBERNETES_VERSION}"
   -kubernetes-version "${KUBERNETES_VERSION}" \
   -schema-location default \
   -schema-location "${repo_root}/helm/schemas/cnpg/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
-  -skip CustomResourceDefinition \
+  -skip CustomResourceDefinition,PrometheusRule,ServiceMonitor,Prometheus,Alertmanager \
   "${repo_root}"/build/manifests/local/*.yaml \
   "${repo_root}"/build/manifests/ci/*.yaml

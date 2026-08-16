@@ -116,6 +116,7 @@ cluster = [
     { name = "boto3" },
     { name = "hvac" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "requests" },
     { name = "testcontainers", extra = ["minio"] },
 ]
 dev = [
@@ -145,6 +146,7 @@ cluster = [
     { name = "boto3", specifier = ">=1.43,<2" },
     { name = "hvac", specifier = ">=2.4,<3" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3,<4" },
+    { name = "requests", specifier = ">=2.32,<3" },
     { name = "testcontainers", extras = ["postgres", "minio"], specifier = ">=4.15,<5" },
 ]
 dev = [

@@ -27,6 +27,30 @@
 # is both the more meaningful signal and, by the time `helm_install` (default
 # `watcher`) has already returned, effectively a fast confirmation of a
 # condition Helm itself already waited for.
+#
+# kube-prometheus-stack (plan 07-07) is DIFFERENT from both charts above and
+# needs `hookOnly`, for the exact same reason 70-airflow.sh/80-vault.sh
+# already do: `helm template` this session confirms this chart DOES render
+# Helm hook resources (the `admission-create`/`admission-patch` Jobs,
+# `pre-install`/`post-install`), and `watcher` waits for the chart's own
+# non-hook Deployments (including `monitoring-grafana`) to become Ready
+# BEFORE running those hooks. On a FIRST-EVER `make cluster-up` (before
+# `make vault-bootstrap` has ever run), Grafana's own pod will fail to start
+# with a missing-Secret error (`grafana-alert-webhook` does not exist yet,
+# per plan 07-06's `_ensure_grafana_secrets`) -- `watcher` would therefore
+# deadlock exactly like the Airflow-migration-Job case `helm-install.sh`'s
+# own header comment documents. This is an accepted, documented
+# bootstrapping-order requirement identical in shape to Vault's own
+# cluster-up-then-unseal-then-bootstrap sequence, not a bug: run
+# `make vault-bootstrap` once, then `helm upgrade` this release again (or
+# just wait for Kubernetes' own Deployment controller to retry the pod once
+# the Secret exists -- no re-install needed). The follow-up wait below
+# therefore only targets `monitoring-kube-prometheus-operator` (a Deployment
+# with no Secret dependency, reconciled immediately) as a real "did the
+# release apply cleanly" signal -- it deliberately does NOT wait on Grafana
+# or the operator-managed Prometheus StatefulSet (created asynchronously by
+# the Operator once it is itself ready, not by this `helm upgrade` call at
+# all).
 
 set -euo pipefail
 
@@ -43,6 +67,7 @@ helm_bin="${repo_root}/tools/bin/helm"
 
 "${helm_bin}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true
+"${helm_bin}" repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo update >/dev/null
 
 helm_install otel-collector open-telemetry/opentelemetry-collector monitoring OTEL_COLLECTOR_CHART_VERSION otel-collector
@@ -51,4 +76,16 @@ helm_install tempo grafana-community/tempo monitoring TEMPO_CHART_VERSION tempo
 wait_for_deploy_available monitoring otel-collector-opentelemetry-collector
 wait_for_statefulset_ready monitoring tempo
 
-echo "==> Monitoring stage installed and running: otel-collector, tempo"
+# plan 07-07: AFTER the OTel Collector/Tempo installs above -- Task 1's own
+# additionalServiceMonitors entry targets the OTel Collector's already-live
+# Service, and this ordering matches this plan's own wave dependency
+# (depends_on 07-03). `hookOnly` -- see this file's own header comment.
+helm_install monitoring prometheus-community/kube-prometheus-stack monitoring \
+  KUBE_PROMETHEUS_STACK_CHART_VERSION monitoring hookOnly
+
+wait_for_deploy_available monitoring monitoring-kube-prometheus-operator
+
+echo "==> Monitoring stage installed and running: otel-collector, tempo, kube-prometheus-stack (prometheus-operator ready)"
+echo "      NOTE: on a first-ever cluster-up, Grafana's own pod stays in"
+echo "      CreateContainerConfigError until \`make vault-bootstrap\` creates"
+echo "      the grafana-alert-webhook Secret -- this is expected, not a bug."

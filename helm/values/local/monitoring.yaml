@@ -37,23 +37,50 @@ grafana:
         cpu: 50m
         memory: 32Mi
 
-  # The chart's own opinionated built-in Prometheus+Alertmanager datasource
-  # provisioning (grafana.sidecar.datasources.*, a sidecar-ConfigMap-watcher
-  # mechanism distinct from additionalDataSources below -- verified via
-  # `helm template` this session: `grafana.sidecar.datasources.enabled` is
-  # the exact key controlling it, nested under `sidecar:`, NOT a top-level
-  # `grafana.datasources` key) is turned OFF so this project controls the
-  # full, exact set of three datasources itself -- the chart's own default
-  # Alertmanager datasource would otherwise point at a Service that does not
-  # exist (alertmanager.enabled: false above), and its own default
-  # "Prometheus" datasource would be a fourth, redundant entry alongside the
-  # one defined explicitly below. Task 3's live check asserts EXACTLY three
-  # datasources. This also means the "grafana-sc-datasources" sidecar
-  # container never renders, leaving only "grafana-sc-dashboard" (Task 2's
-  # dashboard provisioning) and "grafana" -- both still sized by the single
-  # `sidecar:` block below (`sidecar.datasources.enabled: false` lives
-  # there too, alongside `sidecar.resources`, to keep exactly one `sidecar:`
-  # top-level key in this file).
+  # `download-dashboards` (fetches any `url`/`gnetId`-sourced dashboard) also
+  # renders unconditionally once ANY `dashboards:` entry is configured
+  # (Task 2 below) -- verified via `make manifest-policy` this session
+  # (test_every_container_is_sized caught it as an unsized container even
+  # though this project's own dashboard uses only an inline `json:` value,
+  # never `url`/`gnetId`) -- sized like every other init container here.
+  downloadDashboards:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+  # DISCOVERED LIVE this session (two iterations against the real deployed
+  # Grafana, both corrected empirically -- neither was obvious from
+  # `helm template` output alone):
+  #
+  # (1) `additionalDataSources` below is rendered into the SAME ConfigMap
+  #     (`templates/grafana/configmaps-datasources.yaml`) as the chart's own
+  #     default Prometheus+Alertmanager entries, and that ConfigMap only
+  #     ever gets LOADED into Grafana at all via the "grafana-sc-datasources"
+  #     SIDECAR CONTAINER watching for `grafana_datasource`-labelled
+  #     ConfigMaps and copying them into `/etc/grafana/provisioning/
+  #     datasources/` -- unlike `dashboards:` (Task 2 below), there is no
+  #     direct-volume-mount alternative for datasources. Setting
+  #     `sidecar.datasources.enabled: false` (an earlier iteration of this
+  #     file) therefore silently disabled `additionalDataSources` too: `GET
+  #     /api/datasources` returned an EMPTY list live, with no error
+  #     anywhere in the Grafana pod's logs. `sidecar.datasources.enabled`
+  #     MUST stay at its chart default (`true`) for this project's own three
+  #     datasources to load at all.
+  # (2) With the sidecar back on, the chart's own default "Prometheus" and
+  #     "Alertmanager" entries reappeared too (`sidecar.datasources.
+  #     defaultDatasourceEnabled`/`.alertmanager.enabled`, BOTH default
+  #     `true`, are independent flags nested inside the same `datasources:`
+  #     block, not implied by the outer `enabled` flag) -- including a live
+  #     `uid: prometheus` COLLISION with this project's own `prometheus`
+  #     entry below. Both are explicitly disabled here so exactly three
+  #     datasources exist, matching Task 3's live check (see the single
+  #     `sidecar:` block below, alongside `sidecar.resources`, for the
+  #     actual keys -- kept as one block, not two, so this file carries
+  #     exactly one `sidecar:` top-level key).
 
   # T-07-22 (STRIDE Elevation of Privilege, mitigated): the postgres entry
   # names `grafana_reader` explicitly -- never `etl_app`/`analytics_owner`.
@@ -109,10 +136,15 @@ grafana:
       cpu: 500m
       memory: 512Mi
   sidecar:
-    # Disables the chart's own default Prometheus+Alertmanager datasource
-    # sidecar-provisioning (see the comment above `additionalDataSources`).
+    # `datasources.enabled` deliberately NOT set here (chart default: true)
+    # -- see the comment above `additionalDataSources`: the sidecar itself
+    # must keep running for this project's own three datasources to load at
+    # all. Only the chart's own default Prometheus/Alertmanager entries are
+    # suppressed.
     datasources:
-      enabled: false
+      defaultDatasourceEnabled: false
+      alertmanager:
+        enabled: false
     resources:
       requests:
         cpu: 25m
@@ -724,25 +756,38 @@ prometheus:
         cpu: "1"
         memory: 1Gi
 
-    # RESEARCH.md Pitfall 6's own named failure mode: a hand-authored
-    # standalone ServiceMonitor manifest risks missing the Prometheus
-    # Operator's own serviceMonitorSelector label requirement and failing
-    # SILENTLY, with no error, just permanently-missing data. This is the
-    # chart's own idiomatic mechanism instead -- selector/endpoints verified
-    # live this session (`kubectl get svc -n monitoring --show-labels` /
-    # `-o yaml` against plan 07-03's already-deployed OTel Collector
-    # Service): label app.kubernetes.io/name=opentelemetry-collector, named
-    # port `prometheus` = 8889 (plan 07-03's own otel-collector.yaml
-    # `ports.prometheus` block). Without this entry, `dataplat`'s
-    # rows_rejected/rows_kept/runs_started/runs_finished counters (plans
-    # 07-02/07-05) reach the Collector but are NEVER visible to Prometheus.
-    additionalServiceMonitors:
-      - name: otel-collector
-        selector:
-          matchLabels:
-            app.kubernetes.io/name: opentelemetry-collector
-        namespaceSelector:
-          matchNames: [monitoring]
-        endpoints:
-          - port: prometheus
-            path: /metrics
+  # `additionalServiceMonitors` lives directly under `prometheus:`, a
+  # SIBLING of `prometheusSpec:` above (same 2-space indent, same
+  # `prometheus:` block), NOT nested inside `prometheusSpec:`
+  # (07-07-PLAN.md's own <interfaces> block showed it nested --
+  # DISCOVERED WRONG live this session: a `prometheusSpec.
+  # additionalServiceMonitors` entry rendered ZERO ServiceMonitor objects
+  # and Prometheus's own `/api/v1/targets` never listed an otel-collector
+  # job at all, no error anywhere. Confirmed against the chart's own
+  # template source, `templates/prometheus/servicemonitors.yaml` line 1:
+  # `{{- if and .Values.prometheus.enabled .Values.prometheus.
+  # additionalServiceMonitors }}` -- the top-level `prometheus.` namespace,
+  # not `prometheus.prometheusSpec.`). RESEARCH.md Pitfall 6's own named
+  # failure mode ("ServiceMonitor silently never scraped") turned out to
+  # apply one level higher than documented -- itself a second instance of
+  # the exact same silent-failure shape the Pitfall warns about, this time
+  # in values-key placement rather than label matching. Selector/endpoints
+  # verified live this session (`kubectl get svc -n monitoring
+  # --show-labels` / `-o yaml` against plan 07-03's already-deployed OTel
+  # Collector Service): label app.kubernetes.io/name=opentelemetry-collector,
+  # named port `prometheus` = 8889 (plan 07-03's own otel-collector.yaml
+  # `ports.prometheus` block). Without this entry, `dataplat`'s
+  # rows_rejected/rows_kept/runs_started/runs_finished counters (plans
+  # 07-02/07-05) reach the Collector but are NEVER visible to Prometheus.
+  # Re-verified live after this fix: `GET /api/v1/targets` (via Grafana's
+  # datasource proxy) lists an `otel-collector` job with `health: up`.
+  additionalServiceMonitors:
+    - name: otel-collector
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: opentelemetry-collector
+      namespaceSelector:
+        matchNames: [monitoring]
+      endpoints:
+        - port: prometheus
+          path: /metrics

@@ -23,6 +23,20 @@ grafana:
         cpu: 50m
         memory: 32Mi
 
+  downloadDashboards:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+  # See helm/values/local/monitoring.yaml's own header comments (DISCOVERED
+  # LIVE this session) for the full argument: `sidecar.datasources.enabled`
+  # MUST stay at the chart default (true) for additionalDataSources below to
+  # load at all -- only `defaultDatasourceEnabled`/`alertmanager.enabled`
+  # are disabled, in the single `sidecar:` block below.
   additionalDataSources:
     - name: analytics-postgres
       uid: analytics-postgres
@@ -59,11 +73,15 @@ grafana:
       cpu: 200m
       memory: 256Mi
   sidecar:
-    # Same reasoning as helm/values/local/monitoring.yaml: turns off the
-    # chart's own default Prometheus+Alertmanager datasource sidecar so
-    # exactly the three additionalDataSources above are provisioned.
+    # `datasources.enabled` deliberately NOT set (chart default: true) --
+    # same reasoning as helm/values/local/monitoring.yaml's own header
+    # comment. Only the chart's own default Prometheus/Alertmanager entries
+    # are suppressed, so exactly the three additionalDataSources above are
+    # the ones that load.
     datasources:
-      enabled: false
+      defaultDatasourceEnabled: false
+      alertmanager:
+        enabled: false
     resources:
       requests:
         cpu: 10m
@@ -663,17 +681,21 @@ prometheus:
         cpu: 500m
         memory: 512Mi
 
-    # IDENTICAL structural shape to local -- D-16/monitoring-enablement is
-    # about whether this chart is deployed LIVE in CI (it never is), not
-    # about whether its rendered manifests correctly reflect the same
-    # additionalServiceMonitors wiring the local profile proves live.
-    additionalServiceMonitors:
-      - name: otel-collector
-        selector:
-          matchLabels:
-            app.kubernetes.io/name: opentelemetry-collector
-        namespaceSelector:
-          matchNames: [monitoring]
-        endpoints:
-          - port: prometheus
-            path: /metrics
+  # `additionalServiceMonitors` lives directly under `prometheus:`, a
+  # SIBLING of `prometheusSpec:` above -- see helm/values/local/
+  # monitoring.yaml's own header comment on this same key for the full,
+  # live-discovered argument. IDENTICAL structural shape to local --
+  # D-16/monitoring-enablement is about whether this chart is deployed LIVE
+  # in CI (it never is), not about whether its rendered manifests correctly
+  # reflect the same additionalServiceMonitors wiring the local profile
+  # proves live.
+  additionalServiceMonitors:
+    - name: otel-collector
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: opentelemetry-collector
+      namespaceSelector:
+        matchNames: [monitoring]
+      endpoints:
+        - port: prometheus
+          path: /metrics

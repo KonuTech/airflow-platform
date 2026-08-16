@@ -97,6 +97,14 @@ cluster = [
   # — same reasoning as boto3/psycopg above (tests/e2e/*/conftest.py's own
   # import must not couple to whichever dataplat version resolves it later).
   "hvac>=2.4,<3",
+  # plan 07-07: tests/e2e/observability/conftest.py's `grafana_api` fixture
+  # imports requests directly to call Grafana's own REST API (kubectl
+  # port-forward + HTTP basic auth, no SDK exists for this). Already an
+  # indirect dependency of hvac (>=2.27.1,<3.0.0) -- pinned explicitly here
+  # for the same reason boto3/psycopg/hvac are: a test tier's own direct
+  # import must not silently couple to whichever transitive version a
+  # DIFFERENT package happens to resolve.
+  "requests>=2.32,<3",
 ]
 
 [tool.ruff]
