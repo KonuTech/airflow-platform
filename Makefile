@@ -181,7 +181,7 @@ vault-audit-tail:                ## D-04: human-readable tail of Vault's persist
 	# script actually consumes.
 	$(RUN_CLUSTER) python scripts/vault-audit-tail.py
 
-cluster-verify:                 ## D-16: run tests/e2e/cluster and tests/e2e/slice against the live cluster [plan 02-02, extended 04-09]
+cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice and tests/e2e/observability against the live cluster [plan 02-02, extended 04-09, 07-07]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
 	# deliberately excluded from `dev` and from every uv default-group set, so
 	# the offline gate's own environment can never import them. Reachable from
@@ -194,7 +194,12 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster and tests/e2e/sli
 	# standalone install path when you want the environment prepared without
 	# running the suite. tests/e2e/slice (plan 04-08) joins tests/e2e/cluster
 	# here so this one target collects this phase's whole E2E suite.
-	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice -q
+	# tests/e2e/observability (plan 07-07) joins the same way -- unlike
+	# tests/e2e/vault's own dedicated vault-verify target, this package's own
+	# prerequisites (cluster-up + vault-bootstrap) are already what every
+	# other suite collected here needs too, so a second target would just
+	# duplicate this one's own invocation shape for no reason.
+	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice tests/e2e/observability -q
 
 test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — migrations, dataplat [plan 03-02]
 	# $(RUN_CLUSTER), same reasoning as cluster-verify above: testcontainers
@@ -305,7 +310,7 @@ stage-%:                       ## Run exactly one scripts/stages/<name>.sh (no p
 	set -a; . helm/versions.env; set +a; \
 	PROFILE=$(PROFILE) KUBECTL_CONTEXT="kind-$$CLUSTER_NAME" "$$script"
 
-helm-lint:                      ## CICD-07: helm lint all seven pinned charts against every values profile [plan 02-07, 07-03]
+helm-lint:                      ## CICD-07: helm lint all eight pinned charts against every values profile [plan 02-07, 07-03, 07-07]
 	# No version literal here — every version comes from helm/versions.env,
 	# the same rule test_the_makefile_scanner_target_defers_to_the_pinned_
 	# installer already enforces for the gitleaks target. `helm lint` wants a
@@ -322,6 +327,7 @@ helm-lint:                      ## CICD-07: helm lint all seven pinned charts ag
 	"$${helm_bin}" repo add apache-airflow https://airflow.apache.org >/dev/null 2>&1 || true; \
 	"$${helm_bin}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null 2>&1 || true; \
 	"$${helm_bin}" repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true; \
+	"$${helm_bin}" repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true; \
 	"$${helm_bin}" repo update >/dev/null; \
 	workdir="$$(mktemp -d)"; \
 	trap 'rm -rf "$$workdir"' EXIT; \
@@ -345,9 +351,10 @@ helm-lint:                      ## CICD-07: helm lint all seven pinned charts ag
 	lint_chart airflow apache-airflow/airflow "$${AIRFLOW_CHART_VERSION}" airflow; \
 	lint_chart otel-collector open-telemetry/opentelemetry-collector "$${OTEL_COLLECTOR_CHART_VERSION}" otel-collector; \
 	lint_chart tempo grafana-community/tempo "$${TEMPO_CHART_VERSION}" tempo; \
+	lint_chart monitoring prometheus-community/kube-prometheus-stack "$${KUBE_PROMETHEUS_STACK_CHART_VERSION}" monitoring; \
 	exit $$failed
 
-manifests: helm-lint             ## CICD-07/INFRA-10: render + kubeconform -strict, both profiles, all seven charts [plan 02-07, 07-03]
+manifests: helm-lint             ## CICD-07/INFRA-10: render + kubeconform -strict, both profiles, all eight charts [plan 02-07, 07-03, 07-07]
 	# Installs the two binaries it needs as its own first lines — exactly like
 	# the gitleaks target calls tools/security/install_gitleaks.sh — so this
 	# target (and therefore the CI job that calls it) never assumes a

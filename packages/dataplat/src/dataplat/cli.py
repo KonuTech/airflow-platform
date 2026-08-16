@@ -20,7 +20,12 @@ of user/operator error a CLI has to handle, not a bug). Any OTHER exception
 is deliberately NOT caught here (ARCHITECTURE.md Sec 4.5 bans a blanket
 catch-all clause anywhere outside this scoped boundary) and propagates to the
 process, because it is a bug to surface loudly, not a condition this
-boundary should paper over.
+boundary should paper over. A ``finally`` block flushes both observability
+backends unconditionally before returning (plan 07-07, discovered live: this
+CLI's own invocations are short-lived enough that neither provider's
+internal export timer ever fires on its own -- see ``tracing.flush()``/
+``metrics.flush()``'s own docstrings) -- this runs on every exit path,
+including an uncaught exception propagating past this function entirely.
 
 This phase's only subcommand is the ``--version`` flag on the group itself;
 ``ingest`` (Phase 4) and later subcommands attach to the same ``cli`` group
@@ -107,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     env var into the active OTel context and configures both the ``tracing``
     and ``metrics`` observability backends exactly once, at this same point
     -- before any subcommand (including the plugin-loaded ``ingest``) can
-    create a span or increment a counter (OBS-08/OBS-10).
+    create a span or increment a counter (OBS-08/OBS-10). Flushes both
+    backends unconditionally, in a ``finally`` block, before returning --
+    this short-lived batch process would otherwise exit before either
+    provider's own internal export timer ever fires, silently discarding
+    every span/metric recorded during the run (discovered live, plan 07-07).
 
     A ``DataPlatformError`` raised by any subcommand is caught exactly once
     here (D-06), logged with structured context, and turned into exit code
@@ -195,6 +204,30 @@ def main(argv: list[str] | None = None) -> int:
         # EOF/Ctrl-C during a prompt. standalone_mode=True would print
         # "Aborted!" and exit 1; mirror the exit code here (CR-01).
         return 1
+    finally:
+        # OBS-08/OBS-10, discovered live (plan 07-07): `configure()` above
+        # wires a real `PeriodicExportingMetricReader`/`BatchSpanProcessor`
+        # -- both buffer in-process and only export on their own internal
+        # timer (metrics default: 60s) or an explicit flush. This CLI is a
+        # short-lived batch invocation (a real `ingest` run against a small
+        # file completes in ~3s, verified live against a running pod) that
+        # exits long before either internal timer would ever fire on its
+        # own, so every span/metric recorded during THIS process's entire
+        # lifetime was being silently discarded on every single invocation
+        # until this `finally` block existed -- confirmed live: the OTel
+        # Collector's own `/metrics` endpoint showed zero `dataplat`-owned
+        # series after multiple real, successfully-completed ingestion runs
+        # with `tracing.configure()`/`metrics.configure()` correctly wired
+        # to a reachable collector. Runs on EVERY exit path (the success
+        # fallthrough, every `except` branch above, AND an uncaught
+        # exception propagating past this function entirely) -- `finally`
+        # semantics guarantee that; a call placed only after the `try`
+        # block would miss the uncaught-exception path (ARCHITECTURE.md
+        # Sec 4.5's own "propagate loudly, don't paper over" case).
+        # No-op-safe in every case: both `flush()` functions are genuine
+        # no-ops when `configure()` was never given a real endpoint.
+        tracing.flush()
+        metrics.flush()
     return 0
 
 

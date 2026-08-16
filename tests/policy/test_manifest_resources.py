@@ -116,12 +116,27 @@ POD_TEMPLATE_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet", "Job",
 
 # Kinds that legitimately carry no container — reject-listing every Kubernetes
 # kind that is not one of these (and not a Pod-template kind, CronJob, Pod, or
-# the CNPG `Cluster` special case below) is the fail-closed half of Pitfall 6:
-# a workload kind this repository's charts start emitting tomorrow and this
-# set has never seen must be a named failure, not a silent zero.
+# the CNPG `Cluster` / kube-prometheus-stack `Prometheus`/`Alertmanager`
+# special cases below) is the fail-closed half of Pitfall 6: a workload kind
+# this repository's charts start emitting tomorrow and this set has never
+# seen must be a named failure, not a silent zero.
 NO_CONTAINER_KINDS = frozenset(
     {
         "Cluster",  # special-cased separately — see cluster_requests() below
+        # plan 07-07: kube-prometheus-stack's own CRD kinds. `PrometheusRule`
+        # and `ServiceMonitor` genuinely never carry a container (pure
+        # config objects the Operator reconciles). `Prometheus`/
+        # `Alertmanager` DO have a real, non-container-shaped resource
+        # footprint (the Operator turns `spec.resources`/`spec.replicas`
+        # into an actual StatefulSet's Pod template at runtime, invisible to
+        # `helm template`) — special-cased in `custom_resource_requests()`
+        # below, the same Pitfall-6-avoiding treatment `cluster_requests()`
+        # already gives CNPG's `Cluster` kind, so listing them here alone
+        # would silently zero them out of every budget sum instead.
+        "PrometheusRule",
+        "ServiceMonitor",
+        "Prometheus",  # special-cased separately — see custom_resource_requests() below
+        "Alertmanager",  # special-cased separately — see custom_resource_requests() below
         "APIService",
         "ClusterRole",
         "ClusterRoleBinding",
@@ -146,6 +161,16 @@ NO_CONTAINER_KINDS = frozenset(
         "ValidatingWebhookConfiguration",
     },
 )
+
+# plan 07-07: kube-prometheus-stack CRD kinds whose `spec.replicas` field
+# multiplies `spec.resources.requests` the same way CNPG's `Cluster.spec.
+# instances` does (cluster_requests() below) — a real Prometheus/Alertmanager
+# StatefulSet is created by the Operator at runtime with exactly this many
+# replicas, each requesting `spec.resources.requests`.
+CUSTOM_RESOURCE_REPLICA_FIELD: dict[str, str] = {
+    "Prometheus": "replicas",
+    "Alertmanager": "replicas",
+}
 
 
 def is_test_hook(doc: dict[str, Any]) -> bool:
@@ -196,6 +221,51 @@ def cluster_requests(doc: dict[str, Any]) -> tuple[float, float]:
     return cpu, memory
 
 
+def custom_resource_requests(doc: dict[str, Any]) -> tuple[float, float]:
+    """kube-prometheus-stack `Prometheus`/`Alertmanager` CRs are not Pod templates (Pitfall 6).
+
+    Same shape as `cluster_requests()` above, generalised to whichever
+    `CUSTOM_RESOURCE_REPLICA_FIELD` entry names this doc's own replica-count
+    field (`spec.replicas`, not CNPG's `spec.instances`): the Operator turns
+    `spec.resources.requests` times `spec.replicas` into an actual
+    StatefulSet at runtime, invisible to `helm template` — a silent zero
+    here would repeat exactly the bug this project's own Pitfall 6 already
+    names for CNPG.
+    """
+    kind = doc.get("kind", "")
+    replica_field = CUSTOM_RESOURCE_REPLICA_FIELD[kind]
+    spec = doc.get("spec") or {}
+    replicas = spec.get(replica_field, 1)
+    requests = ((spec.get("resources") or {}).get("requests")) or {}
+    cpu = parse_quantity(requests.get("cpu")) * replicas
+    memory = parse_quantity(requests.get("memory")) * replicas
+    return cpu, memory
+
+
+def _unwrap_lists(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten a `kind: List` meta-document into its own real `items`, recursively.
+
+    plan 07-07: kube-prometheus-stack's own `additionalServiceMonitors`
+    template (`templates/prometheus/servicemonitors.yaml`) wraps its
+    variable-length `{{- range }}` output in one `apiVersion: v1, kind:
+    List, items: [...]` meta-document rather than emitting one `---`-
+    separated document per item — verified via `helm template` this
+    session. A `List` is not itself a workload and must never be treated as
+    a single zero-container document (that would be exactly Pitfall 6's
+    "silent zero" failure mode if a future List ever wraps something with a
+    real container) — each of its `items` is unwrapped and walked as its
+    own independent document instead, the same way it would be if the
+    chart had used `---` separators. Recursive: nothing in Kubernetes
+    forbids a `List` of `List`s, however unlikely.
+    """
+    if doc.get("kind") != "List":
+        return [doc]
+    flattened: list[dict[str, Any]] = []
+    for item in doc.get("items") or []:
+        flattened.extend(_unwrap_lists(item))
+    return flattened
+
+
 def load_documents(paths: list[Path]) -> list[tuple[str, dict[str, Any]]]:
     """(label, doc) pairs for every non-null, non-test-hook document across `paths`."""
     out: list[tuple[str, dict[str, Any]]] = []
@@ -206,17 +276,25 @@ def load_documents(paths: list[Path]) -> list[tuple[str, dict[str, Any]]]:
             # comments parses to None, not {} (02-RESEARCH.md skeleton).
             if not doc or is_test_hook(doc):
                 continue
-            out.append((label, doc))
+            for unwrapped in _unwrap_lists(doc):
+                if not unwrapped or is_test_hook(unwrapped):
+                    continue
+                out.append((label, unwrapped))
     return out
 
 
 def request_totals(labeled_docs: list[tuple[str, dict[str, Any]]]) -> tuple[float, float]:
-    """Sum CPU cores and memory bytes requested across every container and Cluster CR."""
+    """Sum CPU cores and memory bytes requested across every container, Cluster and CR."""
     cpu_total = 0.0
     memory_total = 0.0
     for _, doc in labeled_docs:
         if doc.get("kind") == "Cluster":
             cpu, memory = cluster_requests(doc)
+            cpu_total += cpu
+            memory_total += memory
+            continue
+        if doc.get("kind") in CUSTOM_RESOURCE_REPLICA_FIELD:
+            cpu, memory = custom_resource_requests(doc)
             cpu_total += cpu
             memory_total += memory
             continue
@@ -247,6 +325,8 @@ def unsized_containers(labeled_docs: list[tuple[str, dict[str, Any]]]) -> list[s
     for label, doc in labeled_docs:
         if doc.get("kind") == "Cluster":
             continue  # sized separately by cluster_requests(); not a container
+        if doc.get("kind") in CUSTOM_RESOURCE_REPLICA_FIELD:
+            continue  # sized separately by custom_resource_requests(); not a container
         kind = doc.get("kind", "<unknown>")
         name = (doc.get("metadata") or {}).get("name", "<unnamed>")
         for container in containers(doc):

@@ -1,0 +1,793 @@
+# kube-prometheus-stack values (plan 07-07): the operational surface the
+# rest of Phase 7 already built (grafana_reader-authenticated Postgres,
+# plan 07-01/07-06; the OTel Collector's Prometheus exporter, plan 07-03;
+# Tempo, plan 07-03) becomes one dashboard + one alerting engine.
+#
+# D-07 (the ONLY alerting engine this project uses): kube-prometheus-stack's
+# bundled Alertmanager is DELIBERATELY never enabled. Grafana's own native
+# unified alerting (grafana.alerting below, Task 2) evaluates both the
+# Postgres-datasource freshness condition and the Prometheus-datasource live
+# gauges. alertmanager.enabled: false is IDENTICAL in both profiles --
+# D-07's "one alerting engine" is a design decision, not a resource-sizing
+# concern, so this key does not belong to any of test_values_profiles.py's
+# permitted divergence axes.
+alertmanager:
+  enabled: false
+
+grafana:
+  # The exact Secret name plan 07-06's `_ensure_grafana_secrets` bootstrap
+  # step creates in namespace `monitoring` (keys GRAFANA_DB_PASSWORD /
+  # GRAFANA_ALERT_WEBHOOK_URL) -- envFromSecret injects both as container
+  # env vars, which $GRAFANA_DB_PASSWORD / $GRAFANA_ALERT_WEBHOOK_URL below
+  # (single-`$`, RESEARCH.md Pitfall 5) then reference by name.
+  envFromSecret: grafana-alert-webhook
+
+  # `initChownData` (`chown`-ing the persistence PVC to Grafana's own UID/GID
+  # before the main container starts) is enabled by default whenever
+  # `persistence.enabled: true` -- verified via `helm template` this session,
+  # the "init-chown-data" initContainer renders unconditionally once
+  # persistence is on, and needs its own `resources:` sizing exactly like
+  # every other container this file sizes.
+  initChownData:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+  # `download-dashboards` (fetches any `url`/`gnetId`-sourced dashboard) also
+  # renders unconditionally once ANY `dashboards:` entry is configured
+  # (Task 2 below) -- verified via `make manifest-policy` this session
+  # (test_every_container_is_sized caught it as an unsized container even
+  # though this project's own dashboard uses only an inline `json:` value,
+  # never `url`/`gnetId`) -- sized like every other init container here.
+  downloadDashboards:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+  # DISCOVERED LIVE this session (two iterations against the real deployed
+  # Grafana, both corrected empirically -- neither was obvious from
+  # `helm template` output alone):
+  #
+  # (1) `additionalDataSources` below is rendered into the SAME ConfigMap
+  #     (`templates/grafana/configmaps-datasources.yaml`) as the chart's own
+  #     default Prometheus+Alertmanager entries, and that ConfigMap only
+  #     ever gets LOADED into Grafana at all via the "grafana-sc-datasources"
+  #     SIDECAR CONTAINER watching for `grafana_datasource`-labelled
+  #     ConfigMaps and copying them into `/etc/grafana/provisioning/
+  #     datasources/` -- unlike `dashboards:` (Task 2 below), there is no
+  #     direct-volume-mount alternative for datasources. Setting
+  #     `sidecar.datasources.enabled: false` (an earlier iteration of this
+  #     file) therefore silently disabled `additionalDataSources` too: `GET
+  #     /api/datasources` returned an EMPTY list live, with no error
+  #     anywhere in the Grafana pod's logs. `sidecar.datasources.enabled`
+  #     MUST stay at its chart default (`true`) for this project's own three
+  #     datasources to load at all.
+  # (2) With the sidecar back on, the chart's own default "Prometheus" and
+  #     "Alertmanager" entries reappeared too (`sidecar.datasources.
+  #     defaultDatasourceEnabled`/`.alertmanager.enabled`, BOTH default
+  #     `true`, are independent flags nested inside the same `datasources:`
+  #     block, not implied by the outer `enabled` flag) -- including a live
+  #     `uid: prometheus` COLLISION with this project's own `prometheus`
+  #     entry below. Both are explicitly disabled here so exactly three
+  #     datasources exist, matching Task 3's live check (see the single
+  #     `sidecar:` block below, alongside `sidecar.resources`, for the
+  #     actual keys -- kept as one block, not two, so this file carries
+  #     exactly one `sidecar:` top-level key).
+
+  # T-07-22 (STRIDE Elevation of Privilege, mitigated): the postgres entry
+  # names `grafana_reader` explicitly -- never `etl_app`/`analytics_owner`.
+  # T-07-21 (STRIDE Tampering-in-transit, accepted): `sslmode: disable` is
+  # this project's already-established local-dev, in-cluster-only posture
+  # (matches etl_app's own DSN -- no sslmode override there either).
+  additionalDataSources:
+    - name: analytics-postgres
+      uid: analytics-postgres
+      type: postgres
+      access: proxy
+      url: analytics-db-rw.data.svc.cluster.local:5432
+      user: grafana_reader
+      jsonData:
+        database: analytics
+        sslmode: disable # T-07-21: accepted, local-dev, in-cluster-only traffic
+        postgresVersion: 1800
+      secureJsonData:
+        password: $GRAFANA_DB_PASSWORD
+    - name: prometheus
+      uid: prometheus
+      type: prometheus
+      access: proxy
+      # This chart's own front-door Service for its Prometheus release
+      # (verified via `helm template` this session: templates/prometheus/
+      # service.yaml, port name `http-web`, port 9090) -- not the operator's
+      # internal per-replica headless Service.
+      url: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+    - name: tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      # Plan 07-03's own Tempo release name/namespace; the chart's default
+      # OTLP-adjacent query port (3200, Tempo's own HTTP API) -- verified via
+      # `helm show values grafana-community/tempo` (plan 07-03's own
+      # tempo.yaml header comment already establishes this Service exists).
+      url: http://tempo.monitoring.svc.cluster.local:3200
+
+  persistence:
+    enabled: true
+    size: 2Gi # dashboards/provisioning state only -- no metric data lives here
+
+  # Sized like vault.yaml's own local profile (T-05 precedent): a single,
+  # lightweight, always-on service in this cluster. `sidecar.resources`
+  # covers BOTH the dashboards and datasources sidecar containers this
+  # chart renders by default (verified via `helm template` this session --
+  # ONE values key sizes both).
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  sidecar:
+    # `datasources.enabled` deliberately NOT set here (chart default: true)
+    # -- see the comment above `additionalDataSources`: the sidecar itself
+    # must keep running for this project's own three datasources to load at
+    # all. Only the chart's own default Prometheus/Alertmanager entries are
+    # suppressed.
+    datasources:
+      defaultDatasourceEnabled: false
+      alertmanager:
+        enabled: false
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # Task 2: one dashboard covering all 8 named metrics + the 3 D-03 live
+  # gauges. The chart's own `dashboardProviders`/`dashboards` values-key
+  # mechanism (a `type: file` provider whose JSON is baked into a
+  # `grafana_dashboard`-labelled ConfigMap the chart's own already-enabled
+  # dashboards sidecar picks up -- verified via `helm template` this
+  # session) -- NOT a hand-authored standalone ConfigMap.
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: platform
+          orgId: 1
+          folder: 'Platform'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/platform
+  dashboards:
+    platform:
+      platform-observability:
+        json: |
+          {
+            "id": null,
+            "uid": "platform-observability",
+            "title": "Platform Observability",
+            "tags": [
+              "platform",
+              "phase-07"
+            ],
+            "timezone": "utc",
+            "schemaVersion": 39,
+            "version": 1,
+            "refresh": "30s",
+            "time": {
+              "from": "now-24h",
+              "to": "now"
+            },
+            "panels": [
+              {
+                "id": 1,
+                "type": "stat",
+                "title": "files_processed",
+                "gridPos": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COUNT(*) AS files_processed FROM meta.ingestion_runs WHERE file_id IS NOT NULL AND status = 'SUCCEEDED'"
+                  }
+                ]
+              },
+              {
+                "id": 2,
+                "type": "stat",
+                "title": "files_failed",
+                "gridPos": {
+                  "x": 6,
+                  "y": 0,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COUNT(*) AS files_failed FROM meta.ingestion_runs WHERE file_id IS NOT NULL AND status = 'FAILED'"
+                  }
+                ]
+              },
+              {
+                "id": 3,
+                "type": "stat",
+                "title": "rows_processed",
+                "gridPos": {
+                  "x": 12,
+                  "y": 0,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COALESCE(SUM(rows_loaded), 0) AS rows_processed FROM meta.ingestion_runs"
+                  }
+                ]
+              },
+              {
+                "id": 4,
+                "type": "stat",
+                "title": "rows_invalid",
+                "gridPos": {
+                  "x": 18,
+                  "y": 0,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COALESCE(SUM(rows_invalid), 0) AS rows_invalid FROM meta.ingestion_runs"
+                  }
+                ]
+              },
+              {
+                "id": 5,
+                "type": "stat",
+                "title": "rows_deduplicated",
+                "gridPos": {
+                  "x": 0,
+                  "y": 6,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COALESCE(SUM(rows_deduplicated), 0) AS rows_deduplicated FROM meta.ingestion_runs"
+                  }
+                ]
+              },
+              {
+                "id": 6,
+                "type": "stat",
+                "title": "processing_duration",
+                "gridPos": {
+                  "x": 6,
+                  "y": 6,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "ms"
+                  },
+                  "overrides": []
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COALESCE(AVG(duration_ms), 0) AS processing_duration FROM meta.ingestion_runs WHERE duration_ms IS NOT NULL"
+                  }
+                ]
+              },
+              {
+                "id": 7,
+                "type": "stat",
+                "title": "validation_failures",
+                "gridPos": {
+                  "x": 12,
+                  "y": 6,
+                  "w": 6,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "description": "Same signal as rows_invalid until Phase 8's meta.validation_results exists -- no finer-grained validation-failure table exists yet.",
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT COALESCE(SUM(rows_invalid), 0) AS validation_failures FROM meta.ingestion_runs"
+                  }
+                ]
+              },
+              {
+                "id": 8,
+                "type": "table",
+                "title": "data_freshness",
+                "gridPos": {
+                  "x": 0,
+                  "y": 12,
+                  "w": 24,
+                  "h": 8
+                },
+                "datasource": {
+                  "type": "postgres",
+                  "uid": "analytics-postgres"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "format": "table",
+                    "rawSql": "SELECT d.dataset_id, d.dataset_name, d.expected_frequency, d.freshness_warn_after, d.freshness_fail_after, COALESCE(MAX(f.discovered_at), d.created_at) AS last_received_at, CASE WHEN d.freshness_fail_after IS NOT NULL AND now() - COALESCE(MAX(f.discovered_at), d.created_at) > d.expected_frequency + d.freshness_fail_after THEN 'fail' WHEN now() - COALESCE(MAX(f.discovered_at), d.created_at) > d.expected_frequency + COALESCE(d.freshness_warn_after, interval '0') THEN 'warn' ELSE 'ok' END AS freshness_status FROM meta.datasets d LEFT JOIN meta.files f ON f.dataset_id = d.dataset_id WHERE d.expected_frequency IS NOT NULL GROUP BY d.dataset_id, d.dataset_name, d.expected_frequency, d.freshness_warn_after, d.freshness_fail_after, d.created_at"
+                  }
+                ]
+              },
+              {
+                "id": 9,
+                "type": "stat",
+                "title": "In-flight runs (live gauge)",
+                "gridPos": {
+                  "x": 0,
+                  "y": 20,
+                  "w": 8,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "instant": true,
+                    "range": false,
+                    "expr": "sum(runs_started) - sum(runs_finished)"
+                  }
+                ]
+              },
+              {
+                "id": 10,
+                "type": "stat",
+                "title": "Recent failure rate (live gauge)",
+                "gridPos": {
+                  "x": 8,
+                  "y": 20,
+                  "w": 8,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "percentunit"
+                  },
+                  "overrides": []
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "instant": true,
+                    "range": false,
+                    "expr": "sum(rate(runs_finished{status=\"failed\"}[5m])) / sum(rate(runs_finished[5m]))"
+                  }
+                ]
+              },
+              {
+                "id": 11,
+                "type": "stat",
+                "title": "Row-level reject rate (live gauge)",
+                "gridPos": {
+                  "x": 16,
+                  "y": 20,
+                  "w": 8,
+                  "h": 6
+                },
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "unit": "percentunit"
+                  },
+                  "overrides": []
+                },
+                "targets": [
+                  {
+                    "refId": "A",
+                    "instant": true,
+                    "range": false,
+                    "expr": "sum(rate(rows_rejected[5m])) / (sum(rate(rows_rejected[5m])) + sum(rate(rows_kept[5m])))"
+                  }
+                ]
+              }
+            ]
+          }
+
+  # Task 2: Grafana native unified alerting-as-code (RESEARCH.md Pattern 4 --
+  # the `alerting: {}` values key, never the sidecar ConfigMap-watcher).
+  # D-07: the ONLY alerting engine this project uses.
+  alerting:
+    contactpoints.yaml:
+      apiVersion: 1
+      contactPoints:
+        - orgId: 1
+          name: platform-webhook
+          receivers:
+            - uid: platform-webhook-1
+              type: webhook
+              settings:
+                # Single-`$` form only (RESEARCH.md Pitfall 5 -- `${VAR}`
+                # double-expands `$`). Resolves from the grafana-alert-webhook
+                # Secret's GRAFANA_ALERT_WEBHOOK_URL key (envFromSecret above,
+                # plan 07-06's Vault-bootstrapped value) -- never a literal.
+                url: $GRAFANA_ALERT_WEBHOOK_URL
+    policies.yaml:
+      apiVersion: 1
+      policies:
+        - orgId: 1
+          receiver: platform-webhook
+    # Byte-identical WARN-tier SQL to tests/integration/test_freshness_query.py's
+    # own FRESHNESS_BREACH_QUERY constant (verified this session via a direct
+    # Python diff) -- Plan 07-01's own already-tested query, never re-derived.
+    rules.yaml:
+      apiVersion: 1
+      groups:
+        - orgId: 1
+          name: platform
+          folder: Platform
+          interval: 5m
+          rules:
+            - uid: freshness-warn
+              title: "Data freshness: WARN threshold breached"
+              condition: C
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: analytics-postgres
+                  model:
+                    refId: A
+                    format: table
+                    rawSql: |
+                      SELECT
+                          d.dataset_id,
+                          d.dataset_name,
+                          d.expected_frequency,
+                          d.freshness_warn_after,
+                          d.freshness_fail_after,
+                          COALESCE(MAX(f.discovered_at), d.created_at)                        AS last_received_at,
+                          MAX(r.finished_at) FILTER (WHERE r.status = 'SUCCEEDED')            AS last_success_at,
+                          now() - COALESCE(MAX(f.discovered_at), d.created_at)                AS processing_delay
+                      FROM meta.datasets d
+                      LEFT JOIN meta.files f          ON f.dataset_id = d.dataset_id
+                      LEFT JOIN meta.ingestion_runs r ON r.dataset_id = d.dataset_id
+                      WHERE d.expected_frequency IS NOT NULL   -- OBS-09: NULL here means "stays quiet", structurally
+                      GROUP BY d.dataset_id, d.dataset_name, d.expected_frequency,
+                               d.freshness_warn_after, d.freshness_fail_after, d.created_at
+                      HAVING now() - COALESCE(MAX(f.discovered_at), d.created_at)
+                             > d.expected_frequency + COALESCE(d.freshness_warn_after, interval '0');
+                - refId: B
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: reduce
+                    expression: A
+                    reducer: count
+                - refId: C
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: C
+                    type: threshold
+                    expression: B
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: NoData
+              execErrState: Error
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "One or more datasets have exceeded their expected_frequency + freshness_warn_after grace period."
+            - uid: freshness-fail
+              title: "Data freshness: FAIL threshold breached"
+              condition: C
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: analytics-postgres
+                  model:
+                    refId: A
+                    format: table
+                    rawSql: |
+                      SELECT d.dataset_id, d.dataset_name, d.expected_frequency, d.freshness_warn_after,
+                             d.freshness_fail_after
+                        FROM meta.datasets d
+                        LEFT JOIN meta.files f ON f.dataset_id = d.dataset_id
+                        LEFT JOIN meta.ingestion_runs r ON r.dataset_id = d.dataset_id
+                       WHERE d.expected_frequency IS NOT NULL AND d.freshness_fail_after IS NOT NULL
+                       GROUP BY d.dataset_id, d.dataset_name, d.expected_frequency, d.freshness_warn_after,
+                                d.freshness_fail_after, d.created_at
+                      HAVING now() - COALESCE(MAX(f.discovered_at), d.created_at)
+                             > d.expected_frequency + d.freshness_fail_after;
+                - refId: B
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: reduce
+                    expression: A
+                    reducer: count
+                - refId: C
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: C
+                    type: threshold
+                    expression: B
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: NoData
+              execErrState: Error
+              for: 5m
+              labels:
+                severity: critical
+              annotations:
+                summary: "One or more datasets (with a configured freshness_fail_after) have exceeded their FAIL-tier grace period."
+            # (3)-(5): one rule per D-03 live gauge, against the `prometheus`
+            # datasource -- illustrative thresholds for a synthetic-fixture-scale
+            # local platform, documented inline, not a tuned production SLO.
+            - uid: gauge-runs-inflight
+              title: "Live gauge: too many runs in-flight"
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    range: false
+                    # A single-dataset local pipeline should rarely have more than
+                    # ~10 concurrent runs; a sustained value above that suggests a
+                    # stuck/leaked run never reaching a terminal state.
+                    expr: "sum(runs_started) - sum(runs_finished)"
+                - refId: B
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [10] }
+              noDataState: NoData
+              execErrState: Error
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "sum(runs_started) - sum(runs_finished) exceeded 10 for 5m."
+            - uid: gauge-failure-rate
+              title: "Live gauge: elevated run failure rate"
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    range: false
+                    # 0.5 (50%) is a reasonable illustrative default for this
+                    # project's own local, synthetic-fixture-scale platform -- not
+                    # a tuned production SLO.
+                    expr: "sum(rate(runs_finished{status=\"failed\"}[5m])) / sum(rate(runs_finished[5m]))"
+                - refId: B
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0.5] }
+              noDataState: NoData
+              execErrState: Error
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Recent run failure rate exceeded 50% for 5m."
+            - uid: gauge-reject-rate
+              title: "Live gauge: elevated row-level reject rate"
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    range: false
+                    # 0.1 (10%) is a reasonable illustrative default -- not a
+                    # tuned production SLO.
+                    expr: "sum(rate(rows_rejected[5m])) / (sum(rate(rows_rejected[5m])) + sum(rate(rows_kept[5m])))"
+                - refId: B
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0.1] }
+              noDataState: NoData
+              execErrState: Error
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Row-level reject rate exceeded 10% for 5m."
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  # ONE values key sizes BOTH the admission-create and admission-patch Jobs
+  # (verified via `helm template` this session -- job-createSecret.yaml and
+  # job-patchWebhook.yaml both read prometheusOperator.admissionWebhooks.
+  # patch.resources; there is no separate `.create.resources` key in this
+  # chart version).
+  admissionWebhooks:
+    patch:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+prometheus:
+  prometheusSpec:
+    # D-18: ~15 days. IDENTICAL in both profiles -- retention policy is a
+    # data-lifecycle decision, not a resource-sizing concern, so this key
+    # does not fall under test_values_profiles.py's "resource sizing" axis
+    # even though it lives inside a resources-adjacent block.
+    retention: 15d
+
+    # D-17: persistent storage, surviving cluster-down/cluster-up -- matches
+    # vault.yaml's own dataStorage.enabled: true pattern. `resources.
+    # requests.storage` (not a bare `storage.size`/`persistence.size`
+    # suffix) still matches test_values_profiles.py's permitted "resource
+    # sizing" axis because `resources` itself is a path segment here.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  # `additionalServiceMonitors` lives directly under `prometheus:`, a
+  # SIBLING of `prometheusSpec:` above (same 2-space indent, same
+  # `prometheus:` block), NOT nested inside `prometheusSpec:`
+  # (07-07-PLAN.md's own <interfaces> block showed it nested --
+  # DISCOVERED WRONG live this session: a `prometheusSpec.
+  # additionalServiceMonitors` entry rendered ZERO ServiceMonitor objects
+  # and Prometheus's own `/api/v1/targets` never listed an otel-collector
+  # job at all, no error anywhere. Confirmed against the chart's own
+  # template source, `templates/prometheus/servicemonitors.yaml` line 1:
+  # `{{- if and .Values.prometheus.enabled .Values.prometheus.
+  # additionalServiceMonitors }}` -- the top-level `prometheus.` namespace,
+  # not `prometheus.prometheusSpec.`). RESEARCH.md Pitfall 6's own named
+  # failure mode ("ServiceMonitor silently never scraped") turned out to
+  # apply one level higher than documented -- itself a second instance of
+  # the exact same silent-failure shape the Pitfall warns about, this time
+  # in values-key placement rather than label matching. Selector/endpoints
+  # verified live this session (`kubectl get svc -n monitoring
+  # --show-labels` / `-o yaml` against plan 07-03's already-deployed OTel
+  # Collector Service): label app.kubernetes.io/name=opentelemetry-collector,
+  # named port `prometheus` = 8889 (plan 07-03's own otel-collector.yaml
+  # `ports.prometheus` block). Without this entry, `dataplat`'s
+  # rows_rejected/rows_kept/runs_started/runs_finished counters (plans
+  # 07-02/07-05) reach the Collector but are NEVER visible to Prometheus.
+  # Re-verified live after this fix: `GET /api/v1/targets` (via Grafana's
+  # datasource proxy) lists an `otel-collector` job with `health: up`.
+  additionalServiceMonitors:
+    - name: otel-collector
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: opentelemetry-collector
+      namespaceSelector:
+        matchNames: [monitoring]
+      endpoints:
+        - port: prometheus
+          path: /metrics
