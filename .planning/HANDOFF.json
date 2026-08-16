@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-08-16T19:51:23.587Z",
+  "phase": "07",
+  "phase_name": "observability-metrics-tracing-lineage",
+  "phase_dir": ".planning/phases/07-observability-metrics-tracing-lineage",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": "07-09", "name": "OBS-07 gap closure: dag_id/dag_run_id/task_id lineage", "status": "done", "commit": "e9bd58c..4872fd6"},
+    {"id": "scheduler-fix", "name": "Airflow KubernetesExecutor CPU-leak/scheduling fix", "status": "done", "commit": "6ea4129"},
+    {"id": "lineage-grant", "name": "meta.v_customers_lineage SELECT grant to analytics_owner (migration 0013)", "status": "done", "commit": "1d75a92"},
+    {"id": "07-verification-override", "name": "07-VERIFICATION.md override applied and validated by a passing live E2E run", "status": "done", "commit": "685417a"}
+  ],
+  "remaining_tasks": [
+    {"id": "residual-flakiness", "name": "Resolve residual wait_for_files/resolve_window stuck-task flakiness (debug session's own flagged residual risk, not fully eliminated)", "status": "not_started"},
+    {"id": "e2e-full-pass", "name": "Get a clean full pass of tests/e2e/observability/ (currently 4/7 intermittently failing due to residual-flakiness)", "status": "not_started"},
+    {"id": "phase-8-start", "name": "Start Phase 8 via /gsd:discuss-phase 8", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "wait_for_files/resolve_window Airflow tasks occasionally get stuck up_for_retry with no live pod, and since max_active_runs=1 this blocks all new file discovery until cleared", "type": "technical", "workaround": "Manually mark the stuck TaskInstance FAILED via the scheduler pod's ORM session to free the DagRun slot (validated safe, done twice this session) — not a permanent fix"}
+  ],
+  "human_actions_pending": [],
+  "decisions": [
+    {"decision": "Accepted OBS-07's live-verification gap via a documented VERIFICATION.md override, then closed it for real once a live pass was captured", "rationale": "The DB-layer fix was proven correct by every offline-checkable method; the live blocker was independently confirmed to be a separate, pre-existing scheduler defect", "phase": "07"},
+    {"decision": "Deliberately re-ran the heaviest E2E test load under host-memory monitoring after the laptop froze, rather than skipping verification or blindly re-triggering", "rationale": "User explicitly asked whether the freeze-causing load pattern should be tested before moving to Phase 8", "phase": "07"}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Check current DagRun/TaskInstance state for csv_ingest_customers via the scheduler pod ORM query (see .planning/.continue-here.md Infrastructure State). If clean, re-run the full tests/e2e/observability/ suite. If the same stuck-task pattern recurs, open a fresh debug session targeting startup_timeout_seconds/sensor retry tuning.",
+  "context_notes": "Phase 7 itself is done and shipped — the open thread is purely E2E test-infrastructure reliability under this DAG's max_active_runs=1 design, not a Phase 7 content gap. Don't re-litigate Phase 7; stabilize or accept the E2E flakiness, then move to Phase 8."
+}
