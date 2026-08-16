@@ -408,7 +408,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 07-07-PLAN.md — Grafana: three datasources, ServiceMonitor scrape wiring, the 8-metric+3-gauge dashboard, alerting-as-code
+- [x] 07-07-PLAN.md — Grafana: three datasources, ServiceMonitor scrape wiring, the 8-metric+3-gauge dashboard, alerting-as-code
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
