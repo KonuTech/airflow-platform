@@ -38,6 +38,11 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 import pytest
+from opentelemetry import context as otel_context
+from opentelemetry import propagate
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import dataplat.pipeline.run as run_module
 from csv_processor.source import CsvSource
@@ -51,6 +56,7 @@ from dataplat.config.model import (
 )
 from dataplat.metadata.postgres import PostgresMetadataRepository
 from dataplat.models.identity import RunContext
+from dataplat.observability import tracing
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
 from dataplat.pipeline.run import run_ingest
@@ -793,3 +799,76 @@ def test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status(
         "heartbeat loop never ticked (no heartbeat_ingestion_run call observed)"
     )
     assert _read_run_status(env.migrated_dsn, run_id) == "SUCCEEDED"
+
+
+# --- Behavior 6: an incoming TRACEPARENT round-trips into meta.ingestion_runs (plan 07-05) --
+
+_TRACE_ROUNDTRIP_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+_TRACE_ROUNDTRIP_TRACE_ID_HEX = "4bf92f3577b34da6a3ce929d0e0e4736"
+_TRACE_ROUNDTRIP_PARENT_SPAN_ID_HEX = "00f067aa0ba902b7"
+
+
+def _read_run_trace_columns(migrated_dsn: str, run_id: int) -> tuple[str | None, str | None]:
+    with psycopg.connect(migrated_dsn) as conn:
+        row = conn.execute(
+            "SELECT trace_id, span_id FROM meta.ingestion_runs WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()
+    assert row is not None
+    return row[0], row[1]
+
+
+def test_traceparent_round_trips_into_meta_ingestion_runs_via_a_real_claim(env: _Env) -> None:
+    """OBS-10: an incoming TRACEPARENT survives claim -> stage -> publish, unmodified in trace_id.
+
+    Extracts a known-valid, hand-constructed W3C ``traceparent`` into the
+    active OTel context the same way ``dataplat.cli``'s own
+    ``_extract_incoming_trace_context()`` does (07-05 Task 1): a direct
+    ``propagate.extract()`` + ``context.attach()`` call, right here in the
+    test -- less invasive than invoking ``dataplat.cli.main()``'s full
+    dispatch just to reach the same two lines. ``tracing`` is wired directly
+    to an in-memory-exporter-backed real ``TracerProvider`` (bypassing the
+    public ``configure(otlp_endpoint=...)``, which always builds a real
+    network-bound ``OTLPSpanExporter`` -- mirrors ``tests/unit/observability/
+    test_tracing.py``'s own sanctioned direct-poke-at-``tracing._provider``
+    pattern) so ``run_ingest()``'s own ``pipeline.run_ingest`` span is
+    genuinely recording and genuinely nests under the extracted parent.
+
+    Proves, via a direct SQL read of ``meta.ingestion_runs`` (never trusting
+    the in-process ``Receipt`` alone): ``trace_id`` equals the trace ID
+    encoded in the injected ``traceparent`` (cross-process continuity), and
+    ``span_id`` is a well-formed 16-hex-character value that does NOT equal
+    the injected ``traceparent``'s own parent span ID (this run's own child
+    span, never a copy of the parent's).
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracing._provider = provider  # noqa: SLF001 -- see docstring above
+
+    ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
+        env,
+        key_suffix="traceparent_roundtrip",
+        csv_bytes=_csv_bytes(2, start_id=9_100_701),
+    )
+
+    parent_ctx = propagate.extract({"traceparent": _TRACE_ROUNDTRIP_TRACEPARENT})
+    token = otel_context.attach(parent_ctx)
+    try:
+        receipt = run_ingest(ctx)
+    finally:
+        otel_context.detach(token)
+        tracing.configure(otlp_endpoint=None)  # restore a genuine no-op for later tests
+
+    assert receipt.status == "SUCCEEDED"
+
+    db_trace_id, db_span_id = _read_run_trace_columns(env.migrated_dsn, run_id)
+    assert db_trace_id == _TRACE_ROUNDTRIP_TRACE_ID_HEX  # SAME trace: cross-process continuity
+    assert db_span_id is not None
+    assert len(db_span_id) == 16
+    assert db_span_id != _TRACE_ROUNDTRIP_PARENT_SPAN_ID_HEX  # NEW span: run_ingest's own child
+
+    # Bonus rigor: a "pipeline.run_ingest" span was genuinely recorded --
+    # catches a silent tracing-setup mistake that the two DB assertions
+    # above alone could not distinguish from "tracing never actually ran."
+    assert any(span.name == "pipeline.run_ingest" for span in exporter.get_finished_spans())
