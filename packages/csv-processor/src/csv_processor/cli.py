@@ -307,12 +307,25 @@ def ingest(assignment: str) -> None:
         # `SchemaRepository.get_current(dataset_id)` in anticipation of this
         # exact call site populating `meta.schema_versions` for real.
         dataset_id = metadata.get_or_create_dataset(doc.dataset)
+        # OBS-07 gap closure (07-09): the 5 AIRFLOW_CTX_* env vars
+        # TracingKubernetesPodOperator.build_pod_request_obj() injects into
+        # this pod (airflow/dags/_common/tracing_kpo.py), read back the same
+        # way AIRFLOW_TASK_TRY_NUMBER already is above -- `.get()`'s own
+        # `None` default is already RunContext's correct fallback outside
+        # Airflow. map_index has no sensible string default the way attempt
+        # has "1", so it is parsed separately below.
+        _raw_map_index = os.environ.get("AIRFLOW_CTX_MAP_INDEX")
         run = RunContext(
             run_id=doc.run_id,
             idempotency_key=doc.idempotency_key,
             attempt=int(os.environ.get("AIRFLOW_TASK_TRY_NUMBER", "1")),
             file_id=doc.file.file_id,
             batch_id=doc.batch.batch_id,
+            dag_id=os.environ.get("AIRFLOW_CTX_DAG_ID"),
+            dag_run_id=os.environ.get("AIRFLOW_CTX_DAG_RUN_ID"),
+            task_id=os.environ.get("AIRFLOW_CTX_TASK_ID"),
+            map_index=int(_raw_map_index) if _raw_map_index is not None else None,
+            k8s_namespace=os.environ.get("AIRFLOW_CTX_K8S_NAMESPACE"),
         )
         ctx = PipelineContext(
             run=run,

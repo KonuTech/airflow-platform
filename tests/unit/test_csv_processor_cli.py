@@ -19,13 +19,22 @@ point -- the same `main()`-based invocation style
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import pytest
 
 from csv_processor import cli as csv_processor_cli
 from dataplat.cli import main
+from dataplat.config.model import (
+    BatchingConfig,
+    ColumnContract,
+    DatasetConfig,
+    DeduplicationConfig,
+    LoadConfig,
+    SourceConfig,
+)
 from dataplat.errors import ConfigurationError
+from dataplat.models.receipt import Receipt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -166,3 +175,188 @@ def test_ingest_dataplatformerror_path_is_unaffected_by_the_new_except_clause(
     payload = json.loads(xcom_path.read_text(encoding="utf-8"))
     assert payload["status"] == "FAILED"
     assert payload["run_id"] == -1
+
+
+# --- OBS-07 gap closure (07-09): ingest() reads AIRFLOW_CTX_* into RunContext ---
+
+_VALID_ASSIGNMENT_JSON = json.dumps(
+    {
+        "assignment_version": 1,
+        "run_id": 42,
+        "idempotency_key": "customers:test:1",
+        "dataset": "customers",
+        "config_version_id": 1,
+        "config_hash": "test-hash",
+        "file": {
+            "file_id": 1,
+            "object_uri": "s3://raw/customers/f.csv",
+            "content_sha256": "ab" * 32,
+            "size_bytes": 10,
+        },
+        "batch": {"batch_key": "customers:2026-01-01:1", "batch_id": 1},
+    },
+)
+
+
+def _make_dataset_config() -> DatasetConfig:
+    """A minimal, valid `DatasetConfig` -- mirrors `test_run_ingest_trace.py::_make_config`."""
+    return DatasetConfig(
+        dataset="customers",
+        config_schema_version=1,
+        source=SourceConfig(
+            type="csv",
+            bucket="unit-test-bucket",
+            path="customers/",
+            change_semantics="snapshot",
+            duplicate_policy="skip",
+        ),
+        deduplication=DeduplicationConfig(
+            strategy="business_key_latest",
+            keys=["customer_id"],
+            order_by=["event_ts desc"],
+        ),
+        load=LoadConfig(strategy="merge", target="normalized.customers"),
+        batching=BatchingConfig(max_units_per_run=100),
+        columns=[
+            ColumnContract(
+                name="customer_id",
+                type="string",
+                nullable=False,
+                required=True,
+                business_key=True,
+                description="Natural business key for a customer record",
+            ),
+        ],
+    )
+
+
+class _FakeAssignmentStream:
+    """A context-manager-like stand-in for `S3ObjectStore.get_object()`'s `io.TextIOWrapper`."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        del exc
+
+    def read(self) -> str:
+        return self._text
+
+
+class _FakeIngestObjectStore:
+    """Serves `_VALID_ASSIGNMENT_JSON` for any `get_object()` call -- never touches real S3."""
+
+    def get_object(self, bucket: str, key: str) -> _FakeAssignmentStream:
+        del bucket, key
+        return _FakeAssignmentStream(_VALID_ASSIGNMENT_JSON)
+
+
+class _FakeIngestMetadata:
+    """Only `get_or_create_dataset` is exercised on this path before `run_ingest` is faked out."""
+
+    def get_or_create_dataset(self, dataset_name: str) -> int:
+        del dataset_name
+        return 1
+
+
+class _FakeIngestPool:
+    def close(self) -> None:
+        pass
+
+
+class _FakeConfigRegistry:
+    """Stands in for `dataplat.config.registry.ConfigRegistry` -- `get_by_id` never hits a DB."""
+
+    def __init__(self, pool: object) -> None:
+        del pool
+
+    def get_by_id(self, config_version_id: int) -> DatasetConfig:
+        del config_version_id
+        return _make_dataset_config()
+
+
+def _fake_build_common() -> tuple[_FakeIngestPool, _FakeIngestMetadata, _FakeIngestObjectStore]:
+    return _FakeIngestPool(), _FakeIngestMetadata(), _FakeIngestObjectStore()
+
+
+def _make_fake_run_ingest(
+    captured: dict[str, object],
+) -> object:
+    """Builds a `run_ingest` stand-in that captures its `ctx` argument and returns a Receipt."""
+
+    def _fake_run_ingest(ctx: object, *, heartbeat_interval_seconds: float = 60.0) -> Receipt:
+        del heartbeat_interval_seconds
+        captured["ctx"] = ctx
+        return Receipt(
+            run_id=42,
+            status="SUCCEEDED",
+            rows_read=0,
+            rows_loaded=0,
+            rows_invalid=0,
+            rows_deduplicated=0,
+            duration_ms=0,
+            report_uri=None,
+        )
+
+    return _fake_run_ingest
+
+
+def test_ingest_populates_run_context_dag_fields_from_airflow_ctx_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OBS-07 gap closure (07-09): `ingest()`'s `RunContext` construction reads the 5
+    `AIRFLOW_CTX_*` env vars `TracingKubernetesPodOperator` injects, with `map_index`
+    parsed as a genuine `int`.
+    """
+    monkeypatch.setenv("AIRFLOW_CTX_DAG_ID", "csv_ingest_customers")
+    monkeypatch.setenv("AIRFLOW_CTX_TASK_ID", "ingest")
+    monkeypatch.setenv("AIRFLOW_CTX_DAG_RUN_ID", "manual__2026-01-01T00:00:00+00:00")
+    monkeypatch.setenv("AIRFLOW_CTX_MAP_INDEX", "3")
+    monkeypatch.setenv("AIRFLOW_CTX_K8S_NAMESPACE", "etl")
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakeConfigRegistry)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(csv_processor_cli, "run_ingest", _make_fake_run_ingest(captured))
+
+    exit_code = main(["ingest", "--assignment", "s3://metadata/assignments/customers/42.json"])
+
+    assert exit_code == 0
+    ctx = captured["ctx"]
+    assert ctx.run.dag_id == "csv_ingest_customers"
+    assert ctx.run.dag_run_id == "manual__2026-01-01T00:00:00+00:00"
+    assert ctx.run.task_id == "ingest"
+    assert ctx.run.map_index == 3
+    assert ctx.run.k8s_namespace == "etl"
+
+
+def test_ingest_leaves_map_index_none_when_airflow_ctx_map_index_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`AIRFLOW_CTX_MAP_INDEX` unset (e.g. `discover`, or any non-mapped task) must
+    leave `RunContext.map_index` as `None`, never raise on `int(None)`.
+    """
+    monkeypatch.setenv("AIRFLOW_CTX_DAG_ID", "csv_ingest_customers")
+    monkeypatch.setenv("AIRFLOW_CTX_TASK_ID", "ingest")
+    monkeypatch.setenv("AIRFLOW_CTX_DAG_RUN_ID", "manual__2026-01-01T00:00:00+00:00")
+    monkeypatch.setenv("AIRFLOW_CTX_K8S_NAMESPACE", "etl")
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakeConfigRegistry)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(csv_processor_cli, "run_ingest", _make_fake_run_ingest(captured))
+
+    exit_code = main(["ingest", "--assignment", "s3://metadata/assignments/customers/42.json"])
+
+    assert exit_code == 0
+    ctx = captured["ctx"]
+    assert ctx.run.map_index is None

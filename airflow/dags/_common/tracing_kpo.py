@@ -1,16 +1,20 @@
-"""``TracingKubernetesPodOperator`` -- the W3C ``traceparent`` propagation mechanism (OBS-10).
+"""``TracingKubernetesPodOperator`` -- ``traceparent`` (OBS-10) + Airflow/K8s identity (OBS-07).
 
-This module exists solely to close the one gap CLAUDE.md/STACK.md both flag
-explicitly: "Trace context does NOT propagate into ``KubernetesPodOperator``
-pods automatically... you must do it yourself." The override below writes
-nothing that parses CSV, validates a row, or talks to a database -- it reads
-whichever OTel span is currently active in the Airflow worker process and
-copies its W3C trace context into the pod spec ``KubernetesPodOperator`` is
-about to launch, exactly the same "Kubernetes API object or a literal"
-scope ``kpo.py`` itself is limited to. ``tests/policy/test_dag_thinness.py``
-exempts this file BY NAME from its import-based scan for the same reason it
-exempts ``kpo.py``: this file legitimately imports ``opentelemetry.propagate``
-and ``kubernetes.client.models``, neither of which is business logic.
+This module exists solely to close two gaps CLAUDE.md/STACK.md and
+07-VERIFICATION.md both flag explicitly: "Trace context does NOT propagate
+into ``KubernetesPodOperator`` pods automatically... you must do it
+yourself," and Airflow's ``KubernetesPodOperator`` does not auto-inject
+``AIRFLOW_CTX_*`` identity env vars into launched pods either. The override
+below writes nothing that parses CSV, validates a row, or talks to a
+database -- it reads whichever OTel span is currently active in the Airflow
+worker process (for ``TRACEPARENT``) and the Airflow task context passed
+into ``execute()`` (for dag/run/task/map-index/namespace identity), and
+copies both into the pod spec ``KubernetesPodOperator`` is about to launch,
+exactly the same "Kubernetes API object or a literal" scope ``kpo.py``
+itself is limited to. ``tests/policy/test_dag_thinness.py`` exempts this
+file BY NAME from its import-based scan for the same reason it exempts
+``kpo.py``: this file legitimately imports ``opentelemetry.propagate`` and
+``kubernetes.client.models``, neither of which is business logic.
 
 Why a subclass overriding ``build_pod_request_obj()``, not ``env_vars``
 templating and not ``common_kpo_kwargs()`` (RESEARCH.md Pitfalls 2/3):
@@ -36,7 +40,10 @@ from opentelemetry import propagate
 
 
 class TracingKubernetesPodOperator(KubernetesPodOperator):
-    """A ``KubernetesPodOperator`` that injects the active span's W3C ``traceparent``.
+    """Injects the active span's W3C ``traceparent`` and Airflow/K8s task identity.
+
+    When available, also appends Airflow's own dag/run/task/map-index
+    identity plus the launched pod's resolved Kubernetes namespace.
 
     Per D-12, this operator is used ONLY for ``csv_ingest_customers.py``'s
     ``ingest`` task -- the mapped per-file task instance that becomes the
@@ -45,24 +52,42 @@ class TracingKubernetesPodOperator(KubernetesPodOperator):
     """
 
     def build_pod_request_obj(self, context: object = None) -> k8s.V1Pod:
-        """Append a ``TRACEPARENT`` env var to the launched pod, when a span is active.
+        """Append ``TRACEPARENT`` and ``AIRFLOW_CTX_*`` env vars to the launched pod.
 
         Args:
             context: The Airflow task context, forwarded unchanged to
-                ``KubernetesPodOperator.build_pod_request_obj()`` -- this
-                override never reads it directly; it only reads the
-                currently active OTel span via
-                ``opentelemetry.propagate.inject()``.
+                ``KubernetesPodOperator.build_pod_request_obj()``. The
+                ``TRACEPARENT`` injection never reads it directly (it only
+                reads the currently active OTel span via
+                ``opentelemetry.propagate.inject()``); the
+                ``AIRFLOW_CTX_*`` injection reads ``context["ti"]`` when
+                ``context`` is a ``dict`` -- Airflow's real task context
+                always carries a ``"ti"`` key (the ``TaskInstance``) at
+                task-run time, the same object Jinja templates read as
+                ``{{ ti }}``, stable across Airflow 2.x and 3.x. The
+                parameter type stays ``object`` (not widened to a
+                ``Mapping``/``Context`` type) -- ``isinstance(context,
+                dict)`` narrows it locally for mypy without touching the
+                signature or the ``super().build_pod_request_obj(context)``
+                call above.
 
         Returns:
-            The already-built ``V1Pod``, with exactly one additional
-            ``TRACEPARENT`` env var appended to its first container's env
-            list when an active span exists. Genuinely no-op-safe when
-            tracing is disabled or no span is active
-            (``opentelemetry.propagate.inject()``'s own documented
-            no-op-when-no-context behavior, verified empirically in this
-            plan's own unit tests): the pod is returned completely
-            unmodified in that case, matching every other task pod's shape.
+            The already-built ``V1Pod``, with an additional ``TRACEPARENT``
+            env var appended to its first container's env list when an
+            active span exists (genuinely no-op-safe when tracing is
+            disabled or no span is active -- ``opentelemetry.propagate.
+            inject()``'s own documented no-op-when-no-context behavior,
+            verified empirically in this plan's own unit tests), and up to
+            five additional ``AIRFLOW_CTX_DAG_ID``/``_TASK_ID``/
+            ``_DAG_RUN_ID``/``_MAP_INDEX``/``_K8S_NAMESPACE`` env vars
+            appended when ``context["ti"]`` is present and well-formed
+            (T-07-26: a shape mismatch -- ``context`` is ``None``,
+            ``context["ti"]`` is absent, or it lacks an expected attribute
+            -- degrades to zero ``AIRFLOW_CTX_*`` vars appended, never an
+            exception, mirroring ``TRACEPARENT``'s own no-op-safe contract
+            above). The pod is returned completely unmodified when neither
+            mechanism has anything to contribute, matching every other task
+            pod's shape.
         """
         pod = super().build_pod_request_obj(context)
         carrier: dict[str, str] = {}
@@ -71,4 +96,25 @@ class TracingKubernetesPodOperator(KubernetesPodOperator):
             pod.spec.containers[0].env.append(
                 k8s.V1EnvVar(name="TRACEPARENT", value=carrier["traceparent"]),
             )
+
+        ti = context.get("ti") if isinstance(context, dict) else None
+        if ti is not None:
+            try:
+                dag_context_env_vars = [
+                    k8s.V1EnvVar(name="AIRFLOW_CTX_DAG_ID", value=str(ti.dag_id)),
+                    k8s.V1EnvVar(name="AIRFLOW_CTX_TASK_ID", value=str(ti.task_id)),
+                    k8s.V1EnvVar(name="AIRFLOW_CTX_DAG_RUN_ID", value=str(ti.run_id)),
+                    k8s.V1EnvVar(name="AIRFLOW_CTX_MAP_INDEX", value=str(ti.map_index)),
+                    k8s.V1EnvVar(
+                        name="AIRFLOW_CTX_K8S_NAMESPACE",
+                        value=str(pod.metadata.namespace),
+                    ),
+                ]
+            except AttributeError:
+                # T-07-26: a shape mismatch in context["ti"] must never fail
+                # pod launch for the whole `ingest` task -- degrade to
+                # appending nothing, mirroring the TRACEPARENT block above.
+                dag_context_env_vars = []
+            pod.spec.containers[0].env.extend(dag_context_env_vars)
+
         return pod
