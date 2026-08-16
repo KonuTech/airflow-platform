@@ -34,9 +34,14 @@ step.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from kubernetes.client import models as k8s
 from opentelemetry import propagate
+
+if TYPE_CHECKING:
+    from airflow.sdk import Context
 
 
 class TracingKubernetesPodOperator(KubernetesPodOperator):
@@ -51,25 +56,30 @@ class TracingKubernetesPodOperator(KubernetesPodOperator):
     a plain ``KubernetesPodOperator``, unchanged.
     """
 
-    def build_pod_request_obj(self, context: object = None) -> k8s.V1Pod:
+    def build_pod_request_obj(self, context: Context | None = None) -> k8s.V1Pod:
         """Append ``TRACEPARENT`` and ``AIRFLOW_CTX_*`` env vars to the launched pod.
 
         Args:
             context: The Airflow task context, forwarded unchanged to
-                ``KubernetesPodOperator.build_pod_request_obj()``. The
-                ``TRACEPARENT`` injection never reads it directly (it only
-                reads the currently active OTel span via
+                ``KubernetesPodOperator.build_pod_request_obj()`` -- typed
+                to match that parent signature exactly (``airflow.sdk
+                .Context``, a ``TypedDict``, imported only under
+                ``TYPE_CHECKING`` since this module never needs it at
+                runtime). The ``TRACEPARENT`` injection never reads it
+                directly (it only reads the currently active OTel span via
                 ``opentelemetry.propagate.inject()``); the
-                ``AIRFLOW_CTX_*`` injection reads ``context["ti"]`` when
-                ``context`` is a ``dict`` -- Airflow's real task context
-                always carries a ``"ti"`` key (the ``TaskInstance``) at
-                task-run time, the same object Jinja templates read as
-                ``{{ ti }}``, stable across Airflow 2.x and 3.x. The
-                parameter type stays ``object`` (not widened to a
-                ``Mapping``/``Context`` type) -- ``isinstance(context,
-                dict)`` narrows it locally for mypy without touching the
-                signature or the ``super().build_pod_request_obj(context)``
-                call above.
+                ``AIRFLOW_CTX_*`` injection reads ``context["ti"]`` --
+                Airflow's real task context always carries a ``"ti"`` key
+                (the ``TaskInstance``) at task-run time, the same object
+                Jinja templates read as ``{{ ti }}``, stable across Airflow
+                2.x and 3.x. ``isinstance(context, dict)`` below is a
+                runtime defensive check only (a ``TypedDict`` is a plain
+                ``dict`` at runtime, so this guards against a genuinely
+                malformed context Airflow's own type hint doesn't rule out)
+                -- it does not affect, and is not needed for, the
+                ``super().build_pod_request_obj(context)`` call above, which
+                type-checks directly against the parameter's own
+                ``Context | None`` annotation.
 
         Returns:
             The already-built ``V1Pod``, with an additional ``TRACEPARENT``
@@ -104,12 +114,23 @@ class TracingKubernetesPodOperator(KubernetesPodOperator):
                     k8s.V1EnvVar(name="AIRFLOW_CTX_DAG_ID", value=str(ti.dag_id)),
                     k8s.V1EnvVar(name="AIRFLOW_CTX_TASK_ID", value=str(ti.task_id)),
                     k8s.V1EnvVar(name="AIRFLOW_CTX_DAG_RUN_ID", value=str(ti.run_id)),
-                    k8s.V1EnvVar(name="AIRFLOW_CTX_MAP_INDEX", value=str(ti.map_index)),
                     k8s.V1EnvVar(
                         name="AIRFLOW_CTX_K8S_NAMESPACE",
                         value=str(pod.metadata.namespace),
                     ),
                 ]
+                # map_index is `int | None` on TaskInstance (None for an
+                # unmapped task instance) -- unlike the fields above, it has
+                # no sensible str() fallback the CLI side (csv_processor/
+                # cli.py) can round-trip through int(), so omit the env var
+                # entirely rather than inject the literal string "None".
+                if ti.map_index is not None:
+                    dag_context_env_vars.append(
+                        k8s.V1EnvVar(
+                            name="AIRFLOW_CTX_MAP_INDEX",
+                            value=str(ti.map_index),
+                        ),
+                    )
             except AttributeError:
                 # T-07-26: a shape mismatch in context["ti"] must never fail
                 # pod launch for the whole `ingest` task -- degrade to

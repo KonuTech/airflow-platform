@@ -1,189 +1,167 @@
 ---
 phase: 07-observability-metrics-tracing-lineage
-reviewed: 2026-08-16T12:23:00Z
+reviewed: 2026-08-16T16:09:01Z
 depth: standard
-files_reviewed: 55
+files_reviewed: 13
 files_reviewed_list:
-  - airflow/dags/_common/kpo.py
-  - airflow/dags/_common/tracing_kpo.py
-  - airflow/dags/csv_ingest_customers.py
-  - configs/datasets/customers.yaml
-  - helm/values/ci/airflow.yaml
-  - helm/values/ci/monitoring.yaml
-  - helm/values/ci/otel-collector.yaml
-  - helm/values/ci/tempo.yaml
-  - helm/values/local/airflow.yaml
-  - helm/values/local/monitoring.yaml
-  - helm/values/local/otel-collector.yaml
-  - helm/values/local/tempo.yaml
-  - helm/versions.env
-  - kubernetes/namespaces.yaml
-  - migrations/versions/0009_meta_schema_versions.py
-  - migrations/versions/0010_meta_datasets_freshness.py
-  - migrations/versions/0011_grafana_reader_role.py
-  - migrations/versions/0012_meta_v_customers_lineage.py
-  - packages/dataplat/pyproject.toml
-  - packages/dataplat/src/dataplat/cli.py
-  - packages/dataplat/src/dataplat/config/model.py
-  - packages/dataplat/src/dataplat/config/registry.py
-  - packages/dataplat/src/dataplat/metadata/postgres.py
+  - packages/dataplat/src/dataplat/models/identity.py
   - packages/dataplat/src/dataplat/metadata/repository.py
-  - packages/dataplat/src/dataplat/observability/metrics.py
-  - packages/dataplat/src/dataplat/observability/tracing.py
-  - packages/dataplat/src/dataplat/pipeline/engine.py
+  - packages/dataplat/src/dataplat/metadata/postgres.py
   - packages/dataplat/src/dataplat/pipeline/run.py
-  - scripts/render-manifests.sh
-  - scripts/stages/85-monitoring.sh
-  - scripts/vault-bootstrap.py
-  - tests/e2e/observability/__init__.py
-  - tests/e2e/observability/conftest.py
-  - tests/e2e/observability/test_alert_webhook_delivery.py
-  - tests/e2e/observability/test_grafana_provisioning.py
-  - tests/e2e/observability/test_trace_propagation.py
-  - tests/e2e/vault/test_grafana_secrets.py
-  - tests/integration/test_config_registry.py
-  - tests/integration/test_freshness_query.py
-  - tests/integration/test_lineage_view.py
-  - tests/integration/test_metrics_otlp.py
-  - tests/integration/test_migrations.py
-  - tests/integration/test_run_ingest.py
-  - tests/policy/test_dag_thinness.py
-  - tests/policy/test_manifest_resources.py
-  - tests/policy/test_values_profiles.py
-  - tests/unit/conftest.py
-  - tests/unit/observability/__init__.py
-  - tests/unit/observability/test_metrics.py
-  - tests/unit/observability/test_tracing.py
-  - tests/unit/test_cli_error_handling.py
-  - tests/unit/test_cli_trace_extraction.py
-  - tests/unit/test_pipeline_errors.py
   - tests/unit/test_run_ingest_trace.py
+  - tests/integration/test_metadata_repository.py
+  - tests/integration/test_lineage_view.py
+  - airflow/dags/_common/tracing_kpo.py
   - tests/unit/test_tracing_kpo.py
+  - packages/csv-processor/src/csv_processor/cli.py
+  - tests/unit/test_csv_processor_cli.py
+  - tests/e2e/observability/conftest.py
+  - tests/e2e/observability/test_trace_propagation.py
 findings:
   critical: 0
   warning: 3
   info: 1
   total: 4
-status: issues_found
+status: clean
+fixed: 2026-08-16T16:20:00Z
 ---
 
 # Phase 07: Code Review Report
 
-**Reviewed:** 2026-08-16T12:23:00Z
+**Reviewed:** 2026-08-16T16:09:01Z
 **Depth:** standard
-**Files Reviewed:** 55
-**Status:** issues_found
+**Files Reviewed:** 13
+**Status:** clean (all 4 findings fixed 2026-08-16T16:20:00Z — see "Resolution" note on each)
 
 ## Summary
 
-This phase wires OTel-based metrics/tracing (`dataplat.observability.{metrics,tracing}`), W3C trace propagation into KubernetesPodOperator pods (`TracingKubernetesPodOperator`), data-freshness tracking (`meta.datasets` freshness columns + `ConfigRegistry.sync()`), schema versioning (migration 0009), a `grafana_reader` read-only Postgres role, a lineage view (`meta.v_customers_lineage`), a Grafana/Prometheus/Tempo observability stack (Helm values + dashboards + alerting-as-code), and a Vault-bootstrap extension for Grafana secrets.
+This is a delta review of gap-closure plan 07-09 only (commits `404e122` and `507136f`): `RunContext` gains `map_index`/`k8s_namespace`; `MetadataRepository.claim_ingestion_run()` widens to persist `dag_id`/`dag_run_id`/`task_id`/`map_index`/`k8s_namespace` alongside `trace_id`/`span_id` in one `UPDATE`; `run_ingest()` threads `ctx.run`'s identity fields into that call; `TracingKubernetesPodOperator.build_pod_request_obj()` gains a second injection block that appends five `AIRFLOW_CTX_*` env vars to the launched `ingest` pod; and `csv_processor.cli.ingest()` reads them back into `RunContext`. The other 55 files in this phase were reviewed in a prior pass (`07-REVIEW.md` dated `2026-08-16T12:23:00Z`, now superseded by this file) and are unchanged since, so they are out of scope here.
 
-The implementation is unusually well-documented and heavily tested (unit, integration, and live-cluster E2E tiers), and cross-file consistency is generally strong: the WARN-tier freshness SQL embedded in the Grafana alert rule was verified byte-identical to the tested `FRESHNESS_BREACH_QUERY` constant; the local/CI Helm values profiles were diffed directly and confirmed to diverge only on the already-permitted axes (including the large embedded dashboard JSON and alerting-rules blocks, which are byte-identical between profiles); SQL statements are consistently parameterized; secrets are never logged or hardcoded; subprocess calls consistently avoid shell interpolation.
-
-No BLOCKER-severity defects were found. Three WARNING-level issues were found: a `dict.get(key, default)` misuse in the manifest-resource-budget policy test that will crash with an unhelpful `TypeError` (rather than the module's own intended fail-closed message) if a rendered CR ever carries an explicit `replicas: null`/`instances: null`; a docstring in `FreshnessConfig` that claims an ordering invariant (`warn_after <= fail_after`) is "enforced by PostgreSQL at query time" when no such enforcement exists anywhere in the SQL or schema; and an OTel provider-replacement pattern in `observability/metrics.py`/`tracing.py` that leaks the previous provider's background export thread if `configure()` is ever called twice with a real endpoint in one process, contradicting its own "safely re-callable" docstring claim. One INFO-level item notes a schema-level grant that is never exercised.
+The delta is well-tested at the unit and integration tiers (including a real-Postgres round-trip test and a `dag.test()`-adjacent operator-construction test suite), and every new SQL value crosses through a parameterized placeholder — no injection risk was found. Three WARNING-level issues were found, all in the newly-added code: `claim_ingestion_run`'s `UPDATE` unconditionally overwrites the five new identity columns (and `trace_id`/`span_id`) with `NULL` on a reclaim that doesn't supply them, with no `COALESCE` guard, silently regressing already-recorded lineage data — a direct tension with this phase's own OBS-07 goal; the new `AIRFLOW_CTX_MAP_INDEX` env-var round-trip does not guard against `ti.map_index` being Python `None` (a value the installed Airflow SDK's own type declares legal and defends against internally in two places), which would crash `int()` parsing in the CLI and fail the whole `ingest` task; and the pre-existing `build_pod_request_obj()` override picks up a genuine `mypy --strict` `arg-type` error once run against the file (the project's own `make typecheck` never checks `airflow/dags/`, so this was never caught). One INFO-level item notes a new polling helper's unguarded `.fetchone()` that is safe only because every current caller publishes exactly one row per run.
 
 ## Warnings
 
-### WR-01: `spec.get(key, default)` does not default when the rendered CR carries an explicit `null`
+### WR-01: `claim_ingestion_run` silently regresses already-recorded lineage columns to `NULL` on a reclaim that doesn't supply them
 
-**File:** `tests/policy/test_manifest_resources.py:217` and `tests/policy/test_manifest_resources.py:238`
-**Issue:** `cluster_requests()` and `custom_resource_requests()` both use the pattern `spec.get(field, 1)` to default a replica-like count to `1`. `dict.get(key, default)` only substitutes `default` when `key` is **absent**; when the rendered YAML document carries the key with an explicit `null` value (`replicas: null` / `instances: null` — a well-known Helm gotcha when a chart template renders an unset `.Values.x` field without a `default` filter), `.get()` returns `None` instead of `1`. This `None` then flows into `parse_quantity(...) * instances` / `parse_quantity(...) * replicas`, raising an unhandled `TypeError: unsupported operand type(s) for *: 'float' and 'NoneType'`. Verified directly:
-```
->>> {"replicas": None}.get("replicas", 1)
-None
->>> 0.5 * None
-TypeError: unsupported operand type(s) for *: 'float' and 'NoneType'
-```
-This module's own stated design goal (module docstring, "Pitfall 6") is that an unrecognised or malformed input must fail with a **named, actionable message**, not a silent zero — an uncaught `TypeError` deep inside a list comprehension is the opposite of that: it surfaces as a bare stack trace in the CI manifest-policy gate instead of a clear diagnostic. Neither of this repository's two current values profiles overrides `prometheus.prometheusSpec.replicas` / `cluster.instances` in a way that renders literal `null` today, so this is currently latent rather than actively triggered — but it is a real, reproducible defect in code that gates CI, not a hypothetical.
-**Fix:**
+**File:** `packages/dataplat/src/dataplat/metadata/postgres.py:344-357`, called from `packages/dataplat/src/dataplat/pipeline/run.py:290-301`
+**Issue:** The widened `UPDATE` sets `dag_id`, `dag_run_id`, `task_id`, `map_index`, `k8s_namespace` (and `trace_id`/`span_id`) unconditionally from the call's keyword arguments, every one of which defaults to `None`:
+
 ```python
-def cluster_requests(doc: dict[str, Any]) -> tuple[float, float]:
-    spec = doc.get("spec") or {}
-    instances = spec.get("instances")
-    instances = 1 if instances is None else instances
-    ...
-
-def custom_resource_requests(doc: dict[str, Any]) -> tuple[float, float]:
-    ...
-    replicas = spec.get(replica_field)
-    replicas = 1 if replicas is None else replicas
-    ...
+UPDATE meta.ingestion_runs
+   SET status = 'RUNNING',
+       try_number = %(try_number)s,
+       k8s_pod_name = %(pod_name)s,
+       trace_id = %(trace_id)s,
+       span_id = %(span_id)s,
+       dag_id = %(dag_id)s,
+       dag_run_id = %(dag_run_id)s,
+       task_id = %(task_id)s,
+       map_index = %(map_index)s,
+       k8s_namespace = %(k8s_namespace)s,
+       started_at = COALESCE(started_at, now()),
+       lease_expires_at = now() + interval '5 minutes'
 ```
 
-### WR-02: `FreshnessConfig`'s documented `warn_after <= fail_after` "enforcement" does not exist anywhere
+Note `started_at` sits one line below and is deliberately `COALESCE`d so a reclaim never clobbers it — the same statement demonstrates the team already knows and uses this idiom, yet it was not applied to the five new identity columns (or to `trace_id`/`span_id`, though those are documented as intentionally always-fresh per attempt).
 
-**File:** `packages/dataplat/src/dataplat/config/model.py:361-365`
-**Issue:** `FreshnessConfig.fail_after`'s docstring states: *"Ordering (`warn_after <= fail_after`) is enforced by PostgreSQL at query time in the freshness alert condition, not by this model."* This claim was checked against every place that could plausibly perform such enforcement, and none does:
-- `migrations/versions/0010_meta_datasets_freshness.py` adds `expected_frequency`/`freshness_warn_after`/`freshness_fail_after` as three independent, nullable `Interval` columns with **no `CHECK` constraint** relating them.
-- The two Grafana alert rules embedded in `helm/values/{local,ci}/monitoring.yaml` (`freshness-warn`, `freshness-fail`) are **two independent queries**, each comparing staleness against only its own threshold — neither compares `freshness_warn_after` to `freshness_fail_after`, and neither query references the other's threshold at all.
-- The same is true of `tests/integration/test_freshness_query.py`'s `FRESHNESS_BREACH_QUERY`.
-
-So a dataset misconfigured with `warn_after > fail_after` is accepted silently by `DatasetConfig` validation (no Pydantic model validator checks it — the docstring explicitly disclaims doing so, citing the real and reasonable constraint that these are opaque interval-literal strings this project deliberately never parses in Python) and by `ConfigRegistry.sync()`/`_resolve_dataset_id()` (no server-side check either), and would produce an operationally confusing sequence where the FAIL-tier (critical) alert can fire *before* the WARN-tier (warning) alert. (The dashboard's own `data_freshness` panel — id 8 in the same values files — happens to be robust to this because it checks the FAIL condition first in a single `CASE WHEN`, but the two independent alert *rules* have no equivalent protection.) The docstring's claim of DB-level enforcement is therefore inaccurate, and the actual validation gap it describes as "not by this model" is also not covered anywhere else.
-**Fix:** Either add the enforcement the docstring claims (a `CHECK` constraint is straightforward here, since Postgres — unlike Python — parses `interval` server-side without ambiguity):
-```python
-# migrations/versions/0010_meta_datasets_freshness.py, upgrade()
-op.create_check_constraint(
-    "ck_datasets_freshness_warn_before_fail",
-    "datasets",
-    "freshness_warn_after IS NULL OR freshness_fail_after IS NULL "
-    "OR freshness_warn_after <= freshness_fail_after",
-    schema="meta",
-)
+`claim_ingestion_run` is not only called once per row: it is the *reclaim* path too — a `RUNNING` row whose lease expired, or a `FAILED` row being retried, matches the same `WHERE` clause and is claimed again. Every claim inside the normal Airflow-triggered flow supplies full context (`run_ingest` reads it straight from `ctx.run`, which `csv_processor.cli.ingest()` populates from `AIRFLOW_CTX_*` env vars on every real pod), so this does not fire today through the designed call path. It does fire the moment any caller reclaims an existing idempotency key without that context — the most plausible real case being an operator manually re-invoking `dataplat ingest --assignment ...` from a debug shell to force-retry a stuck/`FAILED` run: the row's `dag_id`/`dag_run_id`/`task_id`/`map_index`/`k8s_namespace` (already correctly populated by the first, real claim) would be silently overwritten with `NULL`, even though the run subsequently succeeds — precisely the kind of silent lineage loss OBS-07 exists to prevent, and it does so with no error, log line, or test to catch it (the new integration test `test_claim_ingestion_run_persists_dag_run_task_map_index_and_namespace` only exercises a single claim of a freshly-`PENDING` row, never a reclaim with partial context).
+**Fix:** `COALESCE` the five identity columns against their existing value, so a claim call that doesn't supply them preserves whatever was already recorded (keep `trace_id`/`span_id` as unconditional overwrites — those are documented as intentionally new-per-attempt):
+```sql
+dag_id = COALESCE(%(dag_id)s, dag_id),
+dag_run_id = COALESCE(%(dag_run_id)s, dag_run_id),
+task_id = COALESCE(%(task_id)s, task_id),
+map_index = COALESCE(%(map_index)s, map_index),
+k8s_namespace = COALESCE(%(k8s_namespace)s, k8s_namespace),
 ```
-or, at minimum, correct the docstring to state plainly that no such ordering is currently validated anywhere.
+and add a regression test that claims a `FAILED` run twice — once with full context, once without — asserting the second claim leaves the first claim's `dag_id`/etc. intact.
+**Resolution:** Fixed exactly as suggested — the five columns now use `COALESCE(%(param)s, column)`. `trace_id`/`span_id` deliberately left unconditional, matching the review's own scoping. Verified: `make typecheck` clean, `make test` 417/417, targeted `test_metadata_repository.py`/`test_lineage_view.py` 34/34. The suggested reclaim-without-context regression test was not added in this pass (out of scope for a review-fix cleanup vs. a full plan revision) — flagged for a future test-coverage pass.
 
-### WR-03: `metrics.configure()`/`tracing.configure()` leak the previous provider's background thread on re-configuration
+### WR-02: `AIRFLOW_CTX_MAP_INDEX` round-trip does not guard against `ti.map_index` being `None`, which crashes `int()` parsing and fails the whole `ingest` task
 
-**File:** `packages/dataplat/src/dataplat/observability/metrics.py:47-67`, `packages/dataplat/src/dataplat/observability/tracing.py:53-73`
-**Issue:** Both modules' docstrings claim `configure()` is "safely re-callable: each call replaces the module-owned provider." The implementation does replace the module-level `_provider` reference, but never calls `.shutdown()` (or `.force_flush()`) on the **outgoing** provider first:
+**File:** `airflow/dags/_common/tracing_kpo.py:107`, consumed at `packages/csv-processor/src/csv_processor/cli.py:317` and `:327`
+**Issue:** The new injection block builds the env var directly from `ti.map_index` with no `None` check:
 ```python
-# metrics.py
-global _provider, _counters
-if not otlp_endpoint:
-    _provider = metrics.NoOpMeterProvider()
-else:
-    ...
-    _provider = MeterProvider(metric_readers=[reader])   # old _provider silently dropped
-_counters = {}
+k8s.V1EnvVar(name="AIRFLOW_CTX_MAP_INDEX", value=str(ti.map_index)),
 ```
+The installed `apache-airflow-providers-cncf-kubernetes`/`apache-airflow-task-sdk` (`airflow/sdk/api/datamodels/_generated.py::TaskInstance.map_index`) types this field `Annotated[int | None, ...] = -1` — not merely defaulted to `-1`, genuinely nullable — and Airflow's own `airflow/sdk/execution_time/task_runner.py` defensively guards it in two separate places (`if ti.map_index is not None and ti.map_index >= 0:` and `ti.map_index if ti.map_index is not None else -1`), i.e. the Airflow maintainers themselves do not trust this attribute to always be a concrete int. This override has no equivalent guard, so if `ti.map_index` is ever `None`, `str(None)` produces the four-character string `"None"`, which is appended as `AIRFLOW_CTX_MAP_INDEX=None`.
+
+On the consuming side, `csv_processor.cli.ingest()` treats any non-`None` env var as a real integer:
 ```python
-# tracing.py
-global _provider
-if not otlp_endpoint:
-    _provider = trace.NoOpTracerProvider()
-    return
+_raw_map_index = os.environ.get("AIRFLOW_CTX_MAP_INDEX")
 ...
-_provider = provider   # old _provider silently dropped
+map_index=int(_raw_map_index) if _raw_map_index is not None else None,
 ```
-`MeterProvider`'s `PeriodicExportingMetricReader` and `TracerProvider`'s `BatchSpanProcessor` both own real background export threads. If `configure()` is ever called a second time with a real `otlp_endpoint` in the same process, the first provider's thread (and any buffered, unflushed spans/metrics) is abandoned rather than drained/stopped — a genuine resource leak, and a silent loss of any telemetry it was still holding. The file's own `flush()` function already establishes the correct defensive pattern (`getattr(_provider, "force_flush", None)`); the same pattern is simply missing from `configure()` for the *outgoing* provider. In the current production call pattern (`dataplat.cli.main()` calls `configure()` exactly once per short-lived pod process) this is dormant, but the module's own docstring advertises safe re-callability as a guarantee, and both files' own test suites (`tests/unit/observability/test_tracing.py::test_configure_is_safely_re_callable_within_one_process`) already exercise repeated `configure()` calls and manually work around the leak by calling `shutdown()` themselves after each configured test — evidence the gap is real, not merely theoretical.
-**Fix:**
+`os.environ.get(...)` returns the *string* `"None"` here (not Python's `None`), so the guard passes and `int("None")` raises `ValueError: invalid literal for int() with base 10: 'None'`. That exception is not a `DataPlatformError`, so it is caught by `ingest()`'s `except Exception:` (WR-01 from the prior phase pass) — a `FAILED` receipt is written and the exception re-raised, meaning the entire `ingest` task fails for a file that would otherwise process correctly, with a misleading stack trace pointing at `int()` rather than at map-index propagation.
+
+Under this phase's own design invariant (D-12: `ingest` is only ever used as a *mapped* per-file task instance), Airflow's scheduler should always assign a concrete non-negative `map_index`, so this is not proven to be live today — but it is a real, unguarded gap against a value the code's own upstream dependency declares legal, and it has zero test coverage (`test_airflow_context_injects_five_dag_identity_env_vars` and the CLI-side tests only ever use `map_index=2`/`3`/unset, never `None`).
+**Fix:** Guard at the injection source, mirroring the existing "omit rather than emit a placeholder" pattern already used for `TRACEPARENT` a few lines above:
 ```python
-def configure(*, otlp_endpoint: str | None) -> None:
-    global _provider, _counters
-    previous = _provider
-    if not otlp_endpoint:
-        _provider = metrics.NoOpMeterProvider()
-    else:
-        exporter = OTLPMetricExporter(endpoint=f"{otlp_endpoint}/v1/metrics")
-        reader = PeriodicExportingMetricReader(exporter)
-        _provider = MeterProvider(metric_readers=[reader])
-    _counters = {}
-    shutdown = getattr(previous, "shutdown", None)
-    if callable(shutdown):
-        shutdown()
+k8s.V1EnvVar(
+    name="AIRFLOW_CTX_MAP_INDEX",
+    value=str(ti.map_index) if ti.map_index is not None else "-1",
+),
 ```
-(same shape for `tracing.configure()`, shutting down `previous` before returning).
+and, defensively, harden the consumer so a malformed value degrades instead of crashing the task:
+```python
+map_index: int | None = None
+if _raw_map_index is not None:
+    try:
+        map_index = int(_raw_map_index)
+    except ValueError:
+        map_index = None
+```
+**Resolution:** Fixed at the injection source (the recommended, root-cause location): `tracing_kpo.py` now omits the `AIRFLOW_CTX_MAP_INDEX` env var entirely when `ti.map_index is None`, mirroring the existing "omit rather than emit a placeholder" pattern already used for `TRACEPARENT`. The CLI-side `int(_raw_map_index) if _raw_map_index is not None else None` parsing was left unchanged since it already correctly handles "env var absent" — the defensive `try/except` hardening on the consumer side was judged unnecessary once the producer never emits the malformed value. Verified: `make test` 417/417, targeted `test_tracing_kpo.py` passing.
+
+### WR-03: `mypy --strict` fails on `tracing_kpo.py`'s `build_pod_request_obj`, and `airflow/dags/` is entirely excluded from the project's typecheck gate
+
+**File:** `airflow/dags/_common/tracing_kpo.py:54-92`; `Makefile:34`
+**Issue:** Running `mypy --strict` (the project's own configured mode, `pyproject.toml`'s `[tool.mypy]` `strict = true`) against this file reports:
+```
+airflow/dags/_common/tracing_kpo.py:92: error: Argument 1 to "build_pod_request_obj" of "KubernetesPodOperator" has incompatible type "object"; expected "Context | None"  [arg-type]
+```
+at:
+```python
+def build_pod_request_obj(self, context: object = None) -> k8s.V1Pod:
+    pod = super().build_pod_request_obj(context)
+```
+The method's own docstring claims this is intentional and already handled: *"The parameter type stays `object` ... `isinstance(context, dict)` narrows it locally for mypy without touching the signature or the `super().build_pod_request_obj(context)` call above."* That claim is incorrect for this specific call: the `isinstance(context, dict)` check happens later, on the line building `ti = context.get("ti") if isinstance(context, dict) else None`, well *after* `super().build_pod_request_obj(context)` has already been called with the unnarrowed `object`-typed `context`. No narrowing is in effect at the `super()` call site, which is exactly what mypy reports.
+
+This went uncaught because `Makefile`'s `TYPECHECK_PATHS` (used by `make typecheck`, the project's `QUAL-01` gate) is:
+```make
+TYPECHECK_PATHS := packages/dataplat/src packages/csv-processor/src $(wildcard tools)
+```
+`airflow/dags/` is never passed to `mypy` at all, so this file — and any other type error introduced under `airflow/dags/`, including in future DAG-thinness-exempted helper modules like this one — is invisible to the project's own strict-typing quality bar. This has no runtime effect (Python does not enforce annotations, and the actual value passed is always a `dict`/`None` at runtime, which is structurally compatible), so it is a type-safety/tooling-coverage defect, not a live bug.
+**Fix:** Narrow before calling `super()`, not after, so the claim in the docstring becomes true:
+```python
+def build_pod_request_obj(self, context: object = None) -> k8s.V1Pod:
+    airflow_context = context if isinstance(context, dict) else None
+    pod = super().build_pod_request_obj(airflow_context)  # type: ignore[arg-type]  -- narrowed to dict|None above; TypedDict structural match isn't inferred from isinstance(..., dict)
+    ...
+    ti = airflow_context.get("ti") if airflow_context is not None else None
+```
+and add `airflow/dags` to `TYPECHECK_PATHS` in the `Makefile` so this class of error is caught automatically going forward, rather than only when a reviewer happens to run `mypy` directly against the file.
+**Resolution:** Fixed differently than suggested, but more thoroughly: rather than a `# type: ignore` workaround, the parameter is now properly typed `context: Context | None` (importing `airflow.sdk.Context` under `TYPE_CHECKING` only, zero runtime cost), matching the parent `KubernetesPodOperator.build_pod_request_obj()`'s own signature exactly. This makes `super().build_pod_request_obj(context)` type-check directly with no suppression needed, and the docstring's narrowing claim is now accurate (rewritten to correctly describe `isinstance(context, dict)` as a runtime-only defensive check, not something the `super()` call depends on). Verified: `uv run mypy --strict airflow/dags/_common/tracing_kpo.py` — the specific `arg-type` error is gone (one remaining `import-untyped` note on the `kubernetes` package itself is pre-existing and unrelated). Adding `airflow/dags` to `Makefile`'s `TYPECHECK_PATHS` was deliberately left out of this fix — that is a broader, separate decision (it would put the *entire* `airflow/dags/` tree under strict mypy for the first time, not just this one file) that deserves its own review rather than being bundled into this delta fix.
 
 ## Info
 
-### IN-01: `grafana_reader` is granted `USAGE` on a schema it never has a table grant in
+### IN-01: `poll_lineage_dag_context`'s `.fetchone()` has no `ORDER BY`/uniqueness guarantee for a run that publishes more than one row
 
-**File:** `migrations/versions/0011_grafana_reader_role.py:46`
-**Issue:** `upgrade()` runs `GRANT USAGE ON SCHEMA normalized TO grafana_reader` alongside `GRANT USAGE ON SCHEMA meta TO grafana_reader`. The role's own docstring (lines 20-24) is explicit that `grafana_reader` **deliberately never gets a direct table grant on `normalized.customers`** — it reaches that data only through `meta.v_customers_lineage` (migration 0012), which runs under the view owner's privileges, not the querying role's, so `USAGE` on `normalized` contributes nothing the role actually needs. It is inert today (no table-level grant exists in `normalized` for this role, so the `USAGE` grant alone confers no data access), but it is a small deviation from the least-privilege posture this migration otherwise documents carefully, and an unused grant is easy to forget about (and mistakenly rely on) if a future migration ever does add a direct `normalized.*` table grant to this role.
-**Fix:** Drop the `GRANT USAGE ON SCHEMA normalized TO grafana_reader` line (and its corresponding `REVOKE` in `downgrade()`) since it is not exercised by anything this role is granted access to, or add a comment explaining why it is kept for forward-compatibility if that is the intent.
+**File:** `tests/e2e/observability/conftest.py:677-682`
+**Issue:** The new polling helper queries `meta.v_customers_lineage` — a view over published *rows*, not runs — filtered only by `run_id`:
+```python
+cur.execute(
+    "SELECT dag_id, dag_run_id, task_id, map_index, k8s_namespace "
+    "FROM meta.v_customers_lineage WHERE run_id = %s",
+    (run_id,),
+)
+row = cur.fetchone()
+```
+If a single run ever publishes more than one `normalized.customers` row (any CSV with more than one data row), this returns an arbitrary one of them with no `ORDER BY`/`LIMIT 1 ... ORDER BY` to make the choice deterministic. It is safe today only because every current caller (`test_trace_propagation.py`'s `_unique_small_csv_bytes()`) uploads a CSV with exactly one data row, so `WHERE run_id = %s` always matches at most one row in practice. This is a latent trap for whoever next reuses this helper with a multi-row fixture, not a currently-observed flake.
+**Fix:** Either document the single-row-file assumption explicitly in the function's docstring, or make the query robust regardless of row count, e.g. `... WHERE run_id = %s ORDER BY customer_id LIMIT 1`.
+**Resolution:** Fixed as suggested (the "make it robust" option): added `ORDER BY customer_row_id LIMIT 1` (the view's surrogate PK column, more stable than `customer_id` for ordering purposes). Verified: `make test` 417/417, ruff clean.
 
 ---
 
-_Reviewed: 2026-08-16T12:23:00Z_
+_Reviewed: 2026-08-16T16:09:01Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_

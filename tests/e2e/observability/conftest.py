@@ -676,7 +676,8 @@ def poll_lineage_dag_context(
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT dag_id, dag_run_id, task_id, map_index, k8s_namespace "
-                "FROM meta.v_customers_lineage WHERE run_id = %s",
+                "FROM meta.v_customers_lineage WHERE run_id = %s "
+                "ORDER BY customer_row_id LIMIT 1",
                 (run_id,),
             )
             row = cur.fetchone()

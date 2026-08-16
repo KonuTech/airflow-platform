@@ -347,11 +347,11 @@ class PostgresMetadataRepository(MetadataRepository):
                        k8s_pod_name = %(pod_name)s,
                        trace_id = %(trace_id)s,
                        span_id = %(span_id)s,
-                       dag_id = %(dag_id)s,
-                       dag_run_id = %(dag_run_id)s,
-                       task_id = %(task_id)s,
-                       map_index = %(map_index)s,
-                       k8s_namespace = %(k8s_namespace)s,
+                       dag_id = COALESCE(%(dag_id)s, dag_id),
+                       dag_run_id = COALESCE(%(dag_run_id)s, dag_run_id),
+                       task_id = COALESCE(%(task_id)s, task_id),
+                       map_index = COALESCE(%(map_index)s, map_index),
+                       k8s_namespace = COALESCE(%(k8s_namespace)s, k8s_namespace),
                        started_at = COALESCE(started_at, now()),
                        lease_expires_at = now() + interval '5 minutes'
                  WHERE idempotency_key = %(key)s
