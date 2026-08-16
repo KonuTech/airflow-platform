@@ -51,6 +51,7 @@ from airflow.sdk import dag, task
 from kubernetes.client import models as k8s
 
 from _common.kpo import common_kpo_kwargs
+from _common.tracing_kpo import TracingKubernetesPodOperator
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +135,11 @@ def csv_ingest_customers() -> None:
     # batching.max_units_per_run cap (plan 04-03), never by anything in this
     # file; the platform-level [core] max_map_length default (1024) stays
     # untouched and comfortably above the configured cap.
-    ingest = KubernetesPodOperator.partial(
+    # D-12: `ingest` is the trace root (OBS-10) -- TracingKubernetesPodOperator
+    # injects a per-execution TRACEPARENT env var into each mapped file's
+    # launched pod (tracing_kpo.py), one trace per meta.ingestion_runs row.
+    # `discover` above stays a plain KubernetesPodOperator, untouched.
+    ingest = TracingKubernetesPodOperator.partial(
         task_id="ingest",
         cmds=["dataplat"],
         retries=3,

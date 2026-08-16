@@ -27,7 +27,16 @@ DAGS_DIR = REPO_ROOT / "airflow" / "dags"
 # reason. It is deliberately NOT exempt from the SQL-string check: it should
 # never contain one either, and a silent blanket exemption would hide a
 # real regression just as easily as it hides a false positive.
-_EXEMPT_FROM_IMPORT_CHECK = frozenset({"airflow/dags/_common/kpo.py"})
+#
+# `_common/tracing_kpo.py` (plan 07-04) is exempt for the identical reason:
+# it legitimately imports `kubernetes.client.models` (same pure API-object
+# construction) AND `opentelemetry.propagate` (reading the active span's W3C
+# trace context, not business logic either) -- neither import parses CSV,
+# validates a row, or writes to a database. Same by-name mechanism, not a
+# broader pattern; also deliberately NOT exempt from the SQL-string check.
+_EXEMPT_FROM_IMPORT_CHECK = frozenset(
+    {"airflow/dags/_common/kpo.py", "airflow/dags/_common/tracing_kpo.py"},
+)
 
 FORBIDDEN_IMPORTS = re.compile(r"^\s*(?:import|from)\s+(csv|psycopg|boto3|pydantic)\b")
 FORBIDDEN_SQL = re.compile(r"(?i)(SELECT |INSERT INTO|UPDATE )")
