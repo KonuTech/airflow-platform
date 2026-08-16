@@ -210,6 +210,20 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 7 complete (2026-08-16)** — Observability, Metrics, Tracing & Lineage.
+
+Grafana dashboard (8 metrics + 3 live gauges), bounded-cardinality OTel metrics/traces
+via OTel Collector + Tempo, two-tier freshness alerting to a Vault-backed webhook, and
+`meta.v_customers_lineage` for SQL-queryable lineage — all live-verified against the
+real cluster. Gap closure (07-09) wired `dag_id`/`dag_run_id`/`task_id` end-to-end
+(mirroring the TRACEPARENT pod-boundary mechanism from 07-04), proven correct via
+real-Postgres integration tests and a byte-identical live code deployment. One item
+remains open under a developer-accepted override: live confirmation that a genuinely
+Airflow-triggered row shows non-NULL dag/run/task ID is blocked by an unrelated,
+independently-confirmed Airflow KubernetesExecutor scheduling defect (tasks stuck
+`queued`/`up_for_retry` indefinitely, reproducing since before this phase's own work
+began) — tracked in STATE.md's Blockers/Concerns, needs its own `/gsd:debug` session.
+
 **Phase 6 complete (2026-08-15)** — Universal CSV Engine, Schema Contracts & Normalization.
 
 The full detection → normalization → schema-versioning pipeline is real and wired
@@ -405,4 +419,4 @@ Standing facts later phases inherit:
   integration tests green during isolated worktree execution.
 
 ---
-*Last updated: 2026-08-15 after Phase 6*
+*Last updated: 2026-08-16 after Phase 7*
