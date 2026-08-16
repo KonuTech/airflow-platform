@@ -6,7 +6,7 @@ r"""scripts/vault-bootstrap.py -- idempotent hvac-based Vault admin bootstrap.
 than silently unsealing it itself; unseal is D-02's own deliberate, separate
 step). It creates, if not already present:
 
-  (a) KV v2 mounts `etl` and `airflow`
+  (a) KV v2 mounts `etl`, `airflow` and `grafana`
   (b) the `kubernetes` auth method, configured against the in-cluster API
       server
   (c) policy `csv-processor` (read access to its own two KV paths)
@@ -39,6 +39,16 @@ step). It creates, if not already present:
       back to `Connection(conn_id, **response)` otherwise) -- assembled
       from the same live `data/minio-app` Kubernetes Secret `etl/minio`
       reads (see `_ensure_airflow_secrets`)
+  (j) the `grafana` KV secret VALUES and the `grafana-alert-webhook`
+      Kubernetes Secret in namespace `monitoring` (plan 07-06) --
+      `grafana/analytics-db` (`password`, from a fresh `kubectl exec`-driven
+      `ALTER ROLE grafana_reader WITH PASSWORD ...`, the same mechanism (h)
+      uses for `etl_app`) and `grafana/alert-webhook` (`url`, read from the
+      operator-provisioned `.secrets/grafana-webhook-url` file). Grafana has
+      no Vault client at all (unlike Airflow's native `VaultBackend` or
+      `hvac`-in-pod for ETL), so this step also materializes both values as
+      a Kubernetes Secret Grafana's Helm values reference by name -- see
+      `_ensure_grafana_secrets`
 
 Every step is idempotent: re-running this script against an already-
 bootstrapped Vault performs zero writes and prints "already present" for
@@ -117,6 +127,18 @@ _ANALYTICS_DATABASE = "analytics"
 _ANALYTICS_APP_ROLE = "etl_app"
 _MINIO_APP_SECRET_NAME = "minio-app"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 _MINIO_APP_ACCESS_KEY = "etl-app"
+
+# (j) Grafana (plan 07-06) -- a third Vault-consumer shape, distinct from
+# both of Phase 5's tiers (Airflow's native VaultBackend; hvac-in-pod for
+# ETL): Grafana's own container has no Vault client at all, so its two
+# credentials materialize into a Kubernetes Secret instead
+# (07-RESEARCH.md Pattern 5). `_GRAFANA_READER_ROLE` is a SIBLING constant
+# to `_ANALYTICS_APP_ROLE`, not a reuse of it -- `grafana_reader` (migration
+# 0011) is a separate, SELECT-only role.
+_MONITORING_NAMESPACE = "monitoring"
+_GRAFANA_READER_ROLE = "grafana_reader"
+_GRAFANA_SECRET_NAME = "grafana-alert-webhook"  # noqa: S105 -- a K8s Secret's `metadata.name`
+_GRAFANA_WEBHOOK_FILE = _REPO_ROOT / ".secrets" / "grafana-webhook-url"
 
 
 def _versions_env_variable(name: str) -> str:
@@ -264,9 +286,19 @@ def _read_root_token() -> str:
 
 
 def _ensure_kv_v2_mounts(client: hvac.Client) -> None:
-    """(a) Enable KV v2 mounts `etl` and `airflow`, if not already mounted."""
+    """(a) Enable KV v2 mounts `etl`, `airflow` and `grafana`, if not already mounted.
+
+    `grafana` (plan 07-06) is a Vault-write TARGET, not a Vault-read
+    consumer -- Grafana itself has no Vault client (07-RESEARCH.md
+    Pattern 5) -- but `create_or_update_secret(mount_point="grafana", ...)`
+    still requires the mount to exist first: verified empirically against a
+    live Vault, writing to an unmounted prefix raises the same
+    `hvac.exceptions.InvalidPath` a missing PATH does, so without this the
+    mount itself (not just the path) would silently need creating on every
+    first-ever `_ensure_grafana_secrets` call.
+    """
     existing = client.sys.list_mounted_secrets_engines()["data"]
-    for mount in ("etl", "airflow"):
+    for mount in ("etl", "airflow", "grafana"):
         if f"{mount}/" in existing:
             print(f"mount {mount}/: already present")
             continue
@@ -699,6 +731,180 @@ def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
         print("secret airflow/connections/minio_default: created")
 
 
+def _apply_kubernetes_secret(
+    kubectl_context: str,
+    *,
+    namespace: str,
+    name: str,
+    string_data: dict[str, str],
+) -> None:
+    """Apply a `type: Opaque` Kubernetes Secret via `kubectl apply -f -`, stdin only.
+
+    Python translation of `scripts/airflow-metadata-secret.sh`'s own
+    `_apply_secret` shape (plan 07-06's own Interfaces section names this
+    exact mapping): the manifest text -- which contains every value in
+    `string_data` -- crosses only via `input=` (stdin), never as an argv
+    element (T-05-13), the same discipline `_kubectl_exec_psql` already
+    applies to its own `sql` parameter.
+
+    Unlike `airflow-metadata-secret.sh`'s own raw `printf` interpolation
+    (safe there only because every value it writes is
+    already pre-encoded -- URL-quoted, hex or base64, none of which can
+    contain a YAML-significant character), this function's `string_data`
+    values are NOT guaranteed pre-encoded: an operator-supplied webhook URL
+    (`_ensure_grafana_secrets`) is arbitrary text that could contain `#`,
+    `:`, leading/trailing whitespace or other YAML-significant characters.
+    Each value is therefore emitted via `json.dumps()` -- a valid JSON
+    string literal is also a valid YAML flow scalar, so this safely quotes
+    and escapes without pulling in a full YAML-serialization dependency.
+
+    Args:
+        kubectl_context: The kubectl context to apply through.
+        namespace: The Secret's namespace.
+        name: The Secret's name.
+        string_data: The Secret's `stringData` key/value pairs. Never
+            logged or printed by this function.
+
+    Raises:
+        RuntimeError: The `kubectl apply` call fails.
+    """
+    kubectl_bin = _require_kubectl()
+    lines = [
+        "apiVersion: v1",
+        "kind: Secret",
+        "metadata:",
+        f"  name: {name}",
+        f"  namespace: {namespace}",
+        "type: Opaque",
+        "stringData:",
+    ]
+    lines.extend(f"  {key}: {json.dumps(value)}" for key, value in string_data.items())
+    manifest = "\n".join(lines) + "\n"
+
+    proc = subprocess.run(  # noqa: S603
+        [kubectl_bin, "--context", kubectl_context, "apply", "-f", "-"],
+        input=manifest,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        msg = f"kubectl apply Secret {namespace}/{name} failed: {proc.stderr}"
+        raise RuntimeError(msg)
+
+
+def _ensure_grafana_secrets(client: hvac.Client, kubectl_context: str) -> None:
+    """(j) Populate `grafana/analytics-db` and `grafana/alert-webhook`, materialize their Secret.
+
+    Grafana (unlike Airflow's native `VaultBackend` or `hvac`-in-pod for ETL
+    -- Phase 5's only two established Vault-consumer tiers) has no Vault
+    client at all, so its two credentials must land in a Kubernetes Secret
+    instead of being read directly at runtime (07-RESEARCH.md Pattern 5).
+
+    Same read-then-skip-or-write shape as `_ensure_etl_secrets` for each of
+    the two Vault paths:
+
+    - `grafana/analytics-db`: on `InvalidPath`, generate a fresh
+      `grafana_reader` PostgreSQL password via `secrets.token_hex(32)`,
+      `ALTER ROLE grafana_reader WITH PASSWORD ...` against the analytical
+      cluster's current primary pod (the identical `kubectl exec` mechanism
+      `_ensure_etl_secrets` already uses for `etl_app`), then write
+      `{"password": password}` to Vault KV.
+    - `grafana/alert-webhook`: on `InvalidPath`, read the webhook URL from
+      `_GRAFANA_WEBHOOK_FILE` if it exists, else raise a `RuntimeError`
+      naming the exact path to create -- this function never invents or
+      guesses a webhook destination (the operator's `user_setup` step,
+      07-06-PLAN.md). Write `{"url": webhook_url}` to Vault KV.
+
+    Unconditionally (whether either path above was just created or already
+    existed): read both values back from Vault KV and apply the
+    `grafana-alert-webhook` Kubernetes Secret in namespace `monitoring`
+    (keys `GRAFANA_DB_PASSWORD`/`GRAFANA_ALERT_WEBHOOK_URL`) via
+    `_apply_kubernetes_secret`. This step is NOT guarded by a
+    "was anything just created" check: the Secret itself can independently
+    go missing (e.g. after a `cluster-down`/`cluster-up` that wipes
+    Kubernetes state but not Vault's PVC-backed KV data) even when both
+    Vault paths are already long-lived -- `kubectl apply` on an unchanged
+    manifest is itself an idempotent no-op PATCH.
+
+    Never prints either value.
+
+    Args:
+        client: An `hvac.Client` authenticated with the root token.
+        kubectl_context: The kubectl context to read/exec/apply through.
+
+    Raises:
+        RuntimeError: `grafana/alert-webhook` does not exist yet in Vault
+            AND `_GRAFANA_WEBHOOK_FILE` does not exist on disk either.
+    """
+    try:
+        client.secrets.kv.v2.read_secret_version(mount_point="grafana", path="analytics-db")
+        print("secret grafana/analytics-db: already present")
+    except hvac.exceptions.InvalidPath:
+        primary_pod = _kubectl_cluster_primary_pod(
+            kubectl_context,
+            namespace=_DATA_NAMESPACE,
+            cluster=_ANALYTICS_CLUSTER,
+        )
+        # secrets.token_hex's charset is pure [0-9a-f] -- it cannot contain
+        # the `'` character the SQL string literal below depends on, so
+        # this is not an injection vector (T-05-13), the same reasoning
+        # _ensure_etl_secrets documents for etl_app's own password.
+        password = secrets.token_hex(32)
+        _kubectl_exec_psql(
+            kubectl_context,
+            namespace=_DATA_NAMESPACE,
+            pod=primary_pod,
+            database=_ANALYTICS_DATABASE,
+            sql=f"ALTER ROLE {_GRAFANA_READER_ROLE} WITH PASSWORD '{password}';",
+        )
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="grafana",
+            path="analytics-db",
+            secret={"password": password},
+        )
+        print("secret grafana/analytics-db: created")
+
+    try:
+        client.secrets.kv.v2.read_secret_version(mount_point="grafana", path="alert-webhook")
+        print("secret grafana/alert-webhook: already present")
+    except hvac.exceptions.InvalidPath:
+        if not _GRAFANA_WEBHOOK_FILE.is_file():
+            msg = (
+                f"{_GRAFANA_WEBHOOK_FILE} does not exist -- create it, containing the "
+                "Grafana alert webhook URL as a single line of plain text, then re-run "
+                "`make vault-bootstrap`"
+            )
+            raise RuntimeError(msg) from None
+        webhook_url = _GRAFANA_WEBHOOK_FILE.read_text(encoding="utf-8").strip()
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="grafana",
+            path="alert-webhook",
+            secret={"url": webhook_url},
+        )
+        print("secret grafana/alert-webhook: created")
+
+    password = client.secrets.kv.v2.read_secret_version(
+        mount_point="grafana",
+        path="analytics-db",
+    )["data"]["data"]["password"]
+    webhook_url = client.secrets.kv.v2.read_secret_version(
+        mount_point="grafana",
+        path="alert-webhook",
+    )["data"]["data"]["url"]
+    _apply_kubernetes_secret(
+        kubectl_context,
+        namespace=_MONITORING_NAMESPACE,
+        name=_GRAFANA_SECRET_NAME,
+        string_data={
+            "GRAFANA_DB_PASSWORD": password,
+            "GRAFANA_ALERT_WEBHOOK_URL": webhook_url,
+        },
+    )
+    print(f"Secret {_MONITORING_NAMESPACE}/{_GRAFANA_SECRET_NAME}: applied")
+
+
 def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
     """Run every idempotent bootstrap step against an authenticated, unsealed `client`.
 
@@ -798,6 +1004,7 @@ def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
 
     _ensure_etl_secrets(client, kubectl_context)
     _ensure_airflow_secrets(client, kubectl_context)
+    _ensure_grafana_secrets(client, kubectl_context)
 
 
 def main() -> int:
