@@ -38,7 +38,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 4: Vertical Slice — CSV to Analytical PostgreSQL** - The end-to-end pipeline closes, idempotent by construction; a re-run produces zero additional rows (completed 2026-08-13)
 - [x] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests (completed 2026-08-14)
 - [x] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization (completed 2026-08-15)
-- [ ] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking
+- [x] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking (completed 2026-08-16)
 - [ ] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection
 - [ ] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation
 - [ ] **Phase 10: CDC & Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history, late-arriving corrections by history recomputation, and a CDC `Source` with an ordering barrier
@@ -412,7 +412,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 07-08-PLAN.md — Live-cluster proof: real trace propagation (OBS-10) and real alert webhook delivery (D-20)
+- [x] 07-08-PLAN.md — Live-cluster proof: real trace propagation (OBS-10) and real alert webhook delivery (D-20)
 
 **Research stage**: S11. **Use `/gsd-plan-phase --research-phase`** — STACK rates metrics and traces MEDIUM. Cross-process trace propagation into KPO pods is **not** built in; the W3C `traceparent` injection recipe is DIY. Airflow's StatsD-XOR-OTel constraint shapes the whole design.
 
