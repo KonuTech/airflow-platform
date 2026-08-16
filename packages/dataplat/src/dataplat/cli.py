@@ -20,7 +20,12 @@ of user/operator error a CLI has to handle, not a bug). Any OTHER exception
 is deliberately NOT caught here (ARCHITECTURE.md Sec 4.5 bans a blanket
 catch-all clause anywhere outside this scoped boundary) and propagates to the
 process, because it is a bug to surface loudly, not a condition this
-boundary should paper over.
+boundary should paper over. A ``finally`` block flushes both observability
+backends unconditionally before returning (plan 07-07, discovered live: this
+CLI's own invocations are short-lived enough that neither provider's
+internal export timer ever fires on its own -- see ``tracing.flush()``/
+``metrics.flush()``'s own docstrings) -- this runs on every exit path,
+including an uncaught exception propagating past this function entirely.
 
 This phase's only subcommand is the ``--version`` flag on the group itself;
 ``ingest`` (Phase 4) and later subcommands attach to the same ``cli`` group
@@ -107,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     env var into the active OTel context and configures both the ``tracing``
     and ``metrics`` observability backends exactly once, at this same point
     -- before any subcommand (including the plugin-loaded ``ingest``) can
-    create a span or increment a counter (OBS-08/OBS-10).
+    create a span or increment a counter (OBS-08/OBS-10). Flushes both
+    backends unconditionally, in a ``finally`` block, before returning --
+    this short-lived batch process would otherwise exit before either
+    provider's own internal export timer ever fires, silently discarding
+    every span/metric recorded during the run (discovered live, plan 07-07).
 
     A ``DataPlatformError`` raised by any subcommand is caught exactly once
     here (D-06), logged with structured context, and turned into exit code
