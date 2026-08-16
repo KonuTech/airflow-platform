@@ -3,7 +3,10 @@
 ``main()`` is the console-script target declared by
 ``packages/dataplat/pyproject.toml``'s ``[project.scripts]`` (Cluster O) and
 the pod ``ENTRYPOINT`` this plan's Dockerfile builds. It configures structured
-logging exactly once, then dispatches to the ``cli`` click group inside a
+logging exactly once, extracts an incoming W3C ``TRACEPARENT`` env var into
+the active OTel context and configures both observability backends
+(``tracing``/``metrics``, OBS-10/OBS-08) exactly once -- all near the top,
+before dispatching to the ``cli`` click group -- then dispatches inside a
 ``try/except`` block scoped to two well-defined exception families. A
 ``DataPlatformError`` raised by any subcommand's callback is logged with its
 structured ``context`` and turned into exit code ``1`` -- never a raw Python
@@ -32,8 +35,11 @@ from importlib.metadata import entry_points
 
 import click
 import structlog
+from opentelemetry import context as otel_context
+from opentelemetry import propagate
 
 from dataplat.errors import DataPlatformError
+from dataplat.observability import metrics, tracing
 from dataplat.observability.logging import configure, get_logger
 from dataplat.version import resolve_version
 
@@ -56,6 +62,36 @@ def _log_json_enabled() -> bool:
     return os.environ.get("DATAPLAT_LOG_JSON", "").strip().lower() in _LOG_JSON_TRUTHY
 
 
+def _extract_incoming_trace_context() -> None:
+    """Extract an incoming W3C ``TRACEPARENT`` env var into the active OTel context.
+
+    OBS-10's pod-side half: the Airflow KPO pod-spec side (a separate, earlier
+    plan) injects a ``TRACEPARENT`` env var carrying the Airflow task span's
+    context; this is where ``dataplat`` picks it up, so ``run_ingest``'s own
+    ``pipeline.run_ingest`` span (``pipeline/run.py``) becomes a genuine CHILD
+    of that Airflow task span rather than an unrelated root span.
+
+    A no-op when ``TRACEPARENT`` is unset -- the active context is left
+    exactly as ``opentelemetry`` initialized it, with no parent attached.
+    ``opentelemetry.propagate.extract()`` is the reference W3C traceparent
+    parser (T-07-14): a malformed value degrades to "no parent context"
+    rather than raising, so a bad env var -- set by an operator, or by a
+    misconfigured pod-spec injection -- can never crash the CLI (verified
+    directly against the installed ``opentelemetry`` propagator, not assumed).
+
+    The extracted context is attached via ``opentelemetry.context.attach()``
+    and deliberately never detached: this runs once, near process start, and
+    the extracted parent must stay active for this process's entire
+    remaining lifetime so every span created afterwards -- starting with
+    ``run_ingest``'s own -- nests under it.
+    """
+    traceparent = os.environ.get("TRACEPARENT")
+    if not traceparent:
+        return
+    ctx = propagate.extract({"traceparent": traceparent})
+    otel_context.attach(ctx)
+
+
 @click.group(no_args_is_help=True)
 @click.version_option(version=resolve_version(), prog_name="dataplat")
 def cli() -> None:
@@ -67,9 +103,15 @@ def main(argv: list[str] | None = None) -> int:
 
     Configures structured logging once, near the top, before dispatching to
     the ``cli`` click group, so every present and future subcommand inherits
-    it without reconfiguring. A ``DataPlatformError`` raised by any
-    subcommand is caught exactly once here (D-06), logged with structured
-    context, and turned into exit code ``1``. Click's own usage/control-flow
+    it without reconfiguring. Also extracts an incoming W3C ``TRACEPARENT``
+    env var into the active OTel context and configures both the ``tracing``
+    and ``metrics`` observability backends exactly once, at this same point
+    -- before any subcommand (including the plugin-loaded ``ingest``) can
+    create a span or increment a counter (OBS-08/OBS-10).
+
+    A ``DataPlatformError`` raised by any subcommand is caught exactly once
+    here (D-06), logged with structured context, and turned into exit code
+    ``1``. Click's own usage/control-flow
     exceptions (``ClickException`` and subclasses -- e.g. a bare invocation,
     an unknown option, an unknown subcommand -- plus ``Exit`` and ``Abort``)
     are converted to the matching exit code instead of propagating, since
@@ -109,6 +151,11 @@ def main(argv: list[str] | None = None) -> int:
     if not structlog.is_configured():
         configure(in_cluster=_log_json_enabled())
     log = get_logger()
+
+    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    tracing.configure(otlp_endpoint=otlp_endpoint)
+    metrics.configure(otlp_endpoint=otlp_endpoint)
+    _extract_incoming_trace_context()
 
     for entry_point in entry_points(group="dataplat.plugins"):
         entry_point.load()
