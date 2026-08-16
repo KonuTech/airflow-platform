@@ -166,6 +166,10 @@ None - no external service configuration required.
 - Task 3's live-cluster E2E test is written and committed but has not yet passed against the live cluster — see Issues Encountered for the precise blockers and recommended next step. **A future verification pass (`/gsd:verify-phase` or similar) should NOT treat OBS-07 as fully closed until that test has actually been run to green against a cluster running this plan's merged code.**
 - The cluster itself is left healthier than it was found: 56 stuck sidecar-pattern pods cleared, a 2+-hour-stuck backlog `DagRun` finally resolved, and worker-node CPU allocation reduced from 91-95% to 75-78%. No orphaned throwaway test resources were left behind (the two CSV files uploaded by earlier, timed-out test attempts remain in `s3://raw/customers/` as ordinary, uniquely-named, harmless synthetic fixture data — consistent with how this test suite has always operated; it has no upload-cleanup step in its passing case either).
 
+## Self-Check: PASSED
+
+All 13 modified files verified present on disk (`packages/dataplat/src/dataplat/{models/identity.py,metadata/repository.py,metadata/postgres.py,pipeline/run.py}`, `airflow/dags/_common/tracing_kpo.py`, `packages/csv-processor/src/csv_processor/cli.py`, `tests/unit/{test_run_ingest_trace.py,test_tracing_kpo.py,test_csv_processor_cli.py}`, `tests/integration/{test_metadata_repository.py,test_lineage_view.py}`, `tests/e2e/observability/{conftest.py,test_trace_propagation.py}`). All 4 referenced commit hashes (`404e122`, `507136f`, `cdd051c`, `ce02bfe`) verified present in `git log --oneline --all`. No missing items.
+
 ---
 *Phase: 07-observability-metrics-tracing-lineage*
 *Completed: 2026-08-16*
