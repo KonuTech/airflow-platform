@@ -182,7 +182,7 @@ class _FakeMetadataRepository:
     status_for_skip: str | None = None
     claim_calls: list[dict[str, object]] = field(default_factory=list)
 
-    def claim_ingestion_run(
+    def claim_ingestion_run(  # noqa: PLR0913 -- mirrors the real Protocol's column set
         self,
         *,
         idempotency_key: str,
@@ -190,6 +190,11 @@ class _FakeMetadataRepository:
         pod_name: str,
         trace_id: str | None = None,
         span_id: str | None = None,
+        dag_id: str | None = None,
+        dag_run_id: str | None = None,
+        task_id: str | None = None,
+        map_index: int | None = None,
+        k8s_namespace: str | None = None,
     ) -> tuple[int, str] | None:
         self.claim_calls.append(
             {
@@ -198,6 +203,11 @@ class _FakeMetadataRepository:
                 "pod_name": pod_name,
                 "trace_id": trace_id,
                 "span_id": span_id,
+                "dag_id": dag_id,
+                "dag_run_id": dag_run_id,
+                "task_id": task_id,
+                "map_index": map_index,
+                "k8s_namespace": k8s_namespace,
             },
         )
         return self.claim_result

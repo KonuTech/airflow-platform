@@ -323,7 +323,7 @@ class PostgresMetadataRepository(MetadataRepository):
                 raise RuntimeError(msg)
             return int(row[0]), str(row[1])
 
-    def claim_ingestion_run(
+    def claim_ingestion_run(  # noqa: PLR0913 -- matches the run-identity/trace/dag-context columns this method persists in one UPDATE
         self,
         *,
         idempotency_key: str,
@@ -331,6 +331,11 @@ class PostgresMetadataRepository(MetadataRepository):
         pod_name: str,
         trace_id: str | None = None,
         span_id: str | None = None,
+        dag_id: str | None = None,
+        dag_run_id: str | None = None,
+        task_id: str | None = None,
+        map_index: int | None = None,
+        k8s_namespace: str | None = None,
     ) -> tuple[int, str] | None:
         """See `MetadataRepository.claim_ingestion_run`."""
         with self._pool.connection() as conn:
@@ -342,6 +347,11 @@ class PostgresMetadataRepository(MetadataRepository):
                        k8s_pod_name = %(pod_name)s,
                        trace_id = %(trace_id)s,
                        span_id = %(span_id)s,
+                       dag_id = %(dag_id)s,
+                       dag_run_id = %(dag_run_id)s,
+                       task_id = %(task_id)s,
+                       map_index = %(map_index)s,
+                       k8s_namespace = %(k8s_namespace)s,
                        started_at = COALESCE(started_at, now()),
                        lease_expires_at = now() + interval '5 minutes'
                  WHERE idempotency_key = %(key)s
@@ -356,6 +366,11 @@ class PostgresMetadataRepository(MetadataRepository):
                     "pod_name": pod_name,
                     "trace_id": trace_id,
                     "span_id": span_id,
+                    "dag_id": dag_id,
+                    "dag_run_id": dag_run_id,
+                    "task_id": task_id,
+                    "map_index": map_index,
+                    "k8s_namespace": k8s_namespace,
                     "key": idempotency_key,
                 },
             ).fetchone()

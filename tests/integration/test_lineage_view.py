@@ -65,6 +65,17 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
             idempotency_key="run_ingest_lineage:1",
             file_id=file_id,
             batch_id=batch_id,
+            # OBS-07 gap closure (07-09): values representative of what a
+            # real Airflow-triggered run would carry -- this test proves the
+            # RunContext -> claim_ingestion_run -> view plumbing this plan's
+            # Task 1 builds, independent of the pod-boundary env-var
+            # mechanism Task 2 builds, which gets its own live proof in
+            # Task 3.
+            dag_id="csv_ingest_customers",
+            dag_run_id="manual__2026-01-01T00:00:00+00:00",
+            task_id="ingest",
+            map_index=7,
+            k8s_namespace="etl",
         ),
         config=_make_config(),
         metadata=env.metadata,
@@ -104,11 +115,15 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
     assert row["config_hash"] == "synthetic-hash-for-test"
     assert row["schema_version"] is not None
     assert row["schema_hash"] is not None
-    # This fixture chain runs entirely outside Airflow -- NULL is the
-    # correct, expected value for exactly these three (07-01-PLAN.md Task 3).
-    assert row["dag_id"] is None
-    assert row["dag_run_id"] is None
-    assert row["task_id"] is None
+    # OBS-07 gap closure (07-09): these are now populated because RunContext
+    # was constructed with them above -- claim_ingestion_run() persists them
+    # in the same UPDATE as trace_id/span_id, and the view SELECTs them
+    # straight through from meta.ingestion_runs.
+    assert row["dag_id"] == "csv_ingest_customers"
+    assert row["dag_run_id"] == "manual__2026-01-01T00:00:00+00:00"
+    assert row["task_id"] == "ingest"
+    assert row["map_index"] == 7
+    assert row["k8s_namespace"] == "etl"
 
     # error_detail must never surface through this view (Security Domain
     # finding, migration 0012's own docstring) -- assert the raw exception

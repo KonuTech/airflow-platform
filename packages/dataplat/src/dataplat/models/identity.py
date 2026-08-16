@@ -98,6 +98,12 @@ class RunContext:
         batch_id: The batch this run processes, when applicable. Populated
             and consumed the same way as ``file_id``, from
             ``AssignmentDocument.batch.batch_id``. Defaults to ``None``.
+        map_index: This run's Airflow Dynamic Task Mapping index (0-based),
+            when triggered by Airflow's mapped ``ingest`` task instance.
+            ``None`` when not applicable.
+        k8s_namespace: The Kubernetes namespace the launching
+            KubernetesPodOperator resolved for this pod's own spec (``etl``
+            in production). ``None`` when not applicable.
     """
 
     run_id: int
@@ -110,3 +116,5 @@ class RunContext:
     span_id: str | None = None
     file_id: int | None = None
     batch_id: int | None = None
+    map_index: int | None = None
+    k8s_namespace: str | None = None

@@ -21,6 +21,7 @@ every test below constructs the operator directly rather than going through
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from kubernetes.client import models as k8s
@@ -50,6 +51,18 @@ def _build_operator(task_id: str) -> TracingKubernetesPodOperator:
 
 def _traceparent_env_vars(pod: k8s.V1Pod) -> list[k8s.V1EnvVar]:
     return [env for env in pod.spec.containers[0].env if env.name == "TRACEPARENT"]
+
+
+def _airflow_ctx_env_var_names(pod: k8s.V1Pod) -> list[str]:
+    return [env.name for env in pod.spec.containers[0].env if env.name.startswith("AIRFLOW_CTX_")]
+
+
+def _airflow_ctx_env_var_map(pod: k8s.V1Pod) -> dict[str, str]:
+    return {
+        env.name: env.value
+        for env in pod.spec.containers[0].env
+        if env.name.startswith("AIRFLOW_CTX_")
+    }
 
 
 def test_no_active_span_injects_nothing() -> None:
@@ -143,3 +156,75 @@ def test_discover_is_unaffected_by_this_module() -> None:
     assert "build_pod_request_obj" in TracingKubernetesPodOperator.__dict__, (
         "TracingKubernetesPodOperator no longer overrides build_pod_request_obj directly"
     )
+
+
+def _make_airflow_context(
+    ti: object,
+    *,
+    run_id: str = "manual__2026-01-01T00:00:00+00:00",
+) -> dict[str, object]:
+    """Build a context dict shaped enough for the REAL, installed `KubernetesPodOperator.
+    build_pod_request_obj()` to succeed, not merely `{"ti": ...}` alone.
+
+    The installed `apache-airflow-providers-cncf-kubernetes`'s own
+    `_get_ti_pod_labels()` reads `context["ti"]`/`context["run_id"]`/
+    `context["dag"]` directly and unconditionally whenever `context` is
+    truthy (confirmed empirically: a bare `{"ti": ...}` dict raises
+    `KeyError: 'run_id'` inside the base class, before this override's own
+    code ever runs) -- `run_id`/`dag` are therefore part of every context
+    this file passes to `build_pod_request_obj`, exactly as a real Airflow
+    task context always provides them alongside `ti`.
+    """
+    return {"ti": ti, "run_id": run_id, "dag": SimpleNamespace()}
+
+
+def test_airflow_context_injects_five_dag_identity_env_vars() -> None:
+    """OBS-07 gap closure (07-09): a real-shaped Airflow task context (`context["ti"]`)
+    results in all five `AIRFLOW_CTX_*` env vars on the launched pod, with exact
+    string values -- including `AIRFLOW_CTX_K8S_NAMESPACE`, taken from the pod's
+    own already-built `metadata.namespace`, not from `context` at all.
+    """
+    ti = SimpleNamespace(
+        dag_id="csv_ingest_customers",
+        task_id="ingest",
+        run_id="manual__2026-01-01T00:00:00+00:00",
+        map_index=2,
+        try_number=1,
+    )
+    context = _make_airflow_context(ti)
+    pod = _build_operator("ingest_dag_ctx").build_pod_request_obj(context=context)
+
+    env_vars = _airflow_ctx_env_var_map(pod)
+    assert env_vars["AIRFLOW_CTX_DAG_ID"] == "csv_ingest_customers"
+    assert env_vars["AIRFLOW_CTX_TASK_ID"] == "ingest"
+    assert env_vars["AIRFLOW_CTX_DAG_RUN_ID"] == "manual__2026-01-01T00:00:00+00:00"
+    assert env_vars["AIRFLOW_CTX_MAP_INDEX"] == "2"
+    assert env_vars["AIRFLOW_CTX_K8S_NAMESPACE"] == "etl"
+
+
+def test_malformed_airflow_context_injects_nothing_and_does_not_raise() -> None:
+    """T-07-26: a `ti` satisfying the REAL base operator's own `_get_ti_pod_labels()`
+    requirements (`dag_id`/`task_id`/`map_index`/`try_number`, so `super().
+    build_pod_request_obj()` itself succeeds) but missing `run_id` -- the one
+    extra attribute only THIS override's own `AIRFLOW_CTX_DAG_RUN_ID` injection
+    reads -- must never crash pod launch. It degrades to zero `AIRFLOW_CTX_*`
+    vars appended (the whole five-var list is built inside one `try` block, so
+    an `AttributeError` on any single read discards all five), mirroring
+    `TRACEPARENT`'s own no-op-safe contract.
+    """
+    ti = SimpleNamespace(dag_id="csv_ingest_customers", task_id="ingest", map_index=0, try_number=1)
+    context = _make_airflow_context(ti)
+
+    pod = _build_operator("ingest_malformed_ctx").build_pod_request_obj(context=context)
+
+    assert _airflow_ctx_env_var_names(pod) == []
+
+
+def test_context_none_still_injects_no_dag_identity_env_vars() -> None:
+    """Regression guard: `context=None` -- this file's own pre-existing convention
+    for every TRACEPARENT-only test above -- still injects zero `AIRFLOW_CTX_*`
+    vars, proving this task's change did not alter that pre-existing behavior.
+    """
+    pod = _build_operator("ingest_no_ctx").build_pod_request_obj(context=None)
+
+    assert _airflow_ctx_env_var_names(pod) == []

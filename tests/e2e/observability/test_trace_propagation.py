@@ -45,6 +45,7 @@ import pytest
 from tests.e2e.observability.conftest import (
     poll_file_discovered,
     poll_ingestion_run,
+    poll_lineage_dag_context,
     poll_trace_claimed,
 )
 
@@ -182,3 +183,109 @@ def test_ingest_pod_traceparent_matches_persisted_trace_id(
         f"ingestion run for file_id={file_row['file_id']!r} finished {outcome['status']!r}, "
         f"not SUCCEEDED, even though its TRACEPARENT/trace_id already matched"
     )
+
+
+def test_ingest_pod_dag_context_matches_persisted_lineage_row(
+    kubectl: Callable[..., Any],
+    kubectl_json: Callable[..., Any],
+    s3_client: Callable[[str], Any],
+    analytics_connection: psycopg.Connection[Any],
+) -> None:
+    """OBS-07 gap closure (07-09): a real, live, Airflow-triggered ingest pod's
+    AIRFLOW_CTX_* env vars match meta.ingestion_runs' persisted dag/run/task
+    identity, AND that same identity shows up non-NULL in
+    meta.v_customers_lineage -- the VIEW itself, the literal OBS-07 surface --
+    for the row this run just published.
+
+    Never asserts only one side of any comparison: the pod-spec env vars, the
+    `meta.ingestion_runs` row `poll_trace_claimed` returns, and the
+    `meta.v_customers_lineage` row `poll_lineage_dag_context` returns are all
+    three independent live sources (the Kubernetes API and two separate
+    queries against the analytical database), matching this file's own
+    established "both independent live sources" convention.
+    """
+    unpause = kubectl(
+        "-n",
+        "airflow",
+        "exec",
+        "deploy/airflow-api-server",
+        "--",
+        "airflow",
+        "dags",
+        "unpause",
+        _CUSTOMERS_DAG_ID,
+    )
+    assert unpause.returncode == 0, f"airflow dags unpause failed:\n{unpause.stderr}"
+
+    app = s3_client("app")
+    key = f"customers/e2e-dag-context-{uuid.uuid4().hex[:12]}.csv"
+    object_uri = f"s3://raw/{key}"
+    app.put_object(Bucket="raw", Key=key, Body=_unique_small_csv_bytes())
+
+    file_row = poll_file_discovered(
+        analytics_connection,
+        dataset=_CUSTOMERS_DATASET,
+        object_uri=object_uri,
+        timeout=_DISCOVERY_TIMEOUT_SECONDS,
+    )
+
+    claimed = poll_trace_claimed(
+        analytics_connection,
+        file_id=file_row["file_id"],
+        timeout=_TRACE_CLAIM_TIMEOUT_SECONDS,
+    )
+    pod_name = claimed["k8s_pod_name"]
+
+    pod = _capture_pod_before_deletion(kubectl_json, namespace=_ETL_NAMESPACE, name=pod_name)
+
+    containers = pod["spec"]["containers"]
+    assert containers, f"pod {pod_name!r} has no containers in its captured spec"
+    env_vars = {entry["name"]: entry.get("value") for entry in containers[0].get("env", [])}
+
+    for env_name in (
+        "AIRFLOW_CTX_DAG_ID",
+        "AIRFLOW_CTX_TASK_ID",
+        "AIRFLOW_CTX_DAG_RUN_ID",
+        "AIRFLOW_CTX_MAP_INDEX",
+        "AIRFLOW_CTX_K8S_NAMESPACE",
+    ):
+        assert env_name in env_vars, (
+            f"pod {pod_name!r}'s first container has no {env_name} env var -- captured env "
+            f"names: {sorted(env_vars)}"
+        )
+
+    assert env_vars["AIRFLOW_CTX_DAG_ID"] == claimed["dag_id"], (
+        f"pod env AIRFLOW_CTX_DAG_ID ({env_vars['AIRFLOW_CTX_DAG_ID']!r}) does not match "
+        f"meta.ingestion_runs.dag_id ({claimed['dag_id']!r}) for the same run "
+        f"(file_id={file_row['file_id']!r}, pod={pod_name!r})"
+    )
+    assert env_vars["AIRFLOW_CTX_TASK_ID"] == claimed["task_id"], (
+        f"pod env AIRFLOW_CTX_TASK_ID ({env_vars['AIRFLOW_CTX_TASK_ID']!r}) does not match "
+        f"meta.ingestion_runs.task_id ({claimed['task_id']!r}) for the same run "
+        f"(file_id={file_row['file_id']!r}, pod={pod_name!r})"
+    )
+    assert env_vars["AIRFLOW_CTX_DAG_RUN_ID"] == claimed["dag_run_id"], (
+        f"pod env AIRFLOW_CTX_DAG_RUN_ID ({env_vars['AIRFLOW_CTX_DAG_RUN_ID']!r}) does not "
+        f"match meta.ingestion_runs.dag_run_id ({claimed['dag_run_id']!r}) for the same run "
+        f"(file_id={file_row['file_id']!r}, pod={pod_name!r})"
+    )
+
+    outcome = poll_ingestion_run(
+        analytics_connection,
+        file_id=file_row["file_id"],
+        timeout=_RUN_TERMINAL_TIMEOUT_SECONDS,
+    )
+    assert outcome["status"] == "SUCCEEDED", (
+        f"ingestion run for file_id={file_row['file_id']!r} finished {outcome['status']!r}, "
+        f"not SUCCEEDED, even though its AIRFLOW_CTX_*/dag context already matched"
+    )
+
+    # The decisive proof: meta.v_customers_lineage itself -- not merely
+    # meta.ingestion_runs -- shows non-NULL dag_id/dag_run_id/task_id for a
+    # genuinely live, Airflow-triggered run (07-VERIFICATION.md's own gap).
+    lineage = poll_lineage_dag_context(analytics_connection, run_id=claimed["run_id"])
+    assert lineage["dag_id"] == claimed["dag_id"] == _CUSTOMERS_DAG_ID
+    assert lineage["dag_run_id"] == claimed["dag_run_id"]
+    assert lineage["task_id"] == claimed["task_id"] == "ingest"
+    assert lineage["map_index"] is not None
+    assert lineage["k8s_namespace"] == _ETL_NAMESPACE
