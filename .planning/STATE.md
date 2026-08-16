@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
-status: ready_to_plan
-stopped_at: Phase 07 complete (9/9) — ready to discuss Phase 8
-last_updated: 2026-08-16T16:50:46.807Z
-last_activity: 2026-08-16 -- Phase 07 execution started
+status: planning
+stopped_at: context exhaustion at 75% (2026-08-16)
+last_updated: "2026-08-16T19:31:22.651Z"
+last_activity: 2026-08-16
 progress:
   total_phases: 11
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 70
   completed_plans: 70
-  percent: 55
+  percent: 64
 ---
 
 # Project State
@@ -94,7 +94,9 @@ None yet.
 
 ### Blockers/Concerns
 
-- **RESOLVED (2026-08-16, `/gsd:debug` session, `.planning/debug/resolved/airflow-scheduler-stuck-tasks.md`):** the `csv_ingest_customers` stuck-`queued`/`up_for_retry` scheduling issue (was blocking OBS-07's live E2E confirmation) — root cause was node CPU exhaustion (`kind/cluster.yaml`'s 3-allocatable-core/worker budget, ~750m real headroom after the fixed platform baseline) compounded by `ingest` pods' `airflow-xcom-sidecar` container never terminating on completion, leaking ~500m CPU per occurrence. Fixed via `kpo.py`'s `on_finish_action: delete_pod` + `csv_ingest_customers.py`'s `ingest` concurrency cap (5→1), commit `6ea4129`. Verified live: DagRun `scheduled__2026-08-16T17:04:00` reached full `success`, all 7 tasks. **Still open:** OBS-07's live E2E test (`tests/e2e/observability/test_trace_propagation.py::test_ingest_pod_dag_context_matches_persisted_lineage_row`) itself has not yet been re-run against a post-fix DagRun to confirm non-NULL `dag_id`/`dag_run_id`/`task_id` — do that next to fully close 07-VERIFICATION.md's override. The structural node-CPU-budget question (would need cluster recreation) remains an open, deliberately-deferred decision.
+- **RESOLVED (2026-08-16, `/gsd:debug` session, `.planning/debug/resolved/airflow-scheduler-stuck-tasks.md`):** the `csv_ingest_customers` stuck-`queued`/`up_for_retry` scheduling issue (was blocking OBS-07's live E2E confirmation) — root cause was node CPU exhaustion (`kind/cluster.yaml`'s 3-allocatable-core/worker budget, ~750m real headroom after the fixed platform baseline) compounded by `ingest` pods' `airflow-xcom-sidecar` container never terminating on completion, leaking ~500m CPU per occurrence. Fixed via `kpo.py`'s `on_finish_action: delete_pod` + `csv_ingest_customers.py`'s `ingest` concurrency cap (5→1), commit `6ea4129`. Verified live: DagRun `scheduled__2026-08-16T17:04:00` reached full `success`, all 7 tasks. The structural node-CPU-budget question (would need cluster recreation) remains an open, deliberately-deferred decision.
+- **RESOLVED (2026-08-16, `/gsd:debug` session, `.planning/debug/resolved/wait-for-files-stuck-task.md`):** residual `wait_for_files`/`discover` stuck-`up_for_retry` flakiness that survived the fix above — root cause was unrelated: `vault-0` reseals on every pod/host-level restart (deliberate single-key Shamir + file storage, no auto-unseal, D-02) and nobody had re-run `make vault-unseal` after the day's host disruption. While sealed, `VaultBackend` can't resolve the `minio_default` connection, surfacing as an indistinguishable "connection not found" 404 that exhausts the sensor's retry budget before failing — with `max_active_runs=1`, each occurrence blocked all new file discovery for its full retry-exhaustion window. This is the 2nd occurrence of the same class as `.planning/debug/resolved/dagrun-scheduler-stall.md` (2026-08-14). Fixed by re-running `scripts/vault-unseal.py` (no code change). Verified: DAG cycled 11+ consecutive clean successes post-fix, and a full re-run of `tests/e2e/observability/` now passes 6/7 (all 3 tests tied to this stuck-task pattern now pass). **Follow-up worth considering (not yet actioned):** a periodic Vault-seal healthcheck/alert, since this has now recurred twice from host-level disruptions.
+- **NEW (2026-08-16):** `tests/e2e/observability/test_grafana_provisioning.py::test_prometheus_scrapes_dataplat_metrics_via_the_otel_collector` fails on its own, unrelated grounds — a real ingestion run reaches `SUCCEEDED`, but Prometheus returns an empty result vector for the `runs_started` query within the test's 180s timeout. Not yet investigated; the test's own failure message suggests either a stale `csv_processor_image` Variable predating plans 07-02/07-05's OTel wiring, or a broken `additionalServiceMonitors` entry.
 - **kind and helm are not installed** on this machine — Phase 2 prerequisite.
 - Phase 2 must decide kubelet reservations, `maxPods` and `extraMounts` at cluster-creation time; changing them later requires destroying the cluster (PITFALLS #10, #11).
 - `values-ci.yaml` must be written in Phase 2 even though Phase 11's ephemeral-kind E2E consumes it — retrofitting profile parameterization is expensive.
@@ -110,6 +112,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-15T19:25:02.616Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-observability-metrics-tracing-lineage/07-CONTEXT.md
+Last session: 2026-08-16T19:31:22.648Z
+Stopped at: context exhaustion at 75% (2026-08-16)
+Resume file: None
