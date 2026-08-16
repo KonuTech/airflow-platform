@@ -1,0 +1,215 @@
+# kube-prometheus-stack values (plan 07-07): the operational surface the
+# rest of Phase 7 already built (grafana_reader-authenticated Postgres,
+# plan 07-01/07-06; the OTel Collector's Prometheus exporter, plan 07-03;
+# Tempo, plan 07-03) becomes one dashboard + one alerting engine.
+#
+# D-07 (the ONLY alerting engine this project uses): kube-prometheus-stack's
+# bundled Alertmanager is DELIBERATELY never enabled. Grafana's own native
+# unified alerting (grafana.alerting below, Task 2) evaluates both the
+# Postgres-datasource freshness condition and the Prometheus-datasource live
+# gauges. alertmanager.enabled: false is IDENTICAL in both profiles --
+# D-07's "one alerting engine" is a design decision, not a resource-sizing
+# concern, so this key does not belong to any of test_values_profiles.py's
+# permitted divergence axes.
+alertmanager:
+  enabled: false
+
+grafana:
+  # The exact Secret name plan 07-06's `_ensure_grafana_secrets` bootstrap
+  # step creates in namespace `monitoring` (keys GRAFANA_DB_PASSWORD /
+  # GRAFANA_ALERT_WEBHOOK_URL) -- envFromSecret injects both as container
+  # env vars, which $GRAFANA_DB_PASSWORD / $GRAFANA_ALERT_WEBHOOK_URL below
+  # (single-`$`, RESEARCH.md Pitfall 5) then reference by name.
+  envFromSecret: grafana-alert-webhook
+
+  # `initChownData` (`chown`-ing the persistence PVC to Grafana's own UID/GID
+  # before the main container starts) is enabled by default whenever
+  # `persistence.enabled: true` -- verified via `helm template` this session,
+  # the "init-chown-data" initContainer renders unconditionally once
+  # persistence is on, and needs its own `resources:` sizing exactly like
+  # every other container this file sizes.
+  initChownData:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+  # The chart's own opinionated built-in Prometheus+Alertmanager datasource
+  # provisioning (grafana.sidecar.datasources.*, a sidecar-ConfigMap-watcher
+  # mechanism distinct from additionalDataSources below -- verified via
+  # `helm template` this session: `grafana.sidecar.datasources.enabled` is
+  # the exact key controlling it, nested under `sidecar:`, NOT a top-level
+  # `grafana.datasources` key) is turned OFF so this project controls the
+  # full, exact set of three datasources itself -- the chart's own default
+  # Alertmanager datasource would otherwise point at a Service that does not
+  # exist (alertmanager.enabled: false above), and its own default
+  # "Prometheus" datasource would be a fourth, redundant entry alongside the
+  # one defined explicitly below. Task 3's live check asserts EXACTLY three
+  # datasources. This also means the "grafana-sc-datasources" sidecar
+  # container never renders, leaving only "grafana-sc-dashboard" (Task 2's
+  # dashboard provisioning) and "grafana" -- both still sized by the single
+  # `sidecar:` block below (`sidecar.datasources.enabled: false` lives
+  # there too, alongside `sidecar.resources`, to keep exactly one `sidecar:`
+  # top-level key in this file).
+
+  # T-07-22 (STRIDE Elevation of Privilege, mitigated): the postgres entry
+  # names `grafana_reader` explicitly -- never `etl_app`/`analytics_owner`.
+  # T-07-21 (STRIDE Tampering-in-transit, accepted): `sslmode: disable` is
+  # this project's already-established local-dev, in-cluster-only posture
+  # (matches etl_app's own DSN -- no sslmode override there either).
+  additionalDataSources:
+    - name: analytics-postgres
+      uid: analytics-postgres
+      type: postgres
+      access: proxy
+      url: analytics-db-rw.data.svc.cluster.local:5432
+      user: grafana_reader
+      jsonData:
+        database: analytics
+        sslmode: disable # T-07-21: accepted, local-dev, in-cluster-only traffic
+        postgresVersion: 1800
+      secureJsonData:
+        password: $GRAFANA_DB_PASSWORD
+    - name: prometheus
+      uid: prometheus
+      type: prometheus
+      access: proxy
+      # This chart's own front-door Service for its Prometheus release
+      # (verified via `helm template` this session: templates/prometheus/
+      # service.yaml, port name `http-web`, port 9090) -- not the operator's
+      # internal per-replica headless Service.
+      url: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+    - name: tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      # Plan 07-03's own Tempo release name/namespace; the chart's default
+      # OTLP-adjacent query port (3200, Tempo's own HTTP API) -- verified via
+      # `helm show values grafana-community/tempo` (plan 07-03's own
+      # tempo.yaml header comment already establishes this Service exists).
+      url: http://tempo.monitoring.svc.cluster.local:3200
+
+  persistence:
+    enabled: true
+    size: 2Gi # dashboards/provisioning state only -- no metric data lives here
+
+  # Sized like vault.yaml's own local profile (T-05 precedent): a single,
+  # lightweight, always-on service in this cluster. `sidecar.resources`
+  # covers BOTH the dashboards and datasources sidecar containers this
+  # chart renders by default (verified via `helm template` this session --
+  # ONE values key sizes both).
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  sidecar:
+    # Disables the chart's own default Prometheus+Alertmanager datasource
+    # sidecar-provisioning (see the comment above `additionalDataSources`).
+    datasources:
+      enabled: false
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  # ONE values key sizes BOTH the admission-create and admission-patch Jobs
+  # (verified via `helm template` this session -- job-createSecret.yaml and
+  # job-patchWebhook.yaml both read prometheusOperator.admissionWebhooks.
+  # patch.resources; there is no separate `.create.resources` key in this
+  # chart version).
+  admissionWebhooks:
+    patch:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+prometheus:
+  prometheusSpec:
+    # D-18: ~15 days. IDENTICAL in both profiles -- retention policy is a
+    # data-lifecycle decision, not a resource-sizing concern, so this key
+    # does not fall under test_values_profiles.py's "resource sizing" axis
+    # even though it lives inside a resources-adjacent block.
+    retention: 15d
+
+    # D-17: persistent storage, surviving cluster-down/cluster-up -- matches
+    # vault.yaml's own dataStorage.enabled: true pattern. `resources.
+    # requests.storage` (not a bare `storage.size`/`persistence.size`
+    # suffix) still matches test_values_profiles.py's permitted "resource
+    # sizing" axis because `resources` itself is a path segment here.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+    # RESEARCH.md Pitfall 6's own named failure mode: a hand-authored
+    # standalone ServiceMonitor manifest risks missing the Prometheus
+    # Operator's own serviceMonitorSelector label requirement and failing
+    # SILENTLY, with no error, just permanently-missing data. This is the
+    # chart's own idiomatic mechanism instead -- selector/endpoints verified
+    # live this session (`kubectl get svc -n monitoring --show-labels` /
+    # `-o yaml` against plan 07-03's already-deployed OTel Collector
+    # Service): label app.kubernetes.io/name=opentelemetry-collector, named
+    # port `prometheus` = 8889 (plan 07-03's own otel-collector.yaml
+    # `ports.prometheus` block). Without this entry, `dataplat`'s
+    # rows_rejected/rows_kept/runs_started/runs_finished counters (plans
+    # 07-02/07-05) reach the Collector but are NEVER visible to Prometheus.
+    additionalServiceMonitors:
+      - name: otel-collector
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: opentelemetry-collector
+        namespaceSelector:
+          matchNames: [monitoring]
+        endpoints:
+          - port: prometheus
+            path: /metrics

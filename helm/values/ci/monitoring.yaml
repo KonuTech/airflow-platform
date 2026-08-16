@@ -1,0 +1,146 @@
+# D-16: this file and helm/values/local/monitoring.yaml diverge on EXACTLY
+# the already-permitted "resource sizing" axis (test_values_profiles.py) --
+# the CI profile is deliberately smaller because it shares a 4 CPU / 16 GB
+# GitHub-hosted runner with every other pod the CI job renders, and this
+# chart is never deployed live in CI (D-16: `make manifests` renders and
+# lints this file; nothing in scripts/stages/85-monitoring.sh's CI path
+# actually installs it). Every other key below is IDENTICAL in shape to the
+# local profile -- see helm/values/local/monitoring.yaml's header comments
+# for the full argument behind each structural choice.
+
+alertmanager:
+  enabled: false
+
+grafana:
+  envFromSecret: grafana-alert-webhook
+
+  initChownData:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+  additionalDataSources:
+    - name: analytics-postgres
+      uid: analytics-postgres
+      type: postgres
+      access: proxy
+      url: analytics-db-rw.data.svc.cluster.local:5432
+      user: grafana_reader
+      jsonData:
+        database: analytics
+        sslmode: disable
+        postgresVersion: 1800
+      secureJsonData:
+        password: $GRAFANA_DB_PASSWORD
+    - name: prometheus
+      uid: prometheus
+      type: prometheus
+      access: proxy
+      url: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+    - name: tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.monitoring.svc.cluster.local:3200
+
+  persistence:
+    enabled: true
+    size: 500Mi # smaller than local -- same reasoning as vault.yaml's own ci profile
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  sidecar:
+    # Same reasoning as helm/values/local/monitoring.yaml: turns off the
+    # chart's own default Prometheus+Alertmanager datasource sidecar so
+    # exactly the three additionalDataSources above are provisioned.
+    datasources:
+      enabled: false
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 16Mi
+    limits:
+      cpu: 50m
+      memory: 32Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  admissionWebhooks:
+    patch:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+prometheus:
+  prometheusSpec:
+    # D-18: IDENTICAL to local -- retention policy is not a resource-sizing
+    # concern (see local profile's own comment on this same key).
+    retention: 15d
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi # smaller than local -- never actually used live, per D-16
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # IDENTICAL structural shape to local -- D-16/monitoring-enablement is
+    # about whether this chart is deployed LIVE in CI (it never is), not
+    # about whether its rendered manifests correctly reflect the same
+    # additionalServiceMonitors wiring the local profile proves live.
+    additionalServiceMonitors:
+      - name: otel-collector
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: opentelemetry-collector
+        namespaceSelector:
+          matchNames: [monitoring]
+        endpoints:
+          - port: prometheus
+            path: /metrics
