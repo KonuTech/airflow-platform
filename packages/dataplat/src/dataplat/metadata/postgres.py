@@ -329,6 +329,8 @@ class PostgresMetadataRepository(MetadataRepository):
         idempotency_key: str,
         try_number: int,
         pod_name: str,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> tuple[int, str] | None:
         """See `MetadataRepository.claim_ingestion_run`."""
         with self._pool.connection() as conn:
@@ -338,6 +340,8 @@ class PostgresMetadataRepository(MetadataRepository):
                    SET status = 'RUNNING',
                        try_number = %(try_number)s,
                        k8s_pod_name = %(pod_name)s,
+                       trace_id = %(trace_id)s,
+                       span_id = %(span_id)s,
                        started_at = COALESCE(started_at, now()),
                        lease_expires_at = now() + interval '5 minutes'
                  WHERE idempotency_key = %(key)s
@@ -347,7 +351,13 @@ class PostgresMetadataRepository(MetadataRepository):
                    )
                 RETURNING run_id, status
                 """,
-                {"try_number": try_number, "pod_name": pod_name, "key": idempotency_key},
+                {
+                    "try_number": try_number,
+                    "pod_name": pod_name,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "key": idempotency_key,
+                },
             ).fetchone()
             # A None row here is an EXPECTED outcome, not an invariant
             # violation, unlike every other RETURNING-returned-no-row case
