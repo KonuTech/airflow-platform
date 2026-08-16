@@ -607,17 +607,32 @@ def poll_trace_claimed(
     for BOTH columns together (they are written in one UPDATE, so they only
     ever become non-NULL atomically) rather than polling for `trace_id`
     alone and hoping `k8s_pod_name` is also already set.
+
+    OBS-07 gap closure (07-09): also reads `run_id`/`dag_id`/`dag_run_id`/
+    `task_id` -- widened, not narrowed, since Task 1's `claim_ingestion_run`
+    now persists all of these together in the SAME UPDATE as `trace_id`/
+    `k8s_pod_name` -- the moment `trace_id`/`k8s_pod_name` are non-NULL,
+    `dag_id`/`dag_run_id`/`task_id` already are too. The polling condition
+    itself is unchanged.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT trace_id, k8s_pod_name FROM meta.ingestion_runs WHERE file_id = %s",
+                "SELECT run_id, trace_id, k8s_pod_name, dag_id, dag_run_id, task_id "
+                "FROM meta.ingestion_runs WHERE file_id = %s",
                 (file_id,),
             )
             row = cur.fetchone()
-        if row is not None and row[0] is not None and row[1] is not None:
-            return {"trace_id": row[0], "k8s_pod_name": row[1]}
+        if row is not None and row[1] is not None and row[2] is not None:
+            return {
+                "run_id": row[0],
+                "trace_id": row[1],
+                "k8s_pod_name": row[2],
+                "dag_id": row[3],
+                "dag_run_id": row[4],
+                "task_id": row[5],
+            }
         time.sleep(_POLL_INTERVAL_SECONDS)
     msg = (
         f"meta.ingestion_runs[file_id={file_id}] never got a claimed trace_id/k8s_pod_name "
@@ -625,4 +640,68 @@ def poll_trace_claimed(
         f"span was never valid (dataplat.pipeline.run.run_ingest only writes a non-NULL "
         f"trace_id when otel_trace.get_current_span().get_span_context().is_valid)"
     )
+    raise AssertionError(msg)
+
+
+def poll_lineage_dag_context(
+    conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    timeout: float = 60,
+) -> dict[str, Any]:
+    """Poll `meta.v_customers_lineage` (the VIEW, not the table) for `run_id`'s row.
+
+    OBS-07 gap closure (07-09): this is the literal OBS-07 surface -- a
+    platform operator queries the view, not `meta.ingestion_runs` directly.
+    Mirrors `poll_trace_claimed`'s own polling shape exactly, but its
+    completion condition is a non-NULL `dag_id` on the VIEW'S row for this
+    `run_id` (by the time `poll_trace_claimed` above has already returned,
+    `claim_ingestion_run`'s single UPDATE has already made
+    `meta.ingestion_runs.dag_id` non-NULL -- this function's own timeout
+    exists to catch a genuine VIEW-level wiring defect, not to wait out a
+    race the table-level poll above already resolved).
+
+    Raises:
+        AssertionError: No `meta.v_customers_lineage` row for `run_id`
+            appeared with a non-NULL `dag_id` within `timeout` seconds --
+            named distinctly from "the view never returned a row for this
+            run_id at all" (a `normalized.customers` row never became
+            visible for this run) so a genuine wiring defect (the view's own
+            SELECT list, or a JOIN condition) is distinguishable from a
+            run that never finished publishing.
+    """
+    deadline = time.monotonic() + timeout
+    last_row: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT dag_id, dag_run_id, task_id, map_index, k8s_namespace "
+                "FROM meta.v_customers_lineage WHERE run_id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            last_row = {
+                "dag_id": row[0],
+                "dag_run_id": row[1],
+                "task_id": row[2],
+                "map_index": row[3],
+                "k8s_namespace": row[4],
+            }
+            if last_row["dag_id"] is not None:
+                return last_row
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    if last_row is None:
+        msg = (
+            f"meta.v_customers_lineage has no row for run_id={run_id} within {timeout}s -- "
+            f"either the run never published (no normalized.customers row became visible), "
+            f"or the view's own JOIN never matched this run"
+        )
+    else:
+        msg = (
+            f"meta.v_customers_lineage[run_id={run_id}] has a row but dag_id stayed NULL "
+            f"within {timeout}s (last observed row: {last_row!r}) -- a genuine OBS-07 wiring "
+            f"defect, since meta.ingestion_runs.dag_id was already confirmed non-NULL by "
+            f"poll_trace_claimed before this function was ever called"
+        )
     raise AssertionError(msg)
