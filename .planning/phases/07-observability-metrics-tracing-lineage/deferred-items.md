@@ -60,3 +60,37 @@ Not auto-fixed: out of this plan's declared file scope (SCOPE BOUNDARY). `ruff c
 (likely a ruff version/formatter-behavior change between when these two files were last
 touched and the currently-pinned `ruff==0.16.2`), not a functional defect. A future cleanup
 pass should run `ruff format .` once, repo-wide, to resettle both files.
+
+## From plan 07-05
+
+Found while running `mypy tests/integration/test_run_ingest.py` as a diligence check
+beyond this plan's own declared acceptance criteria (Task 3's mypy gate, via
+`<verification>`, only covers `uv run mypy packages/dataplat/src/dataplat` -- the whole
+`packages/dataplat/src/dataplat` tree, never `tests/`).
+
+| File | Line (current) | Issue |
+|------|-----------------|-------|
+| `tests/integration/test_run_ingest.py` | 550 | `run_module.StagingLoader` (pre-existing crash-simulation test, plan 04-05) — `Module "dataplat.pipeline.run" does not explicitly export attribute "StagingLoader"` (`strict = true`'s `no_implicit_reexport`; `run.py` imports `StagingLoader` without re-exporting it). |
+| `tests/integration/test_run_ingest.py` | 622 | `run_module.resolve_publisher` (same pre-existing crash-simulation test area) — identical `no_implicit_reexport` finding for `resolve_publisher`. |
+
+Verified pre-existing, not introduced by this plan: `git stash` back to the pre-07-05
+state (this plan's own prior commit, `e076c1d`) and re-running `mypy
+tests/integration/test_run_ingest.py` reproduces the exact same 2 errors (identical
+messages, only line numbers shift by 6 -- from 544/616 to 550/622 -- since this plan's
+Task 3 adds 6 new import lines above them). Same bug class already logged above (plan
+07-02) and in `06-universal-csv-engine-schema-contracts-normalization/deferred-items.md`
+(plan 06-02) — `no_implicit_reexport` flagging a module attribute accessed via its
+importing module rather than its defining module, a repo-wide pattern this plan's own new
+unit test (`tests/unit/test_run_ingest_trace.py`) deliberately avoided by importing
+`metrics`/`tracing` directly rather than through `run_module.metrics`/`run_module.tracing`.
+
+Not auto-fixed: this pre-existing crash-simulation test code is untouched by plan 07-05
+(only new imports and one new test function were added to this file; the two flagged
+lines sit inside `test_crash_between_staging_and_publish_leaves_no_partial_state_and_retry_succeeds`
+and its neighbor, both plan-04-05-authored, outside this plan's own declared scope). The
+whole file's tests still pass at runtime regardless of the mypy gap (`pytest
+tests/integration/test_run_ingest.py -q`: 9/9 passing, including this plan's new test). A
+future cleanup pass should decide once, repo-wide, whether `dataplat.pipeline.run` should
+gain an explicit `__all__` re-exporting `StagingLoader`/`resolve_publisher`/`metrics`/
+`tracing`, or whether every such test-side reference should import directly from each
+symbol's owning module instead — matching 06-02's and 07-02's own same recommendation.

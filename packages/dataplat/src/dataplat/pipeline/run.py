@@ -31,8 +31,25 @@ staging table create, a claim upsert failing for a reason other than
 ``run_ingest`` uncaught, to whichever CLI command called it (``csv_processor.
 cli.ingest`` -- a later task in this plan) -- the "always write a receipt,
 even on a run-fatal failure" contract belongs to that call site, not to this
-one. The only thing this function ever guarantees on every exit path,
-success or failure, is that its own heartbeat thread is stopped.
+one. On every exit path, success or failure, this function guarantees two
+things: its own heartbeat thread is stopped, and -- once a claim has
+genuinely succeeded -- a ``runs_finished`` counter increment is observed
+(D-03's live "runs currently in-flight"/"recent failure rate" gauges, plan
+07-05). The latter is emitted from a ``finally`` block, never an ``except``,
+so a run-fatal exception is a pure side-effect observation on the way
+through -- never swallowed, never converted -- and this function still
+"catches nothing" in the sense above.
+
+The whole claim-through-return body also runs inside its own
+``pipeline.run_ingest`` span (OBS-10): a genuine CHILD of whatever parent
+context ``dataplat.cli``'s ``TRACEPARENT`` extraction attached, or a fresh
+root span when no parent was ever extracted. Its ``trace_id``/``span_id``
+are captured and passed straight into ``claim_ingestion_run``, so
+``meta.ingestion_runs.trace_id`` carries the SAME trace id Airflow's own
+task span started with -- proving cross-process trace continuity -- while
+``span_id`` is always a genuinely new value, this run's own. The atomic
+publish transaction additionally gets its own nested ``pipeline.publish``
+child span, the "-> PostgreSQL" segment of that same trace.
 """
 
 from __future__ import annotations
@@ -43,10 +60,13 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from opentelemetry import trace as otel_trace
+
 from dataplat.errors import DataPlatformError
 from dataplat.load.publish.registry import resolve_publisher
 from dataplat.load.staging import StagingLoader
 from dataplat.models.receipt import Receipt
+from dataplat.observability import metrics, tracing
 from dataplat.observability.logging import get_logger
 
 if TYPE_CHECKING:
@@ -252,126 +272,194 @@ def run_ingest(
     log = get_logger()
     start = time.monotonic()
 
-    claimed = ctx.metadata.claim_ingestion_run(
-        idempotency_key=ctx.run.idempotency_key,
-        try_number=ctx.run.attempt,
-        pod_name=os.environ.get("HOSTNAME", "unknown"),
-    )
-    if claimed is None:
-        return _skipped_receipt(ctx)
-    run_id, _ = claimed
-
-    if ctx.run.file_id is None or ctx.run.batch_id is None:
-        msg = "run_ingest requires ctx.run.file_id and ctx.run.batch_id to be set"
-        raise DataPlatformError(
-            msg,
-            context={"run_id": run_id, "idempotency_key": ctx.run.idempotency_key},
+    with tracing.start_span("pipeline.run_ingest"):
+        # This run's own span -- a genuine CHILD of whatever parent context
+        # `dataplat.cli`'s TRACEPARENT extraction attached (OBS-10), or a
+        # fresh root span when no parent was ever extracted. Read BEFORE the
+        # claim below, so the SAME trace_id/span_id land on the claimed row.
+        span_context = otel_trace.get_current_span().get_span_context()
+        trace_id = (
+            otel_trace.format_trace_id(span_context.trace_id)
+            if span_context.is_valid
+            else None
         )
-    file_id = ctx.run.file_id
-    batch_id = ctx.run.batch_id
+        span_id = (
+            otel_trace.format_span_id(span_context.span_id) if span_context.is_valid else None
+        )
 
-    progress = _Progress()
+        claimed = ctx.metadata.claim_ingestion_run(
+            idempotency_key=ctx.run.idempotency_key,
+            try_number=ctx.run.attempt,
+            pod_name=os.environ.get("HOSTNAME", "unknown"),
+            trace_id=trace_id,
+            span_id=span_id,
+        )
+        if claimed is None:
+            return _skipped_receipt(ctx)
+        run_id, _ = claimed
 
-    def _on_progress(rows_read: int, rows_parsed: int) -> None:
-        progress.rows_read = rows_read
-        progress.rows_parsed = rows_parsed
+        # D-04's bounded label set: dataset+stage+status, never an unbounded
+        # identity like run_id/file_id/batch_id. Emitted only once a claim
+        # has genuinely succeeded -- a skip is not "a run in flight."
+        metrics.increment(
+            "runs_started",
+            1,
+            dataset=ctx.config.dataset,
+            stage="run_ingest",
+            status="running",
+        )
+        # Set to "succeeded" only as the LAST statement before this
+        # function's normal return, below -- any exception raised anywhere
+        # in between (file_id/batch_id validation, staging, publish, the
+        # trailing DROP TABLE, or the rows_deduplicated/log.info
+        # computation) leaves this at "failed", observed by the `finally`
+        # below. This is a SECOND, OUTER try/finally -- distinct from and
+        # surrounding the inner staging/publish try/finally below; the two
+        # are never conflated.
+        run_status = "failed"
+        try:
+            if ctx.run.file_id is None or ctx.run.batch_id is None:
+                msg = "run_ingest requires ctx.run.file_id and ctx.run.batch_id to be set"
+                raise DataPlatformError(
+                    msg,
+                    context={"run_id": run_id, "idempotency_key": ctx.run.idempotency_key},
+                )
+            file_id = ctx.run.file_id
+            batch_id = ctx.run.batch_id
 
-    stop_heartbeat = threading.Event()
-    heartbeat_thread = threading.Thread(
-        target=_heartbeat_loop,
-        args=(ctx, run_id, progress, stop_heartbeat, heartbeat_interval_seconds),
-        name=f"run-ingest-heartbeat-{run_id}",
-        daemon=True,
-    )
-    heartbeat_thread.start()
+            progress = _Progress()
 
-    try:
-        # Staging runs OUTSIDE the publish transaction, on its own
-        # connection (ARCHITECTURE.md's checkpointing-vs-transactions
-        # split): checkpointed per chunk, never part of the atomic barrier
-        # below. `pool.connection()`'s own context-manager behavior commits
-        # on clean exit, making the staged table visible to the separate
-        # connection the publish transaction opens next.
-        with ctx.db.connection() as staging_conn:
-            staging_result = StagingLoader(target_columns=_CUSTOMERS_TARGET_COLUMNS).load(
-                ctx,
-                staging_conn,
-                on_progress=_on_progress,
+            def _on_progress(rows_read: int, rows_parsed: int) -> None:
+                progress.rows_read = rows_read
+                progress.rows_parsed = rows_parsed
+
+            stop_heartbeat = threading.Event()
+            heartbeat_thread = threading.Thread(
+                target=_heartbeat_loop,
+                args=(ctx, run_id, progress, stop_heartbeat, heartbeat_interval_seconds),
+                name=f"run-ingest-heartbeat-{run_id}",
+                daemon=True,
             )
+            heartbeat_thread.start()
 
-        finished_at = datetime.now(tz=UTC)
-        with ctx.db.connection() as conn, conn.transaction():
-            # Single-writer publication per dataset (LOAD-09): every writer
-            # to this target serializes on the SAME advisory-lock key before
-            # touching it.
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"publish:{ctx.config.load.target}",),
-            )
-            publisher = resolve_publisher(ctx.config.load.strategy)
-            result = publisher.publish(ctx, staging_result.staging_table, conn)
-            # Measured HERE, immediately after the publish that does the
-            # actual work, not after the trailing DROP TABLE below: this is
-            # the number `finalize_publication` persists inside the SAME
-            # transaction as that publish, so it must exist before that call
-            # and before the transaction commits. Reused as-is for the
-            # Receipt/log after the `with` block exits -- one canonical
-            # duration, never two slightly different numbers for one run.
-            duration_ms = int((time.monotonic() - start) * 1000)
-            # META-03: lands inside the SAME transaction as the Publisher's
-            # own write -- the `with` block's exit commits both together,
-            # or rolls back both together on any exception.
-            ctx.metadata.finalize_publication(
-                conn=conn,
+            try:
+                # Staging runs OUTSIDE the publish transaction, on its own
+                # connection (ARCHITECTURE.md's checkpointing-vs-transactions
+                # split): checkpointed per chunk, never part of the atomic
+                # barrier below. `pool.connection()`'s own context-manager
+                # behavior commits on clean exit, making the staged table
+                # visible to the separate connection the publish transaction
+                # opens next.
+                with ctx.db.connection() as staging_conn:
+                    staging_result = StagingLoader(
+                        target_columns=_CUSTOMERS_TARGET_COLUMNS,
+                    ).load(
+                        ctx,
+                        staging_conn,
+                        on_progress=_on_progress,
+                    )
+
+                finished_at = datetime.now(tz=UTC)
+                # OBS-10's "-> PostgreSQL" segment: opens strictly inside the
+                # outer `pipeline.run_ingest` span above, so it becomes a
+                # genuine child span automatically -- no extra
+                # parent-context plumbing needed. Covers only the atomic
+                # publish transaction itself -- never the staging load above
+                # or the trailing DROP TABLE below, each on its own,
+                # separate connection.
+                with (
+                    tracing.start_span("pipeline.publish"),
+                    ctx.db.connection() as conn,
+                    conn.transaction(),
+                ):
+                    # Single-writer publication per dataset (LOAD-09): every
+                    # writer to this target serializes on the SAME
+                    # advisory-lock key before touching it.
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"publish:{ctx.config.load.target}",),
+                    )
+                    publisher = resolve_publisher(ctx.config.load.strategy)
+                    result = publisher.publish(ctx, staging_result.staging_table, conn)
+                    # Measured HERE, immediately after the publish that does
+                    # the actual work, not after the trailing DROP TABLE
+                    # below: this is the number `finalize_publication`
+                    # persists inside the SAME transaction as that publish,
+                    # so it must exist before that call and before the
+                    # transaction commits. Reused as-is for the Receipt/log
+                    # after the `with` block exits -- one canonical
+                    # duration, never two slightly different numbers for one
+                    # run.
+                    duration_ms = int((time.monotonic() - start) * 1000)
+                    # META-03: lands inside the SAME transaction as the
+                    # Publisher's own write -- the `with` block's exit
+                    # commits both together, or rolls back both together on
+                    # any exception.
+                    ctx.metadata.finalize_publication(
+                        conn=conn,
+                        run_id=run_id,
+                        file_id=file_id,
+                        batch_id=batch_id,
+                        rows_loaded=result.rows_affected,
+                        finished_at=finished_at,
+                        duration_ms=duration_ms,
+                        report_uri=None,
+                        schema_version_id=staging_result.schema_version_id,
+                    )
+
+                # Pitfall 2: an explicit DROP after the publish transaction
+                # has committed, on a fresh connection -- never ON COMMIT
+                # DROP (invalid for an UNLOGGED table; only TEMPORARY tables
+                # support it).
+                with ctx.db.connection() as drop_conn:
+                    drop_conn.execute(f"DROP TABLE IF EXISTS {staging_result.staging_table}")
+            finally:
+                stop_heartbeat.set()
+                heartbeat_thread.join(timeout=heartbeat_interval_seconds + 5)
+
+            # duration_ms was already computed above, right after publish,
+            # and reused here as-is (see the comment at its assignment) --
+            # never recomputed against `time.monotonic()` again, which would
+            # silently fold in the trailing DROP TABLE's time and produce a
+            # second, slightly larger number for the same run.
+            # This phase does not separately track "collapsed by DISTINCT ON
+            # / duplicate customer_id within one batch" from "suppressed as
+            # a no-op write by the WHERE guard" -- both reduce rows_parsed to
+            # a smaller rows_affected, and a finer split is Phase 9's
+            # meta.dedup_decisions territory (merge.py's own module
+            # docstring), not this phase's. Clamped at 0 because a later,
+            # larger customer_id set touching already-published rows (an
+            # UPDATE, not an INSERT) can make rows_affected exceed this
+            # run's own rows_parsed with no dedup having happened at all.
+            rows_deduplicated = max(staging_result.rows_parsed - result.rows_affected, 0)
+            log.info(
+                "run_ingest.succeeded",
                 run_id=run_id,
-                file_id=file_id,
-                batch_id=batch_id,
+                rows_read=staging_result.rows_read,
                 rows_loaded=result.rows_affected,
-                finished_at=finished_at,
+                rows_invalid=staging_result.rows_rejected,
+                rows_deduplicated=rows_deduplicated,
+                duration_ms=duration_ms,
+            )
+            run_status = "succeeded"
+            return Receipt(
+                run_id=run_id,
+                status="SUCCEEDED",
+                rows_read=staging_result.rows_read,
+                rows_loaded=result.rows_affected,
+                rows_invalid=staging_result.rows_rejected,
+                rows_deduplicated=rows_deduplicated,
                 duration_ms=duration_ms,
                 report_uri=None,
-                schema_version_id=staging_result.schema_version_id,
             )
-
-        # Pitfall 2: an explicit DROP after the publish transaction has
-        # committed, on a fresh connection -- never ON COMMIT DROP (invalid
-        # for an UNLOGGED table; only TEMPORARY tables support it).
-        with ctx.db.connection() as drop_conn:
-            drop_conn.execute(f"DROP TABLE IF EXISTS {staging_result.staging_table}")
-    finally:
-        stop_heartbeat.set()
-        heartbeat_thread.join(timeout=heartbeat_interval_seconds + 5)
-
-    # duration_ms was already computed above, right after publish, and
-    # reused here as-is (see the comment at its assignment) -- never
-    # recomputed against `time.monotonic()` again, which would silently
-    # fold in the trailing DROP TABLE's time and produce a second, slightly
-    # larger number for the same run.
-    # This phase does not separately track "collapsed by DISTINCT ON /
-    # duplicate customer_id within one batch" from "suppressed as a no-op
-    # write by the WHERE guard" -- both reduce rows_parsed to a smaller
-    # rows_affected, and a finer split is Phase 9's meta.dedup_decisions
-    # territory (merge.py's own module docstring), not this phase's. Clamped
-    # at 0 because a later, larger customer_id set touching already-published
-    # rows (an UPDATE, not an INSERT) can make rows_affected exceed this
-    # run's own rows_parsed with no dedup having happened at all.
-    rows_deduplicated = max(staging_result.rows_parsed - result.rows_affected, 0)
-    log.info(
-        "run_ingest.succeeded",
-        run_id=run_id,
-        rows_read=staging_result.rows_read,
-        rows_loaded=result.rows_affected,
-        rows_invalid=staging_result.rows_rejected,
-        rows_deduplicated=rows_deduplicated,
-        duration_ms=duration_ms,
-    )
-    return Receipt(
-        run_id=run_id,
-        status="SUCCEEDED",
-        rows_read=staging_result.rows_read,
-        rows_loaded=result.rows_affected,
-        rows_invalid=staging_result.rows_rejected,
-        rows_deduplicated=rows_deduplicated,
-        duration_ms=duration_ms,
-        report_uri=None,
-    )
+        finally:
+            # Never an `except` -- a run-fatal exception is a pure
+            # side-effect observation on the way through, never swallowed or
+            # converted (module docstring's "catches nothing" contract).
+            metrics.increment(
+                "runs_finished",
+                1,
+                dataset=ctx.config.dataset,
+                stage="run_ingest",
+                status=run_status,
+            )

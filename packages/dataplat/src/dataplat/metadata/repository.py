@@ -286,13 +286,15 @@ class MetadataRepository(Protocol):
         idempotency_key: str,
         try_number: int,
         pod_name: str,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> tuple[int, str] | None:
         """Exclusively claim one `meta.ingestion_runs` row for execution, pod-startup-time.
 
-        Maps to ``UPDATE meta.ingestion_runs SET status='RUNNING', ...
-        WHERE idempotency_key = ... AND (status IN ('PENDING','FAILED') OR
-        (status='RUNNING' AND lease_expires_at < now())) RETURNING run_id,
-        status``.
+        Maps to ``UPDATE meta.ingestion_runs SET status='RUNNING', ...,
+        trace_id = ..., span_id = ... WHERE idempotency_key = ... AND
+        (status IN ('PENDING','FAILED') OR (status='RUNNING' AND
+        lease_expires_at < now())) RETURNING run_id, status``.
 
         Distinct from `get_or_create_ingestion_run` above (Pitfall 5): this
         method enforces exclusivity via a conditional `UPDATE ... WHERE` --
@@ -305,6 +307,19 @@ class MetadataRepository(Protocol):
             idempotency_key: The run to claim.
             try_number: This attempt's 1-based try number.
             pod_name: The Kubernetes pod name claiming this run.
+            trace_id: This run's own `pipeline.run_ingest` span's trace id
+                (OBS-10), as a lowercase 32-hex-character string -- the SAME
+                trace id as any extracted parent context (`dataplat.cli`'s
+                `TRACEPARENT` extraction), proving cross-process trace
+                continuity. `None` when tracing is unconfigured or the
+                current span context is invalid, never a garbage
+                all-zero-hex string. Defaults to `None` so every existing
+                caller keeps compiling unchanged.
+            span_id: This run's own `pipeline.run_ingest` span's span id, as
+                a lowercase 16-hex-character string -- always a genuinely
+                NEW value distinct from any parent's own span id, never a
+                copy of it. `None` under the same conditions as `trace_id`.
+                Defaults to `None` for the same reason.
 
         Returns:
             `(run_id, "RUNNING")` when the claim succeeds -- the row's
