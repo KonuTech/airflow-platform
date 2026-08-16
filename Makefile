@@ -52,7 +52,7 @@ FILE ?=
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
-        ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail
+        image-airflow ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -260,6 +260,29 @@ image-csv-processor:            ## INFRA-08/U1: build, tag, push to the local re
 	else \
 	  echo "WARNING: no live cluster — image pushed but csv_processor_image Variable NOT set; run this target again once the cluster is up, or set it manually" >&2; \
 	fi
+
+image-airflow:                  ## OBS-10: build, tag, push the custom Airflow[otel] image to the local registry [plan 07-04]
+	# Mirrors image-csv-processor's exact shape above: GIT_SHA computed inline,
+	# TWICE -- once for the build arg (which becomes this image's own
+	# org.opencontainers.image.revision/.version labels, see the Dockerfile),
+	# once for the tag -- never a literal, never a floating tag.
+	# tests/policy/test_no_latest_image_tag.py is scoped to image-csv-processor
+	# only (TARGET = "image-csv-processor"); this target follows the identical
+	# pattern by convention, not because that test reads it too.
+	#
+	# Unlike image-csv-processor, this target does NOT register an Airflow
+	# Variable: the Airflow image itself is referenced by the Airflow Helm
+	# chart's own `defaultAirflowRepository`/`defaultAirflowTag` values keys
+	# (helm/values/{local,ci}/airflow.yaml, plan 07-04 Task 2) at `helm
+	# upgrade` time, never resolved dynamically at DAG-parse/task-run time the
+	# way csv_processor_image is -- there is no equivalent runtime Variable
+	# lookup to update here.
+	docker build \
+	  --build-arg GIT_SHA=$$(git rev-parse --short HEAD) \
+	  -t airflow:$$(git rev-parse --short HEAD) \
+	  -f docker/airflow/Dockerfile .
+	docker tag airflow:$(GIT_SHA) localhost:5001/airflow:$(GIT_SHA)
+	docker push localhost:5001/airflow:$(GIT_SHA)
 
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
