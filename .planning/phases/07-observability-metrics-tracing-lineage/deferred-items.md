@@ -94,3 +94,76 @@ future cleanup pass should decide once, repo-wide, whether `dataplat.pipeline.ru
 gain an explicit `__all__` re-exporting `StagingLoader`/`resolve_publisher`/`metrics`/
 `tracing`, or whether every such test-side reference should import directly from each
 symbol's owning module instead — matching 06-02's and 07-02's own same recommendation.
+
+## From plan 07-08
+
+Found while running `tests/e2e/observability/test_trace_propagation.py` (Task 2) live
+against the cluster: a genuine, pre-existing cluster resource-exhaustion condition,
+entirely unrelated to OBS-10/TRACEPARENT propagation, that blocks `csv_ingest_customers`
+from scheduling new task pods at all.
+
+**Root cause, fully diagnosed:** two `etl`-namespace `ingest-*` pods
+(`ingest-qp3ougwy`, `ingest-qgw33dq0` — `dag_id=csv_ingest_customers`, `task_id=ingest`,
+`run_id=scheduled__2026-08-16T0607000000-913ad3735`, `map_index` 10 and another) have
+their `base` container (the real `csv-processor` work container) already `terminated`
+with `exitCode: 0`/`reason: Completed` since `2026-08-16T06:19:0{1,3}Z`, but their
+`airflow-xcom-sidecar` container (the tiny `alpine`-based XCom-file server KPO's
+`do_xcom_push=True` adds) is STILL `running` 6+ hours later, with 0 restarts. Because at
+least one container is still running, Kubernetes counts the WHOLE pod's resource
+requests — including the already-exited `base` container's `500m` CPU / `1Gi` memory —
+against the node's allocatable budget for as long as the pod itself never reaches a
+terminal phase. Both worker nodes' kubelet-reported `Allocatable.cpu` is deliberately
+capped at `3` (not the host's `12`; `9` total across the 3-node cluster, matching
+CLAUDE.md's own framing), so these two pods alone permanently consume roughly a third of
+one node's entire CPU budget, and combined with ordinary DAG/monitoring-stack load pushed
+both nodes to 91-97% allocated — leaving no room for genuinely new pods
+(`csv-ingest-customers-wait-for-files-*`/`csv-ingest-customers-resolve-window-*`,
+KubernetesExecutor's own per-TaskInstance worker pods, `250m` CPU each) to ever schedule.
+`kubectl describe pod` on the pending pods confirms the scheduler's own reason verbatim:
+`FailedScheduling ... 2 Insufficient cpu`. `dag_run` history for `csv_ingest_customers`
+shows 4 consecutive `failed` runs immediately before this plan's own session started,
+consistent with this having degraded the whole DAG for hours already, not something this
+session's own activity caused.
+
+**Verified pre-existing, not introduced by this plan:** the stuck pods' own timestamps
+(`06:19:0{1,3}Z`, ~5-6 hours before this plan's Task 2 first ran) predate this plan's
+entire session. `resolve_window` (an independent `@task` with zero declared dependencies
+on `wait_for_files`/`discover`/`ingest`) is ALSO stuck `Pending`, proving this is a pure
+Kubernetes pod-scheduling capacity problem, not a DAG logic or dependency defect this
+plan's own code could have caused.
+
+**Not auto-fixed:** deleting the two stuck pods is a `kubectl delete pod` in the `etl`
+namespace — outside plan 07-08's own declared file/mutation scope (its threat model and
+`webhook_receiver` fixture explicitly authorize mutating only the `monitoring` namespace's
+throwaway `webhook-receiver-*` resources, a dedicated `meta.datasets` test row, and the
+`grafana/alert-webhook` Vault/K8s-Secret pair — never arbitrary `etl`-namespace pods from
+an unrelated historical DagRun), and the executor's own worktree instructions explicitly
+forbid touching any pod/resource outside that declared set. This is a Rule 4 (architectural
+decision, or at minimum an infrastructure-operations decision) call for the orchestrator or
+a human, not an in-scope auto-fix.
+
+**Impact on this plan:** `test_trace_propagation.py` (OBS-10's live end-to-end proof) is
+fully implemented, lints/type-checks cleanly, collects cleanly, and its every polling
+helper/assertion was reviewed against the exact source code it exercises
+(`airflow/dags/_common/tracing_kpo.py`'s `TracingKubernetesPodOperator.build_pod_request_obj`,
+`packages/dataplat/src/dataplat/pipeline/run.py`'s `run_ingest` span-context capture,
+`packages/dataplat/src/dataplat/metadata/postgres.py`'s `claim_ingestion_run` — all three
+already unit/integration-tested in plans 07-04/07-05, per those plans' own SUMMARY.md
+files; this session additionally re-ran `pytest tests/unit -k "trace or tracing" -q`
+live, 21/21 green). Two live attempts against the cluster in this session could not
+complete: first at the committed test's own standard 180s timeout (matching every
+sibling e2e test's own convention), then a second, deliberately generous 900s (15
+-minute) diagnostic retry -- run with a temporarily-widened timeout, reverted before
+this file's own commit -- which ALSO failed, confirming this is not merely a slow
+transient blip but a genuinely durable resource-exhaustion state for at least the
+15-minute window this session could observe it. `csv_ingest_customers` cannot schedule
+ANY new task pod at all while the two stuck `ingest-*` pods persist. See
+`07-08-SUMMARY.md`'s own Deviations section for the full account and the recommended
+next step (clear the two named stuck pods, then re-run
+`uv run pytest tests/e2e/observability/test_trace_propagation.py -m cluster -x -q`).
+
+**Recommended fix** (for whoever picks this up): `kubectl -n etl delete pod ingest-qp3ougwy
+ingest-qgw33dq0`, then separately investigate why `airflow-xcom-sidecar` did not exit once
+its `base` container completed — this is the general mechanism (not specific to these two
+pods) that should be root-caused, since it will recur for every future `ingest` task
+attempt until fixed, silently bleeding cluster capacity over time.
