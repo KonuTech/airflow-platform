@@ -293,6 +293,11 @@ def run_ingest(
             pod_name=os.environ.get("HOSTNAME", "unknown"),
             trace_id=trace_id,
             span_id=span_id,
+            dag_id=ctx.run.dag_id,
+            dag_run_id=ctx.run.dag_run_id,
+            task_id=ctx.run.task_id,
+            map_index=ctx.run.map_index,
+            k8s_namespace=ctx.run.k8s_namespace,
         )
         if claimed is None:
             return _skipped_receipt(ctx)

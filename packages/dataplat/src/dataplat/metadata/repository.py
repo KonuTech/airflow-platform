@@ -280,7 +280,7 @@ class MetadataRepository(Protocol):
         """
         ...
 
-    def claim_ingestion_run(
+    def claim_ingestion_run(  # noqa: PLR0913 -- matches the run-identity/trace/dag-context columns this method persists in one UPDATE
         self,
         *,
         idempotency_key: str,
@@ -288,13 +288,20 @@ class MetadataRepository(Protocol):
         pod_name: str,
         trace_id: str | None = None,
         span_id: str | None = None,
+        dag_id: str | None = None,
+        dag_run_id: str | None = None,
+        task_id: str | None = None,
+        map_index: int | None = None,
+        k8s_namespace: str | None = None,
     ) -> tuple[int, str] | None:
         """Exclusively claim one `meta.ingestion_runs` row for execution, pod-startup-time.
 
         Maps to ``UPDATE meta.ingestion_runs SET status='RUNNING', ...,
-        trace_id = ..., span_id = ... WHERE idempotency_key = ... AND
-        (status IN ('PENDING','FAILED') OR (status='RUNNING' AND
-        lease_expires_at < now())) RETURNING run_id, status``.
+        trace_id = ..., span_id = ..., dag_id = ..., dag_run_id = ...,
+        task_id = ..., map_index = ..., k8s_namespace = ... WHERE
+        idempotency_key = ... AND (status IN ('PENDING','FAILED') OR
+        (status='RUNNING' AND lease_expires_at < now())) RETURNING run_id,
+        status``.
 
         Distinct from `get_or_create_ingestion_run` above (Pitfall 5): this
         method enforces exclusivity via a conditional `UPDATE ... WHERE` --
@@ -320,6 +327,28 @@ class MetadataRepository(Protocol):
                 NEW value distinct from any parent's own span id, never a
                 copy of it. `None` under the same conditions as `trace_id`.
                 Defaults to `None` for the same reason.
+            dag_id: The Airflow DAG id that triggered this run (OBS-07),
+                populated from the launching `ingest` task instance's own
+                `TaskInstance.dag_id` (via `AIRFLOW_CTX_DAG_ID`, injected by
+                `TracingKubernetesPodOperator`). `None` outside Airflow, and
+                for every pre-existing caller. Defaults to `None` so every
+                existing caller keeps compiling unchanged.
+            dag_run_id: The Airflow DAG run id that triggered this run,
+                populated from `TaskInstance.run_id` (via
+                `AIRFLOW_CTX_DAG_RUN_ID`). `None` under the same conditions
+                as `dag_id`. Defaults to `None` for the same reason.
+            task_id: The Airflow task id that triggered this run, populated
+                from `TaskInstance.task_id` (via `AIRFLOW_CTX_TASK_ID`).
+                `None` under the same conditions as `dag_id`. Defaults to
+                `None` for the same reason.
+            map_index: This run's Airflow Dynamic Task Mapping index,
+                populated from `TaskInstance.map_index` (via
+                `AIRFLOW_CTX_MAP_INDEX`). `None` under the same conditions as
+                `dag_id`. Defaults to `None` for the same reason.
+            k8s_namespace: The launched pod's own resolved Kubernetes
+                namespace (via `AIRFLOW_CTX_K8S_NAMESPACE`). `None` under the
+                same conditions as `dag_id`. Defaults to `None` for the same
+                reason.
 
         Returns:
             `(run_id, "RUNNING")` when the claim succeeds -- the row's

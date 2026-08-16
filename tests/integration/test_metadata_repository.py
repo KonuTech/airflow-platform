@@ -499,6 +499,44 @@ def test_claim_ingestion_run_claims_a_pending_run(
     assert pod_name == "pod-a"
 
 
+def test_claim_ingestion_run_persists_dag_run_task_map_index_and_namespace(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """OBS-07 gap closure (07-09): the same UPDATE that sets trace_id/span_id also
+    persists dag_id/dag_run_id/task_id/map_index/k8s_namespace, so a genuine
+    Airflow-triggered run's identity round-trips into meta.ingestion_runs.
+    """
+    run_id = _seed_pending_run(repository, migrated_dsn, key_suffix="dag_ctx")
+
+    claimed = repository.claim_ingestion_run(
+        idempotency_key="claim_run_dag_ctx:1",
+        try_number=1,
+        pod_name="pod-dag-ctx",
+        dag_id="csv_ingest_customers",
+        dag_run_id="manual__2026-01-01T00:00:00+00:00",
+        task_id="ingest",
+        map_index=4,
+        k8s_namespace="etl",
+    )
+
+    assert claimed == (run_id, "RUNNING")
+    with psycopg.connect(migrated_dsn) as conn:
+        row = conn.execute(
+            """
+            SELECT dag_id, dag_run_id, task_id, map_index, k8s_namespace
+              FROM meta.ingestion_runs WHERE run_id = %s
+            """,
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "csv_ingest_customers"
+        assert row[1] == "manual__2026-01-01T00:00:00+00:00"
+        assert row[2] == "ingest"
+        assert row[3] == 4
+        assert row[4] == "etl"
+
+
 def test_claim_ingestion_run_claims_a_failed_run(
     repository: PostgresMetadataRepository,
     migrated_dsn: str,
