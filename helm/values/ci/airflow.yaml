@@ -29,7 +29,7 @@
 # templates/lints this chart and never actually pulls or runs the image.
 airflowVersion: "3.3.0"
 defaultAirflowRepository: localhost:5001/airflow
-defaultAirflowTag: "8b01cc1"
+defaultAirflowTag: "7403b96"
 
 # LocalExecutor in CI — see helm/values/local/airflow.yaml's header comment
 # for the argument (image-pull + disk, not CPU, is the binding constraint on
