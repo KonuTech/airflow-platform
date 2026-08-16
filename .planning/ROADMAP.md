@@ -402,9 +402,9 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07-04-PLAN.md — Custom Airflow image (apache-airflow[otel]) + TracingKubernetesPodOperator (build_pod_request_obj override)
-- [ ] 07-05-PLAN.md — Pod-side trace extraction/capture + runs_started/runs_finished live-gauge counters
-- [ ] 07-06-PLAN.md — Grafana Vault-backed credentials: grafana_reader password + webhook URL, the third Vault-consumer tier
+- [x] 07-04-PLAN.md — Custom Airflow image (apache-airflow[otel]) + TracingKubernetesPodOperator (build_pod_request_obj override)
+- [x] 07-05-PLAN.md — Pod-side trace extraction/capture + runs_started/runs_finished live-gauge counters
+- [x] 07-06-PLAN.md — Grafana Vault-backed credentials: grafana_reader password + webhook URL, the third Vault-consumer tier
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
