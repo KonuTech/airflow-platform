@@ -139,7 +139,20 @@ def csv_ingest_customers() -> None:
         cmds=["dataplat"],
         retries=3,
         retry_exponential_backoff=True,
-        max_active_tis_per_dag=5,
+        # Debug session airflow-scheduler-stuck-tasks (2026-08-16): lowered from 5.
+        # Each concurrent `ingest` attempt needs a KPO target pod (500m cpu,
+        # _INGEST_RESOURCES) PLUS its own KubernetesExecutor worker pod, on
+        # kind worker nodes whose real headroom is only ~650-750m once the
+        # fixed platform baseline (Airflow core + monitoring stack + both
+        # Postgres + MinIO/Vault) is accounted for (Allocatable=3 cores/node
+        # by kind/cluster.yaml's deliberate systemReserved/kubeReserved
+        # sizing). 5 concurrent attempts made "Insufficient cpu"
+        # FailedScheduling near-inevitable under any load, and widened the
+        # window in which an executor worker pod dying mid-attempt orphans
+        # its KPO target pod (stuck XCom sidecar, leaked CPU reservation
+        # forever) -- see .planning/debug/resolved/airflow-scheduler-stuck-tasks.md.
+        # Revisit upward only alongside a node-capacity resize.
+        max_active_tis_per_dag=1,
         **common_kpo_kwargs(resources=_INGEST_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_ingest_args(discover.output))
 

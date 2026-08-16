@@ -91,7 +91,23 @@ def common_kpo_kwargs(
         "service_account_name": "csv-processor",
         "image": Variable.get("csv_processor_image"),
         "do_xcom_push": True,
-        "on_finish_action": "delete_succeeded_pod",
+        # Debug session airflow-scheduler-stuck-tasks (2026-08-16): was
+        # "delete_succeeded_pod" (keep failed pods for debugging). Confirmed
+        # live that this leaks CPU/memory permanently: KubernetesPodOperator's
+        # default startup_timeout_seconds=120 fires when the launched pod
+        # can't get scheduled in time (routine under this cluster's tight
+        # node CPU budget -- kind/cluster.yaml), the operator raises and the
+        # task attempt is marked failed, and "keep on failure" means the pod
+        # is never deleted -- even once it LATER gets scheduled by
+        # Kubernetes and its main container completes successfully, nothing
+        # is left to extract XCom or terminate the do_xcom_push sidecar, so
+        # it sits in Running phase forever, permanently pinning its full
+        # resource request. "keep failed pods for debugging" buys nothing
+        # for this specific failure mode -- a pod that never started has no
+        # container logs, and get_logs=True below already streams any real
+        # container logs into Airflow's own task log before the pod would be
+        # deleted, so genuine application failures stay fully debuggable.
+        "on_finish_action": "delete_pod",
         "get_logs": True,
         "container_resources": resources,
         "env_vars": [
