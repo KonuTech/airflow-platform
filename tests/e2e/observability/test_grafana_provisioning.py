@@ -222,13 +222,23 @@ def test_prometheus_scrapes_dataplat_metrics_via_the_otel_collector(
         "cannot prove the Prometheus scrape without a real completed run"
     )
 
+    # The OTel Collector's Prometheus exporter (default `add_metric_suffixes:
+    # true`, otelcol-contrib) appends `_total` to every monotonic Sum/Counter
+    # instrument per the OpenTelemetry-to-Prometheus naming convention -- the
+    # series Prometheus actually stores is `runs_started_total`, never the
+    # bare `runs_started` name `dataplat.observability.metrics.increment()`
+    # creates. Verified live this session: `runs_started_total` has a real,
+    # populated result vector in Prometheus immediately after a SUCCEEDED
+    # run; the bare `runs_started` name has none, ever, regardless of poll
+    # duration -- it is not a race, the series genuinely does not exist
+    # under that name. Query the exposition-format name here.
     deadline = time.monotonic() + _PROMETHEUS_POLL_TIMEOUT_SECONDS
     last_response: dict[str, Any] = {}
     while time.monotonic() < deadline:
         last_response = grafana_api(
             "GET",
             "/api/datasources/proxy/uid/prometheus/api/v1/query",
-            params={"query": "runs_started"},
+            params={"query": "runs_started_total"},
         )
         result = last_response.get("data", {}).get("result", [])
         if result:
@@ -236,7 +246,7 @@ def test_prometheus_scrapes_dataplat_metrics_via_the_otel_collector(
         time.sleep(_POLL_INTERVAL_SECONDS)
 
     pytest.fail(
-        f"Prometheus never returned a result vector for `runs_started` within "
+        f"Prometheus never returned a result vector for `runs_started_total` within "
         f"{_PROMETHEUS_POLL_TIMEOUT_SECONDS}s of a SUCCEEDED run (file_id="
         f"{file_row['file_id']}) -- last response: {last_response!r}. If the "
         f"registered csv_processor_image Variable predates plans 07-02/07-05's "
