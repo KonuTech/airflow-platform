@@ -21,6 +21,10 @@ provides:
   - "test_publish_transaction_wiring.py's Test C/C2 un-skipped and rewritten to
     prove cross-batch business-key resolution AND CR-01 self-protection through
     real run_ingest execution"
+  - "Live-cluster proof: migration 0020 applied to analytics-db, csv-processor
+    image localhost:5001/csv-processor:99171c3 deployed, test_backfill_reentry.py
+    -m cluster passed genuinely -- VALID-08's gap closed and confirmed against
+    the real running platform, not just automated test tiers"
 affects: [08-HUMAN-UAT]
 
 # Tech tracking
@@ -45,6 +49,7 @@ key-files:
     - packages/dataplat/src/dataplat/pipeline/run.py
     - tests/unit/test_run_ingest_trace.py
     - tests/integration/test_publish_transaction_wiring.py
+    - tests/e2e/slice/test_backfill_reentry.py
 
 key-decisions:
   - "Test C/C2 must seed their batches/files/rejects under the SAME dataset_id
@@ -79,26 +84,30 @@ key-decisions:
     business_key=9404010, genuinely never published) is unchanged and proves
     the distinct, separate guarantee."
 
-requirements-completed: []
+requirements-completed: [VALID-08]
 
 # Metrics
-duration: 13min
+duration: 13min (Tasks 1-2, autonomous) + live-cluster deployment/verification (Task 3, orchestrator)
 completed: 2026-08-18
 ---
 
-# Phase 08 Plan 18: business-key-scoped resolution wiring + Test C/C2 rewrite Summary
+# Phase 08 Plan 18: business-key-scoped resolution wiring + Test C/C2 rewrite + live-cluster proof Summary
 
-**`run_ingest`'s post-publish resolution step now queries its own just-staged rows for the dataset's configured business-key column and resolves every matching PENDING reject across the whole dataset -- replacing 08-16's `business_keys=[]` placeholder with the real derivation, proven through two integration tests that exercise real `run_ingest` execution across genuinely different batches.**
+**`run_ingest`'s post-publish resolution step now queries its own just-staged rows for the dataset's configured business-key column and resolves every matching PENDING reject across the whole dataset -- replacing 08-16's `business_keys=[]` placeholder with the real derivation, proven through two integration tests that exercise real `run_ingest` execution across genuinely different batches, AND now proven live against the real kind cluster: `test_backfill_resolves_previously_rejected_row` passed, confirming exactly one PENDING reject transitioned to REDRIVEN via the business-key-scoped path. VALID-08 is closed for real.**
 
 ## Performance
 
-- **Duration:** 13 min
+- **Duration:** 13 min (Tasks 1-2, this worktree agent) + live-cluster deployment/test-run (Task 3, performed by the orchestrator directly against the shared kind cluster, not by an autonomous worktree agent)
 - **Started:** 2026-08-17T22:08:45Z (worktree base reset)
-- **Completed:** 2026-08-17T22:20:59Z
-- **Tasks:** 2 of 3 (`type="auto"`) completed; Task 3 (`type="checkpoint:human-verify"`,
-  `gate="blocking"`) reached and NOT attempted -- live-cluster deployment/test-run
-  is out of scope for an autonomous worktree agent
-- **Files modified:** 3
+- **Completed:** 2026-08-18 (Task 3 live-cluster proof + docstring update)
+- **Tasks:** 3 of 3 complete. Tasks 1-2 (`type="auto"`) completed by this worktree
+  agent on 2026-08-17. Task 3 (`type="checkpoint:human-verify"`, `gate="blocking"`)
+  was satisfied by the orchestrator: migration 0020 deployed live, csv-processor
+  image rebuilt/redeployed, `pytest tests/e2e/slice/test_backfill_reentry.py -x -m
+  cluster` run to a genuine PASS, and the module's stale docstring/failure-message
+  updated by this continuation agent to match.
+- **Files modified:** 4 (adds `tests/e2e/slice/test_backfill_reentry.py`'s
+  docstring/failure-message update, Task 3's remaining paperwork)
 
 ## Accomplishments
 - `_apply_post_publish_barriers_and_persist` hoists `dataset_id =
@@ -129,16 +138,65 @@ Each task was committed atomically:
 
 1. **Task 1: Wire business-key-scoped resolution into run_ingest's publish transaction** - `463ca8d` (feat)
 2. **Task 2: Rewrite test_publish_transaction_wiring.py's Test C/C2 to prove cross-batch resolution** - `ffecf93` (feat)
+3. **Task 3: Live-cluster proof + docstring update** - live-cluster deployment/test-run performed
+   by the orchestrator directly against the shared kind cluster (not a worktree-agent commit);
+   the remaining docstring/failure-message paperwork was committed by a continuation worktree
+   agent - `94dec58` (docs)
 
 **Plan metadata:** (this commit, docs: complete plan)
 
-Task 3 (checkpoint) NOT executed -- see "Next Phase Readiness" / the returned
-checkpoint state for the exact live-cluster steps required.
+### Task 3: Live-cluster proof -- what was performed and confirmed
+
+Performed by the orchestrator directly against the live kind cluster (outside
+any worktree-isolated agent, per this task's own `checkpoint:human-verify`
+gate):
+
+1. **Migration deployed:** Alembic migrations run through `0020` against the
+   live `analytics-db`. Confirmed via direct psql: `SELECT version_num FROM
+   meta.alembic_version` -> `0020`. `meta.rejected_records.business_key`
+   column and `ix_rejected_records_business_key_resolution` index confirmed
+   present live.
+2. **Image deployed:** `csv-processor` image rebuilt with this plan's
+   `pipeline/run.py` changes baked in, pushed as
+   `localhost:5001/csv-processor:99171c3`, and the `csv_processor_image`
+   Airflow Variable updated to point at it.
+3. **Live test run, genuine pass:**
+   `pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster -v` against
+   the live kind cluster --
+   ```
+   1 passed, 1 warning in 257.29s (0:04:17)
+   ```
+   `test_backfill_resolves_previously_rejected_row` PASSED, reaching and
+   passing its final `_assert_row_resolved` call: the original PENDING
+   reject flipped to `REDRIVEN` via the new business-key-scoped resolution
+   path (`resolve_rejected_records_for_business_keys`), `resolved_by_run_id`
+   correctly linked to the corrected file's own new
+   `meta.ingestion_runs.run_id`.
+4. **Live DB confirmation, post-run:**
+   ```sql
+   SELECT resolution_type, count(*) FROM meta.rejected_records GROUP BY resolution_type;
+   ```
+   returned `PENDING: 8`, `REDRIVEN: 1` -- exactly one row transitioned to
+   `REDRIVEN`, matching this single test run's own single corrected reject.
+   This is the first live confirmation that the VALID-08 gap
+   (08-VERIFICATION.md's live-confirmed batch_id-scoping failure) is
+   genuinely closed against the real, running platform -- not merely at the
+   unit/integration test tiers.
+5. **Docstring/failure-message paperwork (this continuation agent,
+   `94dec58`):** `tests/e2e/slice/test_backfill_reentry.py`'s module
+   docstring paragraph describing the OLD `resolve_rejected_records_for_
+   batch` (D-05) batch_id-scoping caveat, and `_assert_row_resolved`'s
+   failure-message string referencing that same caveat as an open question,
+   both replaced with an accurate description of the NEW, now-proven
+   `resolve_rejected_records_for_business_keys` (D-23) mechanism.
+   Documentation-only -- no test logic or assertions modified (those were
+   already correctly rewritten in Tasks 1-2 of this plan).
 
 ## Files Created/Modified
 - `packages/dataplat/src/dataplat/pipeline/run.py` - Hoisted `dataset_id`, real business-key derivation query, `resolve_rejected_records_for_business_keys` call with actual published business keys
 - `tests/unit/test_run_ingest_trace.py` - `_FakeCursor.fetchall()` stub, corrected `_make_config()` docstring
 - `tests/integration/test_publish_transaction_wiring.py` - `_insert_pending_reject` gains `business_key`; `_insert_config_version` becomes get-or-insert; Test C/C2 un-skipped and rewritten for cross-batch proof
+- `tests/e2e/slice/test_backfill_reentry.py` - Module docstring paragraph and `_assert_row_resolved`'s failure-message string updated from the superseded D-05 batch_id-scoping caveat to the live-proven D-23 business-key-scoped mechanism (Task 3, documentation-only)
 
 ## Decisions Made
 - See `key-decisions` in frontmatter: (1) Test C/C2 must seed under the SAME
@@ -189,27 +247,33 @@ checkpoint state for the exact live-cluster steps required.
 
 ## Issues Encountered
 - Same worktree-environment quirk documented in 08-16-SUMMARY.md/08-17-SUMMARY.md: the venv at the main repo's `.venv` is an editable install pointing at the MAIN repo's `packages/dataplat/src`, not this worktree's copy. `PYTHONPATH=<worktree>/packages/dataplat/src` was prepended for every `mypy`/`pytest` verification command in this session too. Not a code issue.
-- Docker/testcontainers were available in this environment (`docker ps` confirmed a live `kind` cluster's containers already running), so `tests/integration/` (testcontainers-backed) ran successfully in this worktree session. `tests/e2e/slice -m cluster` (Task 3's own scope) was deliberately NOT attempted -- it targets the real, shared, resource-constrained kind cluster and requires deploying this plan's own migration/image first, which is explicitly the checkpoint's job, not an autonomous task's.
+- Docker/testcontainers were available in this environment (`docker ps` confirmed a live `kind` cluster's containers already running), so `tests/integration/` (testcontainers-backed) ran successfully in this worktree session. `tests/e2e/slice -m cluster` (Task 3's own scope) was deliberately NOT attempted by this worktree agent -- it targets the real, shared, resource-constrained kind cluster and requires deploying this plan's own migration/image first, which is the checkpoint's job, not an autonomous task's. It was subsequently performed by the orchestrator directly (see "Task 3" above) -- migration 0020 and the rebuilt image deployed live, and `test_backfill_resolves_previously_rejected_row` passed genuinely (`1 passed, 1 warning in 257.29s`).
 
 ## User Setup Required
 
-**Task 3 is a `checkpoint:human-verify` gated task (`gate="blocking"`) -- live-cluster deployment and verification, not yet performed.** See the checkpoint state returned alongside this summary for the exact steps: deploy Alembic migrations through `0020`, rebuild and redeploy the `csv-processor` image with this plan's `pipeline/run.py` changes baked in, then run `pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster` to a genuine completion and update that test module's stale docstring once it passes.
+**None remaining.** Task 3's `checkpoint:human-verify` gate (`gate="blocking"`) has been satisfied: the orchestrator deployed migration `0020` and the rebuilt `csv-processor` image (`localhost:5001/csv-processor:99171c3`) to the live kind cluster, ran `pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster` to a genuine pass, and confirmed via direct DB query that exactly one `meta.rejected_records` row transitioned `PENDING -> REDRIVEN`. This continuation agent completed the checkpoint's remaining paperwork (the module docstring/failure-message update) and committed it.
 
 ## Next Phase Readiness
 - `run_ingest`'s business-key-scoped resolution is fully wired and proven at
-  two test tiers: `tests/unit/test_run_ingest_trace.py` (offline, fakes) and
+  three test tiers: `tests/unit/test_run_ingest_trace.py` (offline, fakes),
   `tests/integration/test_publish_transaction_wiring.py` (real testcontainers
   Postgres/MinIO, real `run_ingest` execution, cross-batch business-key
-  matching AND CR-01 self-protection both proven live)
-- Task 3's live-cluster proof against `tests/e2e/slice/test_backfill_reentry.py
-  -m cluster` remains the ONE outstanding item this plan's own success
-  criteria require before Phase 8's roadmap success criterion 3 ("Corrected
-  quarantined records re-enter the pipeline through the documented re-drive
-  path and land in the warehouse") can be marked closed for real
+  matching AND CR-01 self-protection both proven live), and now
+  `tests/e2e/slice/test_backfill_reentry.py -m cluster` (the real live kind
+  cluster, a genuine `airflow backfill create` re-execution, real
+  `csv-processor` pods)
+- Task 3's live-cluster proof is COMPLETE: `test_backfill_resolves_
+  previously_rejected_row` passed (`1 passed, 1 warning in 257.29s
+  (0:04:17)`), and `meta.rejected_records` shows `PENDING: 8, REDRIVEN: 1`
+  post-run -- Phase 8's roadmap success criterion 3 ("Corrected quarantined
+  records re-enter the pipeline through the documented re-drive path and
+  land in the warehouse") is now closed for real, with live-cluster proof,
+  matching the same standard 08-14/08-15 were held to
 - `08-HUMAN-UAT.md`'s own test 1 (the exact live re-verification this plan's
-  Task 3 performs) should be re-attempted now that this plan's code wiring is
-  complete and committed -- deploying migration `0020` + the rebuilt image is
-  the only remaining step
+  Task 3 performs) has now been genuinely re-verified live -- VALID-08's
+  requirement row is ready for the orchestrator to mark complete in
+  REQUIREMENTS.md post-merge (not done here; this worktree agent does not
+  edit REQUIREMENTS.md/STATE.md/ROADMAP.md per its own scope)
 
 ---
 *Phase: 08-validation-quarantine-metadata-control-plane-completion*
@@ -220,7 +284,10 @@ checkpoint state for the exact live-cluster steps required.
 - FOUND: packages/dataplat/src/dataplat/pipeline/run.py
 - FOUND: tests/unit/test_run_ingest_trace.py
 - FOUND: tests/integration/test_publish_transaction_wiring.py
+- FOUND: tests/e2e/slice/test_backfill_reentry.py
 - FOUND: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/08-18-SUMMARY.md
 - FOUND: commit 463ca8d (Task 1)
 - FOUND: commit ffecf93 (Task 2)
-- FOUND: commit da73277 (this SUMMARY.md commit)
+- FOUND: commit da73277 (Task 1-2 plan-metadata commit)
+- FOUND: commit 94dec58 (Task 3 docstring/failure-message update)
+- Live-cluster proof (not a repo artifact, recorded here for traceability): `pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster -v` -> `1 passed, 1 warning in 257.29s (0:04:17)`; `meta.rejected_records` post-run: `PENDING: 8, REDRIVEN: 1`
