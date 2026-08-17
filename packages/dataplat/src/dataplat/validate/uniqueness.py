@@ -66,7 +66,7 @@ class UniquenessRule(StreamingStage):
         self._rule_id = rule_id
 
     def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:
-        """Reject every row whose value at this rule's column already occurred earlier in this chunk.
+        """Reject every row whose value at this rule's column already occurred earlier this chunk.
 
         A local ``set`` of already-seen values is built fresh on every call
         -- never persisted across calls -- which is what makes this rule
