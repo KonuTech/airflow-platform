@@ -304,6 +304,10 @@ def test_orphan_row_quarantined_non_orphan_rows_untouched(
     assert orphan.error_type == "REFERENTIAL_ORPHAN"
     assert orphan.source_row_number == 2
     assert orphan.error_column == "customer_id"
+    # D-23's own scoping: the orphan's business_key is its OWN order_id
+    # (the row's own identity), never the customer_id it failed against.
+    assert orphan.business_key == "9202"
+    assert orphan.business_key != "8699"
 
     assert len(result.findings) == 1
     finding = result.findings[0]

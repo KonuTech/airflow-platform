@@ -103,6 +103,34 @@ def test_completeness_rule_never_raises_and_accounts_for_every_row() -> None:
     assert len(result.chunk.rows) + len(result.rejected) == len(chunk.rows)
 
 
+def test_completeness_rule_captures_business_key_from_a_distinct_column() -> None:
+    # business_key_index=0 (customer_id), column_index=1 (the rule's own
+    # checked column, name) -- proves the two are independently tracked.
+    chunk = _chunk([("cust-1", "")])
+    rule = CompletenessRule(
+        column_index=1,
+        column_name="name",
+        strategy="REJECT_RECORD",
+        rule_id="r1",
+        business_key_index=0,
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key == "cust-1"
+
+
+def test_completeness_rule_business_key_is_none_when_index_not_configured() -> None:
+    chunk = _chunk([("cust-1", "")])
+    rule = CompletenessRule(
+        column_index=1, column_name="name", strategy="REJECT_RECORD", rule_id="r1"
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key is None
+
+
 # --- ValidityRangeRule -------------------------------------------------------
 
 
@@ -207,6 +235,39 @@ def test_validity_range_rule_never_raises_and_accounts_for_every_row() -> None:
     assert len(result.chunk.rows) + len(result.rejected) == len(chunk.rows)
 
 
+def test_validity_range_rule_captures_business_key_from_a_distinct_column() -> None:
+    chunk = _chunk([("cust-1", "-5")])
+    rule = ValidityRangeRule(
+        column_index=1,
+        column_name="amount",
+        strategy="REJECT_RECORD",
+        rule_id="r2",
+        business_key_index=0,
+        minimum=0,
+        maximum=1000,
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key == "cust-1"
+
+
+def test_validity_range_rule_business_key_is_none_when_index_not_configured() -> None:
+    chunk = _chunk([("cust-1", "-5")])
+    rule = ValidityRangeRule(
+        column_index=1,
+        column_name="amount",
+        strategy="REJECT_RECORD",
+        rule_id="r2",
+        minimum=0,
+        maximum=1000,
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key is None
+
+
 # --- PatternRule --------------------------------------------------------------
 
 
@@ -277,3 +338,34 @@ def test_pattern_rule_never_raises_and_accounts_for_every_row() -> None:
     result = rule.apply(_make_context(), chunk)
 
     assert len(result.chunk.rows) + len(result.rejected) == len(chunk.rows)
+
+
+def test_pattern_rule_captures_business_key_from_a_distinct_column() -> None:
+    chunk = _chunk([("cust-1", "abc")])
+    rule = PatternRule(
+        column_index=1,
+        column_name="code",
+        strategy="REJECT_RECORD",
+        rule_id="r3",
+        business_key_index=0,
+        pattern=r"^[A-Z]{2}$",
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key == "cust-1"
+
+
+def test_pattern_rule_business_key_is_none_when_index_not_configured() -> None:
+    chunk = _chunk([("cust-1", "abc")])
+    rule = PatternRule(
+        column_index=1,
+        column_name="code",
+        strategy="REJECT_RECORD",
+        rule_id="r3",
+        pattern=r"^[A-Z]{2}$",
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key is None
