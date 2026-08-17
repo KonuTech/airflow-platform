@@ -440,7 +440,44 @@ Plans:
   4. A truncated or still-uploading file — checksum mismatch, size mismatch, wrong extension, empty, or missing its `_BATCH_COMPLETE` marker — is refused before any parsing occurs.
   5. A file whose row count is 10× its historical baseline is flagged as a volume anomaly against persisted statistics, and an orphan foreign key produces the dataset's configured fail / quarantine / warn outcome.
 
-**Plans**: TBD
+**Plans**: 14 plans in 7 waves
+
+Plans:
+
+**Wave 1**
+
+- [ ] 08-01-PLAN.md — Foundational DDL + contracts: migrations 0014/0015/0016, errors.py, report.py, repository.py Protocol, config/model.py quality: block (wave 1)
+- [ ] 08-02-PLAN.md — LOAD-10 integrity_gate.py: extension/empty/stability/checksum checks + D-20 rejection write (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 08-03-PLAN.md — metadata/postgres.py: record_validation_results/record_rejected_records/resolve_rejected_records_for_batch (wave 2)
+- [ ] 08-04-PLAN.md — validate/ registry + CompletenessRule/ValidityRangeRule/PatternRule (wave 2)
+- [ ] 08-05-PLAN.md — orders substrate: dataset-aware target columns, OrdersMergePublisher, orders.yaml minimal (wave 2)
+- [ ] 08-06-PLAN.md — LOAD-11 discover_files' opt-in _BATCH_COMPLETE gate (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 08-07-PLAN.md — RejectionRateCircuitBreaker (D-10) + UniquenessRule (wave 3)
+- [ ] 08-08-PLAN.md — ReferentialIntegrityBarrier (VALID-07) + orders.yaml quality: REFERENTIAL rule (wave 3)
+- [ ] 08-09-PLAN.md — VolumeAnomalyBarrier (VALID-09 minimal slice) (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 08-10-PLAN.md — StagingLoader._build_stages dispatches ctx.config.quality's streaming rules (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 08-11-PLAN.md — run_ingest publish-transaction wiring: barrier stages + persistence + D-11 rollback + customers.yaml quality: block (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 08-12-PLAN.md — DAG layer: integrity_gate wiring + outlets on csv_ingest_customers, new csv_ingest_orders DAG (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 08-13-PLAN.md — tests/dagtest/ new tier: dag.test() proves backfill DagRun mechanics (wave 7)
+- [ ] 08-14-PLAN.md — Live-cluster proof: real orphan-order race (VALID-07) + real airflow dags backfill re-entry (VALID-08) (wave 7)
 
 **Research stage**: S8 + S9. **Skip `--research-phase`** — shapes are specified in ARCHITECTURE Q2 and FEATURES §3.2/§3.3.
 
