@@ -36,18 +36,20 @@ created: 2026-08-17
 
 ## Per-Task Verification Map
 
-Bound to the 14 PLAN.md files created for this phase (revision iteration 1 — VALID-03's row now
-points at the real `StrategyDispatchStage` proof added to plan 08-10; VALID-08's D-05 wiring row
-now reflects that `resolve_rejected_records_for_batch` is genuinely called by `run_ingest`, plan
-08-11, not just proven in isolation by plan 08-03).
+Bound to the 14 PLAN.md files created for this phase (revision iteration 2 — VALID-04's
+MinIO-artifact-half row now points at plan 08-11's Task 1 (production write) and Task 2 Test D
+(integration proof), closing the gap iteration 1 explicitly flagged rather than fixed. VALID-03's
+row still points at the real `StrategyDispatchStage` proof added to plan 08-10; VALID-08's D-05
+wiring row still reflects that `resolve_rejected_records_for_batch` is genuinely called by
+`run_ingest`, plan 08-11, not just proven in isolation by plan 08-03).
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | 08-04.T1 | 08-04 | 2 | VALID-01 | — | Structural rule variants each produce a `RejectedRecord` with row/column/error_type | unit | `pytest tests/unit/validate/test_structural_rules.py -x` | ❌ new | ⬜ pending |
 | 08-04.T1/T2 | 08-04 | 2 | VALID-02 | — | Completeness/uniqueness/validity-range/pattern rules evaluate correct PASS/PASS_WITH_WARNING/FAIL/QUARANTINE outcome | unit + property | `pytest tests/unit/validate/test_quality_rules.py tests/property/test_quality_rules_never_raise.py -x` | ❌ new | ⬜ pending |
 | 08-10.T1 | 08-10 | 4 | VALID-03 | — | `StrategyDispatchStage` proves each of the 5 strategies (`FAIL_FILE`/`REJECT_RECORD`/`QUARANTINE_FILE`/`QUARANTINE_RECORD`/`WARN_AND_CONTINUE`) dispatches to the correct row/run-level action; never silently discards | unit | `pytest tests/unit/validate/test_strategy_dispatch.py -x` | ❌ new (revision-added) | ⬜ pending |
-| 08-03.T2 | 08-03 | 2 | VALID-04 (persistence half) | V5 | `meta.validation_results`/`meta.rejected_records` rows exist after a run, inside the same transaction as publish | integration | `pytest tests/integration/test_validation_persistence.py -x -m integration` | ❌ new | ⬜ pending |
-| — | — | — | VALID-04 (MinIO artifact half) | V5 | A machine-readable validation report artifact is written to MinIO at `report_uri`, same run | — | — | ❌ NOT COVERED by any of this phase's 14 plans — every `finalize_publication`/`Receipt` call site in plan 08-11 passes `report_uri=None`. Flagged here, not silently marked done; carry forward to the next revision iteration or an explicit scope decision, not fixed in this pass (out of the two blockers this revision targeted). | ⬜ gap |
+| 08-03.T2 | 08-03 | 2 | VALID-04 (Postgres-rows half) | V5 | `meta.validation_results`/`meta.rejected_records` rows exist after a run, inside the same transaction as publish | integration | `pytest tests/integration/test_validation_persistence.py -x -m integration` | ❌ new | ⬜ pending |
+| 08-11.T1/T2 | 08-11 | 5 | VALID-04 (MinIO-artifact half) | V5 | `run_ingest` writes a machine-readable `report.json` to MinIO's `validated` bucket (`s3://validated/<dataset>/<run_id>/report.json`) via `ctx.objects.put_object`, inside the SAME publish-transaction code path, using the SAME `all_findings`/`all_rejected` data just persisted to Postgres; `finalize_publication`'s `report_uri` argument and `Receipt.report_uri` both carry that exact URI, never `None`, for every SUCCEEDED run (revision-fixed — previously `report_uri=None` at every call site, flagged as a gap in iteration 1) | integration | `pytest tests/integration/test_publish_transaction_wiring.py -x -m integration` (Test D) | ❌ new | ⬜ pending |
 | 08-08.T? | 08-08 | 3 | VALID-07 | — | Orphan `customer_id` in `orders` quarantined (`REFERENTIAL_ORPHAN`), non-orphan rows in same file still publish | integration | `pytest tests/integration/test_referential_integrity.py -x -m integration` | ❌ new | ⬜ pending |
 | 08-14.T1 | 08-14 | 7 | VALID-07 (live) | — | Real orphan order, raced against not-yet-loaded `customers` batch, proven against real deployed DAGs | e2e, cluster | `pytest tests/e2e/slice/test_referential_orphan.py -x -m cluster` | ❌ new | ⬜ pending |
 | 08-03.T2 + 08-11.T1/T2 | 08-03 / 08-11 | 2 / 5 | VALID-08 | V4 | `resolve_rejected_records_for_batch` (08-03) resolves batch's `PENDING` rejected_records to `RESOLVED`/`REDRIVEN`, linked to new `run_id`; `run_ingest` (08-11) is the real, sole production caller (D-05 wiring, revision-fixed — previously unreachable); no per-row edit path exists | integration | `pytest tests/integration/test_backfill_resolution.py tests/integration/test_publish_transaction_wiring.py -x -m integration` | ❌ new | ⬜ pending |
@@ -70,6 +72,7 @@ now reflects that `resolve_rejected_records_for_batch` is genuinely called by `r
 - [x] `pyproject.toml` `[tool.pytest.ini_options]` `markers` — add `dagtest: needs a local Docker daemon (testcontainers PostgreSQL for Airflow metadata); excluded from the offline gate` (plan 08-13)
 - [x] `tests/e2e/slice/test_referential_orphan.py`, `test_backfill_reentry.py` — extend existing `tests/e2e/slice/conftest.py` fixtures, `cluster`-marked (plan 08-14)
 - [x] `configs/datasets/orders.yaml` fixture/corpus test data — new synthetic CSV fixture set under `tests/fixtures/` for both orphan and non-orphan rows (plans 08-05, 08-08, 08-12)
+- [x] `tests/integration/test_publish_transaction_wiring.py` — extended (not new) by plan 08-11's Task 2 Test D to also create the `validated` MinIO bucket (list-then-create, mirroring `test_run_ingest.py`'s `_scratch_bucket` fixture) and fetch/verify the `report.json` artifact via the existing `s3_client` fixture — no new fixture file needed
 - [x] Framework install: none — pytest/hypothesis/testcontainers already pinned; `dag.test()` needs no new dependency
 
 ---
@@ -89,4 +92,9 @@ now reflects that `resolve_rejected_records_for_batch` is genuinely called by `r
 - [x] Feedback latency < 90s (quick gate)
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending — VALID-04's MinIO-artifact half is a known, explicitly flagged gap (see table row), carried forward rather than silently marked covered; not one of this revision's two required blockers, left for the orchestrator/next iteration to scope.
+**Approval:** VALID-04's MinIO-artifact half — the gap iteration 1 explicitly flagged and left
+uncovered — is now planned: plan 08-11 Task 1 adds the production `ctx.objects.put_object` write
+(reusing the same `all_findings`/`all_rejected` data already going to Postgres, wired into
+`finalize_publication`/`Receipt.report_uri`), and plan 08-11 Task 2 Test D adds the integration
+proof (fetches the MinIO object, asserts parity against the persisted `meta.validation_results`/
+`meta.rejected_records` rows). No other plan in this phase was touched. No remaining known gaps.
