@@ -177,3 +177,19 @@ None - no external service configuration required.
 ---
 *Phase: 08-validation-quarantine-metadata-control-plane-completion*
 *Completed: 2026-08-18*
+
+## Self-Check: PASSED
+
+- FOUND: packages/dataplat/src/dataplat/validate/completeness.py
+- FOUND: packages/dataplat/src/dataplat/validate/pattern.py
+- FOUND: packages/dataplat/src/dataplat/validate/validity_range.py
+- FOUND: packages/dataplat/src/dataplat/validate/uniqueness.py
+- FOUND: packages/dataplat/src/dataplat/validate/referential.py
+- FOUND: packages/dataplat/src/dataplat/load/staging.py
+- FOUND: tests/unit/validate/test_quality_rules.py
+- FOUND: tests/unit/validate/test_uniqueness.py
+- FOUND: tests/integration/test_referential_integrity.py
+- FOUND: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/08-17-SUMMARY.md
+- FOUND: commit 83e5f44 (Task 1)
+- FOUND: commit 30ebf90 (Task 2)
+- FOUND: commit dabe38c (this SUMMARY.md commit)
