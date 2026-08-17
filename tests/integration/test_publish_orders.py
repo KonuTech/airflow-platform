@@ -195,7 +195,7 @@ def test_publish_dedups_same_order_id_keeping_the_later_order_date(
     reasoning) collapses the duplicate, keeping the later `order_date`'s
     values -- matching this plan's own `must_haves.truths` behavior spec.
     """
-    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="dedup")
+    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="orders_dedup")
     staging_table = "staging.orders_test_dedup"
     order_id = "9001"
 
@@ -260,7 +260,7 @@ def test_republishing_the_identical_staged_row_is_a_no_op(
     the same `WHERE ... IS DISTINCT FROM` no-op-update guard now protects
     `normalized.orders` too.
     """
-    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="noop_republish")
+    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="orders_noop_republish")
     order_id = "9101"
     record_hash = hashlib.sha256(b"identical-order-content").digest()
 
