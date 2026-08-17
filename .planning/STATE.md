@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 Phase: 08 (validation-quarantine-metadata-control-plane-completion) — EXECUTING
 Plan: 1 of 15
 Status: Executing Phase 08
-Last activity: 2026-08-17
+Last activity: 2026-08-17 - Completed quick task 260817-rvq: Trim monitoring stack Helm values CPU requests to reduce over-provisioning on kind cluster worker nodes
 
 Progress: [██████████] 100%
 
@@ -126,6 +126,7 @@ None yet.
 |---|-------------|------|--------|-----------|
 | 260817-mvp | Cap concurrency on csv_ingest_customers/csv_ingest_orders integrity_gate dynamically-mapped tasks to prevent CPU-starvation of other DAGs' pod scheduling | 2026-08-17 | ea5a38e | [260817-mvp-cap-concurrency-on-csv-ingest-customers-](./quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/) |
 | 260817-oqy | Raise kind cluster memory budget (28GB WSL2 cap + recomputed KubeletConfiguration reservations) to relieve live CPU/memory starvation | 2026-08-17 | 811438b | [260817-oqy-raise-kind-cluster-memory-budget-28gb-ws](./quick/260817-oqy-raise-kind-cluster-memory-budget-28gb-ws/) |
+| 260817-rvq | Trim monitoring stack (grafana/tempo/otel-collector/prometheus/kube-state-metrics/prometheusOperator) Helm values CPU requests to match the already-vetted ci profile, freeing ~305-330m real schedulable CPU per worker node (values-file only, not yet deployed) | 2026-08-17 | 0404941 | [260817-rvq-trim-monitoring-stack-helm-values-cpu-re](./quick/260817-rvq-trim-monitoring-stack-helm-values-cpu-re/) |
 
 ## Session Continuity
 
