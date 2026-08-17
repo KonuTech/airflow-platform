@@ -594,9 +594,10 @@ class MetadataRepository(Protocol):
         (migration 0020's `business_key` column, joined against
         `meta.batches.dataset_id` for dataset scoping).
 
-        This REPLACES the old `resolve_rejected_records_for_batch` method
-        (D-23's gap-closure fix, `08-CONTEXT.md` "Gap closure: VALID-08
-        backfill resolution scoping"): `discover_files`'s `batch_key` is a
+        This REPLACES this Protocol's prior, strictly `batch_id`-scoped
+        resolution method (D-23's gap-closure fix, `08-CONTEXT.md` "Gap
+        closure: VALID-08 backfill resolution scoping"): `discover_files`'s
+        `batch_key` is a
         pure function of a file's `content_sha256`, so a content-differing
         correction of a previously-rejected row always discovers under a
         NEW `batch_id` — a strictly `batch_id`-scoped resolve call could
