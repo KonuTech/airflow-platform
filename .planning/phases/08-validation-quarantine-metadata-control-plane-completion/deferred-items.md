@@ -92,3 +92,48 @@ directly caused by the current task's own changes).
   batching vs. row-level correction is a design decision, not a one-line
   bug fix) — not a change this closing plan silently made to
   `discovery.py`.
+
+## From the phase-08 code review (08-REVIEW.md)
+
+Two findings (CR-01, the BLOCKER, and WR-04, a NULL-safety data-correctness
+bug) were fixed directly by the orchestrator during phase close — see
+commits `9731192` and `e7bf450`. The remaining three WARNING-level findings
+are deferred: each requires a real design decision (schema-type policy,
+metric semantics, or a documented-but-currently-dormant strategy gap), not
+a mechanical one-line fix, and none is exercised by any live dataset config
+today.
+
+- **WR-01 — `rows_deduplicated` conflates referential-orphan quarantine with
+  genuine merge-time deduplication** (`pipeline/run.py:734`). For `orders`,
+  rows deleted from staging by the referential barrier (already counted via
+  `rows_quarantined`/`meta.rejected_records`) get folded into the same
+  `rows_parsed - rows_affected` arithmetic as genuine `ON CONFLICT`-collapsed
+  duplicates, producing a misleading `rows_deduplicated` metric for `orders`
+  specifically. Fix: track "rows submitted to publish" (post-barrier-deletion)
+  separately from `rows_parsed`. Full detail and a suggested patch in
+  08-REVIEW.md's WR-01.
+
+- **WR-02 — `VolumeAnomalyBarrier` has no `_STRATEGY_TO_OUTCOME` entry for
+  `REJECT_RECORD`** (`validate/volume_anomaly.py:56-61,176`). `REJECT_RECORD`
+  is a legal `QualityRuleConfig.strategy` value for any rule type (D-07), but
+  a `VOLUME` rule configured with it would silently fall back to the most
+  severe `"FAIL"` outcome instead of a dedicated mapping. Currently dormant —
+  no live dataset config declares a `VOLUME` rule at all. Fix: add an
+  explicit mapping entry, or fail fast at construction time for an
+  unsupported strategy (mirroring `StrategyDispatchStage.__init__`'s own
+  validation). Full detail in 08-REVIEW.md's WR-02.
+
+- **WR-03 — Referential anti-join and publish SQL hardcode `::int` casts
+  against business-key columns declared `type: string`** (`validate/
+  referential.py:49-55`, extending a pre-existing pattern from
+  `load/publish/merge.py`/`merge_orders.py`). `customer_id`/`order_id` are
+  contractually `type: string` in the dataset configs but get cast as
+  integers in raw SQL; a genuinely non-numeric or zero-padded business-key
+  value would raise a raw DB error (aborting the whole run) instead of
+  degrading to an expected `REFERENTIAL_ORPHAN`/rejection. Pre-existing since
+  an earlier phase (`normalized.customers.customer_id` has the same pattern);
+  this phase's `ReferentialIntegrityBarrier` extends it into a second SQL
+  statement. Fix requires a schema-type policy decision (declare these
+  columns `type: integer` to match the DB, or make the SQL compare as text)
+  — a cross-cutting call, not scoped to this phase. Full detail in
+  08-REVIEW.md's WR-03.
