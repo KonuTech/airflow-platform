@@ -44,6 +44,7 @@ class CompletenessRule(StreamingStage):
         column_name: str,
         strategy: str,
         rule_id: str,
+        business_key_index: int | None = None,
     ) -> None:
         """Configure which column this rule guards and its declared strategy/identity.
 
@@ -58,11 +59,18 @@ class CompletenessRule(StreamingStage):
             rule_id: The dataset config's stable identifier for this rule
                 instance, for diagnostics and future audit trails. Stored
                 but not yet emitted anywhere in this plan.
+            business_key_index: The 0-based position of the dataset's
+                configured business-key column within each row tuple (D-23),
+                distinct from this rule's own ``column_index`` -- a rule may
+                check a non-business-key column (e.g. ``customers_name_completeness``
+                checks ``name`` but must still capture ``customer_id``).
+                ``None`` when the dataset declares no ``business_key`` column.
         """
         self._column_index = column_index
         self._column_name = column_name
         self._strategy = strategy
         self._rule_id = rule_id
+        self._business_key_index = business_key_index
 
     def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:
         """Reject every row whose value at this rule's column is empty.
@@ -96,6 +104,7 @@ class CompletenessRule(StreamingStage):
                         error_message=f"required column {self._column_name!r} is empty",
                         raw_line=_reconstruct_raw_line(row),
                         error_column=self._column_name,
+                        business_key=_extract_business_key(row, self._business_key_index),
                     )
                 )
                 continue
@@ -136,3 +145,27 @@ def _reconstruct_raw_line(
     return field_delimiter.join(
         "" if field is None else (field if isinstance(field, str) else str(field)) for field in row
     )
+
+
+# Duplicated per-file rather than imported, mirroring `_reconstruct_raw_line`'s
+# own established convention in this codebase (each of `completeness.py`,
+# `pattern.py`, `validity_range.py`, `uniqueness.py` carries its own copy).
+def _extract_business_key(
+    row: tuple[str | bool | None, ...],
+    business_key_index: int | None,
+) -> str | None:
+    """Extract this row's business-key column value, or ``None`` when unreliable.
+
+    Returns ``None`` when ``business_key_index`` is ``None`` (no
+    ``business_key`` column configured for this dataset), or when the value
+    at that position is ``None``/``""`` (D-25: an empty/absent business-key
+    value is exactly as unreliable as a missing one). Otherwise returns the
+    value as a ``str``, stringifying a non-``str`` field (``_reconstruct_raw_line``'s
+    own non-str-tolerance idiom).
+    """
+    if business_key_index is None:
+        return None
+    value = row[business_key_index]
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, str) else str(value)
