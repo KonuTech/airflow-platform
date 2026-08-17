@@ -111,6 +111,7 @@ None yet.
 - Helm 4.2.3 against Helm-3 charts is the MEDIUM-confidence call in STACK.md; `3.21.3` is the documented fallback.
 - Three spikes carry pre-declared pass criteria: U1 and U3 in Phase 4, U2 in Phase 5.
 - csv_ingest_customers has a self-inflicted Airflow scheduling backlog (DagRuns re-queued by an over-broad diagnostic `airflow tasks clear` in plan 05-03) -- safe (idempotent pipeline), genuinely draining again as of 2026-08-14T20:22Z (confirmed actively advancing after the DagModel.is_stale fix below), but still deep enough that `pytest tests/e2e/vault/test_airflow_backend.py -q -m cluster` may show `test_dag_still_resolves_its_connection_and_runs` as flaky until it drains closer to real time (max_active_runs=1 serializes recovery). No action needed beyond waiting, or re-running the live-DAG test once `dag_run` for this dag_id shows queued near zero. (Previously this bullet said the backlog was "self-draining" — during plan 05-06's Task 2, live observation found it had actually stopped advancing entirely; see the debug-session decision-log entry above for the real cause and fix, now resolved.)
+- **RESOLVED (2026-08-17, quick task `260817-mvp`, `.planning/quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/`):** the Phase 08 "`discover` task intermittently registers zero `meta.files` rows" blocker (see `.planning/phases/08-validation-quarantine-metadata-control-plane-completion/.continue-here.md`) was **misdiagnosed** — root-caused live this session as CPU exhaustion, not an application bug in `discover`. `csv_ingest_customers`'s (and `csv_ingest_orders`'s identical) `integrity_gate` TaskFlow task is dynamically mapped via `.expand(key=matched_keys)` with no concurrency cap, so a backlog of matched files fans out to 8-19+ concurrent ~250m-CPU-request pods, exhausting kind worker nodes' ~700-800m real headroom (same structural budget noted in the 2026-08-16 entry above) and starving scheduling for *any other task's pod* cluster-wide — caught live via `kubectl describe pod` showing `FailedScheduling: Insufficient cpu` on `csv_ingest_orders`'s `wait_for_files` (a task upstream of `discover` in the DAG), proving `discover` itself was never even reached, not silently misbehaving. Fixed via `integrity_gate.override(max_active_tis_per_dag=3)` in both DAG files (commit `ea5a38e`; note the plan's assumed `.partial(..., max_active_tis_per_dag=3)` mechanism doesn't work for TaskFlow-decorated tasks — `.override()` is required, see SUMMARY.md's Deviations section). Verified live: Airflow's own task-instance timeline shows overlapping `integrity_gate` `running` windows never exceed 3; zero new `FailedScheduling` events for any other task in the ~9min post-fix window vs. 12 such events in the preceding ~1hr. The structural node-CPU-budget question itself (`kind/cluster.yaml` node allocatable CPU) remains open/deferred, as before — this fix caps demand, it doesn't raise supply. Phase 08's `08-HUMAN-UAT.md` test 1 (clean `pytest tests/e2e/slice -m cluster` pass) should be re-attempted now that this starvation source is capped.
 
 ## Deferred Items
 
@@ -118,9 +119,15 @@ None yet.
 |----------|------|--------|-------------|
 | *(none)* | | | |
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260817-mvp | Cap concurrency on csv_ingest_customers/csv_ingest_orders integrity_gate dynamically-mapped tasks to prevent CPU-starvation of other DAGs' pod scheduling | 2026-08-17 | ea5a38e | [260817-mvp-cap-concurrency-on-csv-ingest-customers-](./quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/) |
+
 ## Session Continuity
 
-Last session: 2026-08-17T09:04:17.994Z
-Stopped at: Completed 08-09-PLAN.md
-Resume file: 
+Last session: 2026-08-17T14:55:00Z
+Stopped at: Completed quick task 260817-mvp: capped integrity_gate concurrency, root-caused and fixed the "discover reliability" misdiagnosis
+Resume file: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/.continue-here.md
 None
