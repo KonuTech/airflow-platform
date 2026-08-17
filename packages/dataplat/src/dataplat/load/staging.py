@@ -68,7 +68,7 @@ on before ``load()`` is ever reached.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from dataplat.errors import ConfigurationError
@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from psycopg import Connection
 
     from dataplat.config.model import NormalizationConfig, QualityRuleConfig
+    from dataplat.models.record import RejectedRecord
     from dataplat.pipeline.protocol import PipelineContext, StreamingStage
 
 # `ctx.config.quality.rules[].rule_type` values `_build_stages` (plan 08-10)
@@ -180,6 +181,12 @@ class StagingResult:
             wired for schema resolution (no ``last_profile`` attribute, or
             one that never populated it) leaves this ``None``, never an
             error (post-wave-5 code review verification Gap 1).
+        rejected_records: Every ``RejectedRecord`` this run's staging pass
+            accumulated, across every chunk -- the SAME objects
+            ``rows_rejected`` already counts, now carried as data (not just
+            a count) so ``run_ingest`` (plan 08-11) can persist them to
+            ``meta.rejected_records`` and report on them. Empty when the run
+            rejected nothing.
     """
 
     staging_table: str
@@ -187,6 +194,7 @@ class StagingResult:
     rows_parsed: int
     rows_rejected: int
     schema_version_id: int | None = None
+    rejected_records: list[RejectedRecord] = field(default_factory=list)
 
 
 class StagingLoader:
@@ -559,6 +567,7 @@ class StagingLoader:
         rows_parsed = 0
         rows_rejected = 0
         next_source_row_number = 1
+        all_rejected: list[RejectedRecord] = []
 
         with source.open(ctx) as stream:
             for chunk_ordinal, result in run_streaming(
@@ -577,6 +586,7 @@ class StagingLoader:
                 rows_in_chunk = len(surviving_rows)
                 rows_read += rows_in_chunk + len(result.rejected)
                 rows_rejected += len(result.rejected)
+                all_rejected.extend(result.rejected)
 
                 enriched_rows: list[tuple[Any, ...]] = []
                 for row in surviving_rows:
@@ -668,4 +678,5 @@ class StagingLoader:
             rows_parsed=rows_parsed,
             rows_rejected=rows_rejected,
             schema_version_id=schema_version_id,
+            rejected_records=all_rejected,
         )

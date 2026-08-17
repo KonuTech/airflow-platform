@@ -54,22 +54,33 @@ child span, the "-> PostgreSQL" segment of that same trace.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from opentelemetry import trace as otel_trace
 
-from dataplat.errors import DataPlatformError
+from dataplat.errors import ConfigurationError, DataPlatformError
 from dataplat.load.publish.registry import resolve_publisher
 from dataplat.load.staging import StagingLoader
 from dataplat.models.receipt import Receipt
 from dataplat.observability import metrics, tracing
 from dataplat.observability.logging import get_logger
+from dataplat.validate.circuit_breaker import RejectionRateCircuitBreaker
+from dataplat.validate.referential import ReferentialIntegrityBarrier
+from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
+    from psycopg import Connection
+
+    from dataplat.config.model import QualityRuleConfig
+    from dataplat.load.staging import StagingResult
+    from dataplat.models.record import RejectedRecord
+    from dataplat.models.report import ValidationResult
     from dataplat.pipeline.protocol import PipelineContext
 
 # Well under the 5-minute lease `claim_ingestion_run`/this module's own
@@ -207,8 +218,223 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
         rows_invalid=0,
         rows_deduplicated=0,
         duration_ms=0,
+        rows_quarantined=0,
         report_uri=None,
     )
+
+
+def _find_quality_rule(ctx: PipelineContext, rule_type: str) -> QualityRuleConfig | None:
+    """Return this run's first ``ctx.config.quality.rules`` entry matching ``rule_type``.
+
+    Split out of ``run_ingest`` purely to keep its own statement count under
+    ``PLR0915``'s threshold -- no behavior change from an inlined loop.
+    Returns ``None`` both when ``ctx.config.quality`` itself is unset and
+    when it is set but declares no rule of this type -- every caller treats
+    both cases identically ("this barrier is not configured for this
+    dataset").
+
+    Args:
+        ctx: The current pipeline context. Only ``ctx.config.quality`` is
+            read.
+        rule_type: The ``QualityRuleConfig.rule_type`` to look for, e.g.
+            ``"REFERENTIAL"`` or ``"VOLUME"``.
+
+    Returns:
+        The first matching rule, in declared order, or ``None``.
+    """
+    if ctx.config.quality is None:
+        return None
+    for rule in ctx.config.quality.rules:
+        if rule.rule_type == rule_type:
+            return rule
+    return None
+
+
+def _apply_referential_barrier(
+    ctx: PipelineContext,
+    conn: Connection[Any],
+    staging_result: StagingResult,
+) -> tuple[list[RejectedRecord], list[ValidationResult]]:
+    """Run ``ReferentialIntegrityBarrier`` when configured, deleting every orphan from staging.
+
+    Split out of ``run_ingest`` purely to keep its own statement count under
+    ``PLR0915``'s threshold. A no-op (returns two empty lists, no query
+    issued) when ``ctx.config.quality`` declares no ``REFERENTIAL`` rule --
+    this is what keeps a dataset with no referential relationship
+    (``customers``) behaving exactly as ``run_ingest`` did before this plan.
+
+    Args:
+        ctx: The current pipeline context.
+        conn: The SAME connection ``run_ingest``'s publish transaction uses
+            -- every orphan-row ``DELETE`` this function issues lands inside
+            that same transaction, so a later rollback (e.g. the circuit
+            breaker tripping) undoes it too.
+        staging_result: This run's already-completed ``StagingLoader.load()``
+            result -- ``staging_result.staging_table`` names the table to
+            anti-join and delete orphan rows from.
+
+    Returns:
+        ``(rejected, findings)``: one ``RejectedRecord`` per orphan row
+        (already deleted from the staging table by this call, via ``conn``)
+        and this barrier's own single ``ValidationResult`` finding. Both
+        empty when no ``REFERENTIAL`` rule is configured.
+
+    Raises:
+        ConfigurationError: A configured ``REFERENTIAL`` rule declares no
+            ``column``, or no ``params.target_table`` -- both are required
+            for this barrier to know what to check.
+    """
+    rule = _find_quality_rule(ctx, "REFERENTIAL")
+    if rule is None:
+        return [], []
+
+    if rule.column is None:
+        msg = f"quality rule {rule.rule_id!r} (rule_type=REFERENTIAL) declares no column"
+        raise ConfigurationError(msg, context={"rule_id": rule.rule_id})
+
+    target_table = rule.params.get("target_table")
+    if target_table is None:
+        msg = (
+            f"quality rule {rule.rule_id!r} (rule_type=REFERENTIAL) declares no "
+            "params.target_table"
+        )
+        raise ConfigurationError(msg, context={"rule_id": rule.rule_id})
+
+    barrier = ReferentialIntegrityBarrier(
+        staging_table=staging_result.staging_table,
+        target_table=str(target_table),
+        target_column=rule.column,
+        staging_column=rule.column,
+        strategy=rule.strategy,
+        rule_id=rule.rule_id,
+    )
+    barrier_result = barrier.apply(ctx)
+
+    for orphan in barrier_result.rejected:
+        conn.execute(
+            f"DELETE FROM {staging_result.staging_table} WHERE _source_row_number = %s",  # noqa: S608 -- staging_result.staging_table is a config/run-derived identifier (T-04-01), the bound value is an internal ordinal, never CSV content
+            (orphan.source_row_number,),
+        )
+
+    return list(barrier_result.rejected), list(barrier_result.findings)
+
+
+def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword per already-known run identity/result value, mirrors merge_orders.py's shape
+    ctx: PipelineContext,
+    conn: Connection[Any],
+    *,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    finished_at: datetime,
+    staging_result: StagingResult,
+    all_rejected: list[RejectedRecord],
+    all_findings: list[ValidationResult],
+) -> str:
+    """Run circuit-breaker/volume barriers, persist, resolve the batch, write the report.
+
+    Split out of ``run_ingest`` purely to keep its own statement count under
+    ``PLR0915``'s threshold. Every step here executes AFTER
+    ``publisher.publish()`` and strictly before ``finalize_publication`` --
+    matching this plan's own ordering rationale: by the time a run is marked
+    SUCCEEDED, every quality check has already run and passed, AND every
+    batch this run supersedes has already been marked resolved.
+
+    Args:
+        ctx: The current pipeline context.
+        conn: The SAME connection ``run_ingest``'s publish transaction uses
+            -- every write here (validation results, rejected records, the
+            batch-resolution UPDATE) lands inside that same transaction. A
+            ``QualityThresholdExceeded`` raised by the circuit breaker
+            propagates straight out of this function uncaught, rolling back
+            everything written here plus everything the caller already
+            wrote on ``conn`` (D-11).
+        run_id: This run's ``meta.ingestion_runs.run_id``.
+        file_id: This run's ``meta.files.file_id``.
+        batch_id: This run's ``meta.batches.batch_id`` -- also D-05's
+            resolution scope: every ``PENDING`` ``meta.rejected_records`` row
+            for this SAME ``batch_id`` is resolved here, regardless of
+            whether THIS run rejected anything of its own (a batch's
+            ``PENDING`` rows may belong to a PRIOR run).
+        finished_at: This run's finish timestamp, reused for the report
+            artifact's ``generated_at`` field -- the SAME value
+            ``finalize_publication`` receives, never independently computed.
+        staging_result: This run's already-completed ``StagingLoader.load()``
+            result.
+        all_rejected: Every ``RejectedRecord`` known so far this run --
+            seeded by the caller from staging-time rejections plus the
+            referential barrier's own orphans.
+        all_findings: Every ``ValidationResult`` known so far this run --
+            seeded by the caller from the referential barrier's own finding,
+            when one ran. Mutated in place (extended) by this function.
+
+    Returns:
+        This run's report artifact URI, e.g.
+        ``"s3://validated/customers/8123/report.json"`` -- always non-``None``
+        for a run that reaches this call (VALID-04's MinIO-artifact half).
+    """
+    if ctx.config.quality is not None and ctx.config.quality.rejection_rate_threshold is not None:
+        circuit_breaker = RejectionRateCircuitBreaker(
+            threshold=ctx.config.quality.rejection_rate_threshold,
+            total_rows_read=staging_result.rows_read,
+            total_rows_rejected=len(all_rejected),
+        )
+        all_findings.extend(circuit_breaker.apply(ctx).findings)
+
+    volume_rule = _find_quality_rule(ctx, "VOLUME")
+    if volume_rule is not None:
+        dataset_id = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
+        volume_barrier = VolumeAnomalyBarrier(
+            dataset_id=dataset_id,
+            current_row_count=staging_result.rows_parsed,
+            multiplier=float(
+                cast("float | int | str", volume_rule.params.get("multiplier", 10.0)),
+            ),
+            rule_id=volume_rule.rule_id,
+            strategy=volume_rule.strategy,
+        )
+        all_findings.extend(volume_barrier.apply(ctx).findings)
+
+    ctx.metadata.record_validation_results(conn=conn, run_id=run_id, results=all_findings)
+    if all_rejected:
+        ctx.metadata.record_rejected_records(
+            conn=conn,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            rejected=all_rejected,
+        )
+    # D-05: unconditional, never gated behind `all_rejected`/an `if` -- a
+    # batch's PENDING rows may belong to a PRIOR run, not this run's own
+    # rejections. A no-op (0 rows affected) when nothing is PENDING for this
+    # batch_id -- the method's own WHERE clause is the filter, not this call
+    # site.
+    ctx.metadata.resolve_rejected_records_for_batch(
+        conn=conn,
+        batch_id=batch_id,
+        resolved_by_run_id=run_id,
+        resolution_type="REDRIVEN",
+    )
+
+    # VALID-04's MinIO-artifact half -- the SAME all_findings/all_rejected
+    # objects just persisted to Postgres above, never a second,
+    # independently-computed view.
+    report = {
+        "run_id": run_id,
+        "dataset": ctx.config.dataset,
+        "file_id": file_id,
+        "batch_id": batch_id,
+        "generated_at": finished_at.isoformat(),
+        "validation_results": [dataclasses.asdict(finding) for finding in all_findings],
+        "rejected_records": [dataclasses.asdict(record) for record in all_rejected],
+    }
+    report_key = f"{ctx.config.dataset}/{run_id}/report.json"
+    ctx.objects.put_object(
+        bucket="validated",
+        key=report_key,
+        body=json.dumps(report, default=str).encode("utf-8"),
+    )
+    return f"s3://validated/{report_key}"
 
 
 def _heartbeat_loop(
@@ -259,7 +485,7 @@ def _heartbeat_loop(
         )
 
 
-def run_ingest(
+def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestration is genuinely this function's one job (plan 08-11 adds barrier-stage wiring); the barrier/persistence/report logic itself is already split into `_apply_referential_barrier`/`_apply_post_publish_barriers_and_persist` above, so further splitting here would only fragment one linear control flow across more functions for no readability gain
     ctx: PipelineContext,
     *,
     heartbeat_interval_seconds: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
@@ -416,6 +642,24 @@ def run_ingest(
                         (f"publish:{ctx.config.load.target}",),
                     )
                     publisher = resolve_publisher(ctx.config.load.strategy)
+
+                    # Barrier-stage wiring (plan 08-11): referential runs
+                    # BEFORE publish, deleting every orphan row from the
+                    # staging table on THIS transaction's own `conn` -- so
+                    # `publisher.publish()`'s own unconditional
+                    # `SELECT * FROM {staging_table}` never sees it. A no-op
+                    # when no REFERENTIAL rule is configured (customers.yaml
+                    # today).
+                    all_rejected: list[RejectedRecord] = list(staging_result.rejected_records)
+                    all_findings: list[ValidationResult] = []
+                    referential_rejected, referential_findings = _apply_referential_barrier(
+                        ctx,
+                        conn,
+                        staging_result,
+                    )
+                    all_rejected.extend(referential_rejected)
+                    all_findings.extend(referential_findings)
+
                     result = publisher.publish(ctx, staging_result.staging_table, conn)
                     # Measured HERE, immediately after the publish that does
                     # the actual work, not after the trailing DROP TABLE
@@ -427,6 +671,26 @@ def run_ingest(
                     # duration, never two slightly different numbers for one
                     # run.
                     duration_ms = int((time.monotonic() - start) * 1000)
+
+                    # Circuit breaker + volume anomaly (post-publish),
+                    # persistence, D-05's batch resolution and the MinIO
+                    # report artifact -- all inside this SAME transaction,
+                    # all strictly BEFORE finalize_publication (plan 08-11).
+                    # A QualityThresholdExceeded raised inside here
+                    # propagates straight out of this `with` block uncaught,
+                    # rolling back the DELETE/publish above too (D-11).
+                    report_uri = _apply_post_publish_barriers_and_persist(
+                        ctx,
+                        conn,
+                        run_id=run_id,
+                        file_id=file_id,
+                        batch_id=batch_id,
+                        finished_at=finished_at,
+                        staging_result=staging_result,
+                        all_rejected=all_rejected,
+                        all_findings=all_findings,
+                    )
+
                     # META-03: lands inside the SAME transaction as the
                     # Publisher's own write -- the `with` block's exit
                     # commits both together, or rolls back both together on
@@ -439,7 +703,7 @@ def run_ingest(
                         rows_loaded=result.rows_affected,
                         finished_at=finished_at,
                         duration_ms=duration_ms,
-                        report_uri=None,
+                        report_uri=report_uri,
                         schema_version_id=staging_result.schema_version_id,
                     )
 
@@ -486,7 +750,8 @@ def run_ingest(
                 rows_invalid=staging_result.rows_rejected,
                 rows_deduplicated=rows_deduplicated,
                 duration_ms=duration_ms,
-                report_uri=None,
+                rows_quarantined=len(all_rejected),
+                report_uri=report_uri,
             )
         finally:
             # Never an `except` -- a run-fatal exception is a pure

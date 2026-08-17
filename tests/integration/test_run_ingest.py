@@ -68,6 +68,12 @@ if TYPE_CHECKING:
 
 _BUCKET = "run-ingest-test"
 _CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+# plan 08-11: every SUCCEEDED run now writes a report.json artifact to the
+# real "validated" bucket (VALID-04's MinIO-artifact half) -- this file's
+# throwaway MinioContainer is a bare instance, not the Helm-provisioned
+# cluster, so the bucket must be created here too, mirroring
+# `_scratch_bucket`'s own create-if-absent pattern.
+_VALIDATED_BUCKET = "validated"
 
 
 def _csv_bytes(rows: int, *, start_id: int) -> bytes:
@@ -196,12 +202,22 @@ def _scratch_bucket(s3_client: Any) -> str:
 
 
 @pytest.fixture
+def _validated_bucket(s3_client: Any) -> str:
+    """Ensure the real "validated" bucket exists; return its name (plan 08-11's report artifact)."""
+    existing = {bucket["Name"] for bucket in s3_client.list_buckets().get("Buckets", [])}
+    if _VALIDATED_BUCKET not in existing:
+        s3_client.create_bucket(Bucket=_VALIDATED_BUCKET)
+    return _VALIDATED_BUCKET
+
+
+@pytest.fixture
 def env(
     _pool: Any,
     migrated_dsn: str,
     s3_client: Any,
     minio_config: dict[str, str],
     _scratch_bucket: str,
+    _validated_bucket: str,
 ) -> _Env:
     """Compose every fixture this file's tests need into one `_Env`."""
     return _Env(

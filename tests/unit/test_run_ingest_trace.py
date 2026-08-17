@@ -94,7 +94,10 @@ def _configure_in_memory_tracing() -> InMemorySpanExporter:
 
 
 class _FakeObjectStore:
-    """An empty stand-in -- ``run_ingest`` never touches ``ctx.objects`` directly."""
+    """A stand-in ``ObjectStore`` -- ``run_ingest`` (08-11) writes a report via ``put_object``."""
+
+    def put_object(self, bucket: str, key: str, body: bytes) -> None:
+        del bucket, key, body
 
 
 class _FakeCursor:
@@ -241,6 +244,37 @@ class _FakeMetadataRepository:
         rows_parsed: int,
     ) -> None:
         del run_id, lease_expires_at, rows_read, rows_parsed
+
+    def record_validation_results(
+        self,
+        *,
+        conn: object,
+        run_id: int,
+        results: object,
+    ) -> None:
+        del conn, run_id, results
+
+    def record_rejected_records(
+        self,
+        *,
+        conn: object,
+        run_id: int,
+        file_id: int,
+        batch_id: int,
+        rejected: object,
+    ) -> None:
+        del conn, run_id, file_id, batch_id, rejected
+
+    def resolve_rejected_records_for_batch(
+        self,
+        *,
+        conn: object,
+        batch_id: int,
+        resolved_by_run_id: int,
+        resolution_type: str,
+    ) -> int:
+        del conn, batch_id, resolved_by_run_id, resolution_type
+        return 0
 
 
 def _make_config() -> DatasetConfig:

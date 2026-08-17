@@ -242,6 +242,7 @@ def _failure_receipt(doc: AssignmentDocument | None) -> Receipt:
         rows_invalid=0,
         rows_deduplicated=0,
         duration_ms=0,
+        rows_quarantined=0,
         report_uri=None,
     )
 
