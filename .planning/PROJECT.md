@@ -66,6 +66,20 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 Validated in Phase 5: INFRA-06, SEC-01, SEC-03, SEC-04, SEC-05, SEC-06, SEC-07, SEC-08, SEC-09, SEC-12,
 SEC-13, SEC-14 — 12/12.
 
+**Validation, Quarantine & Metadata Control-Plane Completion** (Phase 8, 2026-08-18)
+
+- [x] Structural validation reports expected vs actual column count, malformed rows, unclosed quotes and missing delimiters with row number, column, error type, run and timestamp — nothing silently discarded — VALID-01
+- [x] Data-quality rules (completeness, uniqueness, validity ranges, patterns, referential integrity) each declare a configurable per-rule-type bad-record strategy, producing PASS / PASS_WITH_WARNING / FAIL / QUARANTINE — VALID-02, VALID-03
+- [x] Machine-readable validation reports exist as rows in PostgreSQL (`meta.validation_results`) and as an artifact in MinIO — VALID-04
+- [x] Referential integrity between `orders`→`customers` validated live end-to-end against a real second dataset and a real orphan scenario, configurable `fail`/`quarantine`/`warn` — VALID-07
+- [x] Quarantined data has a genuinely working, live-proven re-drive path: a corrected file's Airflow backfill re-execution resolves its original PENDING reject via business-key-scoped resolution (`resolve_rejected_records_for_business_keys`, migration 0020) — not merely designed but proven twice against the real cluster after a first live-verification pass found and a gap-closure round (`/gsd:plan-phase 8 --gaps`) fixed the original batch_id-scoped design (D-23/D-24/D-25) — VALID-08
+- [x] Volume anomalies (10× historical baseline) flagged against persisted statistics, no ML — VALID-09
+- [x] File integrity (checksum, size, extension, object-stability, `_BATCH_COMPLETE` manifest) verified Airflow-side before any pod launches — LOAD-10, LOAD-11
+- [x] Same-round code review found and fixed a genuine correctness bug (CR-01): resolution was scoped to what a run *staged*, not what its publish statement actually wrote — a business key whose `ON CONFLICT` conflict-guard silently no-op'd could still be marked resolved. Fixed via `RETURNING` + `PublishResult.published_business_keys`, proven by a regression test confirmed to fail pre-fix and pass post-fix, then re-verified live.
+
+Validated in Phase 8: VALID-01, VALID-02, VALID-03, VALID-04, VALID-07, VALID-08, VALID-09, LOAD-10,
+LOAD-11 — 9/9.
+
 ### Active
 
 <!-- Current scope. All are hypotheses until shipped. Detailed REQ-IDs live in REQUIREMENTS.md. -->
@@ -89,13 +103,7 @@ SEC-13, SEC-14 — 12/12.
 
 **Data Quality & Validation**
 
-- [ ] Structural validation with row/column-level diagnostics
-- [ ] File-level validation — size, checksum, extension, emptiness, row thresholds, expected arrival
-- [ ] Data quality rules — completeness, uniqueness, validity ranges, patterns, referential integrity
-- [ ] Configurable thresholds producing PASS / PASS_WITH_WARNING / FAIL / QUARANTINE
-- [ ] Configurable bad-record strategies; rejected records retained with reason, never silently discarded
-- [ ] Machine-readable validation reports persisted to MinIO and PostgreSQL
-- [ ] Schema drift detection and volume/quality anomaly detection via statistical thresholds
+- [ ] Source-to-target reconciliation and control-total validation against loaded target (VALID-05, VALID-06 — Phase 9)
 
 **ETL Correctness**
 
@@ -209,6 +217,26 @@ This document evolves at phase transitions and milestone boundaries.
 ---
 
 ## Current State
+
+**Phase 8 complete (2026-08-18)** — Validation, Quarantine & Metadata Control-Plane Completion.
+
+Persisted validation-rule engine (structural/quality/referential, each with a configurable
+per-rule-type bad-record strategy), machine-readable reports in PostgreSQL + MinIO, a real
+second dataset (`orders`→`customers`) proving referential integrity live, and an Airflow-side
+pre-pod-launch file-integrity gate — all 18 plans across 11 waves (14 original + 3 gap-closure),
+live-verified against the real cluster. The standout story: the first verification pass (4/5
+roadmap criteria) found VALID-08's re-drive path genuinely FAILING live — `resolve_rejected_
+records_for_batch` scoped strictly by `batch_id`, but a content-differing correction always
+discovers under a new `batch_id`, so it could never resolve the original PENDING reject. A
+gap-closure round (`/gsd:plan-phase 8 --gaps`, plans 08-16/08-17/08-18) redesigned resolution as
+business-key-scoped (`resolve_rejected_records_for_business_keys`, migration 0020, D-23/D-24/D-25)
+and proved it live — `test_backfill_reentry.py -m cluster` passed against the real cluster. The
+same round's own code review then found and fixed a second, related correctness bug (CR-01):
+resolution was reading what a run *staged*, not what its publish statement actually wrote,
+so a conflict-guard-blocked "locked but unchanged" row could still be marked resolved with
+nothing published. Fixed via `RETURNING` + `PublishResult.published_business_keys`, proven by a
+regression test confirmed to fail pre-fix/pass post-fix, then re-verified live a second time.
+Re-verification: 5/5 roadmap success criteria VERIFIED, all 9 requirement IDs satisfied.
 
 **Phase 7 complete (2026-08-16)** — Observability, Metrics, Tracing & Lineage.
 
@@ -419,4 +447,4 @@ Standing facts later phases inherit:
   integration tests green during isolated worktree execution.
 
 ---
-*Last updated: 2026-08-16 after Phase 7*
+*Last updated: 2026-08-18 after Phase 8*
