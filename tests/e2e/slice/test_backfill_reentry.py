@@ -55,6 +55,23 @@ fully-deployed live cluster, that is real, valuable information about a
 content-hash/batch-scoping gap between the locked intent and the current
 `discovery.py` implementation, not a flaw in this test. See this plan's own
 SUMMARY.md for the full architecture analysis this docstring summarizes.
+
+`airflow backfill create` itself carries a documented, live-confirmed
+transient: `_create_backfill_dag_run_non_partitioned`'s `SELECT ... FOR
+UPDATE SKIP LOCKED` on the target `dag_run` row can lose its lock race
+against a concurrent transaction (almost certainly the scheduler's own
+periodic `dag_run`-row locking), recording
+`backfill_dag_run.exception_reason = 'in flight'` with CLI exit code 0 and
+no re-execution at all -- Airflow's own code has no retry for a lost
+`skip_locked` race. `.planning/debug/backfill-does-not-redrive-rejected-
+row.md` confirms this live (source-traced against this cluster's own
+installed `apache-airflow==3.3.0`, plus a manual re-invocation of the
+identical CLI command that succeeded immediately on the second try, no
+code change). `_run_backfill_and_wait_for_reexecution` below retries the
+CLI invocation on this exact transient (bounded attempts, short backoff)
+before falling through to its normal re-execution wait, and surfaces
+`backfill_dag_run.exception_reason` in every failure message so a genuine
+failure is never confused with this known-transient race again.
 """
 
 from __future__ import annotations
@@ -70,6 +87,7 @@ import pytest
 from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
 
 if TYPE_CHECKING:
+    import datetime
     import subprocess
     from collections.abc import Callable
 
@@ -84,6 +102,16 @@ _INGEST_TIMEOUT_SECONDS = 180
 _DAGRUN_LOOKUP_TIMEOUT_SECONDS = 60
 _BACKFILL_DAGRUN_TIMEOUT_SECONDS = 300
 _POLL_INTERVAL_SECONDS = 0.5
+
+# .planning/debug/backfill-does-not-redrive-rejected-row.md: a lost
+# `SELECT ... FOR UPDATE SKIP LOCKED` race inside Airflow's own
+# `airflow backfill create` records `backfill_dag_run.exception_reason =
+# 'in flight'` (exit code 0, no re-execution) with no retry anywhere in
+# Airflow's own code. These three constants bound this test's own retry of
+# that exact known-transient outcome.
+_BACKFILL_CREATE_MAX_ATTEMPTS = 3
+_BACKFILL_CREATE_RETRY_BACKOFF_SECONDS = 5.0
+_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS = 15.0
 
 # customer_id is `sa.Integer()` (migration 0005) -- disjoint from
 # test_referential_orphan.py's own `[1_500_000_000, 1_999_000_000)` window
@@ -154,38 +182,69 @@ def _fetch_pending_completeness_reject(
     }
 
 
-def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- seven independently-named identity/timing values, a dataclass for one call site adds nothing
-    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
-    airflow_conn: psycopg.Connection[Any],
+def _fetch_latest_backfill_exception_reason(
+    conn: psycopg.Connection[Any],
     *,
     dag_id: str,
-    dag_run_id: str,
-    logical_date_iso: str,
-    pre_backfill_clear_number: int,
-    timeout: float = _BACKFILL_DAGRUN_TIMEOUT_SECONDS,
-) -> None:
-    """Invoke the real `airflow backfill create` CLI, then wait for it to genuinely re-execute.
+    logical_date: datetime.datetime,
+) -> str | None:
+    """Return the most recent `backfill_dag_run.exception_reason` for this dag_id/logical_date.
 
-    `clear_number` advancing past its pre-backfill value (module docstring:
-    the `UNIQUE (dag_id, logical_date)` constraint means backfilling an
-    already-`success` logical_date reuses the SAME `dag_run` row, cleared
-    and re-run, never a new one) is the "a genuinely new execution
-    happened" signal this polls for, alongside `state == 'success'`.
+    `.planning/debug/backfill-does-not-redrive-rejected-row.md` (live SQL +
+    source trace of the installed `apache-airflow==3.3.0`) is the source of
+    this schema/behavior: `backfill` holds one row per `airflow backfill
+    create` invocation (`id` autoincrements -- a retried invocation for the
+    SAME dag_id/logical_date gets a NEW `backfill.id`, confirmed live);
+    `backfill_dag_run` holds one row per `(backfill_id, logical_date)` pair,
+    with `exception_reason` set to the literal string `"in flight"` on a
+    lost `SELECT ... FOR UPDATE SKIP LOCKED` race and left NULL on success.
+    Ordering by `b.id DESC, bdr.id DESC` and taking the first row returns
+    the outcome of the MOST RECENT invocation only.
+
+    Args:
+        conn: The `airflow_metadata_connection` fixture.
+        dag_id: The target DAG.
+        logical_date: The target `dag_run.logical_date` value.
+
+    Returns:
+        The most recent invocation's `exception_reason` (`"in flight"` on a
+        lost lock race, `None` on success), or `None` if no `backfill_dag_run`
+        row exists yet for this dag_id/logical_date.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT bdr.exception_reason
+              FROM backfill_dag_run bdr
+              JOIN backfill b ON b.id = bdr.backfill_id
+             WHERE b.dag_id = %s AND bdr.logical_date = %s
+             ORDER BY b.id DESC, bdr.id DESC
+             LIMIT 1
+            """,
+            (dag_id, logical_date),
+        )
+        row = cur.fetchone()
+    return row[0] if row is not None else None
+
+
+def _invoke_backfill_create_once(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    dag_id: str,
+    logical_date_iso: str,
+) -> subprocess.CompletedProcess[str]:
+    """Invoke `airflow backfill create` exactly once via `kubectl exec`, asserting success.
 
     Args:
         kubectl_fn: The `kubectl` fixture callable.
-        airflow_conn: The `airflow_metadata_connection` fixture.
         dag_id: The target DAG.
-        dag_run_id: The target `dag_run.run_id` (Airflow's own identity,
-            NOT `meta.ingestion_runs.run_id` -- module docstring).
         logical_date_iso: The `--from-date`/`--to-date` value, ISO 8601.
-        pre_backfill_clear_number: `dag_run.clear_number` observed BEFORE
-            invoking backfill.
-        timeout: Maximum seconds to wait for re-execution to `success`.
+
+    Returns:
+        The completed `kubectl exec ... airflow backfill create ...` process.
 
     Raises:
-        AssertionError: The CLI invocation fails, or re-execution never
-            reaches `success` within `timeout`.
+        AssertionError: The CLI invocation itself fails (non-zero exit).
     """
     backfill = kubectl_fn(
         "-n",
@@ -210,6 +269,88 @@ def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- seven independen
         f"--to-date {logical_date_iso} --reprocess-behavior completed failed "
         f"(exit {backfill.returncode}):\n{backfill.stdout}\n{backfill.stderr}"
     )
+    return backfill
+
+
+def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- eight independently-named identity/timing values, a dataclass for one call site adds nothing
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    airflow_conn: psycopg.Connection[Any],
+    *,
+    dag_id: str,
+    dag_run_id: str,
+    logical_date: datetime.datetime,
+    logical_date_iso: str,
+    pre_backfill_clear_number: int,
+    timeout: float = _BACKFILL_DAGRUN_TIMEOUT_SECONDS,
+) -> None:
+    """Invoke the real `airflow backfill create` CLI, then wait for it to genuinely re-execute.
+
+    Retries the CLI invocation itself (bounded by
+    `_BACKFILL_CREATE_MAX_ATTEMPTS`, short fixed backoff
+    `_BACKFILL_CREATE_RETRY_BACKOFF_SECONDS`) whenever
+    `backfill_dag_run.exception_reason` observes the literal string
+    `"in flight"` -- Airflow's own documented-transient lost `SELECT ...
+    FOR UPDATE SKIP LOCKED` row-lock race (`.planning/debug/backfill-does-
+    not-redrive-rejected-row.md`, confirmed live: a manual re-invocation of
+    the identical CLI command with no code change succeeded immediately on
+    the second try). Only once the retry loop observes an outcome OTHER
+    than `"in flight"` (a `None` exception_reason -- Airflow's own success
+    case -- or, defensively, any other non-`"in flight"` value) does this
+    fall through to the pre-existing re-execution wait: polling
+    `clear_number` advancing past its pre-backfill value (module
+    docstring: the `UNIQUE (dag_id, logical_date)` constraint means
+    backfilling an already-`success` logical_date reuses the SAME
+    `dag_run` row, cleared and re-run, never a new one) is the "a
+    genuinely new execution happened" signal this polls for, alongside
+    `state == 'success'`.
+
+    Args:
+        kubectl_fn: The `kubectl` fixture callable.
+        airflow_conn: The `airflow_metadata_connection` fixture.
+        dag_id: The target DAG.
+        dag_run_id: The target `dag_run.run_id` (Airflow's own identity,
+            NOT `meta.ingestion_runs.run_id` -- module docstring).
+        logical_date: The target `dag_run.logical_date` value, used for the
+            `backfill_dag_run.exception_reason` lookup.
+        logical_date_iso: The `--from-date`/`--to-date` value, ISO 8601.
+        pre_backfill_clear_number: `dag_run.clear_number` observed BEFORE
+            invoking backfill.
+        timeout: Maximum seconds to wait for re-execution to `success`.
+
+    Raises:
+        AssertionError: The CLI invocation fails, every retry attempt still
+            observes `"in flight"`, or re-execution never reaches
+            `success` within `timeout`.
+    """
+    for attempt in range(1, _BACKFILL_CREATE_MAX_ATTEMPTS + 1):
+        _invoke_backfill_create_once(kubectl_fn, dag_id=dag_id, logical_date_iso=logical_date_iso)
+
+        settle_deadline = time.monotonic() + _BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS
+        exception_reason: str | None = None
+        while time.monotonic() < settle_deadline:
+            exception_reason = _fetch_latest_backfill_exception_reason(
+                airflow_conn,
+                dag_id=dag_id,
+                logical_date=logical_date,
+            )
+            if exception_reason is not None:
+                break
+            time.sleep(_POLL_INTERVAL_SECONDS)
+
+        if exception_reason != "in flight":
+            break
+
+        if attempt < _BACKFILL_CREATE_MAX_ATTEMPTS:
+            time.sleep(_BACKFILL_CREATE_RETRY_BACKOFF_SECONDS)
+    else:
+        msg = (
+            f"airflow backfill create for dag_id={dag_id!r} logical_date={logical_date!r} "
+            f"still observed backfill_dag_run.exception_reason='in flight' after "
+            f"{_BACKFILL_CREATE_MAX_ATTEMPTS} attempts -- Airflow's own documented-transient "
+            f"lost row-lock race (see .planning/debug/backfill-does-not-redrive-rejected-row.md) "
+            f"did not clear within the retry budget"
+        )
+        raise AssertionError(msg)
 
     deadline = time.monotonic() + timeout
     last_state: str | None = None
@@ -226,11 +367,17 @@ def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- seven independen
             if last_clear_number > pre_backfill_clear_number and last_state == "success":
                 return
         time.sleep(_POLL_INTERVAL_SECONDS)
+    latest_exception_reason = _fetch_latest_backfill_exception_reason(
+        airflow_conn,
+        dag_id=dag_id,
+        logical_date=logical_date,
+    )
     msg = (
         f"dag_run[dag_id={dag_id!r}, run_id={dag_run_id!r}] never re-executed to 'success' "
         f"within {timeout}s after 'airflow backfill create' (pre-backfill clear_number="
         f"{pre_backfill_clear_number!r}, last observed: state={last_state!r}, "
-        f"clear_number={last_clear_number!r})"
+        f"clear_number={last_clear_number!r}, latest backfill_dag_run.exception_reason="
+        f"{latest_exception_reason!r})"
     )
     raise AssertionError(msg)
 
@@ -430,6 +577,7 @@ def test_backfill_resolves_previously_rejected_row(
             airflow_metadata_connection,
             dag_id=dag_id,
             dag_run_id=dag_run_id,
+            logical_date=logical_date,
             logical_date_iso=logical_date.isoformat(),
             pre_backfill_clear_number=pre_backfill_clear_number,
         )
