@@ -13,12 +13,16 @@ from typing import TYPE_CHECKING
 
 from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from airflow.sdk.definitions.asset import Asset
 from airflow.sdk.definitions.mappedoperator import MappedOperator
+from airflow.sdk.definitions.timetables.assets import AssetTriggeredTimetable
 
 if TYPE_CHECKING:
     from airflow.models import DagBag
 
-_BOTH_DAG_IDS = {"smoke_kubernetes_pod", "csv_ingest_customers"}
+_BOTH_DAG_IDS = {"smoke_kubernetes_pod", "csv_ingest_customers", "csv_ingest_orders"}
+
+_CUSTOMERS_ASSET_URI = "s3://normalized/customers"
 
 
 def _kpo_attrs(task: object) -> dict[str, object] | None:
@@ -101,3 +105,53 @@ def test_namespace_and_service_account(dagbag: DagBag) -> None:
             )
             checked += 1
     assert checked >= 3, "expected discover, ingest and the smoke pod to all be checked"
+
+
+def test_integrity_gate_upstream_of_discover(dagbag: DagBag) -> None:
+    """D-18: `wait_for_files >> list_matched_keys >> integrity_gate >> discover` holds in both DAGs.
+
+    Walks each DAG's real task-dependency graph (`task_dict`/
+    `upstream_task_ids`) -- proven structurally, no live cluster needed.
+    """
+    for dag_id in ("csv_ingest_customers", "csv_ingest_orders"):
+        dag = dagbag.dags[dag_id]
+        discover = dag.task_dict["discover"]
+        gate = dag.task_dict["integrity_gate"]
+        matched_keys = dag.task_dict["list_matched_keys"]
+        sensor = dag.task_dict["wait_for_files"]
+
+        assert "integrity_gate" in discover.upstream_task_ids, (
+            f"{dag_id}: discover is not gated by integrity_gate"
+        )
+        assert "list_matched_keys" in gate.upstream_task_ids, (
+            f"{dag_id}: integrity_gate does not fan out over list_matched_keys"
+        )
+        assert "wait_for_files" in matched_keys.upstream_task_ids, (
+            f"{dag_id}: list_matched_keys is not gated by wait_for_files"
+        )
+        assert isinstance(sensor, S3KeySensor), f"{dag_id}: wait_for_files is not an S3KeySensor"
+
+
+def test_orders_dag_present_and_asset_scheduled(dagbag: DagBag) -> None:
+    """D-14/D-15: `csv_ingest_orders` exists, scheduled off the customers Asset, not a cron."""
+    dag = dagbag.dags["csv_ingest_orders"]
+    timetable = dag.timetable
+    assert isinstance(timetable, AssetTriggeredTimetable), (
+        f"csv_ingest_orders is scheduled by {type(timetable).__name__}, not an Asset"
+    )
+    asset_uris = {asset.uri for asset in timetable.asset_condition.objects}
+    assert _CUSTOMERS_ASSET_URI in asset_uris, (
+        f"csv_ingest_orders is not scheduled off {_CUSTOMERS_ASSET_URI}"
+    )
+
+
+def test_customers_ingest_declares_outlets(dagbag: DagBag) -> None:
+    """D-15: `csv_ingest_customers`'s `ingest` task publishes the customers Asset via outlets."""
+    dag = dagbag.dags["csv_ingest_customers"]
+    ingest = dag.task_dict["ingest"]
+    outlets = ingest.outlets
+    assert outlets, "ingest declares no outlets"
+    outlet_uris = {asset.uri for asset in outlets if isinstance(asset, Asset)}
+    assert _CUSTOMERS_ASSET_URI in outlet_uris, (
+        f"ingest's outlets do not include {_CUSTOMERS_ASSET_URI}"
+    )
