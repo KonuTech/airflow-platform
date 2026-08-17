@@ -87,9 +87,11 @@ No code-level issue with the values-file changes themselves; the failure was ent
 
 ## Next Phase Readiness
 
-- This is a values-file-only change. **No `helm upgrade` was run against the live kind cluster** — the trimmed requests will only take effect on the cluster's next deploy of the monitoring/tempo/otel-collector charts (e.g. via `make stage-monitoring`, `make stage-tempo`, `make stage-otel-collector`, or equivalent — not run as part of this task, per its explicit scope boundary).
-- Once deployed, expect `airflow-platform-worker`'s allocated CPU to drop from ~91-100% toward ~80-90%, and `airflow-platform-worker2`'s from ~87% toward ~75-80% — real, not cosmetic, headroom for ETL task pod scheduling (`integrity_gate` fan-out, `discover`, `ingest`).
-- Does not by itself resolve the CPU-budget blocker tracked in `STATE.md`'s Blockers (that's the physical 12-core host ceiling, unaffected by this trim) — this is a genuine but partial mitigation, freeing real margin without requiring the previously-discussed destructive `kind delete cluster` recreation.
+- **Deployed live, same session, on user request:** `bash scripts/stages/85-monitoring.sh` (idempotent `helm upgrade --install`, `PROFILE=local` default) applied all three releases — `otel-collector` (rev 3), `tempo` (rev 3), `monitoring`/kube-prometheus-stack (rev 5). All pods rolled out cleanly to `Running`/`Ready`; new pods independently confirmed via `kubectl get pod -o jsonpath` to carry the exact trimmed `requests.cpu` values (grafana 50m, sidecar 10m, kube-state-metrics 20m, prometheusOperator 20m, otel-collector 100m, prometheus 100m, tempo 100m).
+- **Measured live improvement** (`kubectl describe nodes`, before → after):
+  - `airflow-platform-worker`: 2750-3000m (91-100%) → **2390m (79%)** — ~360-610m freed.
+  - `airflow-platform-worker2`: 2610m (87%) → **2320m (77%)** — ~290m freed.
+- Does not by itself resolve the CPU-budget blocker tracked in `STATE.md`'s Blockers (that's the physical 12-core host ceiling, unaffected by this trim) — but both worker nodes now sit meaningfully below the ~700-800m real-headroom starvation threshold documented there, for the first time this session without needing the destructive `kind delete cluster` recreation path.
 
 ---
 *Quick task: 260817-rvq*
