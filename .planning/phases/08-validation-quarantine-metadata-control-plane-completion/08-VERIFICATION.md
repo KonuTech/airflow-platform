@@ -1,17 +1,35 @@
 ---
 phase: 08-validation-quarantine-metadata-control-plane-completion
 verified: 2026-08-17T20:10:00Z
-status: human_needed
-score: 4/5 roadmap success criteria fully VERIFIED, 1/5 (VALID-08 re-drive audit trail) still genuinely unproven live; the 1 regression this verification found (ORCH-06 DAG line-budget policy test) was fixed post-verification, commit a78680e
+status: gaps_found
+score: 4/5 roadmap success criteria fully VERIFIED; 1/5 (VALID-08 re-drive audit trail) now DEFINITIVELY CONFIRMED FAILING live (not merely uncertain) -- a real dataplat architecture gap, not an infra/timing issue. The 1 regression this verification found (ORCH-06 DAG line-budget policy test) was fixed post-verification, commit a78680e.
 overrides_applied: 0
 post_verification_fix:
   regression: "tests/policy/test_dag_line_budget.py::test_csv_ingest_customers_stays_under_150_lines"
   commit: a78680e
   detail: "csv_ingest_customers.py trimmed 173 -> 149 lines (docstring/comment condensation only, no functional change). Re-confirmed green: pytest tests/unit tests/property tests/policy -q -m \"not integration and not dagtest and not cluster and not manifests\" -> 614 passed, 12 deselected (was 613 passed, 1 failed). Full make test (484) and make policy (124) also re-run clean."
-human_verification:
-  - item: "Run tests/e2e/slice/test_backfill_reentry.py -m cluster to a genuine completion (pass or fail, not another environmental timeout)"
-    expected: "Either the test passes cleanly (proving resolve_rejected_records_for_batch's batch_id scoping correctly resolves a content-differing correction's PENDING row, closing VALID-08's audit-trail proof), or it fails specifically at _assert_row_resolved (proving the batch_key/content_sha256 architecture concern is real, needing a Rule-4-territory design decision per deferred-items.md -- not a quick fix)."
-    why_human: "Requires a live cluster window free of the already-known, already-deferred CPU-contention issue (kind cluster node CPU budget, physical host ceiling, tracked in STATE.md's Blockers) -- 3 attempts this session all failed before ever reaching this code path for that unrelated reason."
+human_verification: []
+# Resolved same session, post-verification (2026-08-17T20:35-21:15Z): the human_verification
+# item below was actually run to completion live. See post_verification_live_result.
+post_verification_live_result:
+  ran: "pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster, after (1) clearing a
+    54-object S3 backlog under raw/customers/ that was blocking discover on every prior attempt,
+    and (2) two further live-driven refinements to the retry-timing fix (commits 441a51a, 368c83c)."
+  result: "Progressed past EVERY step -- discover, ingest (SUCCEEDED), PENDING reject checks,
+    real airflow backfill create re-execution (clear_number advanced, state reached success, no
+    retry-timing errors), corrected row published to normalized.customers -- and failed ONLY at
+    the final assertion (_assert_row_resolved): the original reject stays PENDING because it is
+    scoped to batch_id=43120 while the corrected file's own run (run_id=43121) lands under a
+    DIFFERENT batch_id."
+  conclusion: "The batch_key/content_sha256 architecture concern (deferred-items.md, 'From plan
+    08-14') is CONFIRMED real, live, for the first time -- not refuted as this report previously
+    stated, not merely theoretical. discover_files's batch_key is a pure function of
+    content_sha256, so a content-differing correction always discovers under a new batch_id;
+    resolve_rejected_records_for_batch scopes strictly by batch_id, so it can never touch the old
+    batch's PENDING row. The mechanism (Airflow backfill, retry logic, DAG plumbing) all now work
+    correctly and are proven live -- the gap is architectural, in dataplat's own batch-scoping
+    design, not a test-robustness or infra issue. Needs a real design decision (Rule 4 territory),
+    not a quick fix. Full narrative: .planning/debug/resolved/backfill-does-not-redrive-rejected-row.md"
 re_verification:
   previous_status: human_needed
   previous_score: "4/5 fully verified, 1/5 uncertain"
@@ -20,11 +38,23 @@ re_verification:
     - "The deployment gaps blocking both e2e tests (migrations 0014-0017 not applied, csv_ingest_orders absent from DAG bundle, Vault sealed) are closed: this verifier independently re-queried the live cluster and confirms analytics-db is now at migration 0019, both csv_ingest_customers and csv_ingest_orders are listed by `airflow dags list`, and `vault status` reports Sealed: false."
     - "The test-robustness gap in test_backfill_reentry.py (single CLI invocation, no retry for Airflow's own documented-transient backfill_dag_run.exception_reason='in flight' row-lock race) is closed at the code level: plan 08-15 (commit 1de6a22) plus a follow-up code-review addendum (commit cb56e15, 5 findings all resolved) added a bounded 3-attempt retry with 5s backoff and self-diagnosing failure messages. This verifier independently re-ran ruff/mypy/pytest --collect-only against the current code and confirms all pass cleanly."
   gaps_remaining:
-    - "VALID-08's core open question -- does resolve_rejected_records_for_batch (D-05) genuinely flip a content-differing correction's PENDING meta.rejected_records row to REDRIVEN, given batch_key is a pure function of content_sha256 -- remains completely untested. This verifier independently queried the live analytics-db: meta.rejected_records currently has 5 PENDING rows and ZERO REDRIVEN rows, and the airflow-db's backfill/backfill_dag_run tables show only the 2 manual CLI reproductions from the debug session (backfill_id=1 'in flight', backfill_id=2 dag_run_id=2781 success) -- no genuine pytest -m cluster run of test_backfill_reentry.py has ever completed on this cluster. This is the single most important remaining truth for this phase's goal and it has never been observed, neither passing nor failing."
+    - "SUPERSEDED post-verification, same session: this item was resolved by actually running the live test to completion. See post_verification_live_result above -- VALID-08 is now confirmed FAILING (architecture gap), not merely untested."
   regressions:
     - "tests/policy/test_dag_line_budget.py::test_csv_ingest_customers_stays_under_150_lines now FAILS (173 lines, budget <150) -- NEW finding, not present in the previous verification run (which independently ran the identical command and got a clean 613/613 pass). Introduced by quick task 260817-mvp (commit ea5a38e, 2026-08-17, after the previous verification), which added a `.override(max_active_tis_per_dag=3)` fix plus a ~19-line explanatory comment to csv_ingest_customers.py -- a required phase-08 artifact -- without running `tests/policy` (its own SUMMARY.md only claims tests/unit's 484 tests were checked). This breaks `make policy` / `make check`'s Local gate."
-gaps: []
-# The one gap this verification found (csv_ingest_customers.py over the ORCH-06
+gaps:
+  - truth: "A content-differing corrected file's backfill re-drive flips the original PENDING meta.rejected_records row to REDRIVEN (VALID-08)"
+    status: failed
+    reason: "Live-confirmed: test_backfill_reentry.py ran end-to-end (discover, ingest, real backfill re-execution, corrected row published) and failed only at the final REDRIVEN assertion. rejected_record_id=8 stays batch_id=43120/PENDING; the corrected file's own run (run_id=43121) is a different batch_id, so resolve_rejected_records_for_batch (scoped strictly by batch_id) never touches it."
+    severity: major
+    artifacts:
+      - path: "packages/dataplat/src/dataplat/discovery.py"
+        issue: "batch_key is a pure function of content_sha256, so a content-differing correction always discovers under a new batch -- by design, not a bug in this file"
+      - path: "packages/dataplat/src/dataplat/metadata/postgres.py"
+        issue: "resolve_rejected_records_for_batch (D-05) scopes strictly by batch_id, which can never match a corrected file's new batch"
+    missing:
+      - "A real design decision (Rule 4 territory, deferred-items.md): how should a content-differing correction resolve an OLD batch's PENDING rejects when it necessarily creates a NEW batch_id? Candidates include resolving by business-key+dataset instead of strictly by batch_id, or an explicit corrected-file-to-original-batch linkage captured at discovery time."
+    debug_session: ".planning/debug/resolved/backfill-does-not-redrive-rejected-row.md"
+# The line-budget gap this verification found (csv_ingest_customers.py over the ORCH-06
 # 150-line budget) was fixed immediately after this report was written --
 # see post_verification_fix above. Original gap text preserved in `git log -p`
 # for this file's prior revision, for audit trail.
@@ -34,7 +64,7 @@ gaps: []
 
 **Phase Goal:** No data is ever silently dropped — every rejected record is retained with a reason, reportable, and has a documented path back into the pipeline
 **Verified:** 2026-08-17T20:10:00Z
-**Status:** human_needed
+**Status:** gaps_found (updated post-session: VALID-08 confirmed failing live, see `post_verification_live_result` in frontmatter)
 **Re-verification:** Yes — after gap closure (plan 08-15 + live-cluster UAT session). The single regression this pass found (DAG line-budget) was fixed immediately after (commit `a78680e`) — see `post_verification_fix` in frontmatter.
 
 **Mode note (carried forward, unchanged):** ROADMAP.md marks this phase `mode: mvp`, but the phase goal text does not match the User Story shape (`gsd-sdk query user-story.validate` returns `valid: false`). The phase carries five detailed, testable roadmap Success Criteria, which this report verifies against as the richer contract. Flagged as a process inconsistency, not a verification blocker.
@@ -57,7 +87,7 @@ This is a re-verification following a live-cluster UAT session (08-HUMAN-UAT.md,
 |---|-------|--------|----------|
 | 1 | A file with malformed rows loads the good rows and writes quarantine records naming source file, row number, column, error type, run and timestamp — nothing silently discarded | VERIFIED | Unchanged since prior verification. `RaggedRowGuard`/`CompletenessRule`/`PatternRule`/`ValidityRangeRule`/`UniquenessRule` each convert a row-level violation into a `RejectedRecord` (never raise, QUAL-03). `meta.rejected_records` (migration `0015`, live-confirmed applied — `alembic_version=0019`) carries `run_id`, `file_id`, `source_row_number`, `error_column`, `error_type`. This verifier re-ran the full 116-test integration suite: all pass. |
 | 2 | A validation report exists as PostgreSQL rows and a MinIO artifact; a threshold-breaching dataset reports FAIL/QUARANTINE, an under-threshold one reports PASS_WITH_WARNING | VERIFIED | Unchanged since prior verification; code and tests re-confirmed passing this session (`test_report_artifact_matches_persisted_postgres_rows`, part of the 116 passing integration tests). |
-| 3 | Corrected quarantined records re-enter the pipeline through the documented re-drive path and land in the warehouse | UNCERTAIN (see human_verification) | The "land in the warehouse" half remains proven (`ON CONFLICT DO UPDATE` publishers, batch-independent). The "documented re-drive path" half: the test-robustness fix (retry on Airflow's own `exception_reason='in flight'` transient) is code-complete, twice-reviewed, and statically clean — this verifier independently re-confirmed `ruff check`/`mypy`/`pytest --collect-only` all pass on the current `tests/e2e/slice/test_backfill_reentry.py`. But the actual behavior this truth depends on — whether `resolve_rejected_records_for_batch`'s `batch_id` scoping correctly (or incorrectly) resolves a content-differing correction's PENDING row — has NEVER been observed on this cluster. Live query this session: `meta.rejected_records` has 5 `PENDING` rows, 0 `REDRIVEN`; `backfill`/`backfill_dag_run` show only the 2 manual CLI reproductions from the debug session, not a single completed run of the actual pytest test. Genuinely unresolved, not merely "assumed fine." |
+| 3 | Corrected quarantined records re-enter the pipeline through the documented re-drive path and land in the warehouse | **FAILED (confirmed live, post-session)** | The "land in the warehouse" half is proven (`ON CONFLICT DO UPDATE` publishers, batch-independent — the corrected row DID publish to `normalized.customers`). The "documented re-drive path" half is now confirmed FALSE: `test_backfill_reentry.py` ran to completion live and failed at `_assert_row_resolved` — the original PENDING reject (`batch_id=43120`) is never touched because the corrected file's run lands under a different `batch_id` (43121). `resolve_rejected_records_for_batch`'s `batch_id` scoping does NOT resolve a content-differing correction's PENDING row, because `discover_files`'s `batch_key` is a pure function of `content_sha256`. Real architecture gap, not an infra/timing issue — see `post_verification_live_result` in frontmatter and `.planning/debug/resolved/backfill-does-not-redrive-rejected-row.md`. |
 | 4 | A truncated/still-uploading file (checksum mismatch, size mismatch, wrong extension, empty, missing `_BATCH_COMPLETE`) is refused before any parsing occurs | VERIFIED | Unchanged since prior verification. `integrity_gate.py` wired upstream of `discover` in both DAGs; `tests/unit/test_integrity_gate.py` and `test_batch_complete_marker.py` re-confirmed passing this session. |
 | 5 | A file at 10× historical baseline row count is flagged as a volume anomaly; an orphan foreign key produces the dataset's configured fail/quarantine/warn outcome | VERIFIED | The volume-anomaly half is unchanged/re-confirmed via passing integration tests. The referential-orphan half is now upgraded from "integration-tested only" to **live-proven**: 08-HUMAN-UAT.md documents `test_orphan_order_quarantined_while_valid_rows_publish` achieving one full clean server-side pass (discover → ingest → SUCCEEDED → `REFERENTIAL_ORPHAN` reject row confirmed → non-orphan rows published, orphan row absent from `normalized.orders`) against the real cluster, after fixing 4 real deployment gaps (psycopg dependency, 2 missing GRANTs, stale hostPath mount) along the way. This verifier independently confirms the underlying `ReferentialIntegrityBarrier` code and its integration tests are unchanged since that live pass, and the live cluster is currently deployed with the same code (migration `0019`, both DAGs present). |
 
@@ -108,7 +138,7 @@ Traced independently this session, live, on the running cluster:
 | VALID-03 | 08-01, 08-04, 08-07, 08-10 | Quarantine per configurable strategy | SATISFIED | Unchanged. |
 | VALID-04 | 08-01, 08-03, 08-11 | Machine-readable reports in Postgres + MinIO | SATISFIED | Unchanged. REQUIREMENTS.md stale, confirmed again. |
 | VALID-07 | 08-05, 08-08, 08-12, 08-14 | Referential integrity, configurable fail/quarantine/warn | **SATISFIED, now live-proven** | Upgraded this session from "blocked on deployment" to fully satisfied — see Truth #5. |
-| VALID-08 | 08-03, 08-12, 08-13, 08-14, 08-15 | Documented re-drive path after correction | UNCERTAIN | Test-robustness gap closed at code level (plan 08-15); the underlying behavior remains unproven live — see Truth #3. |
+| VALID-08 | 08-03, 08-12, 08-13, 08-14, 08-15 | Documented re-drive path after correction | **NOT SATISFIED (confirmed)** | Test-robustness gap closed at code level (plan 08-15 + live refinements); the underlying re-drive behavior is confirmed NOT working as designed — a real `batch_key`/`batch_id` architecture gap, needing a design decision. See Truth #3. |
 | VALID-09 | 08-01, 08-09, 08-11 | Volume/quality anomalies against persisted baselines, no ML | SATISFIED | Unchanged. |
 | LOAD-10 | 08-02, 08-12 | File integrity verified before processing | SATISFIED | Unchanged. REQUIREMENTS.md stale, confirmed again. |
 | LOAD-11 | 08-01, 08-06 | Optional `_BATCH_COMPLETE` manifest support | SATISFIED | Unchanged. REQUIREMENTS.md stale, confirmed again. |
@@ -198,9 +228,9 @@ Node CPU allocation remains tight, consistent with STATE.md's own already-docume
 
 **Real progress since the prior verification:** the deployment gaps that previously blocked live verification are now closed (migrations current, both DAGs deployed, Vault unsealed), and VALID-07 is now genuinely live-proven (one full clean e2e pass). The test-robustness fix for VALID-08's e2e proof (plan 08-15 + review addendum) is code-complete and doubly reviewed.
 
-**What remains genuinely open:** VALID-08's specific re-drive audit-trail behavior for a content-differing correction has never executed on this cluster — not proven to work, not proven to fail. This is an honest "unknown," backed by direct live-database evidence (0 REDRIVEN rows, 0 completed test runs), not a documentation gap or a pessimistic guess. It requires a live cluster window unblocked by the separately-tracked node-CPU-budget issue to resolve either way. Tracked as the sole `human_verification` item in frontmatter.
+**UPDATE, same session, post-verification (2026-08-17T20:35-21:15Z):** the `human_verification` item above WAS run to completion live. After clearing the `raw/customers/` S3 backlog (54 objects, was blocking `discover` on every attempt) and two further live-driven refinements to the retry-timing fix (`441a51a`, `368c83c`), `test_backfill_reentry.py` ran end-to-end — discover, ingest, real backfill re-execution, corrected row published — and failed only at the final `REDRIVEN` assertion. **VALID-08's re-drive path is confirmed NOT working as designed**, a real `dataplat` architecture gap (`batch_key`/`batch_id` scoping mismatch), not an infra/timing issue. Full detail: `post_verification_live_result` in frontmatter, `gaps` entry above, `.planning/debug/resolved/backfill-does-not-redrive-rejected-row.md`.
 
-**Recommendation:** Phase 8 is otherwise complete — all formal gaps closed, all code-level work done, 4/5 success criteria fully verified, the 5th verified in every respect except a live run that infra contention has prevented 3 times running. Mark the phase complete with the outstanding live-cluster confirmation tracked as a standing human-verification item (gated on the cluster-capacity decision already recorded in STATE.md's Blockers section), not a phase-blocking gap.
+**Recommendation (superseded):** Phase 8 is code-complete and the retry-timing/infra work is fully resolved, but VALID-08 — one of the phase's 5 core success criteria — is now confirmed to genuinely fail as designed. This is a real, phase-blocking gap (not a standing human-verification item): the phase's own goal ("every rejected record... has a documented path back into the pipeline") is not actually met for content-differing corrections. Recommend `/gsd:plan-phase 8 --gaps` to plan a fix for the `gaps` entry above — a real design decision (Rule 4 territory), not mechanical work.
 
 ---
 
