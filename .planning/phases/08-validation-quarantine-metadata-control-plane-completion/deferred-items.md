@@ -34,3 +34,20 @@ directly caused by the current task's own changes).
   under budget. `airflow/dags/csv_ingest_customers.py` is not in plan
   08-05's `files_modified` scope. Whichever plan owns DAG-thinness cleanup
   for this phase should either shrink the file or revise the budget.
+
+## From plan 08-11
+
+- **`tests/integration/test_publish_orders.py:263` is 103 chars, over ruff's
+  100-char limit — pre-existing, not caused by 08-11.**
+  `tests/policy/test_gates_actually_fail.py::
+  test_the_main_gate_does_not_lint_the_bad_samples` fails because `make lint`
+  itself is red: `ruff check .` reports `E501 Line too long (103 > 100)` on
+  the `_seed_run(repository, migrated_dsn, key_suffix="orders_noop_republish")`
+  line. Root cause: commit `8490926` (plan 08-05's own gap-closure fix,
+  "namespace orders publish-test idempotency keys to avoid cross-file
+  collision") lengthened this line past 100 chars without wrapping it.
+  `tests/integration/test_publish_orders.py` is not in plan 08-11's
+  `files_modified` scope, and this session made no other change to that
+  file. Confirmed via `git log`/`git status` that the file has zero diff
+  from this session. A future plan/verification pass should wrap this line
+  to restore a green `make lint`.
