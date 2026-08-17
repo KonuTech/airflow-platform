@@ -26,7 +26,10 @@ _RULE_TYPE = "QUALITY_COMPLETENESS"
 
 
 def _make_context() -> PipelineContext:
-    """Build a placeholder ``PipelineContext`` -- mirrors ``test_circuit_breaker.py``'s convention."""
+    """Build a placeholder ``PipelineContext``.
+
+    Mirrors ``test_circuit_breaker.py``'s own convention.
+    """
     return PipelineContext(
         run=RunContext(run_id=1, idempotency_key="test-run"),
         config=SimpleNamespace(dataset="test_dataset"),  # type: ignore[arg-type]
@@ -51,7 +54,9 @@ def _make_chunk() -> RecordChunk:
 
 
 def _make_inner_rule() -> CompletenessRule:
-    return CompletenessRule(column_index=1, column_name="name", strategy="REJECT_RECORD", rule_id=_RULE_ID)
+    return CompletenessRule(
+        column_index=1, column_name="name", strategy="REJECT_RECORD", rule_id=_RULE_ID
+    )
 
 
 def test_reject_record_is_a_byte_identical_passthrough_of_the_inner_result() -> None:
@@ -79,7 +84,10 @@ def test_quarantine_record_is_identical_to_reject_record_passthrough() -> None:
         inner=_make_inner_rule(), strategy="REJECT_RECORD", rule_id=_RULE_ID, rule_type=_RULE_TYPE
     )
     quarantine_stage = StrategyDispatchStage(
-        inner=_make_inner_rule(), strategy="QUARANTINE_RECORD", rule_id=_RULE_ID, rule_type=_RULE_TYPE
+        inner=_make_inner_rule(),
+        strategy="QUARANTINE_RECORD",
+        rule_id=_RULE_ID,
+        rule_type=_RULE_TYPE,
     )
 
     reject_result = reject_stage.apply(ctx, _make_chunk())
@@ -94,7 +102,10 @@ def test_warn_and_continue_keeps_every_row_and_emits_one_warning_finding() -> No
     original_chunk = _make_chunk()
 
     stage = StrategyDispatchStage(
-        inner=_make_inner_rule(), strategy="WARN_AND_CONTINUE", rule_id=_RULE_ID, rule_type=_RULE_TYPE
+        inner=_make_inner_rule(),
+        strategy="WARN_AND_CONTINUE",
+        rule_id=_RULE_ID,
+        rule_type=_RULE_TYPE,
     )
     result = stage.apply(ctx, original_chunk)
 

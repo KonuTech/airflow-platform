@@ -135,11 +135,13 @@ class StrategyDispatchStage(StreamingStage):
         self._strategy = strategy
         self._rule_id = rule_id
         self._rule_type = rule_type
-
-    @property
-    def name(self) -> str:
-        """This stage's identifier, tracing back to the wrapped rule's own name."""
-        return f"strategy_dispatch[{self._inner.name}]"
+        # Computed once at construction, not a property -- `StreamingStage.name`
+        # is a plain writeable attribute in the protocol, so this instance
+        # attribute (never a `@property`) is what keeps `StrategyDispatchStage`
+        # structurally compatible with it. Traces back to the wrapped rule's
+        # own name, so metrics/logs still identify which rule a rejection
+        # came from.
+        self.name = f"strategy_dispatch[{inner.name}]"
 
     def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:
         """Apply the wrapped rule, then branch on this stage's configured D-07 strategy.
@@ -192,7 +194,8 @@ class StrategyDispatchStage(StreamingStage):
             # method -- never `result.chunk` (which already excluded the
             # violating rows) -- this is what makes the row genuinely
             # proceed to publish.
-            return StageResult(chunk=chunk, rejected=[], findings=[*result.findings, warning_finding])
+            all_findings = [*result.findings, warning_finding]
+            return StageResult(chunk=chunk, rejected=[], findings=all_findings)
 
         # `self._strategy` in _ESCALATING_STRATEGIES (FAIL_FILE/QUARANTINE_FILE)
         # -- the only remaining branch, since `__init__` already rejected any
