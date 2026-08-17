@@ -588,6 +588,69 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
     )
 
 
+def _apply_batch_complete_marker_gate(
+    *,
+    listed: Sequence[ObjectSummary],
+    config: DatasetConfig,
+    dataset_name: str,
+    log: FilteringBoundLogger,
+) -> tuple[list[ObjectSummary], bool]:
+    """Apply LOAD-11/D-19's opt-in ``_BATCH_COMPLETE`` marker gate (plan 08-06) to one listing.
+
+    Extracted from ``discover_files``'s own body purely to keep that
+    function's cyclomatic complexity within this codebase's lint gate (ruff
+    C901/PLR0912), the same reason ``_process_multipart_group``/
+    ``_process_ungrouped_object`` were extracted -- NO behavior change from
+    an inline version.
+
+    When ``config.source.batch_complete_marker`` is ``None`` (the default;
+    ``customers``/``orders``, this phase), this is a no-op: ``listed`` comes
+    back unchanged and ``batch_withheld`` is always ``False`` -- byte-for-
+    byte identical to calling ``discover_files`` before this plan.
+
+    When it is set, the object whose key equals
+    ``config.source.path + config.source.batch_complete_marker`` must be
+    present in ``listed`` before ANY object in the listing is hashed,
+    registered, batched or assigned this call (LOAD-11: "refused before any
+    parsing occurs", extended here to "before any discovery bookkeeping
+    occurs" for the WHOLE batch, not merely the marker's own object). This
+    mirrors Phase 6 D-10's exact "opt-in, unexercised by both live datasets"
+    precedent for filename masks: built, corpus/unit-tested, but neither
+    live dataset's config sets this field this phase.
+
+    Args:
+        listed: The already-sorted object listing ``discover_files`` just
+            produced from ``objects.list_objects(...)``.
+        config: The dataset's already-validated, resolved configuration.
+        dataset_name: The dataset's unique name, for the withheld-batch log
+            line.
+        log: The structured logger ``discover_files`` itself already holds.
+
+    Returns:
+        A ``(listed, batch_withheld)`` pair. When ``batch_withheld`` is
+        ``True``, ``listed`` is always ``[]`` and the caller MUST return
+        ``[]`` immediately without resolving schema version or entering the
+        multipart-partition/per-object loop. When ``False``, ``listed`` is
+        either the original listing unchanged (marker not configured) or the
+        original listing with the marker object itself removed (marker
+        configured and found) -- the marker is never mistaken for a
+        candidate data file either way.
+    """
+    if config.source.batch_complete_marker is None:
+        return list(listed), False
+
+    marker_key = config.source.path + config.source.batch_complete_marker
+    if not any(obj.key == marker_key for obj in listed):
+        log.info(
+            "discovery.batch_incomplete",
+            dataset=dataset_name,
+            marker_key=marker_key,
+        )
+        return [], True
+
+    return [obj for obj in listed if obj.key != marker_key], False
+
+
 def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input; see module docstring
     *,
     metadata: MetadataRepository,
@@ -604,7 +667,19 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
 ) -> list[DiscoveredUnit]:
     """List, hash, dedup-check, freeze and cap one dataset's discoverable files.
 
-    Sequence, once per call: (0) when ``config.source.multipart_pattern`` is
+    Sequence, once per call: (-1) when ``config.source.batch_complete_marker``
+    is set (LOAD-11/D-19, plan 08-06), check whether an object whose key is
+    ``config.source.path + config.source.batch_complete_marker`` is present
+    in the listing -- when absent, the WHOLE batch is withheld: return
+    ``[]`` immediately, before any hashing, registration, batching or
+    assignment happens for ANY object this call, even ones that would
+    otherwise discover cleanly. This is the same "opt-in, unexercised by
+    both live datasets" precedent as Phase 6's filename masks (D-10):
+    ``None`` (the default) skips this check entirely, and every dataset that
+    does not set it (``customers``, ``orders``, this phase) behaves exactly
+    as before this plan. When the marker IS present, it is stripped from the
+    listing before every later step -- it is never treated as a candidate
+    data file. (0) when ``config.source.multipart_pattern`` is
     set (CSV-11, plan 06-18), partition the listing into multipart-group
     candidates and the remainder via ``group_multipart_units`` -- every
     other dataset (``multipart_pattern is None``, e.g. ``customers``) skips
@@ -705,6 +780,22 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
         key=lambda summary: summary.key,
     )
 
+    # LOAD-11/D-19 opt-in `_BATCH_COMPLETE` marker gate (plan 08-06) -- see
+    # `_apply_batch_complete_marker_gate`'s own docstring for the full
+    # behavior. Extracted into its own function (mirrors
+    # `_process_multipart_group`/`_process_ungrouped_object`'s own
+    # extraction precedent below) purely to keep this function's cyclomatic
+    # complexity within this codebase's lint gate (ruff C901/PLR0912) -- NO
+    # behavior change from the inline version.
+    listed, batch_withheld = _apply_batch_complete_marker_gate(
+        listed=listed,
+        config=config,
+        dataset_name=dataset_name,
+        log=log,
+    )
+    if batch_withheld:
+        return []
+
     # Resolved ONCE per call, before the per-object loop (see this function's
     # own docstring): schema version is dataset-wide, not per-object.
     # Pitfall 5 -- no current schema version yet (this dataset's very first
@@ -738,26 +829,29 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
 
     candidates: list[DiscoveredUnit] = []
 
-    if groups:
-        objects_by_key = {obj.key: obj for obj in listed}
-        for group in groups:
-            group_unit = _process_multipart_group(
-                metadata=metadata,
-                objects=objects,
-                dataset_id=dataset_id,
-                dataset_name=dataset_name,
-                config=config,
-                config_version_id=config_version_id,
-                config_hash=config_hash,
-                processor_image=processor_image,
-                processor_version=processor_version,
-                schema_version_term=schema_version_term,
-                group=group,
-                objects_by_key=objects_by_key,
-                log=log,
-            )
-            if group_unit is not None:
-                candidates.append(group_unit)
+    # `groups` is `[]` (never truthy) whenever `multipart_pattern is None` --
+    # this loop is then simply skipped, so no separate `if groups:` guard is
+    # needed (one fewer branch keeps `discover_files` under this codebase's
+    # ruff C901/PLR0912 complexity gate after the marker-gate call above).
+    objects_by_key = {obj.key: obj for obj in listed}
+    for group in groups:
+        group_unit = _process_multipart_group(
+            metadata=metadata,
+            objects=objects,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+            config=config,
+            config_version_id=config_version_id,
+            config_hash=config_hash,
+            processor_image=processor_image,
+            processor_version=processor_version,
+            schema_version_term=schema_version_term,
+            group=group,
+            objects_by_key=objects_by_key,
+            log=log,
+        )
+        if group_unit is not None:
+            candidates.append(group_unit)
 
     for obj in remaining:
         object_unit = _process_ungrouped_object(

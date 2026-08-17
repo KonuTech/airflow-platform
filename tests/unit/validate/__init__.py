@@ -1,4 +1,4 @@
-"""Unit tests for `dataplat.validate` -- the VALID-01/02/03 `StreamingStage` rules.
+"""Unit tests for validation/quarantine control-plane surfaces (Phase 8).
 
 Present for the same reason as the other test packages: ruff's ``INP001``
 (under ``select = ["ALL"]``) rejects an implicit namespace package, and
