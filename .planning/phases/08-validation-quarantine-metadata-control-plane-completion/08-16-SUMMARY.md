@@ -187,3 +187,13 @@ None - no external service configuration required.
 ---
 *Phase: 08-validation-quarantine-metadata-control-plane-completion*
 *Completed: 2026-08-17*
+
+## Self-Check: PASSED
+
+- FOUND: migrations/versions/0020_meta_rejected_records_business_key.py
+- FOUND: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/08-16-SUMMARY.md
+- FOUND: `RejectedRecord.business_key: str | None = None`
+- FOUND: commit bd8f2ce (Task 1)
+- FOUND: commit 44a9c9c (Task 2)
+- FOUND: commit c7133ee (deviation fixes)
+- FOUND: commit 3cd5227 (this SUMMARY.md commit)
