@@ -39,6 +39,7 @@ from tests.integration.test_run_ingest import (  # noqa: F401 -- re-exported as 
     _pool,
     _scratch_bucket,
     _seed_pending_run,
+    _validated_bucket,
     env,
 )
 

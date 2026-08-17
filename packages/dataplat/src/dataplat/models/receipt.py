@@ -31,8 +31,15 @@ class Receipt(BaseModel):
         rows_invalid: Number of rows rejected by validation.
         rows_deduplicated: Number of rows collapsed by deduplication.
         duration_ms: Wall-clock duration of the run, in milliseconds.
+        rows_quarantined: Number of rows quarantined/rejected by this run's
+            barrier and streaming quality rules combined (plan 08-11) --
+            every row now recorded in ``meta.rejected_records`` for this
+            run. ``0`` on every failure/skip path, since no quarantine
+            happened there.
         report_uri: Object-store URI of a fuller validation report, when
-            one was written. ``None`` when no such report exists.
+            one was written. ``None`` when no such report exists (every
+            failure/skip path); a SUCCEEDED run always writes one (plan
+            08-11, VALID-04's MinIO-artifact half).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -44,4 +51,5 @@ class Receipt(BaseModel):
     rows_invalid: int
     rows_deduplicated: int
     duration_ms: int
+    rows_quarantined: int
     report_uri: str | None = None

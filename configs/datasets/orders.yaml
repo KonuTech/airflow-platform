@@ -62,6 +62,15 @@ quality:
       rule_type: REFERENTIAL
       strategy: QUARANTINE_RECORD
       column: customer_id
+      # target_table (08-11-PLAN.md): the REFERENTIAL BarrierStage this
+      # rule dispatches to (dataplat.validate.referential.
+      # ReferentialIntegrityBarrier, wired into run_ingest by plan 08-11)
+      # requires an explicit params.target_table -- there is no implicit
+      # default, so this must be declared here for orders' real
+      # orders.customer_id -> normalized.customers.customer_id
+      # relationship (this platform's one real referential relationship).
+      params:
+        target_table: normalized.customers
 
 # columns: is D-17's minimal orders schema -- order_id/customer_id/
 # order_date/amount, mirroring customers.yaml's own columns: shape and

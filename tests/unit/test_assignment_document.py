@@ -77,6 +77,7 @@ def test_receipt_model_dump_json_is_valid_and_under_the_4096_byte_xcom_budget() 
         rows_invalid=0,
         rows_deduplicated=12,
         duration_ms=41022,
+        rows_quarantined=0,
         report_uri=None,
     )
 

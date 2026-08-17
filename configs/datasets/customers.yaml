@@ -48,6 +48,42 @@ freshness:
   warn_after: "2 hours"
   fail_after: "6 hours"
 
+# quality: is D-09's real (not fixture-only) quality block -- this is the
+# ONE real cycling dataset that proves the full VALID-01/02/03/04 chain
+# live (08-11-PLAN.md). Every rule below uses REJECT_RECORD -- deliberately
+# NOT FAIL_FILE/QUARANTINE_FILE (T-08-26, 08-10's threat model): those two
+# strategies stay proven only by test_strategy_dispatch.py's unit coverage,
+# never exercised against this real cycling dataset in this phase.
+#   - completeness on `name` (every real corpus row has one; a violation
+#     here is a genuine synthetic-generator bug, not expected traffic)
+#   - pattern on `country`, matching the corpus generator's own 2-letter
+#     ISO-3166-1-alpha-2 pick list (tests/fixtures/slice-corpus.yaml's
+#     `country:` block: "PL", "US", "GB", ... -- verified against the
+#     fixture before locking this pattern)
+#   - uniqueness on `customer_id` (the dataset's own business key)
+# rejection_rate_threshold is deliberately permissive (0.5): this is the
+# platform's one real cycling dataset, and a low threshold would make
+# ordinary demo/E2E traffic noise trip the circuit breaker, which is not
+# this plan's intent -- the breaker exists to catch a genuinely broken
+# run, not to police this corpus's own synthetic imperfection rate.
+quality:
+  rules:
+    - rule_id: customers_name_completeness
+      rule_type: QUALITY_COMPLETENESS
+      strategy: REJECT_RECORD
+      column: name
+    - rule_id: customers_country_pattern
+      rule_type: QUALITY_PATTERN
+      strategy: REJECT_RECORD
+      column: country
+      params:
+        pattern: "^[A-Z]{2}$"
+    - rule_id: customers_customer_id_uniqueness
+      rule_type: QUALITY_UNIQUENESS
+      strategy: REJECT_RECORD
+      column: customer_id
+  rejection_rate_threshold: 0.5
+
 # columns: is D-18's source of truth for per-column type/nullable/required/
 # business_key/semantics, cross-validated against deduplication.keys above
 # (customer_id here is business_key: true, matching keys: [customer_id]).
