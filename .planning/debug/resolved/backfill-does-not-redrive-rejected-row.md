@@ -2,7 +2,7 @@
 status: resolved
 trigger: "backfill-does-not-redrive-rejected-row: airflow backfill create against csv_ingest_customers for a content-differing corrected re-upload does not trigger genuine re-execution / does not flip PENDING rejected_records to REDRIVEN"
 created: 2026-08-17T00:00:00Z
-updated: 2026-08-17T18:36:00Z
+updated: 2026-08-17T19:00:00Z
 ---
 
 ## Live Verification (2026-08-17T18:36Z, orchestrator follow-up)

@@ -1,14 +1,14 @@
 ---
-status: diagnosed
+status: partial
 phase: 08-validation-quarantine-metadata-control-plane-completion
 source: [08-VERIFICATION.md]
 started: 2026-08-17T13:40:00Z
-updated: 2026-08-17T18:36:00Z
+updated: 2026-08-17T19:00:00Z
 ---
 
 ## Current Test
 
-[testing complete — diagnosis done for both outstanding issues. Test 1's root cause (kind cluster node CPU budget, physical host ceiling) is a well-established, deliberately-deferred infra/capacity decision — no code fix, no gap-closure plan needed. Test 2's root cause is now confirmed (not just suspected): a one-shot, no-retry row-lock race inside Airflow 3.3.0's own `airflow backfill create` mechanism, unrelated to the previously-suspected batch_key/content_sha256 architecture concern (which remains a separate, untested question). Test 2 is a genuine test-robustness gap and is being routed to gsd-planner for a gap-closure fix plan. See deferred-items.md and .planning/debug/backfill-does-not-redrive-rejected-row.md for full detail.]
+[testing paused — 1 item resolved (code-level), 1 item remains open. Gap 2 (backfill retry robustness) is CLOSED: plan 08-15 implemented both missing items (retry on `in flight`, surface `exception_reason` in diagnostics), a follow-up code review found 3 more real robustness gaps in that same fix which were also fixed (commit `cb56e15`), and static verification (ruff/mypy/pytest --collect-only, plus the full 484-test unit/regression suite) is clean. Live end-to-end re-verification of this exact code path was attempted 3 times this session and did NOT succeed — but all 3 attempts failed earlier in the pipeline, at the SAME unrelated, already-known gap 1 issue (`discover`/cluster CPU-and-memory starvation), never reaching the backfill retry code at all. Gap 1 itself remains open: a well-established, deliberately-deferred infra/capacity decision (kind cluster node CPU budget, physical host ceiling) — no code fix possible, tracked in STATE.md's Blockers. See deferred-items.md and .planning/debug/resolved/backfill-does-not-redrive-rejected-row.md for full detail.]
 
 ## Tests
 
@@ -100,7 +100,7 @@ blocked: 0
     - "Consider whether clearing/archiving the accumulated historical fixture backlog (not a code or infra change) would relieve enough baseline load to get a clean pass without touching kind/cluster.yaml"
   debug_session: ""
 - truth: "test_backfill_resolves_previously_rejected_row demonstrates a content-differing corrected file's backfill re-drive flips the original PENDING reject to REDRIVEN"
-  status: failed
+  status: resolved
   reason: "airflow backfill create did not trigger any observable re-execution (clear_number stayed at its pre-backfill value, dag_run.state never left its old 'success') within 300s -- test never even reached the point of checking the REDRIVEN flip."
   severity: minor
   test: 2
@@ -108,8 +108,6 @@ blocked: 0
   artifacts:
     - path: "tests/e2e/slice/test_backfill_reentry.py"
       issue: "The helper that invokes 'airflow backfill create' and polls for clear_number/state (module-level, ~line 167) makes exactly one CLI call with no retry/backoff for Airflow's own documented-transient 'in flight' exception_reason race, so a lost skip_locked race (observed live on this cluster) is indistinguishable from a genuine failure and burns the full 300s timeout before surfacing as a hard test failure."
-  missing:
-    - "Retry 'airflow backfill create' (bounded attempts, short backoff) when backfill_dag_run.exception_reason == 'in flight' is observed for the target dag_id/logical_date, before declaring the invocation failed"
-    - "Surface backfill_dag_run.exception_reason directly in the wait-loop's failure diagnostics (via SQL, using the existing airflow_metadata_connection fixture) so a future IN_FLIGHT recurrence produces an immediate, unambiguous signal instead of a bare clear_number-never-advanced timeout"
-    - "Once test 2 passes end-to-end, re-verify the batch_key/content_sha256 architecture concern (deferred-items.md, 'From plan 08-14') is still real -- it was never eliminated, only shown to be unreachable by this specific failure"
-  debug_session: ".planning/debug/backfill-does-not-redrive-rejected-row.md"
+  missing: []
+  resolution: "Plan 08-15 (commit 1de6a22) added the bounded retry (3 attempts, 5s backoff) keyed on backfill_dag_run.exception_reason, plus diagnostics surfacing that value on failure. Follow-up code review (08-REVIEW.md addendum) found 3 additional real robustness gaps in that same fix (settle-loop ambiguity between 'row not found' and 'row found, success'; the same ambiguity's silent-no-op risk; CLI-level failures not covered by the retry budget) -- all fixed, commit cb56e15. Static verification clean (ruff, mypy, pytest --collect-only, full 484-test make test). NOT live-verified end-to-end: 3 live-cluster attempts this session all failed earlier in the pipeline at gap 1's own already-known issue (discover/cluster CPU starvation), never reaching this code path. Re-run tests/e2e/slice/test_backfill_reentry.py -m cluster once gap 1's cluster capacity issue is addressed to get the first genuine live confirmation."
+  debug_session: ".planning/debug/resolved/backfill-does-not-redrive-rejected-row.md"
