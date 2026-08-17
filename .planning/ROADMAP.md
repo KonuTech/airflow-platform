@@ -468,7 +468,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 08-11-PLAN.md — run_ingest publish-transaction wiring: barrier stages + persistence + D-11 rollback + customers.yaml quality: block (wave 5)
+- [x] 08-11-PLAN.md — run_ingest publish-transaction wiring: barrier stages + persistence + D-11 rollback + customers.yaml quality: block (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
