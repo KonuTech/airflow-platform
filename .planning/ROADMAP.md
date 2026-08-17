@@ -446,8 +446,8 @@ Plans:
 
 **Wave 1**
 
-- [ ] 08-01-PLAN.md — Foundational DDL + contracts: migrations 0014/0015/0016, errors.py, report.py, repository.py Protocol, config/model.py quality: block (wave 1)
-- [ ] 08-02-PLAN.md — LOAD-10 integrity_gate.py: extension/empty/stability/checksum checks + D-20 rejection write (wave 1)
+- [x] 08-01-PLAN.md — Foundational DDL + contracts: migrations 0014/0015/0016, errors.py, report.py, repository.py Protocol, config/model.py quality: block (wave 1)
+- [x] 08-02-PLAN.md — LOAD-10 integrity_gate.py: extension/empty/stability/checksum checks + D-20 rejection write (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

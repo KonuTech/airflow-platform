@@ -2,16 +2,18 @@
 
 ``ConfigurationError``, ``StorageError``, ``SecretResolutionError``,
 ``SourceError`` (+ ``FileInspectionError``, ``FilenameParsingError``,
-``EncodingDetectionError``, ``CsvDialectDetectionError``, ``CsvParsingError``)
-and ``SchemaError`` (+ ``SchemaValidationError``, ``IncompatibleSchemaError``)
-exist here today. ``QualityThresholdExceeded`` and ``PublicationError`` are
-still deliberately absent: each is added by the phase that first raises it
-(CONTEXT.md D-06). A subclass with no raise site is dead code wearing a
-design decision's clothes — the eight ``SourceError``/``SchemaError``
-subclasses added this phase (06) are pre-declared contracts for Wave 2's
-detector/schema plans, each of which adds its own raise site later in this
-same phase, so by the end of the phase every one is actually raised
-somewhere.
+``EncodingDetectionError``, ``CsvDialectDetectionError``, ``CsvParsingError``),
+``SchemaError`` (+ ``SchemaValidationError``, ``IncompatibleSchemaError``),
+``QualityThresholdExceeded`` and ``PublicationError`` exist here today. Each
+subclass is added by the phase that first raises it (CONTEXT.md D-06 /
+08-CONTEXT.md's "exception subclass added by the phase that first raises it"
+convention). A subclass with no raise site is dead code wearing a design
+decision's clothes — the eight ``SourceError``/``SchemaError`` subclasses
+added in phase 06 are pre-declared contracts for that phase's Wave 2
+detector/schema plans, each of which adds its own raise site later in that
+same phase; ``QualityThresholdExceeded``/``PublicationError`` follow the
+identical pattern for phase 08 — pre-declared here (plan 08-01), with their
+own raise sites landing in a later plan of the same phase.
 
 Every exception carries a ``context: dict[str, object]`` populated by the
 raising code, so a later ``cli.py`` catch-once handler (plan 03-07) can log
@@ -185,4 +187,26 @@ class IncompatibleSchemaError(SchemaError):
     makes the whole file fail — nothing loads — raised before any row is
     staged. This is "§13 BREAKING change under a strict policy"
     (ARCHITECTURE.md §4.5), which D-02 makes this platform's only policy.
+    """
+
+
+class QualityThresholdExceeded(DataPlatformError):  # noqa: N818 -- exact name from 08-CONTEXT.md/08-RESEARCH.md, not "...Error"
+    """The run-level rejection-rate circuit breaker (D-10) tripped.
+
+    Raised by ``RejectionRateCircuitBreaker`` when the aggregate
+    rejected/total ratio exceeds the dataset's configured
+    ``quality.rejection_rate_threshold`` — causes the entire publication
+    transaction to roll back (D-11): nothing from this run reaches the
+    warehouse until the file is corrected and re-ingested as a backfill
+    (D-01).
+    """
+
+
+class PublicationError(DataPlatformError):
+    """The publication transaction failed for a reason other than a quality threshold.
+
+    Raised when ``Publisher.publish()`` itself fails (constraint violation,
+    connection loss mid-transaction) — distinct from
+    ``QualityThresholdExceeded``, which is a deliberate business-rule
+    rollback, not an infrastructure failure.
     """
