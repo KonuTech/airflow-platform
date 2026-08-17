@@ -109,9 +109,16 @@ _POLL_INTERVAL_SECONDS = 0.5
 # 'in flight'` (exit code 0, no re-execution) with no retry anywhere in
 # Airflow's own code. These three constants bound this test's own retry of
 # that exact known-transient outcome.
+# .planning/debug/resolved/backfill-does-not-redrive-rejected-row.md's
+# "Live Re-Verification" section live-observed the gap between
+# `backfill_dag_run.exception_reason` being written (early/synchronous)
+# and the owning `backfill.completed_at` actually landing to be as wide as
+# ~20s under contention -- 45.0s (3x that worst case) gives headroom now
+# that the settle loop below waits for full completion, not just
+# row-appearance.
 _BACKFILL_CREATE_MAX_ATTEMPTS = 3
 _BACKFILL_CREATE_RETRY_BACKOFF_SECONDS = 5.0
-_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS = 15.0
+_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS = 45.0
 
 # customer_id is `sa.Integer()` (migration 0005) -- disjoint from
 # test_referential_orphan.py's own `[1_500_000_000, 1_999_000_000)` window
@@ -187,19 +194,19 @@ def _fetch_latest_backfill_dag_run_row(
     *,
     dag_id: str,
     logical_date: datetime.datetime,
-) -> tuple[bool, str | None]:
-    """Return (row_found, exception_reason) for the most recent backfill invocation.
+) -> tuple[bool, str | None, datetime.datetime | None]:
+    """Return (row_found, exception_reason, completed_at) for the most recent backfill invocation.
 
-    `.planning/debug/backfill-does-not-redrive-rejected-row.md` (live SQL +
-    source trace of the installed `apache-airflow==3.3.0`) is the source of
-    this schema/behavior: `backfill` holds one row per `airflow backfill
-    create` invocation (`id` autoincrements -- a retried invocation for the
-    SAME dag_id/logical_date gets a NEW `backfill.id`, confirmed live);
-    `backfill_dag_run` holds one row per `(backfill_id, logical_date)` pair,
-    with `exception_reason` set to the literal string `"in flight"` on a
-    lost `SELECT ... FOR UPDATE SKIP LOCKED` race and left NULL on success.
-    Ordering by `b.id DESC, bdr.id DESC` and taking the first row returns
-    the outcome of the MOST RECENT invocation only.
+    `.planning/debug/resolved/backfill-does-not-redrive-rejected-row.md`
+    (live SQL + source trace of the installed `apache-airflow==3.3.0`) is
+    the source of this schema/behavior: `backfill` holds one row per
+    `airflow backfill create` invocation (`id` autoincrements -- a retried
+    invocation for the SAME dag_id/logical_date gets a NEW `backfill.id`,
+    confirmed live); `backfill_dag_run` holds one row per `(backfill_id,
+    logical_date)` pair, with `exception_reason` set to the literal string
+    `"in flight"` on a lost `SELECT ... FOR UPDATE SKIP LOCKED` race and
+    left NULL on success. Ordering by `b.id DESC, bdr.id DESC` and taking
+    the first row returns the outcome of the MOST RECENT invocation only.
 
     `row_found` is returned separately from `exception_reason` because both
     "no row yet" and "row exists with exception_reason NULL (success)" would
@@ -208,21 +215,31 @@ def _fetch_latest_backfill_dag_run_row(
     from `exception_reason` alone (this project's own code review, WR-01/
     WR-02, flagged the resulting ambiguity when they were collapsed).
 
+    `completed_at` is the OWNING `backfill.completed_at` -- `None` until
+    that backfill invocation finishes, non-`None` once it has. The "Live
+    Re-Verification" section of the debug doc above live-observed a retry
+    firing while the prior attempt's own `backfill.completed_at` was still
+    NULL (despite `exception_reason` already being observable), colliding
+    with Airflow's own one-active-backfill-per-DAG `AlreadyRunningBackfill`
+    guard -- callers that need to know a backfill has genuinely finished,
+    not merely registered, must check this column.
+
     Args:
         conn: The `airflow_metadata_connection` fixture.
         dag_id: The target DAG.
         logical_date: The target `dag_run.logical_date` value.
 
     Returns:
-        `(True, exception_reason)` if a `backfill_dag_run` row exists for
-        this dag_id/logical_date (`exception_reason` is `"in flight"` on a
-        lost lock race, `None` on success); `(False, None)` if no such row
-        exists yet.
+        `(True, exception_reason, completed_at)` if a `backfill_dag_run`
+        row exists for this dag_id/logical_date (`exception_reason` is
+        `"in flight"` on a lost lock race, `None` on success; `completed_at`
+        is the owning backfill's own completion timestamp, `None` until it
+        finishes); `(False, None, None)` if no such row exists yet.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT bdr.exception_reason
+            SELECT bdr.exception_reason, b.completed_at
               FROM backfill_dag_run bdr
               JOIN backfill b ON b.id = bdr.backfill_id
              WHERE b.dag_id = %s AND bdr.logical_date = %s
@@ -233,8 +250,8 @@ def _fetch_latest_backfill_dag_run_row(
         )
         row = cur.fetchone()
     if row is None:
-        return (False, None)
-    return (True, row[0])
+        return (False, None, None)
+    return (True, row[0], row[1])
 
 
 def _wait_for_backfill_dag_run_row(
@@ -244,16 +261,20 @@ def _wait_for_backfill_dag_run_row(
     logical_date: datetime.datetime,
     attempt: int,
 ) -> str | None:
-    """Poll until a `backfill_dag_run` row is observed, then return its `exception_reason`.
+    """Poll until this attempt's own backfill genuinely completes, then return `exception_reason`.
 
-    Settle loop: breaks as soon as a row is observed at all (`row_found`),
-    regardless of `exception_reason` -- NOT on "exception_reason is not
-    None" (that conflated "no row yet" with "row found, NULL/success",
-    this project's own code review WR-01/WR-02). This is a defensive safety
-    margin, not a confirmed async-write requirement: the debug log's own
-    manual reproduction shows the row is written synchronously before the
-    CLI process exits, so this loop should normally observe `row_found`
-    True on its very first check.
+    Settle loop: only returns once a `backfill_dag_run` row has been
+    observed (`row_found`) AND its owning `backfill.completed_at` is
+    non-`None` -- NOT merely "row observed" (that was this loop's own prior
+    shape, which conflated "row registered" with "backfill genuinely
+    finished"). `.planning/debug/resolved/backfill-does-not-redrive-
+    rejected-row.md`'s "Live Re-Verification" section live-observed the gap
+    between those two events reach ~20s under contention, wide enough for a
+    5s-backoff retry to fire `airflow backfill create` again while the
+    prior attempt's backfill was still active, colliding with Airflow's own
+    one-active-backfill-per-DAG `AlreadyRunningBackfill` guard. Waiting for
+    `completed_at is not None` closes that exact race: the next retry (if
+    any) never fires while a still-active backfill exists for this DAG.
 
     Args:
         conn: The `airflow_metadata_connection` fixture.
@@ -264,34 +285,51 @@ def _wait_for_backfill_dag_run_row(
 
     Returns:
         The observed `exception_reason` (`"in flight"` or `None` for
-        success).
+        success) once this attempt's own owning backfill has completed.
 
     Raises:
-        AssertionError: No `backfill_dag_run` row was observed within
-            `_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS` -- a distinct failure
-            mode from the documented "in flight" race, not retried
-            automatically.
+        AssertionError: Either of two distinct failure modes, both within
+            `_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS`: (1) no `backfill_dag_run`
+            row was ever observed at all, or (2) a row WAS observed but its
+            owning `backfill.completed_at` never went non-`None` -- the row
+            registered, but the backfill it belongs to never finished in
+            time. See `.planning/debug/resolved/backfill-does-not-redrive-
+            rejected-row.md`'s "Live Re-Verification" section for the race
+            that motivates distinguishing case (2) from case (1).
     """
     settle_deadline = time.monotonic() + _BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS
     row_found = False
     exception_reason: str | None = None
+    completed_at: datetime.datetime | None = None
     while time.monotonic() < settle_deadline:
-        row_found, exception_reason = _fetch_latest_backfill_dag_run_row(
+        row_found, exception_reason, completed_at = _fetch_latest_backfill_dag_run_row(
             conn,
             dag_id=dag_id,
             logical_date=logical_date,
         )
-        if row_found:
+        if row_found and completed_at is not None:
             return exception_reason
         time.sleep(_POLL_INTERVAL_SECONDS)
+    if not row_found:
+        msg = (
+            f"airflow backfill create for dag_id={dag_id!r} logical_date={logical_date!r} "
+            f"reported CLI success (attempt {attempt}/{_BACKFILL_CREATE_MAX_ATTEMPTS}) but no "
+            f"backfill_dag_run row was observed within {_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS}s -- "
+            f"this is a distinct failure mode from the documented 'in flight' race (see "
+            f".planning/debug/backfill-does-not-redrive-rejected-row.md) and is NOT retried "
+            f"automatically; the logical_date-matching precondition this query depends on may have "
+            f"silently broken"
+        )
+        raise AssertionError(msg)
     msg = (
         f"airflow backfill create for dag_id={dag_id!r} logical_date={logical_date!r} "
-        f"reported CLI success (attempt {attempt}/{_BACKFILL_CREATE_MAX_ATTEMPTS}) but no "
-        f"backfill_dag_run row was observed within {_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS}s -- "
-        f"this is a distinct failure mode from the documented 'in flight' race (see "
-        f".planning/debug/backfill-does-not-redrive-rejected-row.md) and is NOT retried "
-        f"automatically; the logical_date-matching precondition this query depends on may have "
-        f"silently broken"
+        f"(attempt {attempt}/{_BACKFILL_CREATE_MAX_ATTEMPTS}) registered a backfill_dag_run row "
+        f"(exception_reason={exception_reason!r}) but its owning backfill.completed_at was still "
+        f"NULL after {_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS}s -- this is DIFFERENT from the "
+        f"'no row observed' case above: the row exists, but the backfill it belongs to never "
+        f"completed in time. See .planning/debug/resolved/backfill-does-not-redrive-rejected-"
+        f"row.md's 'Live Re-Verification' section, the exact retry-timing race this settle loop "
+        f"now guards against"
     )
     raise AssertionError(msg)
 
@@ -445,7 +483,7 @@ def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- eight independen
             if last_clear_number > pre_backfill_clear_number and last_state == "success":
                 return
         time.sleep(_POLL_INTERVAL_SECONDS)
-    _, latest_exception_reason = _fetch_latest_backfill_dag_run_row(
+    _, latest_exception_reason, _ = _fetch_latest_backfill_dag_run_row(
         airflow_conn,
         dag_id=dag_id,
         logical_date=logical_date,
