@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataplat.models.identity import RunContext
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
+from dataplat.validate.volume_anomaly import _HISTORICAL_AVERAGE_SQL, VolumeAnomalyBarrier
 
 
 def _make_context() -> PipelineContext:
@@ -159,7 +159,5 @@ def test_one_prior_run_never_flags_regardless_of_current_row_count() -> None:
 
 def test_the_historical_average_query_binds_dataset_id_via_a_placeholder() -> None:
     """T-08-17: the real query string never string-formats `dataset_id` in."""
-    from dataplat.validate.volume_anomaly import _HISTORICAL_AVERAGE_SQL
-
     assert "%s" in _HISTORICAL_AVERAGE_SQL
     assert "{" not in _HISTORICAL_AVERAGE_SQL

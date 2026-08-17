@@ -29,6 +29,7 @@ from dataplat.validate.pattern import PatternRule
 from dataplat.validate.referential import ReferentialIntegrityBarrier
 from dataplat.validate.uniqueness import UniquenessRule
 from dataplat.validate.validity_range import ValidityRangeRule
+from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
     from dataplat.pipeline.protocol import BarrierStage, StreamingStage
@@ -41,6 +42,7 @@ VALIDATION_RULE_REGISTRY: dict[str, type[StreamingStage | BarrierStage]] = {
     "QUALITY_PATTERN": PatternRule,
     "CIRCUIT_BREAKER": RejectionRateCircuitBreaker,
     "REFERENTIAL": ReferentialIntegrityBarrier,
+    "VOLUME": VolumeAnomalyBarrier,
 }
 
 
