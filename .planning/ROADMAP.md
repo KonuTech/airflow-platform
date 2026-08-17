@@ -451,10 +451,10 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 08-03-PLAN.md — metadata/postgres.py: record_validation_results/record_rejected_records/resolve_rejected_records_for_batch (wave 2)
-- [ ] 08-04-PLAN.md — validate/ registry + CompletenessRule/ValidityRangeRule/PatternRule (wave 2)
-- [ ] 08-05-PLAN.md — orders substrate: dataset-aware target columns, OrdersMergePublisher, orders.yaml minimal (wave 2)
-- [ ] 08-06-PLAN.md — LOAD-11 discover_files' opt-in _BATCH_COMPLETE gate (wave 2)
+- [x] 08-03-PLAN.md — metadata/postgres.py: record_validation_results/record_rejected_records/resolve_rejected_records_for_batch (wave 2)
+- [x] 08-04-PLAN.md — validate/ registry + CompletenessRule/ValidityRangeRule/PatternRule (wave 2)
+- [x] 08-05-PLAN.md — orders substrate: dataset-aware target columns, OrdersMergePublisher, orders.yaml minimal (wave 2)
+- [x] 08-06-PLAN.md — LOAD-11 discover_files' opt-in _BATCH_COMPLETE gate (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
