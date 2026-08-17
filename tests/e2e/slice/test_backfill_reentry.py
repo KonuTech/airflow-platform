@@ -261,20 +261,27 @@ def _wait_for_backfill_dag_run_row(
     logical_date: datetime.datetime,
     attempt: int,
 ) -> str | None:
-    """Poll until this attempt's own backfill genuinely completes, then return `exception_reason`.
+    """Poll for this attempt's `backfill_dag_run` row; on 'in flight', wait for full completion.
 
-    Settle loop: only returns once a `backfill_dag_run` row has been
-    observed (`row_found`) AND its owning `backfill.completed_at` is
-    non-`None` -- NOT merely "row observed" (that was this loop's own prior
-    shape, which conflated "row registered" with "backfill genuinely
-    finished"). `.planning/debug/resolved/backfill-does-not-redrive-
-    rejected-row.md`'s "Live Re-Verification" section live-observed the gap
-    between those two events reach ~20s under contention, wide enough for a
-    5s-backoff retry to fire `airflow backfill create` again while the
-    prior attempt's backfill was still active, colliding with Airflow's own
-    one-active-backfill-per-DAG `AlreadyRunningBackfill` guard. Waiting for
-    `completed_at is not None` closes that exact race: the next retry (if
-    any) never fires while a still-active backfill exists for this DAG.
+    Settle loop: returns as soon as a `backfill_dag_run` row is observed
+    (`row_found`) -- UNLESS `exception_reason == "in flight"`, in which case
+    it additionally waits for the owning `backfill.completed_at` to go
+    non-`None` before returning. The `completed_at` wait exists ONLY to
+    protect a subsequent retry (the caller only calls `airflow backfill
+    create` again when this function returns `"in flight"`): firing that
+    retry while the prior attempt's own backfill is still active collides
+    with Airflow's one-active-backfill-per-DAG `AlreadyRunningBackfill`
+    guard (`.planning/debug/resolved/backfill-does-not-redrive-rejected-
+    row.md`'s "Live Re-Verification" section, live-observed ~20s gap
+    between `exception_reason` appearing and `completed_at` landing under
+    contention). When `exception_reason` is anything OTHER than
+    `"in flight"` (success, or any unexpected value), the caller's own loop
+    breaks immediately with no further `airflow backfill create` call --
+    there is nothing to protect against, so waiting for `completed_at` in
+    that case is pure unneeded delay, and can itself time out on a
+    genuinely successful backfill whose full DAG re-execution (clear +
+    rerun the downstream task graph) legitimately takes longer than the
+    `"in flight"` case's own bookkeeping-only latency.
 
     Args:
         conn: The `airflow_metadata_connection` fixture.
@@ -285,17 +292,19 @@ def _wait_for_backfill_dag_run_row(
 
     Returns:
         The observed `exception_reason` (`"in flight"` or `None` for
-        success) once this attempt's own owning backfill has completed.
+        success). Non-`"in flight"` values return as soon as `row_found`;
+        `"in flight"` only returns once the owning backfill has completed.
 
     Raises:
         AssertionError: Either of two distinct failure modes, both within
             `_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS`: (1) no `backfill_dag_run`
-            row was ever observed at all, or (2) a row WAS observed but its
-            owning `backfill.completed_at` never went non-`None` -- the row
-            registered, but the backfill it belongs to never finished in
-            time. See `.planning/debug/resolved/backfill-does-not-redrive-
-            rejected-row.md`'s "Live Re-Verification" section for the race
-            that motivates distinguishing case (2) from case (1).
+            row was ever observed at all, or (2) `exception_reason` was
+            `"in flight"` but the owning `backfill.completed_at` never went
+            non-`None` -- the row registered, but the backfill it belongs
+            to never finished in time. See `.planning/debug/resolved/
+            backfill-does-not-redrive-rejected-row.md`'s "Live
+            Re-Verification" section for the race that motivates
+            distinguishing case (2) from case (1).
     """
     settle_deadline = time.monotonic() + _BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS
     row_found = False
@@ -307,7 +316,7 @@ def _wait_for_backfill_dag_run_row(
             dag_id=dag_id,
             logical_date=logical_date,
         )
-        if row_found and completed_at is not None:
+        if row_found and (exception_reason != "in flight" or completed_at is not None):
             return exception_reason
         time.sleep(_POLL_INTERVAL_SECONDS)
     if not row_found:
@@ -324,12 +333,13 @@ def _wait_for_backfill_dag_run_row(
     msg = (
         f"airflow backfill create for dag_id={dag_id!r} logical_date={logical_date!r} "
         f"(attempt {attempt}/{_BACKFILL_CREATE_MAX_ATTEMPTS}) registered a backfill_dag_run row "
-        f"(exception_reason={exception_reason!r}) but its owning backfill.completed_at was still "
-        f"NULL after {_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS}s -- this is DIFFERENT from the "
+        f"still showing exception_reason='in flight', and its owning backfill.completed_at was "
+        f"still NULL after {_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS}s -- this is DIFFERENT from the "
         f"'no row observed' case above: the row exists, but the backfill it belongs to never "
-        f"completed in time. See .planning/debug/resolved/backfill-does-not-redrive-rejected-"
-        f"row.md's 'Live Re-Verification' section, the exact retry-timing race this settle loop "
-        f"now guards against"
+        f"completed in time (only reachable when exception_reason=='in flight'; any other value "
+        f"returns immediately without this wait). See .planning/debug/resolved/backfill-does-not-"
+        f"redrive-rejected-row.md's 'Live Re-Verification' section, the exact retry-timing race "
+        f"this settle loop guards against"
     )
     raise AssertionError(msg)
 
