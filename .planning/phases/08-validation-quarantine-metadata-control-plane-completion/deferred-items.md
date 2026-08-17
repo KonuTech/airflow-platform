@@ -13,14 +13,14 @@ directly caused by the current task's own changes).
   immediately after the Wave 2 worktree merge (`Success: no issues found in
   80 source files`).
 
-- **`csv_ingest_customers.py` exceeds ORCH-06's 150-line budget — pre-existing, not caused by 08-05.**
-  `tests/policy/test_dag_line_budget.py::
-  test_csv_ingest_customers_stays_under_150_lines` fails: the file is 162
-  lines. Root cause: plan 08-02 added the `integrity_gate` task (LOAD-10)
-  to `airflow/dags/csv_ingest_customers.py` without trimming the file back
-  under budget. `airflow/dags/csv_ingest_customers.py` is not in plan
-  08-05's `files_modified` scope. Whichever plan owns DAG-thinness cleanup
-  for this phase should either shrink the file or revise the budget.
+- **RESOLVED (plan 08-12).** `csv_ingest_customers.py` exceeded ORCH-06's
+  150-line budget (162 lines, from plan 08-02's `integrity_gate` task
+  addition without a compensating trim). Plan 08-12 already modified this
+  file (wiring `list_matched_keys`/`integrity_gate`/`outlets` in) so the
+  gap was closed inline rather than deferred further: module docstring and
+  inline comments condensed, no functional lines removed. File is now 149
+  lines; `tests/policy/test_dag_line_budget.py::
+  test_csv_ingest_customers_stays_under_150_lines` passes.
 
 ## From plan 08-11
 
