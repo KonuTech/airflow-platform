@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from psycopg.types.json import Jsonb
+
 from dataplat.metadata.repository import MetadataRepository
 
 if TYPE_CHECKING:
@@ -23,6 +25,9 @@ if TYPE_CHECKING:
 
     from psycopg import Connection
     from psycopg_pool import ConnectionPool
+
+    from dataplat.models.record import RejectedRecord
+    from dataplat.models.report import ValidationResult
 
 # Every meta.ingestion_runs column update_ingestion_run_status is allowed to
 # set, beyond `status` (handled explicitly by the method's own parameter).
@@ -465,6 +470,121 @@ class PostgresMetadataRepository(MetadataRepository):
             """,
             (finished_at, rows_loaded, duration_ms, report_uri, schema_version_id, run_id),
         )
+
+    def record_validation_results(
+        self,
+        *,
+        conn: Connection[Any],
+        run_id: int,
+        results: list[ValidationResult],
+    ) -> None:
+        """See `MetadataRepository.record_validation_results`.
+
+        Like `finalize_publication`, this method never opens its own
+        connection from `self._pool` and never calls `conn.commit()`/
+        `conn.rollback()` — it issues its writes against the caller-supplied
+        `conn`, which must already be inside an open transaction (Pattern
+        3/D-11). With `results=[]` this executes zero INSERTs and returns
+        without raising. `threshold`/`observed` round-trip through JSONB via
+        `psycopg.types.json.Jsonb` (matching `config/registry.py`'s own
+        usage), never string-interpolated.
+        """
+        for result in results:
+            conn.execute(
+                """
+                INSERT INTO meta.validation_results (
+                    run_id, rule_id, rule_type, severity, outcome,
+                    evaluated_count, failed_count, threshold, observed
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    result.rule_id,
+                    result.rule_type,
+                    result.severity,
+                    result.outcome,
+                    result.evaluated_count,
+                    result.failed_count,
+                    Jsonb(result.threshold),
+                    Jsonb(result.observed),
+                ),
+            )
+
+    def record_rejected_records(
+        self,
+        *,
+        conn: Connection[Any],
+        run_id: int,
+        file_id: int,
+        batch_id: int,
+        rejected: list[RejectedRecord],
+    ) -> None:
+        """See `MetadataRepository.record_rejected_records`.
+
+        Same `conn`-never-opened-here, never-committed-here shape as
+        `record_validation_results` above. `run_id`/`file_id`/`batch_id`
+        come from this method's own arguments, never from `RejectedRecord`
+        (which carries none of them). `resolution_type` is never set here —
+        every inserted row lands at migration 0015's `'PENDING'` column
+        default; `resolve_rejected_records_for_batch` below is the only
+        method that ever changes it. `RejectedRecord` has no
+        `source_byte_offset` field today, so it is always bound `None`.
+        `raw_line`/`error_message` — untrusted CSV content — cross into SQL
+        exclusively via `%s` placeholders (T-08-07), never string-formatted.
+        """
+        for record in rejected:
+            conn.execute(
+                """
+                INSERT INTO meta.rejected_records (
+                    run_id, file_id, batch_id, source_row_number,
+                    source_byte_offset, raw_line, error_type, error_column,
+                    error_message
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    run_id,
+                    file_id,
+                    batch_id,
+                    record.source_row_number,
+                    None,
+                    record.raw_line,
+                    record.error_type,
+                    record.error_column,
+                    record.error_message,
+                ),
+            )
+
+    def resolve_rejected_records_for_batch(
+        self,
+        *,
+        conn: Connection[Any],
+        batch_id: int,
+        resolved_by_run_id: int,
+        resolution_type: str,
+    ) -> int:
+        """See `MetadataRepository.resolve_rejected_records_for_batch`.
+
+        This is the ONLY method on this class — and the ONLY code path
+        anywhere in this codebase — that can ever change
+        `resolution_type`/`resolved_by_run_id` on `meta.rejected_records`
+        (D-04, T-08-08). No narrower per-row variant exists, and none may be
+        added: the single `WHERE batch_id = %s AND resolution_type =
+        'PENDING'` predicate below is D-03's whole-batch-only granularity,
+        made concrete — this method's sole scoping parameter is a
+        `batch_id`, never a row id, a list of row ids, or a `file_id`.
+        Never opens its own connection and never commits/rolls back `conn`,
+        matching `finalize_publication`'s documented exception.
+        """
+        cursor = conn.execute(
+            """
+            UPDATE meta.rejected_records
+               SET resolution_type = %s,
+                   resolved_by_run_id = %s
+             WHERE batch_id = %s AND resolution_type = 'PENDING'
+            """,
+            (resolution_type, resolved_by_run_id, batch_id),
+        )
+        return int(cursor.rowcount)
 
     def update_ingestion_run_status(self, *, run_id: int, status: str, **fields: object) -> None:
         """See `MetadataRepository.update_ingestion_run_status`.
