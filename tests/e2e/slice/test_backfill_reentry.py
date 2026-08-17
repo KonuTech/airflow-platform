@@ -182,13 +182,13 @@ def _fetch_pending_completeness_reject(
     }
 
 
-def _fetch_latest_backfill_exception_reason(
+def _fetch_latest_backfill_dag_run_row(
     conn: psycopg.Connection[Any],
     *,
     dag_id: str,
     logical_date: datetime.datetime,
-) -> str | None:
-    """Return the most recent `backfill_dag_run.exception_reason` for this dag_id/logical_date.
+) -> tuple[bool, str | None]:
+    """Return (row_found, exception_reason) for the most recent backfill invocation.
 
     `.planning/debug/backfill-does-not-redrive-rejected-row.md` (live SQL +
     source trace of the installed `apache-airflow==3.3.0`) is the source of
@@ -201,15 +201,23 @@ def _fetch_latest_backfill_exception_reason(
     Ordering by `b.id DESC, bdr.id DESC` and taking the first row returns
     the outcome of the MOST RECENT invocation only.
 
+    `row_found` is returned separately from `exception_reason` because both
+    "no row yet" and "row exists with exception_reason NULL (success)" would
+    otherwise collapse to the same `None` return value -- a caller polling
+    for "did this invocation register" cannot tell those two states apart
+    from `exception_reason` alone (this project's own code review, WR-01/
+    WR-02, flagged the resulting ambiguity when they were collapsed).
+
     Args:
         conn: The `airflow_metadata_connection` fixture.
         dag_id: The target DAG.
         logical_date: The target `dag_run.logical_date` value.
 
     Returns:
-        The most recent invocation's `exception_reason` (`"in flight"` on a
-        lost lock race, `None` on success), or `None` if no `backfill_dag_run`
-        row exists yet for this dag_id/logical_date.
+        `(True, exception_reason)` if a `backfill_dag_run` row exists for
+        this dag_id/logical_date (`exception_reason` is `"in flight"` on a
+        lost lock race, `None` on success); `(False, None)` if no such row
+        exists yet.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -224,7 +232,68 @@ def _fetch_latest_backfill_exception_reason(
             (dag_id, logical_date),
         )
         row = cur.fetchone()
-    return row[0] if row is not None else None
+    if row is None:
+        return (False, None)
+    return (True, row[0])
+
+
+def _wait_for_backfill_dag_run_row(
+    conn: psycopg.Connection[Any],
+    *,
+    dag_id: str,
+    logical_date: datetime.datetime,
+    attempt: int,
+) -> str | None:
+    """Poll until a `backfill_dag_run` row is observed, then return its `exception_reason`.
+
+    Settle loop: breaks as soon as a row is observed at all (`row_found`),
+    regardless of `exception_reason` -- NOT on "exception_reason is not
+    None" (that conflated "no row yet" with "row found, NULL/success",
+    this project's own code review WR-01/WR-02). This is a defensive safety
+    margin, not a confirmed async-write requirement: the debug log's own
+    manual reproduction shows the row is written synchronously before the
+    CLI process exits, so this loop should normally observe `row_found`
+    True on its very first check.
+
+    Args:
+        conn: The `airflow_metadata_connection` fixture.
+        dag_id: The target DAG.
+        logical_date: The target `dag_run.logical_date` value.
+        attempt: The current 1-indexed retry attempt (for the error message
+            only).
+
+    Returns:
+        The observed `exception_reason` (`"in flight"` or `None` for
+        success).
+
+    Raises:
+        AssertionError: No `backfill_dag_run` row was observed within
+            `_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS` -- a distinct failure
+            mode from the documented "in flight" race, not retried
+            automatically.
+    """
+    settle_deadline = time.monotonic() + _BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS
+    row_found = False
+    exception_reason: str | None = None
+    while time.monotonic() < settle_deadline:
+        row_found, exception_reason = _fetch_latest_backfill_dag_run_row(
+            conn,
+            dag_id=dag_id,
+            logical_date=logical_date,
+        )
+        if row_found:
+            return exception_reason
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    msg = (
+        f"airflow backfill create for dag_id={dag_id!r} logical_date={logical_date!r} "
+        f"reported CLI success (attempt {attempt}/{_BACKFILL_CREATE_MAX_ATTEMPTS}) but no "
+        f"backfill_dag_run row was observed within {_BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS}s -- "
+        f"this is a distinct failure mode from the documented 'in flight' race (see "
+        f".planning/debug/backfill-does-not-redrive-rejected-row.md) and is NOT retried "
+        f"automatically; the logical_date-matching precondition this query depends on may have "
+        f"silently broken"
+    )
+    raise AssertionError(msg)
 
 
 def _invoke_backfill_create_once(
@@ -323,19 +392,28 @@ def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- eight independen
             `success` within `timeout`.
     """
     for attempt in range(1, _BACKFILL_CREATE_MAX_ATTEMPTS + 1):
-        _invoke_backfill_create_once(kubectl_fn, dag_id=dag_id, logical_date_iso=logical_date_iso)
-
-        settle_deadline = time.monotonic() + _BACKFILL_ROW_SETTLE_TIMEOUT_SECONDS
-        exception_reason: str | None = None
-        while time.monotonic() < settle_deadline:
-            exception_reason = _fetch_latest_backfill_exception_reason(
-                airflow_conn,
+        # WR-03 (code review): retry the CLI invocation itself, not just the
+        # DB-observed "in flight" race -- a transient kubectl/CLI-level
+        # failure is plausible on this cluster's own documented CPU/
+        # scheduler contention and deserves the same retry budget.
+        try:
+            _invoke_backfill_create_once(
+                kubectl_fn,
                 dag_id=dag_id,
-                logical_date=logical_date,
+                logical_date_iso=logical_date_iso,
             )
-            if exception_reason is not None:
-                break
-            time.sleep(_POLL_INTERVAL_SECONDS)
+        except AssertionError:
+            if attempt == _BACKFILL_CREATE_MAX_ATTEMPTS:
+                raise
+            time.sleep(_BACKFILL_CREATE_RETRY_BACKOFF_SECONDS)
+            continue
+
+        exception_reason = _wait_for_backfill_dag_run_row(
+            airflow_conn,
+            dag_id=dag_id,
+            logical_date=logical_date,
+            attempt=attempt,
+        )
 
         if exception_reason != "in flight":
             break
@@ -367,7 +445,7 @@ def _run_backfill_and_wait_for_reexecution(  # noqa: PLR0913 -- eight independen
             if last_clear_number > pre_backfill_clear_number and last_state == "success":
                 return
         time.sleep(_POLL_INTERVAL_SECONDS)
-    latest_exception_reason = _fetch_latest_backfill_exception_reason(
+    _, latest_exception_reason = _fetch_latest_backfill_dag_run_row(
         airflow_conn,
         dag_id=dag_id,
         logical_date=logical_date,
@@ -408,7 +486,10 @@ def _assert_row_resolved(
             (rejected_record_id,),
         )
         resolved_row = cur.fetchone()
-    assert resolved_row is not None
+    assert resolved_row is not None, (
+        f"expected a meta.rejected_records row for rejected_record_id={rejected_record_id!r}, "
+        f"found none"
+    )
     resolution_type, resolved_by_run_id = resolved_row
     assert resolution_type == "REDRIVEN", (
         f"expected the original rejected_record_id={rejected_record_id!r} to show "
@@ -588,7 +669,12 @@ def test_backfill_resolves_previously_rejected_row(
             object_uri=corrected_uri,
             timeout=_DISCOVERY_TIMEOUT_SECONDS,
         )
-        assert corrected_file["duplicate_of_file_id"] is None
+        assert corrected_file["duplicate_of_file_id"] is None, (
+            f"expected the corrected file {corrected_uri!r} to discover as a genuinely new "
+            f"file (duplicate_of_file_id=None), got duplicate_of_file_id="
+            f"{corrected_file['duplicate_of_file_id']!r} -- content_sha256-based dedup "
+            f"treated it as a repeat of an existing file"
+        )
 
         corrected_run = poll_run_for_file(
             analytics_connection,
