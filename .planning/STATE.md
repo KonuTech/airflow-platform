@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Phase 8 context gathered
-last_updated: "2026-08-17T08:39:37.775Z"
+stopped_at: Completed 08-08-PLAN.md
+last_updated: "2026-08-17T08:50:16.120Z"
 last_activity: 2026-08-17
 progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 84
-  completed_plans: 77
+  completed_plans: 78
   percent: 64
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 08 (validation-quarantine-metadata-control-plane-completion) — EXECUTING
-Plan: 2 of 14
+Plan: 3 of 14
 Status: Ready to execute
 Last activity: 2026-08-17
 
-Progress: [█████████░] 92%
+Progress: [█████████░] 93%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [█████████░] 92%
 | Phase 05 P04 | 40min | 3 tasks | 5 files |
 | Phase 05 P05 | 20min | 2 tasks | 4 files |
 | Phase 08 P07 | 25min | 2 tasks | 5 files |
+| Phase 08 P08 | 25min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,7 @@ Recent decisions affecting current work:
 - [Phase 07]: Decision-coverage gate overridden for Phase 7 planning — 13/20 CONTEXT.md decisions (D-01,D-02,D-05,D-06,D-07,D-08,D-09,D-10,D-11,D-13,D-14,D-15,D-19) had no literal D-ID citation in any plan file — Verified via grep spot-check (OTLP, statsd, webhook, Tempo, v_customers_lineage, record_lineage absence, proof-over-prose test pattern all present across plans) plus 3 rounds of gsd-plan-checker semantic review that the underlying decision content IS implemented — this was a citation-format gap, not a dropped decision. User chose 'Proceed anyway' over re-planning for pure citation additions. If verify-phase later finds any of these 13 decisions genuinely unimplemented (not just uncited), that is a real regression worth investigating, not an expected consequence of this override.
 - [Phase 08]: RejectionRateCircuitBreaker's constructor accepts total_rows_read/total_rows_rejected directly rather than reading them from ctx, since BarrierStage.apply(ctx) has no row-count field -- a fresh instance is constructed per run by the future 08-11 caller after StagingLoader.load() returns its totals
 - [Phase 08]: UniquenessRule is deliberately within-chunk-only scoped -- no cross-chunk state; deduplication.strategy: business_key_latest (wired since Phase 4) is the real whole-run uniqueness enforcement mechanism, this rule is a pre-publish diagnostic surface only
+- [Phase 08]: ReferentialIntegrityBarrier's anti-join SELECT list names customer_id/order_id literally (single-dataset, matching OrdersMergePublisher's precedent) even though staging_table/target_table/target_column/staging_column stay config-driven for the JOIN condition — A generic 'any staging table, any column' barrier remains future work, not this plan's scope; documented in the module docstring
 
 ### Pending Todos
 
@@ -115,7 +117,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-17T08:35:29.421Z
-Stopped at: Phase 8 context gathered
+Last session: 2026-08-17T08:50:16.092Z
+Stopped at: Completed 08-08-PLAN.md
 Resume file: 
 None
