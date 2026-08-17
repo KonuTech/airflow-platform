@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from dataplat.errors import ConfigurationError
 from dataplat.pipeline.engine import RaggedRowGuard
+from dataplat.validate.circuit_breaker import RejectionRateCircuitBreaker
 from dataplat.validate.completeness import CompletenessRule
 from dataplat.validate.pattern import PatternRule
 from dataplat.validate.validity_range import ValidityRangeRule
@@ -35,6 +36,7 @@ VALIDATION_RULE_REGISTRY: dict[str, type[StreamingStage | BarrierStage]] = {
     "QUALITY_COMPLETENESS": CompletenessRule,
     "QUALITY_VALIDITY_RANGE": ValidityRangeRule,
     "QUALITY_PATTERN": PatternRule,
+    "CIRCUIT_BREAKER": RejectionRateCircuitBreaker,
 }
 
 
