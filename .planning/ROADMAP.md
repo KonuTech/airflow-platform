@@ -472,7 +472,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 08-12-PLAN.md — DAG layer: integrity_gate wiring + outlets on csv_ingest_customers, new csv_ingest_orders DAG (wave 6)
+- [x] 08-12-PLAN.md — DAG layer: integrity_gate wiring + outlets on csv_ingest_customers, new csv_ingest_orders DAG (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
