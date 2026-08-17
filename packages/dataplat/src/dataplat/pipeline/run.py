@@ -351,11 +351,11 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
             wrote on ``conn`` (D-11).
         run_id: This run's ``meta.ingestion_runs.run_id``.
         file_id: This run's ``meta.files.file_id``.
-        batch_id: This run's ``meta.batches.batch_id`` -- also D-05's
-            resolution scope: every ``PENDING`` ``meta.rejected_records`` row
-            for this SAME ``batch_id`` is resolved here, regardless of
-            whether THIS run rejected anything of its own (a batch's
-            ``PENDING`` rows may belong to a PRIOR run).
+        batch_id: This run's ``meta.batches.batch_id``. D-05's resolution
+            scope moved off this parameter under D-23 (business-key-scoped,
+            not batch-scoped, resolution -- plan 08-16); this parameter no
+            longer drives the resolution call below, only
+            ``record_rejected_records``' own insert.
         finished_at: This run's finish timestamp, reused for the report
             artifact's ``generated_at`` field -- the SAME value
             ``finalize_publication`` receives, never independently computed.
@@ -396,19 +396,27 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
         all_findings.extend(volume_barrier.apply(ctx).findings)
 
     ctx.metadata.record_validation_results(conn=conn, run_id=run_id, results=all_findings)
-    # D-05: unconditional, never gated behind `all_rejected`/an `if` -- a
-    # batch's PENDING rows may belong to a PRIOR run, not this run's own
-    # rejections. A no-op (0 rows affected) when nothing is PENDING for this
-    # batch_id -- the method's own WHERE clause is the filter, not this call
-    # site. MUST run BEFORE record_rejected_records below: the WHERE clause
-    # matches on `batch_id` + `resolution_type = 'PENDING'` alone, with no
-    # run-id exclusion, so calling this AFTER inserting this run's own fresh
-    # rejects would immediately flip them to REDRIVEN too -- a run "backfill
-    # resolving" rejections it just created itself, before any actual
-    # backfill happened (CR-01, phase-08 code review).
-    ctx.metadata.resolve_rejected_records_for_batch(
+    # D-05/D-23: this call's real business-key derivation -- which business
+    # keys this run actually published, so their prior-batch PENDING
+    # rejects resolve -- is plan 08-18's own scope ("wiring the new
+    # resolution call into run_ingest"), not this plan's (08-16 only lays
+    # the schema/Protocol/repository foundation the call now type-checks
+    # against; plan 08-17 wires per-rule `business_key` extraction onto
+    # `RejectedRecord` itself). `business_keys=[]` is a DELIBERATE, documented
+    # no-op (`MetadataRepository.resolve_rejected_records_for_business_keys`'s
+    # own docstring) — a placeholder, not a working D-05 auto-resolve, until
+    # 08-18 lands the real derivation. MUST still run BEFORE
+    # record_rejected_records below once that derivation exists: the method's
+    # WHERE clause has no run-id exclusion, so calling this AFTER inserting
+    # this run's own fresh rejects would immediately flip matching ones back
+    # to REDRIVEN too -- a run "resolving" rejections it just created itself
+    # (CR-01, phase-08 code review, preserved unchanged by this call's new
+    # business-key scoping).
+    dataset_id_for_resolution = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
+    ctx.metadata.resolve_rejected_records_for_business_keys(
         conn=conn,
-        batch_id=batch_id,
+        dataset_id=dataset_id_for_resolution,
+        business_keys=[],
         resolved_by_run_id=run_id,
         resolution_type="REDRIVEN",
     )
