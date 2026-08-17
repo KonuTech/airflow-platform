@@ -71,20 +71,44 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from dataplat.errors import ConfigurationError
 from dataplat.normalize.boolean_null import BooleanNormalizer, NullTokenNormalizer
 from dataplat.normalize.dates import DateNormalizer
 from dataplat.normalize.numeric import NumericNormalizer
 from dataplat.normalize.unicode import UnicodeNormalizer
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.engine import RaggedRowGuard, run_streaming
+from dataplat.validate.registry import resolve_validation_rule
+from dataplat.validate.strategy_dispatch import StrategyDispatchStage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from psycopg import Connection
 
-    from dataplat.config.model import NormalizationConfig
+    from dataplat.config.model import NormalizationConfig, QualityRuleConfig
     from dataplat.pipeline.protocol import PipelineContext, StreamingStage
+
+# `ctx.config.quality.rules[].rule_type` values `_build_stages` (plan 08-10)
+# dispatches through `StrategyDispatchStage` as streaming stages. `StreamingStage`/
+# `BarrierStage` are `Protocol`s, not `@runtime_checkable`, so this local
+# frozenset is the dispatch gate, not `issubclass`. `STRUCTURAL` is a member
+# of this set (it names a real `StreamingStage`, `RaggedRowGuard`) but is
+# deliberately SKIPPED inside the loop body below: `RaggedRowGuard()` is
+# ALREADY unconditionally first in this method's stage list per D-08, so a
+# `STRUCTURAL`-typed config entry is a documented no-op here, never a second
+# `RaggedRowGuard` instance. `REFERENTIAL`/`CIRCUIT_BREAKER`/`VOLUME` are
+# `BarrierStage`s, wired into the publish transaction by plan 08-11, never
+# into this streaming stage list -- absent from this set entirely.
+_STREAMING_RULE_TYPES: frozenset[str] = frozenset(
+    {
+        "STRUCTURAL",
+        "QUALITY_COMPLETENESS",
+        "QUALITY_UNIQUENESS",
+        "QUALITY_VALIDITY_RANGE",
+        "QUALITY_PATTERN",
+    },
+)
 
 # `ColumnContract.type` values (dataplat.config.model) that route to
 # DateNormalizer / NumericNormalizer respectively -- mirrors
@@ -344,7 +368,121 @@ class StagingLoader:
         # opt-out) -- other normalizers above may still be matching
         # not-yet-NFC-normalized raw tokens for their own lookups.
         stages.append(UnicodeNormalizer())
+
+        # FOURTH section (plan 08-10): ctx.config.quality's STREAMING
+        # rule_type entries, dispatched through VALIDATION_RULE_REGISTRY and
+        # each wrapped in StrategyDispatchStage, appended AFTER every
+        # normalizer above -- a quality rule must evaluate fully-normalized
+        # values (NFC-normalized, type-coerced-to-None-or-bool where
+        # applicable), matching this module's own "normalization MUST
+        # precede hashing" invariant extended one step further to
+        # "normalization MUST precede quality evaluation".
+        stages.extend(self._build_quality_stages(ctx))
+
         return stages
+
+    def _build_quality_stages(self, ctx: PipelineContext) -> list[StreamingStage]:
+        """Dispatch ``ctx.config.quality``'s STREAMING rule_type entries into wrapped stages.
+
+        Split out of ``_build_stages`` purely to keep that method's cyclomatic
+        complexity in check -- this is the fourth, independent section
+        ``_build_stages``'s own docstring describes, appended in
+        ``ctx.config.quality.rules``' own declared order (deterministic, no
+        reordering).
+
+        Args:
+            ctx: The current pipeline context. Only ``ctx.config.quality``
+                and ``self._target_columns`` are read.
+
+        Returns:
+            One ``StrategyDispatchStage`` per streaming-scoped quality rule,
+            in declared order. Empty when ``ctx.config.quality`` is ``None``.
+
+        Raises:
+            ConfigurationError: A streaming quality rule_type declares no
+                ``column`` -- every streaming rule_type requires one.
+            ValueError: A quality rule names a ``column`` absent from
+                ``self._target_columns`` -- a config/target-schema mismatch
+                (T-08-18).
+        """
+        if ctx.config.quality is None:
+            return []
+
+        quality_stages: list[StreamingStage] = []
+        for rule in ctx.config.quality.rules:
+            if rule.rule_type not in _STREAMING_RULE_TYPES:
+                # REFERENTIAL/CIRCUIT_BREAKER/VOLUME are BarrierStages, wired
+                # into the publish transaction by plan 08-11 -- never into
+                # this streaming stage list. Silently skipped here, never
+                # raised on.
+                continue
+            if rule.rule_type == "STRUCTURAL":
+                # RaggedRowGuard() is ALREADY unconditionally first in
+                # _build_stages' own stage list (D-08) -- a STRUCTURAL-typed
+                # config entry is a documented no-op here, never a second
+                # RaggedRowGuard instance.
+                continue
+
+            quality_stages.append(self._build_one_quality_stage(rule))
+        return quality_stages
+
+    def _build_one_quality_stage(self, rule: QualityRuleConfig) -> StreamingStage:
+        """Construct one streaming quality rule, wrapped in ``StrategyDispatchStage``.
+
+        Args:
+            rule: The dataset config's quality rule to construct.
+
+        Returns:
+            A ``StrategyDispatchStage`` wrapping the resolved, constructed
+            inner rule.
+
+        Raises:
+            ConfigurationError: ``rule.column`` is ``None`` -- every
+                streaming quality rule_type requires one.
+            ValueError: ``rule.column`` has no corresponding entry in
+                ``self._target_columns`` -- a config/target-schema mismatch
+                (T-08-18).
+        """
+        if rule.column is None:
+            msg = (
+                f"quality rule {rule.rule_id!r} (rule_type={rule.rule_type!r}) "
+                "declares no column, but every streaming quality rule_type "
+                "requires one"
+            )
+            raise ConfigurationError(
+                msg,
+                context={"rule_id": rule.rule_id, "rule_type": rule.rule_type},
+            )
+        try:
+            column_index = self._target_columns.index(rule.column)
+        except ValueError as exc:
+            msg = (
+                f"quality rule {rule.rule_id!r} names column {rule.column!r}, "
+                f"which has no corresponding entry in target_columns "
+                f"{self._target_columns!r} -- a config/target-schema mismatch"
+            )
+            raise ValueError(msg) from exc
+
+        stage_class = resolve_validation_rule(rule.rule_type)
+        rule_kwargs: dict[str, object] = {
+            "column_index": column_index,
+            "column_name": rule.column,
+            "strategy": rule.strategy,
+            "rule_id": rule.rule_id,
+        }
+        if rule.rule_type == "QUALITY_VALIDITY_RANGE":
+            rule_kwargs["minimum"] = rule.params.get("minimum")
+            rule_kwargs["maximum"] = rule.params.get("maximum")
+        elif rule.rule_type == "QUALITY_PATTERN":
+            rule_kwargs["pattern"] = rule.params["pattern"]
+
+        inner_stage = stage_class(**rule_kwargs)
+        return StrategyDispatchStage(
+            inner=inner_stage,  # type: ignore[arg-type]
+            strategy=rule.strategy,
+            rule_id=rule.rule_id,
+            rule_type=rule.rule_type,
+        )
 
     def load(
         self,
