@@ -214,3 +214,13 @@ checkpoint state for the exact live-cluster steps required.
 ---
 *Phase: 08-validation-quarantine-metadata-control-plane-completion*
 *Completed: 2026-08-18*
+
+## Self-Check: PASSED
+
+- FOUND: packages/dataplat/src/dataplat/pipeline/run.py
+- FOUND: tests/unit/test_run_ingest_trace.py
+- FOUND: tests/integration/test_publish_transaction_wiring.py
+- FOUND: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/08-18-SUMMARY.md
+- FOUND: commit 463ca8d (Task 1)
+- FOUND: commit ffecf93 (Task 2)
+- FOUND: commit da73277 (this SUMMARY.md commit)
