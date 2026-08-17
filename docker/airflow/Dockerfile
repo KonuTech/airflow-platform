@@ -46,6 +46,15 @@ ARG GIT_SHA
 RUN pip install --no-cache-dir "apache-airflow[otel]==3.3.0" \
     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.0/constraints-3.12.txt"
 
+# Phase 8 (LOAD-10): `airflow/dags/_common/integrity_gate.py` imports `psycopg`
+# directly at DAG-parse time -- ADR-0004/D-18/D-20's "no dataplat import, no KPO
+# pod launch" rule means it writes its own narrow `meta.files` INSERT inline,
+# so it needs psycopg in THIS image, not only in the csv-processor image.
+# Pinned to the exact version `uv.lock` resolves elsewhere in this project
+# (psycopg[binary]==3.3.4), never a floating range, matching this
+# Dockerfile's own determinism reasoning above.
+RUN pip install --no-cache-dir "psycopg[binary]==3.3.4"
+
 # INFRA-08-style replayability, the identical convention docker/csv-processor/Dockerfile
 # already uses: which commit built this image, answerable from the running container's own
 # metadata, without a registry lookup. No semver release for this image exists yet, so its
