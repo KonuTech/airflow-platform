@@ -70,6 +70,13 @@ class SourceConfig(BaseModel):
             a dataset has no multi-part delivery shape (``customers``
             does not), mirroring D-10's opt-in pattern for filename masks.
             Consumed by ``dataplat.discovery.group_multipart_units``.
+        batch_complete_marker: An opt-in object-key suffix (e.g.
+            ``"_BATCH_COMPLETE"``) a batch directory must contain before
+            ``discover_files`` includes it (LOAD-11/D-19). ``None`` means
+            the check is skipped entirely -- the same "opt-in, unexercised
+            by both live datasets" precedent as Phase 6's filename masks
+            (06-CONTEXT.md D-10); neither ``customers.yaml`` nor
+            ``orders.yaml`` sets this in phase 8.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -80,6 +87,7 @@ class SourceConfig(BaseModel):
     change_semantics: str
     duplicate_policy: str
     multipart_pattern: str | None = None
+    batch_complete_marker: str | None = None
 
 
 class DeduplicationConfig(BaseModel):
@@ -376,6 +384,72 @@ class FreshnessConfig(BaseModel):
     fail_after: str | None = None
 
 
+class QualityRuleConfig(BaseModel):
+    """One validation rule's identity, category, bad-record strategy and parameters.
+
+    Strategy is assigned per-rule-type (D-07) -- each entry in
+    ``QualityConfig.rules`` declares its own ``strategy``, never one blanket
+    strategy for the whole dataset.
+
+    Attributes:
+        rule_id: Stable identifier of this rule, e.g.
+            ``"customer_id_not_null"``. Matches ``ValidationResult.rule_id``
+            and ``meta.validation_results.rule_id`` (migration 0014).
+        rule_type: The rule's category, resolved through
+            ``VALIDATION_RULE_REGISTRY`` -- plain ``str``, matching
+            ``SourceConfig.type``'s registry convention (a real extension
+            point, per 08-RESEARCH.md Pattern 1), NOT ``ColumnContract.
+            type``'s closed-``Literal`` convention. One of ``"FILE"``,
+            ``"STRUCTURAL"``, ``"SCHEMA"``, ``"TYPE"``, ``"QUALITY"``,
+            ``"REFERENTIAL"``, ``"VOLUME"`` today, but new values are a
+            registry entry, not a change to this model.
+        strategy: The bad-record strategy this rule applies on failure --
+            one of ``"FAIL_FILE"``, ``"REJECT_RECORD"``, ``"QUARANTINE_FILE"``,
+            ``"QUARANTINE_RECORD"``, ``"WARN_AND_CONTINUE"`` (D-07). Plain
+            ``str``, same reasoning as ``rule_type``.
+        column: The column this rule applies to, or ``None`` for a
+            dataset-wide rule (e.g. ``REFERENTIAL``).
+        params: Rule-specific parameters, e.g. ``{"min": 0, "max": 100}``
+            for a validity-range rule, or ``{"pattern": "^[A-Z]"}`` for a
+            pattern rule -- interpreted by each rule's own ``__init__``,
+            never by this model.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rule_id: str
+    rule_type: str
+    strategy: str
+    column: str | None = None
+    params: dict[str, object] = {}
+
+
+class QualityConfig(BaseModel):
+    """A dataset's opt-in data-quality rule set and run-level circuit breaker.
+
+    Absent entirely when a dataset declares no quality rules -- mirrors
+    ``FreshnessConfig``'s own opt-in precedent. ``customers.yaml`` populates
+    this for real (D-09); ``orders.yaml`` (D-13..D-17) does too, for its
+    referential rule.
+
+    Attributes:
+        rules: The dataset's validation rules, each independently
+            configured (rule type, strategy, column, params).
+        rejection_rate_threshold: D-10's run-level circuit-breaker
+            threshold -- e.g. ``0.10`` for 10% -- layered on top of each
+            rule's own row-level strategy: even when every individual rule
+            uses a row-level strategy, an aggregate rejection rate above
+            this threshold still escalates the whole run to FAIL (raising
+            ``QualityThresholdExceeded``, D-11). ``None`` when the dataset
+            has no run-level circuit breaker configured.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rules: list[QualityRuleConfig] = []
+    rejection_rate_threshold: float | None = None
+
+
 class DatasetConfig(BaseModel):
     """The complete, validated configuration for one dataset.
 
@@ -407,6 +481,10 @@ class DatasetConfig(BaseModel):
         freshness: The dataset's opt-in data-freshness expectation, or
             ``None`` when this dataset has no freshness expectation to
             track (07-CONTEXT.md D-08) — ``customers.yaml`` declares one.
+        quality: The dataset's opt-in data-quality rule set and run-level
+            circuit breaker, or ``None`` when this dataset declares no
+            quality rules — ``customers.yaml`` populates this for real
+            (08-CONTEXT.md D-09).
         csv: Structural CSV-parsing overrides. Defaults to "detect
             everything" (``CsvParsingConfig``'s own field defaults).
         schema_evolution_on_new_column: Policy applied when a file
@@ -431,6 +509,7 @@ class DatasetConfig(BaseModel):
     filename: FilenameMaskConfig | None = None
     normalization: NormalizationConfig | None = None
     freshness: FreshnessConfig | None = None
+    quality: QualityConfig | None = None
     csv: CsvParsingConfig = Field(default_factory=CsvParsingConfig)
     schema_evolution_on_new_column: str = "evolve"
     schema_evolution_on_missing_or_retyped_column: str = "freeze"

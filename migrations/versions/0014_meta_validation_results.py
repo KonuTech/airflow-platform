@@ -36,7 +36,12 @@ def upgrade() -> None:
     """Create `meta.validation_results`."""
     op.create_table(
         "validation_results",
-        sa.Column("validation_result_id", sa.BigInteger(), sa.Identity(always=True), primary_key=True),
+        sa.Column(
+            "validation_result_id",
+            sa.BigInteger(),
+            sa.Identity(always=True),
+            primary_key=True,
+        ),
         sa.Column(
             "run_id",
             sa.BigInteger(),
@@ -44,7 +49,8 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("rule_id", sa.Text(), nullable=False),
-        # App-validated {FILE,STRUCTURAL,SCHEMA,TYPE,QUALITY,REFERENTIAL,VOLUME} -- never a native enum.
+        # App-validated {FILE,STRUCTURAL,SCHEMA,TYPE,QUALITY,REFERENTIAL,
+        # VOLUME} -- never a native enum.
         sa.Column("rule_type", sa.Text(), nullable=False),
         sa.Column("severity", sa.Text(), nullable=False),
         # App-validated {PASS,PASS_WITH_WARNING,FAIL,QUARANTINE} -- never a native enum.

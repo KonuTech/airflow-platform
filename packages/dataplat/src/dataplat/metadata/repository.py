@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
     from psycopg import Connection
 
+    from dataplat.models.record import RejectedRecord
+    from dataplat.models.report import ValidationResult
+
 
 class MetadataRepository(Protocol):
     """Typed CRUD operations over the `meta` schema's five slice tables."""
@@ -503,5 +506,115 @@ class MetadataRepository(Protocol):
             status: The run's new status.
             **fields: Additional `meta.ingestion_runs` columns to set, e.g.
                 `finished_at=...`, `rows_loaded=...`.
+        """
+        ...
+
+    def record_validation_results(
+        self,
+        *,
+        conn: Connection[Any],
+        run_id: int,
+        results: list[ValidationResult],
+    ) -> None:
+        """Bulk-insert one run's validation findings, inside the caller's own open transaction.
+
+        Maps to ``INSERT INTO meta.validation_results (run_id, rule_id,
+        rule_type, severity, outcome, evaluated_count, failed_count,
+        threshold, observed) VALUES (...)`` for each `ValidationResult` in
+        `results` (migration 0014).
+
+        Like `finalize_publication`, `conn` is caller-supplied and never
+        committed or rolled back here — this method must land inside the
+        SAME transaction as the run's atomic publish (Pattern 3/D-11), so a
+        run that escalates to FAIL and rolls back its publication also rolls
+        back the validation findings that caused the rollback, keeping
+        `meta.validation_results` consistent with what actually happened.
+
+        Args:
+            conn: An already-open connection, inside an already-open
+                transaction — the same one `Publisher.publish` and
+                `finalize_publication` run against.
+            run_id: The run these findings belong to.
+            results: The validation findings to persist, in any order.
+        """
+        ...
+
+    def record_rejected_records(
+        self,
+        *,
+        conn: Connection[Any],
+        run_id: int,
+        file_id: int,
+        batch_id: int,
+        rejected: list[RejectedRecord],
+    ) -> None:
+        """Bulk-insert one run's rejected rows, inside the caller's own open transaction.
+
+        Maps to ``INSERT INTO meta.rejected_records (run_id, file_id,
+        batch_id, source_row_number, raw_line, error_type, error_column,
+        error_message) VALUES (...)`` for each `RejectedRecord` in
+        `rejected` (migration 0015). `resolution_type` is left to its
+        `'PENDING'` column default — this method never sets it directly.
+
+        Like `record_validation_results`, `conn` is caller-supplied and
+        never committed or rolled back here — must land inside the SAME
+        transaction as the run's atomic publish (Pattern 3/D-11).
+
+        Args:
+            conn: An already-open connection, inside an already-open
+                transaction — the same one `Publisher.publish` and
+                `finalize_publication` run against.
+            run_id: The run these rejects belong to.
+            file_id: The file these rejects were read from.
+            batch_id: The batch these rejects belong to — needed later by
+                `resolve_rejected_records_for_batch`'s own `WHERE batch_id =
+                %s` predicate.
+            rejected: The rejected rows to persist, in any order.
+        """
+        ...
+
+    def resolve_rejected_records_for_batch(
+        self,
+        *,
+        conn: Connection[Any],
+        batch_id: int,
+        resolved_by_run_id: int,
+        resolution_type: str,
+    ) -> int:
+        """Resolve every still-PENDING reject in one batch, as a single whole-batch side effect.
+
+        Maps to ``UPDATE meta.rejected_records SET resolution_type = %s,
+        resolved_by_run_id = %s WHERE batch_id = %s AND resolution_type =
+        'PENDING' RETURNING rejected_record_id`` (migration 0015).
+
+        Whole-batch side effect only (D-04) — no per-row variant exists
+        anywhere in this codebase, and none may be added: a backfill run
+        completing, or an explicit batch-level discard operation, are the
+        ONLY two call sites this method has. This is the ONLY write path to
+        `resolution_type`/`resolved_by_run_id` anywhere in this codebase —
+        `record_rejected_records` above never sets either column, leaving
+        every newly-inserted row at its `'PENDING'` column default.
+
+        Like the two methods above, `conn` is caller-supplied and never
+        committed or rolled back here.
+
+        Args:
+            conn: An already-open connection, inside an already-open
+                transaction.
+            batch_id: The batch whose PENDING rejects are being resolved.
+            resolved_by_run_id: The run (a backfill run, or the run
+                performing an explicit discard) responsible for this
+                resolution — the FK lineage answers "was this ever fixed,
+                and by what run" (D-05).
+            resolution_type: The resolution outcome — `"REDRIVEN"` (resolved
+                via a backfill run completing) or `"DISCARDED"` (resolved
+                via an explicit batch-level operator action). Never
+                `"PENDING"` — this method only ever transitions rows AWAY
+                from that state.
+
+        Returns:
+            The number of rows resolved by this call. `0` when the batch had
+            no PENDING rejects — a legitimate, non-error outcome (e.g. a
+            second resolution attempt against an already-resolved batch).
         """
         ...

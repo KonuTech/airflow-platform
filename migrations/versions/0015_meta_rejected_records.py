@@ -1,4 +1,6 @@
-"""meta.rejected_records — quarantined rows, resolved only via whole-batch backfill (D-01/D-04/D-05).
+"""meta.rejected_records — quarantined rows, resolved only via whole-batch backfill.
+
+D-01/D-04/D-05 govern this table's lifecycle shape.
 
 `resolution_type` disambiguates D-04's exactly-2-state lifecycle
 (`PENDING`/`RESOLVED`) into three values: `PENDING`, `REDRIVEN` (resolved via
@@ -44,7 +46,12 @@ def upgrade() -> None:
     """Create `meta.rejected_records`."""
     op.create_table(
         "rejected_records",
-        sa.Column("rejected_record_id", sa.BigInteger(), sa.Identity(always=True), primary_key=True),
+        sa.Column(
+            "rejected_record_id",
+            sa.BigInteger(),
+            sa.Identity(always=True),
+            primary_key=True,
+        ),
         sa.Column(
             "run_id",
             sa.BigInteger(),
