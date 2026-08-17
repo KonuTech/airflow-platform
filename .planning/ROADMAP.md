@@ -485,15 +485,15 @@ Plans:
 
 **Wave 9** *(blocked on Wave 8 completion; gap closure — VALID-08 business-key resolution scoping, D-23/D-24/D-25)*
 
-- [ ] 08-16-PLAN.md — Gap closure: meta.rejected_records.business_key column + MetadataRepository.resolve_rejected_records_for_business_keys contract/implementation (wave 9)
+- [x] 08-16-PLAN.md — Gap closure: meta.rejected_records.business_key column + MetadataRepository.resolve_rejected_records_for_business_keys contract/implementation (wave 9)
 
 **Wave 10** *(blocked on Wave 9 completion)*
 
-- [ ] 08-17-PLAN.md — Gap closure: business_key extraction wired into every RejectedRecord-creation site (wave 10)
+- [x] 08-17-PLAN.md — Gap closure: business_key extraction wired into every RejectedRecord-creation site (wave 10)
 
 **Wave 11** *(blocked on Wave 10 completion)*
 
-- [ ] 08-18-PLAN.md — Gap closure: run_ingest resolves by (dataset_id, business_key); live-cluster proof of VALID-08's re-drive path (wave 11)
+- [x] 08-18-PLAN.md — Gap closure: run_ingest resolves by (dataset_id, business_key); live-cluster proof of VALID-08's re-drive path (wave 11)
 
 **Research stage**: S8 + S9. **Skip `--research-phase`** — shapes are specified in ARCHITECTURE Q2 and FEATURES §3.2/§3.3.
 

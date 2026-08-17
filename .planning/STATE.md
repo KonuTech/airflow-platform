@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
-status: executing
-stopped_at: "Completed quick task 260817-mvp: capped integrity_gate concurrency, root-caused and fixed the "discover reliability" misdiagnosis"
-last_updated: "2026-08-17T21:41:41.662Z"
-last_activity: 2026-08-17 -- Phase 08 planning complete
+status: ready_to_plan
+stopped_at: Phase 08 complete (18/18) — ready to discuss Phase 9
+last_updated: 2026-08-17T23:23:52.536Z
+last_activity: 2026-08-17 -- Phase 08 execution started
 progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 88
-  completed_plans: 85
+  completed_plans: 88
   percent: 64
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** Every file, batch and record that enters the platform can be traced, explained, reprocessed and trusted.
-**Current focus:** Phase 08 — validation-quarantine-metadata-control-plane-completion
+**Current focus:** Phase 9 — etl correctness — dedup, incremental, backfill & recovery
 
 ## Current Position
 
-Phase: 08 (validation-quarantine-metadata-control-plane-completion) — EXECUTING
-Plan: 1 of 15
-Status: Ready to execute
-Last activity: 2026-08-17 -- Phase 08 planning complete
+Phase: 9
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-17
 
 Progress: [██████████] 100%
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100%
 
 **Velocity:**
 
-- Total plans completed: 69
+- Total plans completed: 87
 - Average duration: —
 - Total execution time: 0.0 hours
 
@@ -51,6 +51,7 @@ Progress: [██████████] 100%
 | 05 | 6 | - | - |
 | 06 | 18 | - | - |
 | 07 | 9 | - | - |
+| 08 | 18 | - | - |
 
 **Recent Trend:**
 

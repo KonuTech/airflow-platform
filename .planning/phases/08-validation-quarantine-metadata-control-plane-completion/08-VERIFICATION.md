@@ -1,83 +1,40 @@
 ---
 phase: 08-validation-quarantine-metadata-control-plane-completion
-verified: 2026-08-17T20:10:00Z
-status: gaps_found
-score: 4/5 roadmap success criteria fully VERIFIED; 1/5 (VALID-08 re-drive audit trail) now DEFINITIVELY CONFIRMED FAILING live (not merely uncertain) -- a real dataplat architecture gap, not an infra/timing issue. The 1 regression this verification found (ORCH-06 DAG line-budget policy test) was fixed post-verification, commit a78680e.
+verified: 2026-08-18T02:00:00Z
+status: passed
+score: 5/5 roadmap success criteria VERIFIED (VALID-08 / Truth #3, the one confirmed-FAILING gap from the prior verification round, is now independently confirmed closed)
 overrides_applied: 0
-post_verification_fix:
-  regression: "tests/policy/test_dag_line_budget.py::test_csv_ingest_customers_stays_under_150_lines"
-  commit: a78680e
-  detail: "csv_ingest_customers.py trimmed 173 -> 149 lines (docstring/comment condensation only, no functional change). Re-confirmed green: pytest tests/unit tests/property tests/policy -q -m \"not integration and not dagtest and not cluster and not manifests\" -> 614 passed, 12 deselected (was 613 passed, 1 failed). Full make test (484) and make policy (124) also re-run clean."
-human_verification: []
-# Resolved same session, post-verification (2026-08-17T20:35-21:15Z): the human_verification
-# item below was actually run to completion live. See post_verification_live_result.
-post_verification_live_result:
-  ran: "pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster, after (1) clearing a
-    54-object S3 backlog under raw/customers/ that was blocking discover on every prior attempt,
-    and (2) two further live-driven refinements to the retry-timing fix (commits 441a51a, 368c83c)."
-  result: "Progressed past EVERY step -- discover, ingest (SUCCEEDED), PENDING reject checks,
-    real airflow backfill create re-execution (clear_number advanced, state reached success, no
-    retry-timing errors), corrected row published to normalized.customers -- and failed ONLY at
-    the final assertion (_assert_row_resolved): the original reject stays PENDING because it is
-    scoped to batch_id=43120 while the corrected file's own run (run_id=43121) lands under a
-    DIFFERENT batch_id."
-  conclusion: "The batch_key/content_sha256 architecture concern (deferred-items.md, 'From plan
-    08-14') is CONFIRMED real, live, for the first time -- not refuted as this report previously
-    stated, not merely theoretical. discover_files's batch_key is a pure function of
-    content_sha256, so a content-differing correction always discovers under a new batch_id;
-    resolve_rejected_records_for_batch scopes strictly by batch_id, so it can never touch the old
-    batch's PENDING row. The mechanism (Airflow backfill, retry logic, DAG plumbing) all now work
-    correctly and are proven live -- the gap is architectural, in dataplat's own batch-scoping
-    design, not a test-robustness or infra issue. Needs a real design decision (Rule 4 territory),
-    not a quick fix. Full narrative: .planning/debug/resolved/backfill-does-not-redrive-rejected-row.md"
 re_verification:
-  previous_status: human_needed
-  previous_score: "4/5 fully verified, 1/5 uncertain"
+  previous_status: gaps_found
+  previous_score: "4/5 fully VERIFIED, 1/5 (VALID-08) confirmed FAILING live"
   gaps_closed:
-    - "VALID-07 (referential-orphan quarantine + non-orphan publish) confirmed live end-to-end: 08-HUMAN-UAT.md documents one full clean pass of test_orphan_order_quarantined_while_valid_rows_publish (discover -> ingest -> SUCCEEDED -> orphan quarantine verified) against the real cluster; this verifier independently confirms the underlying code/integration tests are unchanged since that pass. Promoted from ORPHANED/ERROR to VERIFIED."
-    - "The deployment gaps blocking both e2e tests (migrations 0014-0017 not applied, csv_ingest_orders absent from DAG bundle, Vault sealed) are closed: this verifier independently re-queried the live cluster and confirms analytics-db is now at migration 0019, both csv_ingest_customers and csv_ingest_orders are listed by `airflow dags list`, and `vault status` reports Sealed: false."
-    - "The test-robustness gap in test_backfill_reentry.py (single CLI invocation, no retry for Airflow's own documented-transient backfill_dag_run.exception_reason='in flight' row-lock race) is closed at the code level: plan 08-15 (commit 1de6a22) plus a follow-up code-review addendum (commit cb56e15, 5 findings all resolved) added a bounded 3-attempt retry with 5s backoff and self-diagnosing failure messages. This verifier independently re-ran ruff/mypy/pytest --collect-only against the current code and confirms all pass cleanly."
-  gaps_remaining:
-    - "SUPERSEDED post-verification, same session: this item was resolved by actually running the live test to completion. See post_verification_live_result above -- VALID-08 is now confirmed FAILING (architecture gap), not merely untested."
-  regressions:
-    - "tests/policy/test_dag_line_budget.py::test_csv_ingest_customers_stays_under_150_lines now FAILS (173 lines, budget <150) -- NEW finding, not present in the previous verification run (which independently ran the identical command and got a clean 613/613 pass). Introduced by quick task 260817-mvp (commit ea5a38e, 2026-08-17, after the previous verification), which added a `.override(max_active_tis_per_dag=3)` fix plus a ~19-line explanatory comment to csv_ingest_customers.py -- a required phase-08 artifact -- without running `tests/policy` (its own SUMMARY.md only claims tests/unit's 484 tests were checked). This breaks `make policy` / `make check`'s Local gate."
-gaps:
-  - truth: "A content-differing corrected file's backfill re-drive flips the original PENDING meta.rejected_records row to REDRIVEN (VALID-08)"
-    status: failed
-    reason: "Live-confirmed: test_backfill_reentry.py ran end-to-end (discover, ingest, real backfill re-execution, corrected row published) and failed only at the final REDRIVEN assertion. rejected_record_id=8 stays batch_id=43120/PENDING; the corrected file's own run (run_id=43121) is a different batch_id, so resolve_rejected_records_for_batch (scoped strictly by batch_id) never touches it."
-    severity: major
-    artifacts:
-      - path: "packages/dataplat/src/dataplat/discovery.py"
-        issue: "batch_key is a pure function of content_sha256, so a content-differing correction always discovers under a new batch -- by design, not a bug in this file"
-      - path: "packages/dataplat/src/dataplat/metadata/postgres.py"
-        issue: "resolve_rejected_records_for_batch (D-05) scopes strictly by batch_id, which can never match a corrected file's new batch"
-    missing:
-      - "A real design decision (Rule 4 territory, deferred-items.md): how should a content-differing correction resolve an OLD batch's PENDING rejects when it necessarily creates a NEW batch_id? Candidates include resolving by business-key+dataset instead of strictly by batch_id, or an explicit corrected-file-to-original-batch linkage captured at discovery time."
-    debug_session: ".planning/debug/resolved/backfill-does-not-redrive-rejected-row.md"
-# The line-budget gap this verification found (csv_ingest_customers.py over the ORCH-06
-# 150-line budget) was fixed immediately after this report was written --
-# see post_verification_fix above. Original gap text preserved in `git log -p`
-# for this file's prior revision, for audit trail.
+    - "VALID-08 / roadmap success criterion 3 ('Corrected quarantined records re-enter the pipeline through the documented re-drive path and land in the warehouse'): resolution scoping moved from strict batch_id matching (which the prior verification proved live can never resolve a content-differing correction's PENDING row) to (dataset_id, business_key) matching, per locked decisions D-23/D-24/D-25. Independently re-verified: migration 0020 applied (schema), business_key extraction wired into every RejectedRecord-creation site (CompletenessRule/PatternRule/ValidityRangeRule/UniquenessRule/ReferentialIntegrityBarrier), and run_ingest's resolution call wired to the real derivation. Live-cluster query this session confirms meta.rejected_records shows PENDING:8/REDRIVEN:2 (was PENDING:5/REDRIVEN:0 at the prior verification) — the mechanism has now genuinely fired twice against the real deployed platform."
+    - "CR-01 (08-REVIEW.md, this gap-closure round's own code review): the original wiring resolved rejects by reading SELECT DISTINCT over the STAGING table (what merely staged), not what the publish statement's ON CONFLICT ... WHERE conflict-guard actually wrote/updated -- a real false-positive-resolution path. Fixed: both MergePublisher/OrdersMergePublisher now RETURNING their business-key column from the INSERT ... ON CONFLICT statement, threaded through PublishResult.published_business_keys, and run.py resolves using that instead of a staging-table read. Independently reproduced this session: checked out the pre-fix source into an isolated worktree, ran the new regression test (test_staged_but_conflict_guard_blocked_business_key_stays_pending) against it -- confirmed it FAILS with exactly the claimed symptom (AssertionError: assert 'REDRIVEN' == 'PENDING'), then confirmed it PASSES against the current (fixed) code. Not a tautology."
+    - "WR-01 (same review): business-key column resolution silently picked the first business_key:true column with no cardinality guard. Fixed via a DatasetConfig model_validator rejecting >1 business_key:true column; independently confirmed present in config/model.py and covered by a dedicated unit test."
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 8: Validation, Quarantine & Metadata Control-Plane Completion Verification Report
 
 **Phase Goal:** No data is ever silently dropped — every rejected record is retained with a reason, reportable, and has a documented path back into the pipeline
-**Verified:** 2026-08-17T20:10:00Z
-**Status:** gaps_found (updated post-session: VALID-08 confirmed failing live, see `post_verification_live_result` in frontmatter)
-**Re-verification:** Yes — after gap closure (plan 08-15 + live-cluster UAT session). The single regression this pass found (DAG line-budget) was fixed immediately after (commit `a78680e`) — see `post_verification_fix` in frontmatter.
+**Verified:** 2026-08-18T02:00:00Z
+**Status:** passed
+**Re-verification:** Yes — after gap-closure round (plans 08-16, 08-17, 08-18, spawned via `/gsd:plan-phase 8 --gaps`), targeting the single confirmed-FAILING gap (VALID-08) from the prior 08-VERIFICATION.md.
 
-**Mode note (carried forward, unchanged):** ROADMAP.md marks this phase `mode: mvp`, but the phase goal text does not match the User Story shape (`gsd-sdk query user-story.validate` returns `valid: false`). The phase carries five detailed, testable roadmap Success Criteria, which this report verifies against as the richer contract. Flagged as a process inconsistency, not a verification blocker.
+**Mode note (carried forward, unchanged from prior verification):** ROADMAP.md marks this phase `mode: mvp`, but `gsd-sdk query user-story.validate` confirms the phase goal text does not match the User Story shape (`valid: false`). The phase carries five detailed, testable roadmap Success Criteria, which this report verifies against as the richer contract — a process inconsistency, not a verification blocker, unchanged from the prior report's judgment.
 
 ## Summary of This Verification's Independent Findings
 
-This is a re-verification following a live-cluster UAT session (08-HUMAN-UAT.md, deferred-items.md) and a targeted gap-closure plan (08-15 + its code-review addendum). Rather than trust those artifacts' own narration, this verifier re-derived the current state independently:
+This is a re-verification following a targeted gap-closure round. Rather than trust 08-16/17/18-SUMMARY.md, 08-REVIEW.md, or 08-REVIEW-FIX.md's own narration, this verifier independently re-derived the current state:
 
-- **Re-ran** ruff, mypy, `pytest --collect-only`, the full unit/property/policy suite, the integration suite, and the dagtest suite from scratch.
-- **Queried the live kind cluster directly** (it was reachable this session, unlike the prior verification's attempt): `analytics-db`'s `alembic_version`, `airflow dags list`, `vault status`, node CPU/memory allocation, and — going further than the prior verification — the live `backfill`/`backfill_dag_run` and `meta.rejected_records` tables to see what has actually happened on this cluster, not just whether the tooling can reach it.
-- **Found one new regression** the previous verification and the 08-15 gap-closure session both missed: `tests/policy/test_dag_line_budget.py` currently fails. This was not caused by phase 08's own plans; it was introduced by a post-phase quick task (`260817-mvp`, commit `ea5a38e`) that modified a phase-08 required artifact without running the full policy suite.
-- **Confirmed** the prior verification's `human_verification` item 1 (deployment gaps) is now closed, and VALID-07's live proof is genuine (one full clean e2e pass, documented in 08-HUMAN-UAT.md, corroborated by unchanged passing integration tests).
-- **Did not attempt** to run the live `-m cluster` e2e tests myself. Live node CPU allocation is currently 100%/78% across the two worker nodes (independently confirmed this session), matching the exact resource-pressure signature that caused all 3 prior live attempts of `test_backfill_reentry.py` to fail before ever reaching the code this phase's fix touches. Per this verifier's own constraints ("keep verification fast, don't run the app") and the risk of disrupting a shared long-running demo cluster with a multi-minute test that has already failed 3/3 times for environmental reasons, I judged this out of scope for this verification pass. The live DB query below (zero `REDRIVEN` rows, only 2 manual CLI reproductions in `backfill`/`backfill_dag_run`) is offered as the strongest available substitute evidence: it proves definitively that no successful end-to-end proof of VALID-08's re-drive path exists anywhere on this cluster today, closing the ambiguity about whether "maybe it silently already passed somewhere."
+- **Read** every gap-closure plan (08-16/17/18) and summary, the locked D-23/D-24/D-25 decisions in 08-CONTEXT.md, and 08-REVIEW.md/08-REVIEW-FIX.md's own critical/warning findings and fixes.
+- **Read the actual source** of every claimed change: `migrations/versions/0020_meta_rejected_records_business_key.py`, `models/record.py`, `metadata/repository.py`, `metadata/postgres.py`, `pipeline/run.py`, `load/publish/{protocol,merge,merge_orders}.py`, `config/model.py`. Confirmed the code matches what the plans/summaries claim, not merely that files were touched.
+- **Grepped the full source+test tree** for `resolve_rejected_records_for_batch` (0 references anywhere) and for every remaining `SELECT DISTINCT ... FROM {staging_table}`-shaped read (none feed the resolution call any more — the only `SELECT DISTINCT` left is the publishers' own pre-existing `DISTINCT ON (customer_id|order_id)` deduplication clause inside their `INSERT` statement, unrelated to reject-resolution).
+- **Independently reproduced the CR-01 regression test's claim** that it fails on pre-fix code and passes on the fix: checked out the pre-CR-01-fix commit into an isolated `git worktree`, copied in the current (post-fix) test file, ran `test_staged_but_conflict_guard_blocked_business_key_stays_pending` against the OLD source via `PYTHONPATH` override — it failed with exactly the claimed symptom (`AssertionError: assert 'REDRIVEN' == 'PENDING'`). Re-ran the same test against the current tree — passes. This is not a tautological test.
+- **Independently re-ran** ruff (`packages/dataplat/src tests` — clean), mypy (`packages/dataplat/src packages/csv-processor/src` — 72 files, no issues), the full unit+property+policy suite (622 passed), the full integration suite (117 passed, including the two previously-skipped Test C/C2 now un-skipped and passing, plus the new CR-01 regression test), the combined `pytest tests/unit tests/integration -m "not cluster"` (609 passed, matching the SUMMARY's claim exactly), `pytest tests/policy` (134 passed, including the DAG line-budget test), and `make check` end to end (492 tests + 71 corpus fixtures, green).
+- **Queried the live kind cluster directly** this session: `meta.alembic_version` = `0020`; `meta.rejected_records.business_key` column and its `(business_key, resolution_type)` index both present; `meta.rejected_records` resolution-type counts are `PENDING: 8, REDRIVEN: 2` (was `PENDING: 5, REDRIVEN: 0` at the prior verification — the mechanism has now fired twice, matching the SUMMARY's claim of two live test runs); both `csv_ingest_customers`/`csv_ingest_orders` DAGs deployed; the live `csv_processor_image` Airflow Variable points at `localhost:5001/csv-processor:4a2ded0` — the WR-01-fix commit, confirming the currently-deployed image includes both this round's CR-01 and WR-01 fixes, not a stale pre-fix build; Vault unsealed.
+- **Did not re-run** `pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster` myself this session (a ~4-5 minute live-cluster test against a shared demo cluster that has already twice completed genuinely per this round's own SUMMARY evidence, corroborated by the live DB's `REDRIVEN: 2` count and the deployed image tag matching the WR-01 fix). The live DB state is offered as strong independent corroboration that is consistent with, not merely repeating, the SUMMARY's narrative.
 
 ## Goal Achievement
 
@@ -85,49 +42,108 @@ This is a re-verification following a live-cluster UAT session (08-HUMAN-UAT.md,
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | A file with malformed rows loads the good rows and writes quarantine records naming source file, row number, column, error type, run and timestamp — nothing silently discarded | VERIFIED | Unchanged since prior verification. `RaggedRowGuard`/`CompletenessRule`/`PatternRule`/`ValidityRangeRule`/`UniquenessRule` each convert a row-level violation into a `RejectedRecord` (never raise, QUAL-03). `meta.rejected_records` (migration `0015`, live-confirmed applied — `alembic_version=0019`) carries `run_id`, `file_id`, `source_row_number`, `error_column`, `error_type`. This verifier re-ran the full 116-test integration suite: all pass. |
-| 2 | A validation report exists as PostgreSQL rows and a MinIO artifact; a threshold-breaching dataset reports FAIL/QUARANTINE, an under-threshold one reports PASS_WITH_WARNING | VERIFIED | Unchanged since prior verification; code and tests re-confirmed passing this session (`test_report_artifact_matches_persisted_postgres_rows`, part of the 116 passing integration tests). |
-| 3 | Corrected quarantined records re-enter the pipeline through the documented re-drive path and land in the warehouse | **FAILED (confirmed live, post-session)** | The "land in the warehouse" half is proven (`ON CONFLICT DO UPDATE` publishers, batch-independent — the corrected row DID publish to `normalized.customers`). The "documented re-drive path" half is now confirmed FALSE: `test_backfill_reentry.py` ran to completion live and failed at `_assert_row_resolved` — the original PENDING reject (`batch_id=43120`) is never touched because the corrected file's run lands under a different `batch_id` (43121). `resolve_rejected_records_for_batch`'s `batch_id` scoping does NOT resolve a content-differing correction's PENDING row, because `discover_files`'s `batch_key` is a pure function of `content_sha256`. Real architecture gap, not an infra/timing issue — see `post_verification_live_result` in frontmatter and `.planning/debug/resolved/backfill-does-not-redrive-rejected-row.md`. |
-| 4 | A truncated/still-uploading file (checksum mismatch, size mismatch, wrong extension, empty, missing `_BATCH_COMPLETE`) is refused before any parsing occurs | VERIFIED | Unchanged since prior verification. `integrity_gate.py` wired upstream of `discover` in both DAGs; `tests/unit/test_integrity_gate.py` and `test_batch_complete_marker.py` re-confirmed passing this session. |
-| 5 | A file at 10× historical baseline row count is flagged as a volume anomaly; an orphan foreign key produces the dataset's configured fail/quarantine/warn outcome | VERIFIED | The volume-anomaly half is unchanged/re-confirmed via passing integration tests. The referential-orphan half is now upgraded from "integration-tested only" to **live-proven**: 08-HUMAN-UAT.md documents `test_orphan_order_quarantined_while_valid_rows_publish` achieving one full clean server-side pass (discover → ingest → SUCCEEDED → `REFERENTIAL_ORPHAN` reject row confirmed → non-orphan rows published, orphan row absent from `normalized.orders`) against the real cluster, after fixing 4 real deployment gaps (psycopg dependency, 2 missing GRANTs, stale hostPath mount) along the way. This verifier independently confirms the underlying `ReferentialIntegrityBarrier` code and its integration tests are unchanged since that live pass, and the live cluster is currently deployed with the same code (migration `0019`, both DAGs present). |
+| 1 | A file with malformed rows loads the good rows and writes quarantine records naming source file, row number, column, error type, run and timestamp — nothing silently discarded | VERIFIED | Unchanged since prior verification (this round did not touch these code paths). Re-confirmed passing this session via the full integration suite. |
+| 2 | A validation report exists as PostgreSQL rows and a MinIO artifact; a threshold-breaching dataset reports FAIL/QUARANTINE, an under-threshold one reports PASS_WITH_WARNING | VERIFIED | Unchanged; `test_report_artifact_matches_persisted_postgres_rows` re-confirmed passing this session. |
+| 3 | Corrected quarantined records re-enter the pipeline through the documented re-drive path and land in the warehouse | **VERIFIED (gap closed)** | Was the single FAILED truth in the prior verification, live-confirmed broken (`resolve_rejected_records_for_batch`'s strict `batch_id` scoping could never resolve a content-differing correction's PENDING row). Now: (a) schema — `meta.rejected_records.business_key` column + index, migration 0020, live-confirmed applied; (b) capture — every `RejectedRecord`-creation site in the platform's real rule set populates `business_key` when reliably extractable, `RaggedRowGuard` provably untouched (`git diff --stat` empty for that file); (c) resolution — `resolve_rejected_records_for_business_keys` matches `(dataset_id, business_key)` across ANY `batch_id`, proven in isolation (`test_backfill_resolution.py`, full D-23/D-24/D-25 scoping matrix) and through real `run_ingest` execution (`test_publish_transaction_wiring.py` Test C/C2, cross-batch + CR-01 self-protection); (d) correctness hardening — CR-01 (staged-but-conflict-guard-blocked business keys must never resolve) independently reproduced as a genuine, non-tautological regression test; (e) live proof — `meta.rejected_records` on the real cluster shows `REDRIVEN: 2` (was `0`), the deployed image tag matches the WR-01-fix commit, both DAGs and migration 0020 are live. |
+| 4 | A truncated/still-uploading file (checksum mismatch, size mismatch, wrong extension, empty, missing `_BATCH_COMPLETE`) is refused before any parsing occurs | VERIFIED | Unchanged; `test_integrity_gate.py`/`test_batch_complete_marker.py` re-confirmed passing this session. |
+| 5 | A file at 10× historical baseline row count is flagged as a volume anomaly; an orphan foreign key produces the dataset's configured fail/quarantine/warn outcome | VERIFIED | Unchanged; both halves re-confirmed passing this session (`test_referential_integrity.py`, extended this round with a `business_key == order_id` assertion, also re-confirmed passing). |
 
-**Score:** 4/5 fully VERIFIED (one upgraded from ORPHANED to VERIFIED this session), 1/5 genuinely UNCERTAIN — not because of missing effort, but because the specific behavior it depends on has never actually run to completion, pass or fail, anywhere.
+**Score:** 5/5 fully VERIFIED — the previously-confirmed-failing truth is now closed at the schema, extraction, resolution-matching, and live-cluster levels, plus a genuine correctness bug (CR-01) this round's own code review found and fixed before it could cause a real false-positive resolution.
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `migrations/versions/0014_meta_validation_results.py` … `0017_normalized_orders_business_key_unique.py` | `meta.validation_results`/`meta.rejected_records`/`normalized.orders` DDL | VERIFIED | Live-confirmed applied: `SELECT version_num FROM meta.alembic_version` → `0019` (this session; was `0013` at the prior verification). |
-| `packages/dataplat/src/dataplat/validate/{completeness,pattern,validity_range,uniqueness,circuit_breaker,referential,volume_anomaly}.py` | VALID-02/03/07/09 rule classes | VERIFIED | Unchanged, all registered, unit/property/integration tests re-confirmed passing this session. |
-| `packages/dataplat/src/dataplat/validate/strategy_dispatch.py` | D-07 5-strategy outcome wrapper | VERIFIED | Unchanged, re-confirmed. |
-| `packages/dataplat/src/dataplat/metadata/postgres.py` | `record_validation_results`/`record_rejected_records`/`resolve_rejected_records_for_batch` | VERIFIED | Unchanged; CR-01 ordering fix still present and covered by regression test. |
-| `airflow/dags/_common/integrity_gate.py` | LOAD-10 pre-pod-launch gate | VERIFIED | Wired upstream of `discover` in both DAGs; live-confirmed deployed (both DAGs listed by `airflow dags list`). |
-| `airflow/dags/csv_ingest_orders.py` | Second live dataset DAG | VERIFIED | 159 lines, deployed and listed live (`csv_ingest_orders` now present, was absent at prior verification). No line-budget test covers this file, so its growth (145→159 since prior verification) is not itself a policy violation. |
-| `airflow/dags/csv_ingest_customers.py` | Phase 8's LOAD-10 gate wiring, first live dataset DAG | VERIFIED | Functionally correct and deployed (integrity_gate wiring, concurrency cap all present and live-confirmed working per 08-HUMAN-UAT.md); was 173 lines against ORCH-06's <150-line budget at verification time, trimmed to 149 lines immediately after (commit `a78680e`, docstring/comment condensation only) — `tests/policy/test_dag_line_budget.py` now passes. |
-| `packages/dataplat/src/dataplat/load/publish/merge_orders.py` | `OrdersMergePublisher` | VERIFIED | Unchanged, WR-04 NULL-safety fix still present. |
-| `configs/datasets/orders.yaml`, `configs/datasets/customers.yaml` | Real `quality:` blocks | VERIFIED | Unchanged, deployed (live e2e pass for VALID-07 exercised the deployed configs). |
-| `tests/dagtest/test_backfill_dagrun.py` | Backfill DagRun mechanics proof | VERIFIED | Unchanged, 2/2 passing this session. |
-| `tests/e2e/slice/test_referential_orphan.py` | VALID-07's live closing proof | VERIFIED | Ruff/mypy/collect-only clean this session; live-proven with one full clean pass per 08-HUMAN-UAT.md; not re-run live this session (see Summary above for why). |
-| `tests/e2e/slice/test_backfill_reentry.py` | VALID-08's live closing proof | CODE VERIFIED, LIVE-UNPROVEN | Ruff/mypy/collect-only clean this session (independently re-confirmed); retry logic reviewed twice (08-REVIEW.md + Addendum, 5/5 findings fixed, commit `cb56e15`); has never completed a full `-m cluster` run — 3 attempts across sessions all failed before reaching this file's own code, for a separate, known, deliberately-deferred infra reason (node CPU budget). |
+| `migrations/versions/0020_meta_rejected_records_business_key.py` | `meta.rejected_records.business_key` column + index | VERIFIED | Read directly: `revision="0020"`, `down_revision="0019"`, nullable `business_key` column + `(business_key, resolution_type)` index, no GRANT (table-level grant from 0015 covers it). Live-confirmed applied: `alembic_version = 0020`. |
+| `packages/dataplat/src/dataplat/models/record.py` | `RejectedRecord.business_key: str \| None = None` | VERIFIED | Field present, last position, non-breaking (every construction call site uses kwargs). |
+| `packages/dataplat/src/dataplat/metadata/repository.py` | `resolve_rejected_records_for_business_keys` Protocol method | VERIFIED | Present; `resolve_rejected_records_for_batch` fully removed (0 references anywhere in `packages/dataplat/src` or `tests`). |
+| `packages/dataplat/src/dataplat/metadata/postgres.py` | `PostgresMetadataRepository.resolve_rejected_records_for_business_keys` | VERIFIED | `UPDATE meta.rejected_records ... FROM meta.batches WHERE meta.batches.batch_id = meta.rejected_records.batch_id AND meta.batches.dataset_id = %s AND meta.rejected_records.business_key = ANY(%s) AND meta.rejected_records.resolution_type = 'PENDING'` — matches D-23 exactly, `business_keys=[]` short-circuits to a documented no-op, docstring states this is the sole write path to `resolution_type`. |
+| `packages/dataplat/src/dataplat/validate/{completeness,pattern,validity_range,uniqueness,referential}.py` | `business_key`/`business_key_index` extraction at every `RejectedRecord` site | VERIFIED | Read directly: all four streaming rules take `business_key_index`, extract via a per-file `_extract_business_key` helper, thread `business_key=` into every `RejectedRecord(...)` call (both of `ValidityRangeRule`'s two sites). `ReferentialIntegrityBarrier` captures `business_key=str(row["order_id"])` — the orphan row's own identity, not the FK it failed against. `pipeline/engine.py` (`RaggedRowGuard`) provably untouched. |
+| `packages/dataplat/src/dataplat/load/staging.py` | `business_key_index` computed once, threaded into every quality-rule construction | VERIFIED | `_build_quality_stages` resolves the single `business_key: true` column via the same `self._target_columns.index(...)` idiom `_build_one_quality_stage` already uses, threaded unconditionally into `rule_kwargs`. |
+| `packages/dataplat/src/dataplat/pipeline/run.py` | `_apply_post_publish_barriers_and_persist` wired to real, correctness-safe business-key derivation | VERIFIED | `dataset_id` hoisted once; resolution call uses `published_business_keys` — a caller PARAMETER sourced from `publisher.publish()`'s own `PublishResult.published_business_keys`, NOT a `SELECT DISTINCT` over the staging table (this was the CR-01 fix, verified below). CR-01-ordering (resolve strictly BEFORE `record_rejected_records`) preserved. |
+| `packages/dataplat/src/dataplat/load/publish/{protocol,merge,merge_orders}.py` | `PublishResult.published_business_keys` populated from `RETURNING` | VERIFIED | `protocol.py` adds the field (default `()`), documents why. Both `MergePublisher`/`OrdersMergePublisher`'s `_PUBLISH_SQL` now end in `RETURNING customer_id`/`RETURNING order_id`; both `publish()` methods populate `published_business_keys` from the cursor's `fetchall()` — the exact rows the conflict-guarded `ON CONFLICT DO UPDATE` actually affected, never a blind staging-table read. |
+| `packages/dataplat/src/dataplat/config/model.py` | Cardinality guard on `business_key: true` columns (WR-01 fix) | VERIFIED | `DatasetConfig._check_at_most_one_business_key_column` model_validator present; rejects >1 `business_key: true` column; unit test (`test_dataset_config_rejects_more_than_one_business_key_column`) confirmed passing. |
+| `tests/integration/test_backfill_resolution.py` | D-23/D-24/D-25 scoping matrix proof (isolated repository call) | VERIFIED | 2/2 tests pass: `test_resolution_scoped_to_business_key_across_batches_and_idempotent_on_replay` (cross-batch resolution, business-key isolation, dataset isolation, NULL-never-resolves, idempotent replay all in one scenario) and `test_resolve_rejected_records_for_business_keys_is_the_only_write_path_to_resolution_type`. |
+| `tests/integration/test_publish_transaction_wiring.py` | Real `run_ingest`-driven cross-batch proof (Test C/C2) + CR-01 regression test | VERIFIED | All 6 tests pass, 0 skipped (the two tests 08-16 had to skip as structurally NULL-incompatible are now un-skipped and rewritten). Independently reproduced that `test_staged_but_conflict_guard_blocked_business_key_stays_pending` fails on pre-fix code and passes on the fix — not a tautology. |
+| `tests/e2e/slice/test_backfill_reentry.py` | Live-cluster proof, docstring updated | VERIFIED | Docstring/failure-message no longer references the superseded `resolve_rejected_records_for_batch`/D-05 batch-scoping caveat; describes the current `resolve_rejected_records_for_business_keys`/D-23 mechanism. Not re-run live this session (see Summary above); live DB state (`REDRIVEN: 2`) is independent corroboration that it has run to completion twice. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| `wait_for_files` (S3KeySensor) | `discover` (KPO) | `matched_keys >> gate >> discover` | WIRED | Unchanged, re-confirmed via `test_integrity_gate_upstream_of_discover`. |
-| `pipeline/run.py` barrier stages | `meta.validation_results`/`meta.rejected_records` | `ctx.metadata.record_*` inside the publish transaction | WIRED | Unchanged, re-confirmed. |
-| `pipeline/run.py` | MinIO `validated` bucket | `ctx.objects.put_object` | WIRED | Unchanged, re-confirmed. |
-| `StagingLoader._build_stages` | `ctx.config.quality` rule declarations | `resolve_validation_rule` + `StrategyDispatchStage` | WIRED | Unchanged, re-confirmed. |
-| `ReferentialIntegrityBarrier` | `normalized.orders` publish exclusion + `meta.rejected_records` | Anti-join delete from staging before publish | WIRED, live-proven | 08-HUMAN-UAT.md's clean pass; unchanged code since. |
-| Airflow `airflow backfill create` | `meta.rejected_records.resolution_type` flip | `resolve_rejected_records_for_batch` scoped by `batch_id` | UNCERTAIN for content-differing corrections | Live query this session: 0 `REDRIVEN` rows exist on this cluster; this link has never fired for real content-differing correction data, only for the debug session's own manual same-content re-invocation (which never reached `resolve_rejected_records_for_batch` either — it only proved the Airflow-level `DAG.clear()` mechanism itself works). |
+| `run_ingest`'s `publisher.publish(...)` call | `_apply_post_publish_barriers_and_persist`'s resolution call | `published_business_keys=result.published_business_keys` (a real function parameter, not a re-derivation) | WIRED | Read directly at `pipeline/run.py` lines ~702-732: `result = publisher.publish(...)`, then `_apply_post_publish_barriers_and_persist(..., published_business_keys=result.published_business_keys, ...)`. |
+| `MergePublisher`/`OrdersMergePublisher`'s `INSERT ... ON CONFLICT ... RETURNING` | `PublishResult.published_business_keys` | `cursor.fetchall()` after `conn.execute(_PUBLISH_SQL...)` | WIRED | Read directly in both files: `published_business_keys = tuple(str(row[0]) for row in cursor.fetchall())`. |
+| `_apply_post_publish_barriers_and_persist` | `ctx.metadata.resolve_rejected_records_for_business_keys` | Direct call, `dataset_id`+`published_business_keys` params, strictly BEFORE `record_rejected_records` | WIRED | Read directly; ordering comment explicitly ties this to CR-01's guarantee holding under the new predicate. |
+| `resolve_rejected_records_for_business_keys` | `meta.rejected_records.resolution_type` | `UPDATE ... FROM meta.batches WHERE ... business_key = ANY(%s) ... resolution_type='PENDING'` | WIRED, live-proven | Live query this session: `PENDING: 8, REDRIVEN: 2` — was `PENDING: 5, REDRIVEN: 0` at the prior verification; the link has now fired twice against real content-differing-correction data. |
+| `DatasetConfig` validation | `staging.py`/`run.py`'s business-key column resolution | `_check_at_most_one_business_key_column` model_validator | WIRED | Confirmed present and unit-tested; both real dataset configs (`customers.yaml`/`orders.yaml`) still validate cleanly (single-column business keys). |
 
-### Data-Flow Trace (Level 4) — the VALID-08 chain specifically
+### Data-Flow Trace (Level 4) — the VALID-08 chain, re-traced
 
-Traced independently this session, live, on the running cluster:
+1. **Extraction:** A quality-rule rejection (e.g. `PatternRule`) calls `_extract_business_key(row, self._business_key_index)`, populating `RejectedRecord.business_key` from the dataset's configured business-key column — confirmed by reading the code and by the unit tests added this round (`test_quality_rules.py`, `test_uniqueness.py`) asserting the extracted value on both the populated and `None`-index paths.
+2. **Persistence:** `record_rejected_records` inserts `record.business_key` into `meta.rejected_records.business_key` — confirmed by reading `postgres.py`'s `INSERT` column/parameter list.
+3. **Publish:** `MergePublisher`/`OrdersMergePublisher`'s `RETURNING`-augmented `INSERT ... ON CONFLICT` returns exactly the business-key values the statement actually affected (excluding conflict-guard-blocked "locked but unchanged" rows) — confirmed by direct SQL reading and by the independently-reproduced CR-01 regression test.
+4. **Resolution:** `run_ingest` passes those actually-published keys into `resolve_rejected_records_for_business_keys(dataset_id=..., business_keys=...)`, which flips every `PENDING` row sharing `(dataset_id, business_key)` — regardless of `batch_id` — to `REDRIVEN`.
+5. **Live confirmation:** `meta.rejected_records` on the real cluster shows `REDRIVEN: 2`, up from `0` at the prior verification, with the currently-deployed image tag (`4a2ded0`) matching the commit that includes both the CR-01 and WR-01 fixes — i.e. the chain traced above is not merely unit-tested, it is the exact code presently running against the live platform.
 
-1. `meta.rejected_records` (live query): 5 rows, all `resolution_type='PENDING'`, 0 `resolution_type='REDRIVEN'`.
-2. `backfill`/`backfill_dag_run` (live query, airflow-db): 2 rows total, both from the debug session's manual `airflow backfill create` CLI reproduction (`backfill_id=1`, `exception_reason='in flight'`; `backfill_id=2`, `dag_run_id=2781`, no exception — i.e. a genuine re-execution of the DAG happened once) — neither originates from an actual `pytest -m cluster` run of `test_backfill_reentry.py`, and neither is a content-differing-correction scenario (the debug session reused the identical, unmodified file).
-3. **Conclusion:** the data-flow chain this truth depends on (`corrected file discovers → new batch_id → resolve_rejected_records_for_batch(new batch_id) → does it or doesn't it touch the OLD batch's PENDING row`) has literally never executed on this cluster. This is DISCONNECTED in the sense of "never observed," not "observed and broken" — an important distinction from the original code-level concern raised in the first verification pass, which speculated this would fail; the debug session's own investigation shows the earlier failure (300s timeout) was NOT this concern at all, but an unrelated Airflow row-lock race that has since been fixed at the test level.
+**Conclusion:** DISCONNECTED (prior verification) → FLOWING (this verification). The chain that previously "never executed on this cluster" now demonstrably has, twice, with the corrected code deployed.
+
+### Behavioral Spot-Checks / Test Suite Execution
+
+Independently re-run this session (not trusting any prior SUMMARY/REVIEW/REVIEW-FIX claim):
+
+| Suite | Command | Result | Status |
+|-------|---------|--------|--------|
+| ruff | `ruff check packages/dataplat/src tests` | All checks passed! | PASS |
+| mypy | `mypy packages/dataplat/src packages/csv-processor/src` | Success: no issues found in 72 source files | PASS |
+| unit + property + policy | `pytest tests/unit tests/property tests/policy -q -m "not integration and not dagtest and not cluster and not manifests"` | 622 passed, 12 deselected | PASS |
+| integration (testcontainers) | `pytest tests/integration -q` | 117 passed | PASS |
+| integration, targeted (backfill/wiring/referential) | `pytest tests/integration/test_backfill_resolution.py tests/integration/test_publish_transaction_wiring.py tests/integration/test_referential_integrity.py -v` | 10/10 passed, 0 skipped | PASS |
+| unit + integration combined (SUMMARY's own claimed command) | `pytest tests/unit tests/integration -m "not cluster" -q` | 609 passed | PASS (matches SUMMARY exactly) |
+| policy | `pytest tests/policy -q` | 134 passed | PASS |
+| CR-01 regression test, reproduced against PRE-FIX code (isolated `git worktree` @ `a4c004d^`, current test file, `PYTHONPATH` override) | `pytest .../test_staged_but_conflict_guard_blocked_business_key_stays_pending -v` | `AssertionError: assert 'REDRIVEN' == 'PENDING'` | FAILS as claimed — confirms non-tautological |
+| Same test against current (fixed) code | same | `1 passed` | PASS |
+| `make check` (Local gate: lint/format/typecheck/imports/policy/test/fixtures-verify) | `make check` | 492 passed, 71/71 corpus fixtures verified | PASS |
+
+### Live-Cluster State (independently confirmed by this verifier, this session)
+
+```
+$ kubectl -n data exec analytics-db-1 -- psql -U postgres -d analytics -c "SELECT version_num FROM meta.alembic_version"
+ version_num
+-------------
+ 0020
+```
+
+```
+$ kubectl -n data exec analytics-db-1 -- psql -U postgres -d analytics -c "\d meta.rejected_records" | grep business_key
+ business_key       | text                     |           |          |
+    "ix_rejected_records_business_key_resolution" btree (business_key, resolution_type)
+```
+
+```
+$ kubectl -n data exec analytics-db-1 -- psql -U postgres -d analytics -c "SELECT resolution_type, count(*) FROM meta.rejected_records GROUP BY resolution_type"
+ resolution_type | count
+------------------+-------
+ PENDING          |     8
+ REDRIVEN         |     2
+```
+Was `PENDING: 5, REDRIVEN: 0` at the prior verification — the resolution mechanism has now fired live, twice, against real content-differing-correction data.
+
+```
+$ kubectl -n airflow exec deploy/airflow-api-server -- airflow dags list | grep -E "csv_ingest_(customers|orders)"
+csv_ingest_customers | ...
+csv_ingest_orders    | ...
+```
+
+```
+$ kubectl -n airflow exec deploy/airflow-api-server -- airflow variables get csv_processor_image
+localhost:5001/csv-processor:4a2ded0
+```
+`4a2ded0` is the WR-01-fix commit (which itself follows the CR-01-fix commit `a4c004d`) — confirms the currently-deployed image includes both of this round's code-review fixes, not a stale pre-fix build.
+
+```
+$ kubectl -n vault exec vault-0 -- vault status | grep Sealed
+Sealed    false
+```
 
 ### Requirements Coverage
 
@@ -137,102 +153,35 @@ Traced independently this session, live, on the running cluster:
 | VALID-02 | 08-01, 08-04, 08-07, 08-10, 08-11 | Completeness/uniqueness/validity-range/pattern/referential | SATISFIED | Unchanged. |
 | VALID-03 | 08-01, 08-04, 08-07, 08-10 | Quarantine per configurable strategy | SATISFIED | Unchanged. |
 | VALID-04 | 08-01, 08-03, 08-11 | Machine-readable reports in Postgres + MinIO | SATISFIED | Unchanged. REQUIREMENTS.md stale, confirmed again. |
-| VALID-07 | 08-05, 08-08, 08-12, 08-14 | Referential integrity, configurable fail/quarantine/warn | **SATISFIED, now live-proven** | Upgraded this session from "blocked on deployment" to fully satisfied — see Truth #5. |
-| VALID-08 | 08-03, 08-12, 08-13, 08-14, 08-15 | Documented re-drive path after correction | **NOT SATISFIED (confirmed)** | Test-robustness gap closed at code level (plan 08-15 + live refinements); the underlying re-drive behavior is confirmed NOT working as designed — a real `batch_key`/`batch_id` architecture gap, needing a design decision. See Truth #3. |
+| VALID-07 | 08-05, 08-08, 08-12, 08-14 | Referential integrity, configurable fail/quarantine/warn | SATISFIED | Unchanged, live-proven per prior verification, re-confirmed unaffected by this round. |
+| VALID-08 | 08-03, 08-12, 08-13, 08-14, 08-15, 08-16, 08-17, 08-18 | Documented re-drive path after correction | **SATISFIED (gap closed this round)** | Was `NOT SATISFIED` at the prior verification (live-confirmed batch_id/batch_key architecture mismatch). Now closed at schema, extraction, resolution-matching, correctness-hardening (CR-01), and live-cluster levels — see Truth #3 above. REQUIREMENTS.md still shows `[ ]`/"Pending" — stale doc (see note below), should now be updated to `[x]`. |
 | VALID-09 | 08-01, 08-09, 08-11 | Volume/quality anomalies against persisted baselines, no ML | SATISFIED | Unchanged. |
 | LOAD-10 | 08-02, 08-12 | File integrity verified before processing | SATISFIED | Unchanged. REQUIREMENTS.md stale, confirmed again. |
 | LOAD-11 | 08-01, 08-06 | Optional `_BATCH_COMPLETE` manifest support | SATISFIED | Unchanged. REQUIREMENTS.md stale, confirmed again. |
 
-**Note on REQUIREMENTS.md staleness (unchanged from prior verification):** 5 of 9 phase-08 requirement IDs (VALID-01, VALID-04, VALID-08, LOAD-10, LOAD-11) are still shown `[ ]`/"Pending" in `.planning/REQUIREMENTS.md` despite substantive, tested implementations (VALID-08 excepted per the caveat above). Should be corrected, but is a documentation lag, not a code gap.
+**Note on REQUIREMENTS.md staleness (unchanged pattern from prior verification, now includes VALID-08):** 5 of 9 phase-08 requirement IDs (VALID-01, VALID-04, VALID-08, LOAD-10, LOAD-11) are still shown `[ ]`/"Pending" in `.planning/REQUIREMENTS.md` despite substantive, tested, and — for VALID-08 specifically — now live-proven implementations. This is a documentation-lag housekeeping item, not a code gap; recommend updating REQUIREMENTS.md's checkboxes and the phase-mapping table's "Pending"→"Complete" for these 5 rows (VALID-08 in particular, since this round specifically closed it) as a follow-up.
 
-**Orphaned requirements:** None. Unchanged from prior verification.
+**Orphaned requirements:** None. All 9 requirement IDs for Phase 8 are claimed by at least one plan (08-01 through 08-18).
 
 ### Anti-Patterns Found
 
-No `TBD`/`FIXME`/`XXX`/`TODO`/`HACK`/`PLACEHOLDER` markers found in this phase's key files. No stub implementations found in the validation rule classes or barrier stages.
+No `TBD`/`FIXME`/`XXX`/`TODO`/`HACK`/`PLACEHOLDER` markers found in any file touched by this gap-closure round (migrations/0020, `models/record.py`, `metadata/{repository,postgres}.py`, `pipeline/run.py`, `load/publish/{protocol,merge,merge_orders}.py`, `config/model.py`, `validate/{completeness,pattern,validity_range,uniqueness,referential}.py`, `load/staging.py`). No stub implementations found.
 
-**Found this session, fixed immediately after:** `airflow/dags/csv_ingest_customers.py` had grown from 149 to 173 lines (quick task `260817-mvp`, commit `ea5a38e`, applied 2026-08-17 after the prior verification), breaking `tests/policy/test_dag_line_budget.py::test_csv_ingest_customers_stays_under_150_lines`. The change itself (a `max_active_tis_per_dag=3` concurrency cap plus a long rationale comment) is functionally correct and live-verified working — it fixed a genuine cluster-wide CPU-starvation bug — but the quick task's own SUMMARY only ran `tests/unit` (484 tests), never `tests/policy`, so this regression went uncaught until this verification pass. Trimmed back to 149 lines immediately after this report was drafted (commit `a78680e`); `make policy`/`make check` are green again.
+**Deliberately-left-open items from 08-REVIEW.md, still deferred, non-blocking:** WR-02 (a fourth `_extract_business_key`/`_reconstruct_raw_line` duplication across the four rule files) was explicitly evaluated and left unfixed by the review-fix pass as a documented, deliberate DRY-not-correctness tradeoff — reasonable judgment call, does not affect any of this phase's observable truths. IN-01 (`get_or_create_dataset` commits on its own connection, outside the publish transaction) is informational-severity in the original review and was excluded from the review-fix pass's scope by design (`fix_scope=critical_warning`) — harmless in practice (idempotent, content-free bookkeeping row), noted for completeness, not a phase-blocking gap.
 
-Carried forward from 08-REVIEW.md (unchanged): CR-01 and WR-04 fixed and re-confirmed present; WR-01/WR-02/WR-03 remain deliberately deferred, documented, non-blocking (metric-accuracy, dormant-strategy-gap, dormant-type-cast — none causes silent data loss today).
-
-### Behavioral Spot-Checks / Test Suite Execution
-
-Independently re-run this session (not trusting any prior SUMMARY/VERIFICATION claim):
-
-| Suite | Command | Result | Status |
-|-------|---------|--------|--------|
-| unit + property + policy | `pytest tests/unit tests/property tests/policy -q -m "not integration and not dagtest and not cluster and not manifests"` | 613 passed, 1 failed, 12 deselected at verification time; re-run after the line-budget fix (commit `a78680e`): **614 passed, 12 deselected** | PASS (post-fix) |
-| ruff (targeted, backfill test) | `ruff check tests/e2e/slice/test_backfill_reentry.py tests/e2e/slice/test_referential_orphan.py` | All checks passed! | PASS |
-| mypy (in-scope) | `mypy packages/dataplat/src packages/csv-processor/src` | Success: no issues found in 72 source files | PASS |
-| pytest --collect-only (e2e slice) | `pytest tests/e2e/slice/test_backfill_reentry.py tests/e2e/slice/test_referential_orphan.py --collect-only -q` | 2 tests collected | PASS |
-| integration (testcontainers Postgres/MinIO) | `pytest tests/integration -q` | 116 passed | PASS |
-| dagtest (testcontainers Airflow metadata DB) | `pytest tests/dagtest -q` | 2 passed | PASS |
-| e2e cluster (live, this session) | Not run — see Summary above for reasoning | N/A | SKIPPED (deliberate — see rationale above) |
-
-### Live-Cluster State (independently confirmed by this verifier, this session)
-
-```
-$ kubectl -n data exec analytics-db-1 -- psql -U postgres -d analytics -c "SELECT version_num FROM meta.alembic_version"
- version_num
--------------
- 0019
-```
-Fully current (was `0013`, 4 behind, at the prior verification).
-
-```
-$ kubectl -n airflow exec deploy/airflow-api-server -- airflow dags list
-csv_ingest_customers | ...
-csv_ingest_orders    | ...
-smoke_kubernetes_pod | ...
-```
-Both ingestion DAGs deployed (was missing `csv_ingest_orders` at the prior verification).
-
-```
-$ kubectl -n vault exec vault-0 -- vault status
-Sealed    false
-```
-Unsealed (was sealed at the prior verification).
-
-```
-$ kubectl -n data exec airflow-db-1 -- psql -U postgres -d airflow -c "SELECT b.id, b.dag_id, b.reprocess_behavior, bdr.logical_date, bdr.dag_run_id, bdr.exception_reason FROM backfill b JOIN backfill_dag_run bdr ON bdr.backfill_id = b.id WHERE b.dag_id='csv_ingest_customers' ORDER BY b.id DESC;"
- id | dag_run_id | exception_reason
-----+------------+------------------
-  2 |       2781 | (null)
-  1 |            | in flight
-(2 rows)
-
-$ kubectl -n data exec analytics-db-1 -- psql -U postgres -d analytics -c "SELECT resolution_type, count(*) FROM meta.rejected_records GROUP BY resolution_type;"
- resolution_type | count
-------------------+-------
- PENDING          |     5
-(1 row)
-```
-Confirms: only 2 backfill invocations have ever occurred on this cluster (both manual debug-session reproductions, not from the actual test suite), and zero `meta.rejected_records` rows have ever been marked `REDRIVEN`. VALID-08's re-drive path has never been observed to succeed OR fail end-to-end on this cluster.
-
-```
-$ kubectl describe nodes | grep -A5 "Allocated resources"
-airflow-platform-worker:   cpu 3 (100%)
-airflow-platform-worker2:  cpu 2360m (78%)
-```
-Node CPU allocation remains tight, consistent with STATE.md's own already-documented, deliberately-deferred blocker (kind cluster node CPU budget — physical host ceiling, needs cluster recreation to resolve).
+Carried forward from the original phase's own review (unchanged, non-blocking): WR-01/WR-02/WR-03 from the ORIGINAL 08-REVIEW.md (a metric-accuracy concern, a dormant-strategy-gap, and a dormant-type-cast concern) — none is exercised by either live dataset config today, none causes silent data loss.
 
 ### Human Verification Required
 
-1. **Once the deliberately-deferred kind/cluster.yaml node-CPU-budget decision is actioned (or the cluster is otherwise free of contention for a sustained window), run `pytest tests/e2e/slice/test_backfill_reentry.py -x -m cluster` to a genuine completion** (pass or fail, not another environmental timeout).
-   **Expected:** Either the test passes cleanly (proving `resolve_rejected_records_for_batch`'s `batch_id` scoping correctly resolves a content-differing correction's PENDING row, closing VALID-08's audit-trail proof), or it fails specifically at `_assert_row_resolved` (proving the batch_key/content_sha256 architecture concern is real, which would then need a Rule-4-territory design decision per deferred-items.md — NOT a quick fix).
-   **Why human:** Requires a live cluster window free of the already-known, already-deferred CPU-contention issue; this verifier deliberately did not attempt this run itself (see Summary above).
+None. All prior human-verification items (the live `-m cluster` backfill-reentry proof) have been completed and are independently corroborated by this session's live-cluster query (`REDRIVEN: 2`, up from `0`) and the deployed image tag matching the code-review-fixed commit. No new items were identified.
 
 ### Gaps Summary
 
-**One new, real regression was found this session and fixed immediately after:** `tests/policy/test_dag_line_budget.py::test_csv_ingest_customers_stays_under_150_lines` failed (173 vs. <150 lines), breaking `make policy`/`make check`. Introduced by a post-phase quick task that touched a phase-08 required artifact without running the full policy suite. It never threatened the phase's core data-integrity goal (the underlying concurrency-cap fix was always functionally correct and live-verified working) — it was a project-convention/architecture-hygiene violation (ORCH-06: DAG files stay thin). Fixed by trimming the added comment block (commit `a78680e`, docstring/comment condensation only, no functional change); `make policy` (124 tests) and `make test` (484 tests) both re-confirmed clean.
+None. The single gap the prior verification confirmed FAILING live (VALID-08 / roadmap success criterion 3) is closed: schema (migration 0020), capture-at-reject-time (business_key extraction wired into every real rejection path), resolution-matching (business-key-scoped, not batch-scoped), a genuine correctness bug this round's own code review caught before it could cause silent false-positive resolutions (CR-01, independently reproduced as a real, non-tautological regression), and a config-cardinality guard (WR-01) are all independently confirmed present, tested, and — for the live-cluster claim specifically — corroborated by this session's own direct query of the running platform.
 
-**Real progress since the prior verification:** the deployment gaps that previously blocked live verification are now closed (migrations current, both DAGs deployed, Vault unsealed), and VALID-07 is now genuinely live-proven (one full clean e2e pass). The test-robustness fix for VALID-08's e2e proof (plan 08-15 + review addendum) is code-complete and doubly reviewed.
-
-**UPDATE, same session, post-verification (2026-08-17T20:35-21:15Z):** the `human_verification` item above WAS run to completion live. After clearing the `raw/customers/` S3 backlog (54 objects, was blocking `discover` on every attempt) and two further live-driven refinements to the retry-timing fix (`441a51a`, `368c83c`), `test_backfill_reentry.py` ran end-to-end — discover, ingest, real backfill re-execution, corrected row published — and failed only at the final `REDRIVEN` assertion. **VALID-08's re-drive path is confirmed NOT working as designed**, a real `dataplat` architecture gap (`batch_key`/`batch_id` scoping mismatch), not an infra/timing issue. Full detail: `post_verification_live_result` in frontmatter, `gaps` entry above, `.planning/debug/resolved/backfill-does-not-redrive-rejected-row.md`.
-
-**Recommendation (superseded):** Phase 8 is code-complete and the retry-timing/infra work is fully resolved, but VALID-08 — one of the phase's 5 core success criteria — is now confirmed to genuinely fail as designed. This is a real, phase-blocking gap (not a standing human-verification item): the phase's own goal ("every rejected record... has a documented path back into the pipeline") is not actually met for content-differing corrections. Recommend `/gsd:plan-phase 8 --gaps` to plan a fix for the `gaps` entry above — a real design decision (Rule 4 territory), not mechanical work.
+**Recommendation:** Phase 8 is complete. All 9 requirement IDs are satisfied with codebase evidence; all 5 roadmap success criteria are VERIFIED. The only follow-up item (non-blocking) is updating REQUIREMENTS.md's stale `[ ]` checkboxes for VALID-01/VALID-04/VALID-08/LOAD-10/LOAD-11 to `[x]`/"Complete" — a documentation task, not a code change.
 
 ---
 
-_Verified: 2026-08-17T20:10:00Z_
+_Verified: 2026-08-18T02:00:00Z_
 _Verifier: Claude (gsd-verifier)_
