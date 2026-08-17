@@ -81,20 +81,51 @@ if TYPE_CHECKING:
 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
 _LEASE_DURATION = timedelta(minutes=5)
 
-# This phase is deliberately single-dataset (04-CONTEXT.md: "one dataset
-# (customers)"), mirroring `MergePublisher`'s own hardcoded business-column
-# list against `normalized.customers` (`load/publish/merge.py`'s module
-# docstring) -- `DatasetConfig` carries no generic "business columns" field
-# to resolve this from yet. A later, generic multi-dataset design resolves
-# both from config together; changing one without the other would silently
-# desync staging's column list from publication's.
-_CUSTOMERS_TARGET_COLUMNS: tuple[str, ...] = (
-    "customer_id",
-    "name",
-    "country",
-    "birth_date",
-    "event_ts",
-)
+# A dataset-keyed lookup, not yet a generic config-derived resolution --
+# `DatasetConfig` carries no canonical "business columns in order" field yet
+# (08-05-PLAN.md's own framing, mirroring `MergePublisher`'s/
+# `OrdersMergePublisher`'s own hardcoded per-dataset business-column lists,
+# `load/publish/merge.py`/`merge_orders.py`'s module docstrings). Phase 4
+# started this as a single hardcoded `_CUSTOMERS_TARGET_COLUMNS` constant
+# ("one dataset (customers)", 04-CONTEXT.md); this phase adds `orders` as a
+# second real dataset (08-CONTEXT.md D-13..D-17) without inventing the
+# generic resolution -- now keyed by dataset name so a second real dataset
+# does not silently reuse the first one's column list. A third dataset added
+# later without an entry here fails loudly at the lookup site below (a named
+# `DataPlatformError`), never a bare `KeyError` and never a silent fallback
+# onto another dataset's columns.
+_TARGET_COLUMNS_BY_DATASET: dict[str, tuple[str, ...]] = {
+    "customers": ("customer_id", "name", "country", "birth_date", "event_ts"),
+    "orders": ("order_id", "customer_id", "order_date", "amount"),
+}
+
+
+def _target_columns_for_dataset(dataset: str) -> tuple[str, ...]:
+    """Resolve ``dataset`` through ``_TARGET_COLUMNS_BY_DATASET``, or fail loudly.
+
+    Split out of ``run_ingest`` itself purely to keep that function's own
+    statement count under ``PLR0915``'s threshold -- no behavior change from
+    an inlined lookup.
+
+    Args:
+        dataset: ``ctx.config.dataset``, e.g. ``"customers"``/``"orders"``.
+
+    Returns:
+        That dataset's ordered staging target columns.
+
+    Raises:
+        DataPlatformError: ``dataset`` has no entry -- named and structured,
+            never a bare ``KeyError`` and never a silent fallback onto
+            another dataset's columns.
+    """
+    try:
+        return _TARGET_COLUMNS_BY_DATASET[dataset]
+    except KeyError:
+        msg = f"run_ingest has no _TARGET_COLUMNS_BY_DATASET entry for dataset {dataset!r}"
+        raise DataPlatformError(
+            msg,
+            context={"dataset": dataset, "known_datasets": sorted(_TARGET_COLUMNS_BY_DATASET)},
+        ) from None
 
 
 class _Progress:
@@ -357,7 +388,7 @@ def run_ingest(
                 # opens next.
                 with ctx.db.connection() as staging_conn:
                     staging_result = StagingLoader(
-                        target_columns=_CUSTOMERS_TARGET_COLUMNS,
+                        target_columns=_target_columns_for_dataset(ctx.config.dataset),
                     ).load(
                         ctx,
                         staging_conn,

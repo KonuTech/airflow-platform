@@ -1,0 +1,85 @@
+# configs/datasets/orders.yaml — the second real, non-illustrative dataset
+# config in this repository (08-CONTEXT.md D-13..D-17). Proves `orders` runs
+# through the SAME config-driven Source -> Stage -> Publisher pipeline
+# `customers.yaml` already uses, no new capability invented (08-05-PLAN.md
+# objective).
+#
+# Merged OVER configs/defaults.yaml, then validated against
+# dataplat.config.model.DatasetConfig (dataplat.config.loader.load_config).
+# dataplat.config.registry.ConfigRegistry.sync() hashes the merged, validated
+# document (dataplat.config.hashing.hash_config) and versions it into
+# meta.config_versions the moment it syncs, exactly as customers.yaml does.
+#
+# Shape mirrors customers.yaml's own (source:/deduplication:/load:/
+# batching:/columns: blocks), adapted to normalized.orders's four business
+# columns (order_id, customer_id, order_date, amount).
+#
+# No quality: block yet -- that lands in plan 08-08, which wires
+# ReferentialIntegrityBarrier's D-16 orphan-order handling
+# (error_type=REFERENTIAL_ORPHAN, strategy=QUARANTINE_RECORD). This plan's
+# job is only to make `orders` a real, working second dataset through the
+# full staging->publish pipeline (see this file's own PLAN.md objective).
+#
+# No filename:/normalization: blocks either -- customers.yaml's own
+# precedent (no filename-mask delivery shape, no numeric/currency locale
+# needs) still holds here: `amount`'s decimal type parses correctly under
+# NumericNormalizer's own defaults (decimal_separator=".", no thousands
+# separator) for a plain "123.45"-shaped value, which is exactly what this
+# plan's synthetic fixture uses -- StagingLoader falls back to those same
+# defaults whenever DatasetConfig.normalization is None
+# (dataplat.load.staging, decimal_separator=... if normalization is not
+# None else ".").
+
+dataset: orders
+config_schema_version: 1
+source:
+  type: csv
+  bucket: raw
+  path: orders/
+  change_semantics: snapshot
+  duplicate_policy: skip
+deduplication:
+  strategy: business_key_latest
+  keys: [order_id]
+  order_by: [order_date desc]
+load:
+  # NOTE the deliberate divergence from customers.yaml's `strategy: merge`:
+  # `merge_orders` is a DIFFERENT registry key resolving to a DIFFERENT
+  # Publisher (OrdersMergePublisher, load/publish/merge_orders.py) -- this
+  # phase's registry split is per-dataset (each Publisher is single-dataset,
+  # hardcoded against its own target table's real schema), so `orders` needs
+  # its own strategy key even though the config SHAPE around it is otherwise
+  # identical to customers.yaml's (D-17).
+  strategy: merge_orders
+  target: normalized.orders
+batching:
+  max_units_per_run: 100
+
+# columns: is D-17's minimal orders schema -- order_id/customer_id/
+# order_date/amount, mirroring customers.yaml's own columns: shape and
+# strptime-format discipline (STACK.md §F: dates are never parsed by
+# inference).
+columns:
+  - name: order_id
+    type: string
+    nullable: false
+    required: true
+    business_key: true
+    description: "Natural business key for an order record"
+  - name: customer_id
+    type: string
+    nullable: false
+    required: true
+    description: >-
+      References customers.customer_id -- checked by
+      ReferentialIntegrityBarrier (a later plan, 08-08); this plan proves
+      orders can publish rows without that barrier existing yet.
+  - name: order_date
+    type: date
+    nullable: true
+    required: true
+    format: "%Y-%m-%d"
+  - name: amount
+    type: decimal
+    nullable: true
+    required: true
