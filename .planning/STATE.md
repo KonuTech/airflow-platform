@@ -4,13 +4,13 @@ milestone: v1.35.5
 milestone_name: milestone
 status: executing
 stopped_at: Phase 8 context gathered
-last_updated: "2026-08-17T07:42:43.487Z"
-last_activity: 2026-08-17 -- Phase 08 execution started
+last_updated: "2026-08-17T08:39:37.775Z"
+last_activity: 2026-08-17
 progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 84
-  completed_plans: 70
+  completed_plans: 77
   percent: 64
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 08 (validation-quarantine-metadata-control-plane-completion) — EXECUTING
-Plan: 1 of 14
-Status: Executing Phase 08
-Last activity: 2026-08-17 -- Phase 08 execution started
+Plan: 2 of 14
+Status: Ready to execute
+Last activity: 2026-08-17
 
-Progress: [██████████] 100%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [██████████] 100%
 | Phase 05 P03 | 95min | 2 tasks | 7 files |
 | Phase 05 P04 | 40min | 3 tasks | 5 files |
 | Phase 05 P05 | 20min | 2 tasks | 4 files |
+| Phase 08 P07 | 25min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,8 @@ Recent decisions affecting current work:
 - [Phase 05]: Plan 05-05: the script-side non-vacuity test in test_no_stale_secrets.py mutates scripts/stages/75-etl.sh, not the plan-cited scripts/etl-secrets.sh — scripts/etl-secrets.sh was deleted outright in plan 05-03 once all three D-01 migrations completed, before this plan's own session began -- 75-etl.sh is a real, currently-committed script under the same scanned scripts/**/*.sh surface
 - [Phase 05]: Plan 05-06 gap-closure fixed vault-bootstrap.py's CR-01/CR-02 defects and proved them live, but the live proof (Task 2) surfaced a much larger, unrelated infrastructure fault: a Docker Desktop/WSL2-level restart at 2026-08-14T16:58:55Z broke the DAGs hostPath bind mount on all 3 kind nodes simultaneously, silently freezing Airflow's scheduler for EVERY DAG cluster-wide (via DagModel.is_stale never clearing) — not scoped to csv_ingest_customers, not related to Vault/credentials. Diagnosed and fixed via a dedicated /gsd:debug session (.planning/debug/resolved/dagrun-scheduler-stall.md): docker restart on each affected kind node reattaches the mount and self-heals scheduling with no Airflow-side changes needed. — This previously-undiagnosed cluster-wide freeze likely explains earlier session anomalies attributed to "self-draining backlog slowness" (line below, now superseded) — the backlog wasn't just slow, it had actually stopped advancing entirely for a period. Any future WSL2/Docker Desktop restart or suspend/resume risks recreating this exact symptom; the fix is always the same (docker restart on the affected kind node(s)), and DagModel.is_stale + /mnt/dags mount state on each node are the fastest diagnostic signals.
 - [Phase 07]: Decision-coverage gate overridden for Phase 7 planning — 13/20 CONTEXT.md decisions (D-01,D-02,D-05,D-06,D-07,D-08,D-09,D-10,D-11,D-13,D-14,D-15,D-19) had no literal D-ID citation in any plan file — Verified via grep spot-check (OTLP, statsd, webhook, Tempo, v_customers_lineage, record_lineage absence, proof-over-prose test pattern all present across plans) plus 3 rounds of gsd-plan-checker semantic review that the underlying decision content IS implemented — this was a citation-format gap, not a dropped decision. User chose 'Proceed anyway' over re-planning for pure citation additions. If verify-phase later finds any of these 13 decisions genuinely unimplemented (not just uncited), that is a real regression worth investigating, not an expected consequence of this override.
+- [Phase 08]: RejectionRateCircuitBreaker's constructor accepts total_rows_read/total_rows_rejected directly rather than reading them from ctx, since BarrierStage.apply(ctx) has no row-count field -- a fresh instance is constructed per run by the future 08-11 caller after StagingLoader.load() returns its totals
+- [Phase 08]: UniquenessRule is deliberately within-chunk-only scoped -- no cross-chunk state; deduplication.strategy: business_key_latest (wired since Phase 4) is the real whole-run uniqueness enforcement mechanism, this rule is a pre-publish diagnostic surface only
 
 ### Pending Todos
 
@@ -112,6 +115,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-17T05:51:18.245Z
+Last session: 2026-08-17T08:35:29.421Z
 Stopped at: Phase 8 context gathered
 Resume file: 
+None

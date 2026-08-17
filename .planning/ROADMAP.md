@@ -458,7 +458,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 08-07-PLAN.md — RejectionRateCircuitBreaker (D-10) + UniquenessRule (wave 3)
+- [x] 08-07-PLAN.md — RejectionRateCircuitBreaker (D-10) + UniquenessRule (wave 3)
 - [ ] 08-08-PLAN.md — ReferentialIntegrityBarrier (VALID-07) + orders.yaml quality: REFERENTIAL rule (wave 3)
 - [ ] 08-09-PLAN.md — VolumeAnomalyBarrier (VALID-09 minimal slice) (wave 3)
 

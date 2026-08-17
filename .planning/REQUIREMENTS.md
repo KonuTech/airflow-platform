@@ -100,8 +100,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 ### VALID — Validation, Quality, Quarantine and Reconciliation
 
 - [ ] **VALID-01**: Structural validation reports expected vs actual column count, malformed rows, unclosed quotes and missing delimiters with row number, column where possible, error type and diagnostics — *(DoD 30)*
-- [ ] **VALID-02**: Data-quality validation covers completeness, uniqueness, validity ranges, patterns and referential integrity, with configurable thresholds producing PASS / PASS_WITH_WARNING / FAIL / QUARANTINE — *(DoD 31)*
-- [ ] **VALID-03**: Invalid data is quarantined per configurable strategy (`FAIL_FILE`, `REJECT_RECORD`, `QUARANTINE_FILE`, `QUARANTINE_RECORD`, `WARN_AND_CONTINUE`), retaining source file, row number, error, run and timestamp — and never silently discarded — *(DoD 32)*
+- [x] **VALID-02**: Data-quality validation covers completeness, uniqueness, validity ranges, patterns and referential integrity, with configurable thresholds producing PASS / PASS_WITH_WARNING / FAIL / QUARANTINE — *(DoD 31)*
+- [x] **VALID-03**: Invalid data is quarantined per configurable strategy (`FAIL_FILE`, `REJECT_RECORD`, `QUARANTINE_FILE`, `QUARANTINE_RECORD`, `WARN_AND_CONTINUE`), retaining source file, row number, error, run and timestamp — and never silently discarded — *(DoD 32)*
 - [ ] **VALID-04**: Machine-readable validation reports are produced and persisted as rows in PostgreSQL as well as artifacts in MinIO — *(DoD 33)*
 - [ ] **VALID-05**: Source-to-target reconciliation compares record counts, sums, checksums, min/max and key counts, reporting discrepancies explicitly — *(DoD 55)*
 - [ ] **VALID-06**: Source-provided control totals are validated against the loaded target — *(DoD 56)*
@@ -335,8 +335,8 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | SCHEMA-06 | Phase 6 | Complete |
 | SCHEMA-07 | Phase 3 | Complete |
 | VALID-01 | Phase 8 | Pending |
-| VALID-02 | Phase 8 | Pending |
-| VALID-03 | Phase 8 | Pending |
+| VALID-02 | Phase 8 | Complete |
+| VALID-03 | Phase 8 | Complete |
 | VALID-04 | Phase 8 | Pending |
 | VALID-05 | Phase 9 | Pending |
 | VALID-06 | Phase 9 | Pending |
