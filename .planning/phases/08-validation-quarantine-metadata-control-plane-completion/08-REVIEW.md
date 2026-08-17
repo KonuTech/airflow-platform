@@ -2,7 +2,7 @@
 phase: 08-validation-quarantine-metadata-control-plane-completion
 reviewed: 2026-08-17T11:12:58Z
 depth: standard
-files_reviewed: 62
+files_reviewed: 63
 files_reviewed_list:
   - airflow/dags/_common/integrity_gate.py
   - airflow/dags/csv_ingest_customers.py
@@ -74,6 +74,16 @@ findings:
   info: 0
   total: 5
 status: issues_found
+addendum:
+  reviewed: 2026-08-17T00:00:00Z
+  scope: gap-closure (plan 08-15, single file)
+  findings:
+    critical: 0
+    warning: 3
+    info: 2
+    total: 5
+  all_resolved: true
+  resolved_commit: cb56e15
 ---
 
 # Phase 08: Code Review Report
@@ -116,6 +126,12 @@ Three further, lower-severity issues were found: a metric-conflation bug in
 staging before publish; an incomplete strategy-to-outcome mapping in
 `VolumeAnomalyBarrier`; and a `::int` cast on a business key declared
 `type: string` in the dataset config, extended into new SQL this phase.
+
+**Resolution status (updated 2026-08-17, see Addendum below):** CR-01 and
+WR-04 were fixed directly during phase close (commits `9731192`, `e7bf450`
+— see `deferred-items.md`). WR-01/WR-02/WR-03 remain deliberately deferred
+(each requires a design decision not exercised by any live config today —
+see `deferred-items.md`).
 
 ## Critical Issues
 
@@ -352,5 +368,64 @@ subsequent correction is actually applied.
 ---
 
 _Reviewed: 2026-08-17T11:12:58Z_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
+
+## Addendum: Gap-Closure Review (Plan 08-15, 2026-08-17)
+
+**Scope:** `tests/e2e/slice/test_backfill_reentry.py` only — the single file
+modified by plan 08-15 to close `08-HUMAN-UAT.md` gap 2 (a bounded retry
+around `airflow backfill create`, keyed on `backfill_dag_run.exception_reason`,
+working around a confirmed, live-verified Airflow 3.3.0 row-lock race — see
+`.planning/debug/backfill-does-not-redrive-rejected-row.md`).
+
+**Findings:** 0 critical, 3 warning, 2 info — no correctness BLOCKER found
+after tracing the fix against the debug log's live-verified evidence (stale
+reads across retries, collision with Airflow's other `IN_FLIGHT` code path,
+and a `logical_date` round-trip precision mismatch were all ruled out).
+
+**Status: all 5 findings RESOLVED, commit `cb56e15`.**
+
+### WR-05 (was WR-01): Settle loop could not distinguish "row not written yet" from "row written, succeeded"
+
+`_fetch_latest_backfill_exception_reason` returned `None` for both "no
+`backfill_dag_run` row yet" and "row exists, `exception_reason IS NULL`
+(success)" — a delayed write would have silently been treated as success
+with no diagnostic trail.
+
+**Fix applied:** Replaced with `_fetch_latest_backfill_dag_run_row` →
+`(row_found, exception_reason)`, extracted into a new
+`_wait_for_backfill_dag_run_row` helper. The settle loop now breaks on
+`row_found`, and raises a distinct, diagnosable `AssertionError` if no row
+appears within the settle window instead of falling through silently.
+
+### WR-06 (was WR-02): Retry-detection depended on exact `logical_date` equality with no diagnostic if that precondition silently broke
+
+Same root cause and same fix as WR-05 — `_wait_for_backfill_dag_run_row`'s
+explicit `row_found` check now surfaces a loud failure instead of a silent
+no-op if the `logical_date` match ever stops finding a row.
+
+### WR-07 (was WR-03): Retry only covered the DB-observed "in flight" signal, not kubectl/CLI-level transient failures
+
+`_invoke_backfill_create_once` was called once per attempt but a failure
+there was not itself retried, aborting the whole test on attempt 1
+regardless of remaining budget.
+
+**Fix applied:** The CLI invocation is now wrapped in the same
+bounded-attempt retry loop (`try`/`except AssertionError`, same
+`_BACKFILL_CREATE_MAX_ATTEMPTS`/`_BACKFILL_CREATE_RETRY_BACKOFF_SECONDS`
+budget) as the DB-lock race.
+
+### IN-01/IN-02: Bare asserts and unexplained settle-loop timing
+
+**Fix applied:** Added descriptive messages to the two previously-bare
+`assert` statements; the settle loop's defensive (not required) nature is
+now documented inline in `_wait_for_backfill_dag_run_row`'s docstring.
+
+**Verification:** `ruff check`, `mypy`, and `pytest --collect-only` all
+clean on the modified file; full `make test` (484 tests) passes with no
+regressions.
+
+_Addendum reviewed: 2026-08-17T00:00:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
