@@ -107,7 +107,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **VALID-06**: Source-provided control totals are validated against the loaded target — *(DoD 56)*
 - [x] **VALID-07**: Referential integrity between datasets is validated, with configurable `fail` / `quarantine` / `warn` behaviour on orphan records — *(DoD 57)*
 - [ ] **VALID-08**: Quarantined data has a documented re-drive path back into the pipeline after correction — quarantine without an exit is a data graveyard — *(Gap 7)*
-- [ ] **VALID-09**: Volume and quality anomalies are detected against configurable statistical thresholds using persisted historical baselines — no ML — *(Gap 12)*
+- [x] **VALID-09**: Volume and quality anomalies are detected against configurable statistical thresholds using persisted historical baselines — no ML — *(Gap 12)*
 
 ### LOAD — Identity, Idempotency and Transactional Loading
 
@@ -342,7 +342,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | VALID-06 | Phase 9 | Pending |
 | VALID-07 | Phase 8 | Complete |
 | VALID-08 | Phase 8 | Pending |
-| VALID-09 | Phase 8 | Pending |
+| VALID-09 | Phase 8 | Complete |
 | LOAD-01 | Phase 4 | Complete |
 | LOAD-02 | Phase 4 | Complete |
 | LOAD-03 | Phase 4 | Complete |

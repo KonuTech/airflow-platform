@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Completed 08-08-PLAN.md
-last_updated: "2026-08-17T08:50:16.120Z"
+stopped_at: Completed 08-09-PLAN.md
+last_updated: "2026-08-17T09:04:18.023Z"
 last_activity: 2026-08-17
 progress:
   total_phases: 11
   completed_phases: 7
   total_plans: 84
-  completed_plans: 78
+  completed_plans: 79
   percent: 64
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 08 (validation-quarantine-metadata-control-plane-completion) — EXECUTING
-Plan: 3 of 14
+Plan: 4 of 14
 Status: Ready to execute
 Last activity: 2026-08-17
 
-Progress: [█████████░] 93%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [█████████░] 93%
 | Phase 05 P05 | 20min | 2 tasks | 4 files |
 | Phase 08 P07 | 25min | 2 tasks | 5 files |
 | Phase 08 P08 | 25min | 2 tasks | 4 files |
+| Phase 08 P09 | 10min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase 08]: RejectionRateCircuitBreaker's constructor accepts total_rows_read/total_rows_rejected directly rather than reading them from ctx, since BarrierStage.apply(ctx) has no row-count field -- a fresh instance is constructed per run by the future 08-11 caller after StagingLoader.load() returns its totals
 - [Phase 08]: UniquenessRule is deliberately within-chunk-only scoped -- no cross-chunk state; deduplication.strategy: business_key_latest (wired since Phase 4) is the real whole-run uniqueness enforcement mechanism, this rule is a pre-publish diagnostic surface only
 - [Phase 08]: ReferentialIntegrityBarrier's anti-join SELECT list names customer_id/order_id literally (single-dataset, matching OrdersMergePublisher's precedent) even though staging_table/target_table/target_column/staging_column stay config-driven for the JOIN condition — A generic 'any staging table, any column' barrier remains future work, not this plan's scope; documented in the module docstring
+- [Phase 08]: [Phase 08]: VolumeAnomalyBarrier accepts an optional ctx_db_query testing seam so unit tests can inject (historical_average, prior_run_count) directly, keeping the real per-run SQL query the only code path a live caller ever exercises
+- [Phase 08]: [Phase 08]: VolumeAnomalyBarrier's cold-start threshold is <2 prior SUCCEEDED VOLUME rows -- a structural PASS with observed={'historical_average': None, 'prior_run_count': N}, matching UniquenessRule/ReferentialIntegrityBarrier's own strategy-stored-but-mapped precedent for outcome dispatch
 
 ### Pending Todos
 
@@ -117,7 +120,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-17T08:50:16.092Z
-Stopped at: Completed 08-08-PLAN.md
+Last session: 2026-08-17T09:04:17.994Z
+Stopped at: Completed 08-09-PLAN.md
 Resume file: 
 None
