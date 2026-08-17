@@ -464,7 +464,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 08-10-PLAN.md — StagingLoader._build_stages dispatches ctx.config.quality's streaming rules (wave 4)
+- [x] 08-10-PLAN.md — StagingLoader._build_stages dispatches ctx.config.quality's streaming rules (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
