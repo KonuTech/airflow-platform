@@ -373,6 +373,11 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
         ``"s3://validated/customers/8123/report.json"`` -- always non-``None``
         for a run that reaches this call (VALID-04's MinIO-artifact half).
     """
+    # D-23: computed unconditionally, once, at the top of this function --
+    # both the VOLUME barrier below and the resolution call further down
+    # need it, and it must never be queried twice for one run.
+    dataset_id = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
+
     if ctx.config.quality is not None and ctx.config.quality.rejection_rate_threshold is not None:
         circuit_breaker = RejectionRateCircuitBreaker(
             threshold=ctx.config.quality.rejection_rate_threshold,
@@ -383,7 +388,6 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
 
     volume_rule = _find_quality_rule(ctx, "VOLUME")
     if volume_rule is not None:
-        dataset_id = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
         volume_barrier = VolumeAnomalyBarrier(
             dataset_id=dataset_id,
             current_row_count=staging_result.rows_parsed,
@@ -396,27 +400,48 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
         all_findings.extend(volume_barrier.apply(ctx).findings)
 
     ctx.metadata.record_validation_results(conn=conn, run_id=run_id, results=all_findings)
-    # D-05/D-23: this call's real business-key derivation -- which business
-    # keys this run actually published, so their prior-batch PENDING
-    # rejects resolve -- is plan 08-18's own scope ("wiring the new
-    # resolution call into run_ingest"), not this plan's (08-16 only lays
-    # the schema/Protocol/repository foundation the call now type-checks
-    # against; plan 08-17 wires per-rule `business_key` extraction onto
-    # `RejectedRecord` itself). `business_keys=[]` is a DELIBERATE, documented
-    # no-op (`MetadataRepository.resolve_rejected_records_for_business_keys`'s
-    # own docstring) — a placeholder, not a working D-05 auto-resolve, until
-    # 08-18 lands the real derivation. MUST still run BEFORE
-    # record_rejected_records below once that derivation exists: the method's
+    # D-05/D-23: resolve PENDING rejects by the business key THIS run
+    # actually published -- a PENDING row sharing this run's published
+    # business key may belong to an entirely different batch, from a prior
+    # run -- that is the whole point of this predicate, D-23. discover_files'
+    # batch_key is a pure function of a file's content_sha256, so a
+    # content-differing correction of a previously-rejected row always
+    # discovers under a NEW batch_id; matching on (dataset_id, business_key)
+    # instead of batch_id is what lets this call reach the ORIGINAL batch's
+    # PENDING row regardless.
+    #
+    # published_business_keys is read from staging_result.staging_table
+    # itself (still a live, queryable table on THIS transaction's own conn
+    # at this point -- the DROP TABLE happens later, on a separate
+    # connection, after this whole transaction commits), using the dataset's
+    # configured business-key column. When no column is marked
+    # business_key=True, published_business_keys stays empty and this call
+    # is a documented no-op for that dataset.
+    #
+    # MUST still run BEFORE record_rejected_records below: the method's
     # WHERE clause has no run-id exclusion, so calling this AFTER inserting
     # this run's own fresh rejects would immediately flip matching ones back
     # to REDRIVEN too -- a run "resolving" rejections it just created itself
-    # (CR-01, phase-08 code review, preserved unchanged by this call's new
-    # business-key scoping).
-    dataset_id_for_resolution = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
+    # (CR-01, phase-08 code review). This ordering is what makes CR-01's
+    # guarantee hold under the new predicate too: a run's own fresh reject's
+    # business key was never published this run (the row that got rejected
+    # never entered staging in the first place), so the SELECT DISTINCT below
+    # can never surface it.
+    business_key_column = next(
+        (c.name for c in ctx.config.columns if c.business_key),
+        None,
+    )
+    published_business_keys: list[str] = []
+    if business_key_column is not None:
+        rows = conn.execute(
+            f"SELECT DISTINCT {business_key_column} FROM {staging_result.staging_table} "  # noqa: S608 -- business_key_column/staging_result.staging_table are config/run-derived identifiers only (T-04-01/T-08-15 precedent), never CSV content
+            f"WHERE {business_key_column} IS NOT NULL",
+        ).fetchall()
+        published_business_keys = [str(row[0]) for row in rows]
     ctx.metadata.resolve_rejected_records_for_business_keys(
         conn=conn,
-        dataset_id=dataset_id_for_resolution,
-        business_keys=[],
+        dataset_id=dataset_id,
+        business_keys=published_business_keys,
         resolved_by_run_id=run_id,
         resolution_type="REDRIVEN",
     )

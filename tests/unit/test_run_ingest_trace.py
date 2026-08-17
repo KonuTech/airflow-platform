@@ -108,6 +108,9 @@ class _FakeCursor:
     def fetchone(self) -> None:
         return None
 
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return []
+
 
 class _FakeConnection:
     def execute(self, *args: object, **kwargs: object) -> _FakeCursor:
@@ -283,7 +286,9 @@ class _FakeMetadataRepository:
 
 
 def _make_config() -> DatasetConfig:
-    """A minimal, valid `DatasetConfig` -- `run_ingest` itself never reads `.columns`."""
+    """A minimal, valid `DatasetConfig` -- `run_ingest` now reads `.columns`
+    unconditionally, to find the business-key column for the post-publish
+    resolution query (D-23, plan 08-18)."""
     return DatasetConfig(
         dataset="customers",
         config_schema_version=1,
