@@ -132,6 +132,22 @@ def test_integrity_gate_upstream_of_discover(dagbag: DagBag) -> None:
         assert isinstance(sensor, S3KeySensor), f"{dag_id}: wait_for_files is not an S3KeySensor"
 
 
+def test_integrity_gate_concurrency_capped(dagbag: DagBag) -> None:
+    """Quick task 260817-mvp: `integrity_gate`'s mapped fan-out is capped at 3 concurrent pods.
+
+    Unbounded `.expand(key=matched_keys)` over a matched-key backlog starves
+    kind worker nodes' ~700-800m real CPU headroom (see the DAG files' own
+    comment above their `gate = integrity_gate.partial(...)` call sites) --
+    the same mechanism already fixed for `ingest` via `max_active_tis_per_dag=1`.
+    """
+    for dag_id in ("csv_ingest_customers", "csv_ingest_orders"):
+        dag = dagbag.dags[dag_id]
+        gate = dag.task_dict["integrity_gate"]
+        assert gate.max_active_tis_per_dag == 3, (
+            f"{dag_id}: integrity_gate is not capped at max_active_tis_per_dag=3"
+        )
+
+
 def test_orders_dag_present_and_asset_scheduled(dagbag: DagBag) -> None:
     """D-14/D-15: `csv_ingest_orders` exists, scheduled off the customers Asset, not a cron."""
     dag = dagbag.dags["csv_ingest_orders"]
