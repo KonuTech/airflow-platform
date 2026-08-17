@@ -137,3 +137,61 @@ today.
   columns `type: integer` to match the DB, or make the SQL compare as text)
   — a cross-cutting call, not scoped to this phase. Full detail in
   08-REVIEW.md's WR-03.
+
+## From live-cluster UAT deployment (2026-08-17)
+
+Deploying phase-8's artifacts to the live kind cluster to run the E2E slice
+tests (08-14) surfaced four real deployment gaps, all fixed and applied to
+the live cluster this session:
+
+1. **Stale kind DAGs hostPath bind-mount** (infra, pre-existing, not
+   phase-8-specific) -- all three kind node containers showed an empty
+   `/mnt/dags`, likely from an earlier Docker Desktop/WSL2 restart. Fixed
+   by `docker restart` on all three node containers (with user
+   confirmation first, since it briefly disrupts the whole cluster).
+
+2. **RESOLVED, commit `020d0c2`.** `docker/airflow/Dockerfile` never
+   installed `psycopg`, but `airflow/dags/_common/integrity_gate.py`
+   (plan 08-02) imports it directly at DAG-parse time -- every DAG in
+   `dags-folder` failed to parse. Fixed, rebuilt, redeployed.
+
+3. **RESOLVED, commits `1cdcb48`/`f6e7c95`** (migrations 0018/0019).
+   `analytics_owner` was never granted SELECT on `meta.validation_results`,
+   `meta.rejected_records`, `normalized.customers`, or `normalized.orders`
+   -- migrations 0005/0014/0015/0016 granted `etl_app` only. Same class of
+   oversight migration 0013 already fixed once for
+   `meta.v_customers_lineage`. `tests/e2e/slice/conftest.py`'s
+   `analytics_owner_connection` fixture needs direct read access to all
+   four. Confirmed live: both grants closed the exact `InsufficientPrivilege`
+   errors the E2E tests hit.
+
+4. **UNRESOLVED — live-cluster environmental timing, not a phase-8 code
+   defect.** With all of (1)-(3) fixed, `test_orphan_order_quarantined_
+   while_valid_rows_publish` progressed through discover -> ingest ->
+   SUCCEEDED -> orphan-quarantine-verified in one full clean run (proving
+   the phase-8 mechanism genuinely works end-to-end on this cluster), but
+   subsequent attempts hit two compounding environmental issues specific to
+   this long-lived demo cluster:
+   - `csv_ingest_customers`'s `*/1 * * * *` cron (D-03) has accumulated a
+     large backlog of historical E2E-test files (~70+ across all earlier
+     phases) still matching its S3 listing glob every run, so each cron
+     firing re-evaluates dozens of `integrity_gate` mapped tasks even
+     though most are already `PROCESSED` -- this alone can take several
+     minutes per cron cycle under this environment's KubernetesExecutor
+     pod-start overhead.
+   - A `csv_ingest_orders` run's deferred `S3KeySensor` (`wait_for_files`)
+     was observed stuck for 15+ minutes with the triggerer showing "1
+     trigger running" continuously but never firing, even though the exact
+     same sensor/trigger configuration succeeded in ~3 minutes on three
+     other runs earlier in this same session (`8d794aa2294a`,
+     `ed381a57f14e`, `2f58487b4708`) and the target file was genuinely
+     present in MinIO throughout. Not reproduced/root-caused before this
+     session ended -- worth a dedicated investigation (deferred trigger
+     internals, or triggerer resource contention) if it recurs.
+
+   Recommendation for the next attempt: run the E2E slice tests when the
+   cluster has been idle for a few minutes (letting the customers cron
+   backlog drain naturally), and/or temporarily pause `csv_ingest_customers`
+   first (`airflow dags pause csv_ingest_customers`, remember to unpause
+   after) to remove cron contention entirely before triggering the test's
+   own manual DAG runs.
