@@ -559,3 +559,34 @@ class DatasetConfig(BaseModel):
                 )
                 raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _check_at_most_one_business_key_column(self) -> DatasetConfig:
+        """Reject more than one ``columns[].business_key: true`` entry (WR-01, phase-08).
+
+        Every ``business_key_column``/``business_key_index`` resolution site
+        (``dataplat.load.staging``'s ``_build_quality_stages`` and
+        ``dataplat.pipeline.run``'s ``_apply_post_publish_barriers_and_persist``)
+        resolves the business-key column via ``next((c for c in columns if
+        c.business_key), None)`` -- silently picking only the FIRST matching
+        column in declared order. A dataset config declaring a composite
+        business key (multiple ``business_key: true`` columns, consistent
+        with a multi-column ``deduplication.keys``) would otherwise pass
+        config validation cleanly while every one of those call sites
+        silently drops every business-key column after the first, with no
+        error raised anywhere -- exactly the "config typo becomes a silent,
+        hard-to-diagnose outage" case this model's own ``extra="forbid"``
+        elsewhere exists to prevent. Composite business keys are not
+        supported by ``resolve_rejected_records_for_business_keys`` today;
+        this validator makes that limitation a loud, config-validation-time
+        failure instead of a silent one.
+        """
+        business_key_columns = [column.name for column in self.columns if column.business_key]
+        if len(business_key_columns) > 1:
+            msg = (
+                f"columns: declares multiple business_key: true entries "
+                f"{business_key_columns!r}; only a single-column business key is "
+                "currently supported by resolve_rejected_records_for_business_keys"
+            )
+            raise ValueError(msg)
+        return self

@@ -150,3 +150,33 @@ def test_dataset_config_rejects_dedup_key_whose_column_is_not_a_business_key() -
 
     with pytest.raises(ValidationError, match="name"):
         DatasetConfig.model_validate(document)
+
+
+def test_dataset_config_rejects_more_than_one_business_key_column() -> None:
+    """WR-01 (phase-08 code review): `columns[].business_key: true` cardinality > 1 must fail
+    validation loudly, not silently resolve to only the first such column at
+    `dataplat.load.staging`/`dataplat.pipeline.run`'s own resolution sites."""
+    document = {
+        **_VALID_DOCUMENT,
+        "deduplication": {
+            "strategy": "business_key_latest",
+            "keys": ["customer_id", "name"],
+            "order_by": ["event_ts desc"],
+        },
+        "columns": [
+            {**_VALID_DOCUMENT["columns"][0]},
+            {
+                "name": "name",
+                "type": "string",
+                "nullable": False,
+                "required": True,
+                "business_key": True,
+            },
+            {**_VALID_DOCUMENT["columns"][2]},
+            {**_VALID_DOCUMENT["columns"][3]},
+            {**_VALID_DOCUMENT["columns"][4]},
+        ],
+    }
+
+    with pytest.raises(ValidationError, match="business_key"):
+        DatasetConfig.model_validate(document)
