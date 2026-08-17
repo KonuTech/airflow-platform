@@ -50,6 +50,50 @@ Out of scope for this phase: anomaly detection over time-series validation histo
 - Exact naming/shape of the run-level rejection-rate threshold config key under `quality:` (D-10).
 - Whether the Airflow-side integrity sensor (D-18) is a custom `@task` or a `PythonSensor`/deferrable sensor — implementation detail, not a locked architectural choice.
 
+### Gap closure: VALID-08 backfill resolution scoping (2026-08-17, post-verification)
+
+**Confirmed gap (08-VERIFICATION.md, live-proven):** `discover_files`'s `batch_key` is a
+pure function of `content_sha256`, so a content-differing correction of a previously-rejected
+row always discovers under a NEW `batch_id`. `resolve_rejected_records_for_batch` (D-05) scopes
+strictly by `batch_id`, so it can never touch the ORIGINAL batch's `PENDING` row. Live-confirmed:
+`test_backfill_reentry.py` ran discover → ingest → real backfill re-execution → corrected row
+published to `normalized.customers`, then failed only at the final `REDRIVEN` assertion, exactly
+as this gap predicts. Full trace: `.planning/debug/resolved/backfill-does-not-redrive-rejected-row.md`,
+`08-VERIFICATION.md` `gaps[0]`.
+
+- **D-23 (LOCKED — user decision, Rule 4):** Resolution scoping moves from strictly
+  `batch_id`-scoped to **business-key-scoped**: `meta.rejected_records` gains a durable
+  `business_key` value (the dataset's configured business/unique key column value for the
+  rejected row, e.g. `customer_id`) captured at `record_rejected_records` insert time.
+  Resolution matches on `(dataset, business_key)` with `resolution_type = 'PENDING'` —
+  **not** on `batch_id` — so a backfill run completing resolves every PENDING reject sharing
+  that business key, regardless of which batch originally rejected it or which batch the
+  correction discovers under. This is the direction the codebase already leans (Phase 4's
+  `ON CONFLICT`/`MERGE` publish pattern is itself business-key-driven, per §27/§55 in
+  CLAUDE.md's stack notes) — extend that same identity concept to rejection resolution
+  instead of inventing a second, batch-lineage-based identity scheme.
+- **D-24 (LOCKED):** D-03 ("granularity is whole-batch only") is **preserved, reinterpreted**:
+  resolution still only happens as a whole-batch side effect of a backfill run *completing*
+  (D-04's no-per-row-manual-edit constraint is untouched) — what changes is the *matching
+  predicate* used to decide which PENDING rows that side effect resolves (business-key match,
+  not batch_id match). No new manual/per-row resolution API is introduced by this decision.
+- **D-25 (LOCKED):** A row that fails validation before its business-key column can be
+  reliably extracted (e.g. a structural/ragged-row failure where column positions are
+  unreliable) stores `business_key = NULL`. A `NULL` business_key row is **never**
+  auto-resolved by this mechanism — it remains `PENDING` until an explicit batch-level
+  discard (D-04's other resolution path). This is a deliberate, narrower fallback, not a
+  regression: today, with strict `batch_id` scoping, these rows *also* never auto-resolve
+  for a content-differing correction, so no currently-working case is broken.
+- **Claude's Discretion (added by this gap-closure decision):** Which dataset config field
+  designates "the business key" for `business_key` extraction (a new explicit `quality:` or
+  top-level dataset-config key, vs. reusing `deduplication:`'s existing key declaration if one
+  exists) — read `configs/datasets/customers.yaml`/`orders.yaml` and the dataset-config Pydantic
+  models before deciding; prefer reusing an existing key concept over inventing a new one.
+  Whether `business_key` is stored as a single `text` column (requiring per-dataset
+  single-column business keys) or a composite/JSON shape — default to the simplest option
+  that covers `customers`/`orders`' actual (single-column) keys, note if a composite key
+  need is discovered.
+
 </decisions>
 
 <canonical_refs>
