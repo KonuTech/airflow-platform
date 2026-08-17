@@ -1,14 +1,14 @@
 ---
-status: partial
+status: diagnosed
 phase: 08-validation-quarantine-metadata-control-plane-completion
 source: [08-VERIFICATION.md]
 started: 2026-08-17T13:40:00Z
-updated: 2026-08-17T15:20:00Z
+updated: 2026-08-17T18:36:00Z
 ---
 
 ## Current Test
 
-[testing paused — 2 items outstanding; test 1's original root cause is now understood and partially fixed (quick task 260817-mvp), but a second, structural bottleneck remains. See deferred-items.md and .planning/quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/ for full detail.]
+[testing complete — diagnosis done for both outstanding issues. Test 1's root cause (kind cluster node CPU budget, physical host ceiling) is a well-established, deliberately-deferred infra/capacity decision — no code fix, no gap-closure plan needed. Test 2's root cause is now confirmed (not just suspected): a one-shot, no-retry row-lock race inside Airflow 3.3.0's own `airflow backfill create` mechanism, unrelated to the previously-suspected batch_key/content_sha256 architecture concern (which remains a separate, untested question). Test 2 is a genuine test-robustness gap and is being routed to gsd-planner for a gap-closure fix plan. See deferred-items.md and .planning/debug/backfill-does-not-redrive-rejected-row.md for full detail.]
 
 ## Tests
 
@@ -104,9 +104,12 @@ blocked: 0
   reason: "airflow backfill create did not trigger any observable re-execution (clear_number stayed at its pre-backfill value, dag_run.state never left its old 'success') within 300s -- test never even reached the point of checking the REDRIVEN flip."
   severity: minor
   test: 2
-  root_cause: "Suspected (not yet conclusively proven): meta.batches.batch_key as a pure function of content_sha256 combined with dag_run reuse per Airflow's UNIQUE (dag_id, logical_date) constraint may cause a backfill of unchanged content to be silently recognized as already-done rather than genuinely cleared and re-run. Needs a dedicated investigation, not a live-cluster contention issue this time -- the DagRun that failed to re-execute was NOT blocked by other traffic during this specific test run."
-  artifacts: []
+  root_cause: "CONFIRMED via live SQL + source trace (installed apache-airflow==3.3.0 airflow/models/backfill.py): NOT the batch_key/content_sha256 architecture concern (refuted -- the test never gets far enough to reach resolve_rejected_records_for_batch at all). The actual proximate cause: backfill_dag_run.exception_reason='in flight' -- _create_backfill_dag_run_non_partitioned's SELECT ... FOR UPDATE SKIP LOCKED on the target dag_run row lost its lock race against a concurrent transaction (almost certainly the scheduler's own periodic dag_run-row locking, worsened by this cluster's already-documented CPU/scheduler contention), and Airflow's own code has NO retry for a lost skip_locked race -- a single occurrence permanently records IN_FLIGHT with exit 0 and no surfaced error. Live-proven the mechanism itself works: manually re-invoking the IDENTICAL `airflow backfill create --dag-id csv_ingest_customers --from-date 2026-08-17T14:55:00+00:00 --to-date 2026-08-17T14:55:00+00:00 --reprocess-behavior completed` a second time (no code change) succeeded immediately -- exception_reason NULL, dag_run.clear_number 0->1, state 'success'->'running', run_type 'scheduled'->'backfill'. This is a one-shot Airflow-level race, not a dataplat defect; the batch_key/content_sha256 concern remains real but untested (would only surface AFTER a genuine re-execution)."
+  artifacts:
+    - path: "tests/e2e/slice/test_backfill_reentry.py"
+      issue: "The helper that invokes 'airflow backfill create' and polls for clear_number/state (module-level, ~line 167) makes exactly one CLI call with no retry/backoff for Airflow's own documented-transient 'in flight' exception_reason race, so a lost skip_locked race (observed live on this cluster) is indistinguishable from a genuine failure and burns the full 300s timeout before surfacing as a hard test failure."
   missing:
-    - "A focused investigation (offline, not live-cluster) into batch_key derivation and Airflow's backfill/clear semantics for this exact scenario"
-    - "Confirm via direct SQL/CLI whether 'airflow backfill create' genuinely no-ops on an unchanged logical_date, or whether something else (e.g. a stale clear_number cache) explains the flat reading"
-  debug_session: ""
+    - "Retry 'airflow backfill create' (bounded attempts, short backoff) when backfill_dag_run.exception_reason == 'in flight' is observed for the target dag_id/logical_date, before declaring the invocation failed"
+    - "Surface backfill_dag_run.exception_reason directly in the wait-loop's failure diagnostics (via SQL, using the existing airflow_metadata_connection fixture) so a future IN_FLIGHT recurrence produces an immediate, unambiguous signal instead of a bare clear_number-never-advanced timeout"
+    - "Once test 2 passes end-to-end, re-verify the batch_key/content_sha256 architecture concern (deferred-items.md, 'From plan 08-14') is still real -- it was never eliminated, only shown to be unreachable by this specific failure"
+  debug_session: ".planning/debug/backfill-does-not-redrive-rejected-row.md"
