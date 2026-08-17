@@ -242,7 +242,7 @@ def test_orphan_row_quarantined_non_orphan_rows_untouched(
     with psycopg.connect(migrated_dsn) as conn:
         _insert_customer(
             conn,
-            customer_id=6001,
+            customer_id=8601,
             run_id=run_id,
             file_id=file_id,
             batch_id=batch_id,
@@ -255,7 +255,7 @@ def test_orphan_row_quarantined_non_orphan_rows_untouched(
             conn,
             staging_table,
             order_id="9201",
-            customer_id="6001",  # matches normalized.customers
+            customer_id="8601",  # matches normalized.customers
             order_date="2026-01-01",
             amount="10.00",
             run_id=run_id,
@@ -267,7 +267,7 @@ def test_orphan_row_quarantined_non_orphan_rows_untouched(
             conn,
             staging_table,
             order_id="9202",
-            customer_id="6999",  # no matching normalized.customers row -- the orphan
+            customer_id="8699",  # no matching normalized.customers row -- the orphan
             order_date="2026-01-02",
             amount="20.00",
             run_id=run_id,
@@ -279,7 +279,7 @@ def test_orphan_row_quarantined_non_orphan_rows_untouched(
             conn,
             staging_table,
             order_id="9203",
-            customer_id="6001",  # matches normalized.customers -- a second non-orphan row
+            customer_id="8601",  # matches normalized.customers -- a second non-orphan row
             order_date="2026-01-03",
             amount="30.00",
             run_id=run_id,
@@ -334,7 +334,7 @@ def test_race_scenario_not_yet_arrived_customer_is_quarantine_never_fail(
     with psycopg.connect(migrated_dsn) as conn:
         _insert_customer(
             conn,
-            customer_id=7001,
+            customer_id=8701,
             run_id=run_id,
             file_id=file_id,
             batch_id=batch_id,
@@ -347,7 +347,7 @@ def test_race_scenario_not_yet_arrived_customer_is_quarantine_never_fail(
             conn,
             staging_table,
             order_id="9301",
-            customer_id="7001",  # matches -- non-orphan
+            customer_id="8701",  # matches -- non-orphan
             order_date="2026-02-01",
             amount="15.00",
             run_id=run_id,
@@ -358,10 +358,10 @@ def test_race_scenario_not_yet_arrived_customer_is_quarantine_never_fail(
         _insert_staging_row(
             conn,
             staging_table,
-            # customer 7999's own `customers` batch legitimately hasn't
+            # customer 8799's own `customers` batch legitimately hasn't
             # landed yet -- this is Pitfall 5's race, not a data error.
             order_id="9302",
-            customer_id="7999",
+            customer_id="8799",
             order_date="2026-02-02",
             amount="45.00",
             run_id=run_id,
@@ -401,7 +401,7 @@ def test_race_scenario_not_yet_arrived_customer_is_quarantine_never_fail(
             conn,
             publish_table,
             order_id="9301",
-            customer_id="7001",
+            customer_id="8701",
             order_date="2026-02-01",
             amount="15.00",
             run_id=run_id,
@@ -428,7 +428,7 @@ def test_race_scenario_not_yet_arrived_customer_is_quarantine_never_fail(
         ).fetchone()
 
     assert row is not None
-    assert row[0] == 7001
+    assert row[0] == 8701
     assert str(row[1]) == "15.00"
     # The orphan (9302) was never published -- proving its exclusion did
     # not affect the non-orphan row's own publish.
