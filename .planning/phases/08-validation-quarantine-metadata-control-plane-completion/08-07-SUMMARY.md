@@ -119,3 +119,9 @@ None — no external service configuration required.
 ---
 *Phase: 08-validation-quarantine-metadata-control-plane-completion*
 *Completed: 2026-08-17*
+
+## Self-Check: PASSED
+
+All 6 created/modified files confirmed present on disk; all 6 commit hashes
+(6f6aef6, 5758bfd, 48b7dbf, 60793d7, 6c63bbe, c639a27) confirmed present in
+git log.
