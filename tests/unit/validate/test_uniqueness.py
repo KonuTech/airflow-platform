@@ -112,3 +112,20 @@ def test_never_raises_and_accounts_for_every_row() -> None:
     result = rule.apply(_make_context(), chunk)
 
     assert len(result.chunk.rows) + len(result.rejected) == len(chunk.rows)
+
+
+def test_a_duplicate_customer_id_row_captures_its_own_value_as_business_key() -> None:
+    # customers.yaml's real uniqueness rule targets customer_id itself --
+    # business_key_index equals column_index in production, proven here.
+    chunk = _chunk([("cust-1", "Alice"), ("cust-1", "Alice Duplicate")])
+    rule = UniquenessRule(
+        column_index=0,
+        column_name="customer_id",
+        strategy="REJECT_RECORD",
+        rule_id="r4",
+        business_key_index=0,
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.rejected[0].business_key == "cust-1"

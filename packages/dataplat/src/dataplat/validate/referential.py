@@ -158,6 +158,7 @@ class ReferentialIntegrityBarrier(BarrierStage):
                 ),
                 raw_line=str(row["order_id"]),
                 error_column=self._staging_column,
+                business_key=str(row["order_id"]),
             )
             for row in orphan_rows
         ]

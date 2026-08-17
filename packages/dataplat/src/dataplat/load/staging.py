@@ -416,6 +416,27 @@ class StagingLoader:
         if ctx.config.quality is None:
             return []
 
+        # Computed ONCE per run (D-23), not per rule: find the single
+        # ColumnContract with business_key: True and resolve its position
+        # via the SAME idiom `_build_one_quality_stage` uses for its own
+        # `column_index` below. `None` when the dataset declares no
+        # business_key column at all.
+        business_key_column = next(
+            (column for column in ctx.config.columns if column.business_key),
+            None,
+        )
+        business_key_index: int | None = None
+        if business_key_column is not None:
+            try:
+                business_key_index = self._target_columns.index(business_key_column.name)
+            except ValueError as exc:
+                msg = (
+                    f"ColumnContract {business_key_column.name!r} (business_key: true) "
+                    f"has no corresponding entry in target_columns "
+                    f"{self._target_columns!r} -- a contract/target-schema mismatch"
+                )
+                raise ValueError(msg) from exc
+
         quality_stages: list[StreamingStage] = []
         for rule in ctx.config.quality.rules:
             if rule.rule_type not in _STREAMING_RULE_TYPES:
@@ -431,14 +452,30 @@ class StagingLoader:
                 # RaggedRowGuard instance.
                 continue
 
-            quality_stages.append(self._build_one_quality_stage(rule))
+            quality_stages.append(
+                self._build_one_quality_stage(rule, business_key_index=business_key_index),
+            )
         return quality_stages
 
-    def _build_one_quality_stage(self, rule: QualityRuleConfig) -> StreamingStage:
+    def _build_one_quality_stage(
+        self,
+        rule: QualityRuleConfig,
+        *,
+        business_key_index: int | None,
+    ) -> StreamingStage:
         """Construct one streaming quality rule, wrapped in ``StrategyDispatchStage``.
 
         Args:
             rule: The dataset config's quality rule to construct.
+            business_key_index: The 0-based position of the dataset's
+                configured business-key column within each row tuple (D-23),
+                computed once by the caller (``_build_quality_stages``).
+                ``None`` when the dataset declares no ``business_key``
+                column. Threaded unconditionally into ``rule_kwargs`` below
+                -- safe for every streaming rule type this method ever
+                dispatches to (``REFERENTIAL``/``CIRCUIT_BREAKER``/
+                ``VOLUME``/``STRUCTURAL`` are filtered out earlier in
+                ``_build_quality_stages`` and never reach this method).
 
         Returns:
             A ``StrategyDispatchStage`` wrapping the resolved, constructed
@@ -477,6 +514,7 @@ class StagingLoader:
             "column_name": rule.column,
             "strategy": rule.strategy,
             "rule_id": rule.rule_id,
+            "business_key_index": business_key_index,
         }
         if rule.rule_type == "QUALITY_VALIDITY_RANGE":
             rule_kwargs["minimum"] = rule.params.get("minimum")

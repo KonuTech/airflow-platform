@@ -33,13 +33,14 @@ class ValidityRangeRule(StreamingStage):
 
     name = "validity_range_rule"
 
-    def __init__(  # noqa: PLR0913 -- six keyword-only config fields, all load-bearing
+    def __init__(  # noqa: PLR0913 -- seven keyword-only config fields, all load-bearing
         self,
         *,
         column_index: int,
         column_name: str,
         strategy: str,
         rule_id: str,
+        business_key_index: int | None = None,
         minimum: float | None = None,
         maximum: float | None = None,
     ) -> None:
@@ -55,6 +56,10 @@ class ValidityRangeRule(StreamingStage):
                 dispatched on -- plan 08-10 wires strategy-based branching.
             rule_id: The dataset config's stable identifier for this rule
                 instance. Stored but not yet emitted anywhere in this plan.
+            business_key_index: The 0-based position of the dataset's
+                configured business-key column within each row tuple (D-23),
+                distinct from this rule's own ``column_index``. ``None``
+                when the dataset declares no ``business_key`` column.
             minimum: The inclusive lower bound, or ``None`` for no lower
                 bound.
             maximum: The inclusive upper bound, or ``None`` for no upper
@@ -64,6 +69,7 @@ class ValidityRangeRule(StreamingStage):
         self._column_name = column_name
         self._strategy = strategy
         self._rule_id = rule_id
+        self._business_key_index = business_key_index
         self._minimum = minimum
         self._maximum = maximum
 
@@ -109,6 +115,7 @@ class ValidityRangeRule(StreamingStage):
                         ),
                         raw_line=_reconstruct_raw_line(row),
                         error_column=self._column_name,
+                        business_key=_extract_business_key(row, self._business_key_index),
                     )
                 )
                 continue
@@ -125,6 +132,7 @@ class ValidityRangeRule(StreamingStage):
                         ),
                         raw_line=_reconstruct_raw_line(row),
                         error_column=self._column_name,
+                        business_key=_extract_business_key(row, self._business_key_index),
                     )
                 )
                 continue
@@ -164,3 +172,26 @@ def _reconstruct_raw_line(
     return field_delimiter.join(
         "" if field is None else (field if isinstance(field, str) else str(field)) for field in row
     )
+
+
+# Duplicated per-file rather than imported, mirroring `_reconstruct_raw_line`'s
+# own established convention in this codebase.
+def _extract_business_key(
+    row: tuple[str | bool | None, ...],
+    business_key_index: int | None,
+) -> str | None:
+    """Extract this row's business-key column value, or ``None`` when unreliable.
+
+    Returns ``None`` when ``business_key_index`` is ``None`` (no
+    ``business_key`` column configured for this dataset), or when the value
+    at that position is ``None``/``""`` (D-25: an empty/absent business-key
+    value is exactly as unreliable as a missing one). Otherwise returns the
+    value as a ``str``, stringifying a non-``str`` field (``_reconstruct_raw_line``'s
+    own non-str-tolerance idiom).
+    """
+    if business_key_index is None:
+        return None
+    value = row[business_key_index]
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, str) else str(value)
