@@ -68,22 +68,41 @@ None. Worktree base was corrected once at start via
 `git reset --hard 620edfa005b34dc1a3866a679e3b365aa6f25ed6` (a known
 #2015-class worktree-branch-drift issue, not a plan deviation).
 
-## Out of Scope (by design, not deferred as a gap)
+## Post-Session Follow-Up: Activation (recorded here for continuity)
 
-No cluster-recreation, `wsl --shutdown`, or Docker Desktop restart was
-run — these require a Windows-side action outside this WSL session and
-are a manually-coordinated follow-up step for the user:
+The Windows-side steps out of this plan's scope were completed in a
+follow-up conversation, with an outcome different from what was planned:
 
-1. Run `wsl --shutdown` from Windows PowerShell/cmd (not from inside WSL).
-2. Restart Docker Desktop.
-3. Confirm the new memory ceiling took effect (`free -h` inside WSL should
-   show ~28Gi total).
-4. `kind delete cluster` + recreate (destroys current Postgres/MinIO/Vault
-   data — already accepted by the user this session) to pick up the new
-   `KubeletConfiguration` reservations (kubelet reservations are
-   creation-time-only, per this file's own top-of-file comment).
-5. Full stack redeploy: Helm charts, Vault bootstrap/unseal, migrations,
-   image builds/pushes.
+1. User ran a **full laptop restart** (not just `wsl --shutdown`), which
+   cleanly applied the new `.wslconfig` cap — `docker info` confirmed
+   `Total Memory: 27.41GiB` (up from 23.47GiB).
+2. Docker Desktop **restarted the existing kind node containers** rather
+   than the cluster being recreated. Kubelet re-read the new, bigger
+   cgroup capacity live, but its `KubeletConfiguration` reservation
+   values were still the OLD baked-in ones (`systemReserved.memory=9Gi`,
+   `kubeReserved.memory=8Gi`) — this file's `11Gi`/`9.5Gi` recomputation
+   requires a genuine `kind create cluster` to take effect, not a
+   container restart.
+3. Net effect: allocatable memory/node rose from ~6.3Gi to **~9.92Gi**
+   (`kubectl get nodes` confirmed `mem=10405032Ki` on all 3 nodes) — MORE
+   than this plan's own deliberately-conservative ~7.5Gi target, because
+   the old (smaller) absolute reservation is now applied against the new
+   (bigger) capacity.
+4. Given that, and given CPU (not memory) was the session's dominant
+   contention factor and is completely unaffected either way, the user
+   chose to **skip the destructive `kind delete cluster` recreation**
+   rather than trade the current ~9.92Gi/node for the deliberately-lower
+   ~7.5Gi/node this plan's committed values would produce. See
+   `.planning/STATE.md`'s Blockers/Concerns for the full record — the
+   committed `kind/cluster.yaml` values (`11Gi`/`9.5Gi`) are correct and
+   intentional, they just aren't live yet, and won't be until the next
+   genuine cluster recreation (at which point allocatable memory/node
+   will *drop* to ~7.5Gi from the current accidental ~9.92Gi — expected,
+   not a regression).
+5. Post-restart cleanup performed: `make vault-unseal` (expected per D-02,
+   no auto-unseal), 15 zombie `Unknown`/`Error` pods force-deleted, DAGs
+   hostPath mount confirmed intact on all 3 nodes (no recurrence of the
+   `dagrun-scheduler-stall` class of issue this time).
 
 ## Verification Status
 
