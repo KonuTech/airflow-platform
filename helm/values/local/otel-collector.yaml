@@ -73,12 +73,16 @@ ports:
     servicePort: 8889
     protocol: TCP
 
-# Sized like `vault.yaml`'s own local profile (T-05 precedent): this chart
+# CPU request trimmed from 250m to 100m (quick task 260817-rvq): matches
+# `helm/values/ci/otel-collector.yaml`'s own already-vetted `resources.
+# requests.cpu` value. Live 15m-average measurement this session found
+# otel-collector using ~3.6m actual vs 250m previously requested (~1.4%) --
+# several-times headroom retained at 100m. Memory untouched. This chart
 # holds no persistent state (it is a pure pipeline), so neither profile
 # needs a `dataStorage`-equivalent PVC block.
 resources:
   requests:
-    cpu: 250m
+    cpu: 100m
     memory: 512Mi
   limits:
     cpu: "1"

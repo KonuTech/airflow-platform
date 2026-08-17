@@ -25,11 +25,14 @@ tempo:
   # `time.ParseDuration`-shaped string and does not accept a bare "d" unit.
   retention: 168h
 
-  # Sized like vault.yaml's own local profile (T-05 precedent) -- a single
-  # lightweight, always-on service in this cluster.
+  # CPU request trimmed from 250m to 100m (quick task 260817-rvq): matches
+  # `helm/values/ci/tempo.yaml`'s own already-vetted `tempo.resources.
+  # requests.cpu` value. Live 15m-average measurement this session found
+  # tempo using ~3.1m actual vs 250m previously requested (~1.2%) --
+  # several-times headroom retained at 100m. Memory untouched.
   resources:
     requests:
-      cpu: 250m
+      cpu: 100m
       memory: 512Mi
     limits:
       cpu: "1"
