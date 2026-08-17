@@ -3,12 +3,12 @@ status: partial
 phase: 08-validation-quarantine-metadata-control-plane-completion
 source: [08-VERIFICATION.md]
 started: 2026-08-17T13:40:00Z
-updated: 2026-08-17T15:15:00Z
+updated: 2026-08-17T15:20:00Z
 ---
 
 ## Current Test
 
-[testing paused — 1 item outstanding, see deferred-items.md's "From live-cluster UAT deployment" section]
+[testing paused — 2 items outstanding; test 1's original root cause is now understood and partially fixed (quick task 260817-mvp), but a second, structural bottleneck remains. See deferred-items.md and .planning/quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/ for full detail.]
 
 ## Tests
 
@@ -21,41 +21,92 @@ reported: |
   (commit 020d0c2), and two missing analytics_owner GRANTs closed by migrations 0018/0019
   (commits 1cdcb48/f6e7c95). With those fixed, test_orphan_order_quarantined_while_valid_rows_
   publish achieved one full clean pass server-side (discover -> ingest -> SUCCEEDED -> orphan
-  quarantine verified), proving VALID-07 genuinely works end-to-end on this cluster. But running
-  the full pytest suite hit live-cluster environmental contention (large historical file backlog
-  on csv_ingest_customers' every-minute cron, plus a deferred S3KeySensor observed stuck 15+
-  minutes on one run despite the same config succeeding in ~3 min on three other runs this same
-  session) that prevented a clean automated pass within this session. See deferred-items.md for
-  full detail and a recommended retry approach (pause the customers cron first to remove
-  contention).
+  quarantine verified), proving VALID-07 genuinely works end-to-end on this cluster.
+
+  A follow-up session root-caused the original "discover intermittently registers zero rows"
+  symptom precisely: csv_ingest_customers'/csv_ingest_orders' integrity_gate TaskFlow task was
+  dynamically mapped with NO concurrency cap, so a file backlog could fan out to 8-19+ concurrent
+  ~250m-CPU pods, exhausting kind worker nodes' tight CPU budget and starving scheduling for
+  EVERY other task's pod cluster-wide (including wait_for_files, discover itself, and other
+  DAGs) -- caught live via kubectl describe showing FailedScheduling: Insufficient cpu. Fixed via
+  quick task 260817-mvp: integrity_gate.override(max_active_tis_per_dag=3) in both DAG files
+  (commit ea5a38e). Verified live: this specific starvation chain is eliminated -- a fresh
+  re-run's wait_for_files -> resolve_window -> list_matched_keys -> integrity_gate -> discover ->
+  build_ingest_args all reached success cleanly for the first time this session, and zero new
+  FailedScheduling events occurred for any non-integrity_gate task in the ~9min post-fix window
+  (vs. 12 such events in the preceding ~1hr).
+
+  However, re-running the full pytest suite immediately after (same session) still failed --
+  now at the ingest task itself, one step further down the pipeline. Confirmed this is the SAME
+  underlying structural cause (kind/cluster.yaml's node CPU/memory budget), not a regression from
+  the fix or a new code defect: at the time of failure, one worker node was at 100% CPU
+  allocated, the other at 95% CPU / 91% memory, and FailedScheduling events now cite BOTH
+  Insufficient cpu AND Insufficient memory even for the now-capped integrity_gate pods. ingest
+  (a single 500m-CPU pod, not dynamically mapped) sat queued for ~8.5min then ran but failed
+  after ~2min (cause not yet determined -- resource pressure vs. an app-level error was not
+  distinguished before the pod was deleted by on_finish_action), entering up_for_retry; the retry
+  had not been scheduled by the session's own default 5min retry_delay + several more minutes,
+  consistent with continued node saturation.
+
+  Net: the SPECIFIC phase-8 application bug this test was chasing is fixed and verified. What
+  remains is the already-known, already-deferred structural node-CPU-budget question
+  (kind/cluster.yaml) -- now confirmed to affect ingest (and potentially other single-pod tasks)
+  in addition to integrity_gate's fan-out, once the fan-out itself was capped and stopped masking
+  it. This is an infrastructure capacity decision, not a phase-8 code gap.
 severity: minor
 blocked_by: other
 
 ### 2. Investigate whether a content-differing "corrected" file re-upload actually flips its predecessor's meta.rejected_records row from PENDING to REDRIVEN
 expected: Either the assertion in test_backfill_resolves_previously_rejected_row holds (VALID-08's documented re-drive path is genuinely proven end-to-end), or it fails because meta.batches.batch_key is a pure function of content_sha256 while resolve_rejected_records_for_batch resolves PENDING rows strictly by batch_id.
-result: blocked
+result: issue
+reported: |
+  Ran to completion this time (no longer blocked by test 1's stuck DagRun -- test 2 targets
+  csv_ingest_customers' own backfill re-execution, an independent DAG/run from test 1's orders
+  target). Failed with a specific, now well-characterized signal: `airflow backfill create`
+  returned exit 0, but dag_run.clear_number never advanced past its pre-backfill value of 0
+  within the test's 300s timeout, and dag_run.state stayed at its OLD 'success' value throughout
+  -- i.e. the backfill CLI invocation did not appear to trigger any genuine re-execution of the
+  target logical_date at all, not merely a slow one. This is consistent with (though not yet
+  conclusively proven to be) the batch_key/content_sha256 architecture question already flagged
+  in deferred-items.md: if meta.batches.batch_key is a pure function of content_sha256, and
+  resolve_rejected_records_for_batch resolves PENDING rows strictly by batch_id, a backfill of
+  the SAME unchanged file may be getting recognized as already-fully-processed and skipped by
+  Airflow itself (dag_run reuse per the UNIQUE (dag_id, logical_date) constraint) rather than
+  genuinely cleared and re-run.
+severity: minor
 blocked_by: other
-reason: Never reached — blocked on test 1's environmental contention issue before this test's own logic could execute against a clean run.
 
 ## Summary
 
 total: 2
 passed: 0
-issues: 1
+issues: 2
 pending: 0
 skipped: 0
-blocked: 1
+blocked: 0
 
 ## Gaps
 
 - truth: "test_orphan_order_quarantined_while_valid_rows_publish passes cleanly on a fresh pytest invocation"
   status: failed
-  reason: "Live-cluster contention (customers cron backlog + a stuck deferred S3KeySensor) prevented a clean automated pass, though the mechanism itself was proven working via a manual server-side trace of one full successful run this session."
+  reason: "The originally-suspected 'discover silently fails' bug is fixed and verified (quick task 260817-mvp, commit ea5a38e). The test still fails one step later, at ingest, due to the same class of root cause (kind cluster CPU/memory budget) now unmasked rather than a new defect."
   severity: minor
   test: 1
-  root_cause: "Not fully diagnosed — likely triggerer/executor resource contention on a long-lived demo cluster with accumulated historical test traffic, not a phase-8 code defect. See deferred-items.md for the full investigation trail."
+  root_cause: "kind/cluster.yaml's node CPU/memory allocatable budget is too tight for this cluster's current baseline load (5 days of accumulated historical CSV fixture traffic + per-minute customers cron + platform components) -- confirmed live: one worker node at 100% CPU, the other at 95% CPU/91% memory, FailedScheduling citing both Insufficient cpu and Insufficient memory. This is the same structural question already flagged in STATE.md's blockers as deliberately deferred (would need cluster recreation)."
+  artifacts: ["airflow/dags/csv_ingest_customers.py", "airflow/dags/csv_ingest_orders.py", ".planning/quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/"]
+  missing:
+    - "A decision on the kind/cluster.yaml node CPU/memory budget itself (increase allocatable resources, requires cluster recreation) -- out of scope for a quick task, needs a deliberate phase or milestone-level decision"
+    - "Determine whether ingest's specific failure (not just the retry delay) was resource pressure (OOM/CPU throttle) or an app-level error -- the pod was deleted by on_finish_action before logs could be captured; a future attempt should capture logs live the way the integrity_gate investigation did"
+    - "Consider whether clearing/archiving the accumulated historical fixture backlog (not a code or infra change) would relieve enough baseline load to get a clean pass without touching kind/cluster.yaml"
+  debug_session: ""
+- truth: "test_backfill_resolves_previously_rejected_row demonstrates a content-differing corrected file's backfill re-drive flips the original PENDING reject to REDRIVEN"
+  status: failed
+  reason: "airflow backfill create did not trigger any observable re-execution (clear_number stayed at its pre-backfill value, dag_run.state never left its old 'success') within 300s -- test never even reached the point of checking the REDRIVEN flip."
+  severity: minor
+  test: 2
+  root_cause: "Suspected (not yet conclusively proven): meta.batches.batch_key as a pure function of content_sha256 combined with dag_run reuse per Airflow's UNIQUE (dag_id, logical_date) constraint may cause a backfill of unchanged content to be silently recognized as already-done rather than genuinely cleared and re-run. Needs a dedicated investigation, not a live-cluster contention issue this time -- the DagRun that failed to re-execute was NOT blocked by other traffic during this specific test run."
   artifacts: []
   missing:
-    - "Re-run tests/e2e/slice/test_referential_orphan.py and test_backfill_reentry.py -m cluster after pausing csv_ingest_customers and letting the cluster idle for a few minutes"
-    - "If the deferred-sensor stall recurs, investigate S3KeySensor's deferred/trigger code path specifically (it differs from the synchronous poke() path that has never shown this issue)"
+    - "A focused investigation (offline, not live-cluster) into batch_key derivation and Airflow's backfill/clear semantics for this exact scenario"
+    - "Confirm via direct SQL/CLI whether 'airflow backfill create' genuinely no-ops on an unchanged logical_date, or whether something else (e.g. a stale clear_number cache) explains the flat reading"
   debug_session: ""
