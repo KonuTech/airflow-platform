@@ -34,8 +34,28 @@ DAGS_DIR = REPO_ROOT / "airflow" / "dags"
 # trace context, not business logic either) -- neither import parses CSV,
 # validates a row, or writes to a database. Same by-name mechanism, not a
 # broader pattern; also deliberately NOT exempt from the SQL-string check.
+#
+# `_common/integrity_gate.py` (plan 08-02) is ALSO exempt here: it
+# legitimately imports `psycopg`/`hashlib` for the narrow D-20/D-22
+# rejection-bookkeeping work (LOAD-10's pre-pod-launch integrity gate).
 _EXEMPT_FROM_IMPORT_CHECK = frozenset(
-    {"airflow/dags/_common/kpo.py", "airflow/dags/_common/tracing_kpo.py"},
+    {
+        "airflow/dags/_common/kpo.py",
+        "airflow/dags/_common/tracing_kpo.py",
+        "airflow/dags/_common/integrity_gate.py",
+    },
+)
+
+# `_common/integrity_gate.py` is the ONE sanctioned exception to ADR-0004's
+# "Airflow never writes to the analytical database directly" rule (D-20's
+# rejection-bookkeeping INSERT, documented at length in the module's own
+# docstring) -- a raw SQL literal is structurally unavoidable in the one
+# function that performs it. This exemption is scoped narrowly and
+# INDEPENDENTLY of `_EXEMPT_FROM_IMPORT_CHECK` above: a future file that also
+# imports psycopg/hashlib does not silently inherit an SQL exemption it was
+# never granted just by being added to that other frozenset.
+_EXEMPT_FROM_SQL_CHECK = frozenset(
+    {"airflow/dags/_common/integrity_gate.py"},
 )
 
 FORBIDDEN_IMPORTS = re.compile(r"^\s*(?:import|from)\s+(csv|psycopg|boto3|pydantic)\b")
@@ -70,6 +90,8 @@ def test_no_raw_sql_strings() -> None:
     violations: list[str] = []
     for path in _candidate_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in _EXEMPT_FROM_SQL_CHECK:
+            continue
         text = path.read_text(encoding="utf-8")
         for lineno, line in enumerate(text.splitlines(), start=1):
             if FORBIDDEN_SQL.search(line):
