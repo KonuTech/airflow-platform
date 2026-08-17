@@ -20,6 +20,7 @@ from dataplat.models.identity import RunContext
 from dataplat.models.record import RecordChunk
 from dataplat.pipeline.protocol import PipelineContext
 from dataplat.validate.completeness import CompletenessRule
+from dataplat.validate.pattern import PatternRule
 from dataplat.validate.validity_range import ValidityRangeRule
 
 
@@ -199,6 +200,78 @@ def test_validity_range_rule_never_raises_and_accounts_for_every_row() -> None:
         rule_id="r2",
         minimum=0,
         maximum=1000,
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert len(result.chunk.rows) + len(result.rejected) == len(chunk.rows)
+
+
+# --- PatternRule --------------------------------------------------------------
+
+
+def test_pattern_rule_keeps_a_value_matching_the_full_pattern() -> None:
+    chunk = _chunk([("1", "AB")])
+    rule = PatternRule(
+        column_index=1,
+        column_name="code",
+        strategy="REJECT_RECORD",
+        rule_id="r3",
+        pattern=r"^[A-Z]{2}$",
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.chunk.rows == (("1", "AB"),)
+    assert result.rejected == []
+
+
+def test_pattern_rule_rejects_a_non_matching_value() -> None:
+    chunk = _chunk([("1", "abc")], first_ordinal=3)
+    rule = PatternRule(
+        column_index=1,
+        column_name="code",
+        strategy="REJECT_RECORD",
+        rule_id="r3",
+        pattern=r"^[A-Z]{2}$",
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.chunk.rows == ()
+    assert len(result.rejected) == 1
+    rejected = result.rejected[0]
+    assert rejected.error_type == "PATTERN_VIOLATION"
+    assert rejected.error_column == "code"
+    assert rejected.source_row_number == 3
+
+
+def test_pattern_rule_rejects_a_partial_match_since_fullmatch_is_required() -> None:
+    # "ABC" contains a leading "AB" match but fullmatch requires the ENTIRE
+    # value to match -- proves re.fullmatch, not re.match/re.search, is used.
+    chunk = _chunk([("1", "ABC")])
+    rule = PatternRule(
+        column_index=1,
+        column_name="code",
+        strategy="REJECT_RECORD",
+        rule_id="r3",
+        pattern=r"^[A-Z]{2}$",
+    )
+
+    result = rule.apply(_make_context(), chunk)
+
+    assert result.chunk.rows == ()
+    assert result.rejected[0].error_type == "PATTERN_VIOLATION"
+
+
+def test_pattern_rule_never_raises_and_accounts_for_every_row() -> None:
+    chunk = _chunk([("1", "AB"), ("2", "abc"), ("3", None)])
+    rule = PatternRule(
+        column_index=1,
+        column_name="code",
+        strategy="REJECT_RECORD",
+        rule_id="r3",
+        pattern=r"^[A-Z]{2}$",
     )
 
     result = rule.apply(_make_context(), chunk)

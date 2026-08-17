@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from dataplat.errors import ConfigurationError
 from dataplat.pipeline.engine import RaggedRowGuard
 from dataplat.validate.completeness import CompletenessRule
+from dataplat.validate.pattern import PatternRule
 from dataplat.validate.validity_range import ValidityRangeRule
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ VALIDATION_RULE_REGISTRY: dict[str, type[StreamingStage | BarrierStage]] = {
     "STRUCTURAL": RaggedRowGuard,
     "QUALITY_COMPLETENESS": CompletenessRule,
     "QUALITY_VALIDITY_RANGE": ValidityRangeRule,
+    "QUALITY_PATTERN": PatternRule,
 }
 
 
