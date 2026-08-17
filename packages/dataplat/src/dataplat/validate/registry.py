@@ -65,10 +65,7 @@ def resolve_validation_rule(rule_type: str) -> type[StreamingStage | BarrierStag
     try:
         return VALIDATION_RULE_REGISTRY[rule_type]
     except KeyError:
-        msg = (
-            "a config names a validation rule_type key that has no registry "
-            f"entry: {rule_type!r}"
-        )
+        msg = f"a config names a validation rule_type key that has no registry entry: {rule_type!r}"
         raise ConfigurationError(
             msg,
             context={"rule_type": rule_type, "known": sorted(VALIDATION_RULE_REGISTRY)},

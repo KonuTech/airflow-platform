@@ -295,9 +295,7 @@ def ingest(assignment: str) -> None:
         # `source_bucket`/`source_key` above already used; only the key is
         # needed -- every part shares `doc.file.object_uri`'s bucket by
         # construction (`dataplat.discovery`'s own per-group assembly).
-        additional_keys = tuple(
-            _parse_s3_uri(part.object_uri)[1] for part in doc.additional_parts
-        )
+        additional_keys = tuple(_parse_s3_uri(part.object_uri)[1] for part in doc.additional_parts)
         # `get_or_create_dataset` is idempotent (`discover()`'s own prior
         # call already created this row -- `discover_files` requires a real
         # `dataset_id` to run at all) -- this is a read in practice, never a

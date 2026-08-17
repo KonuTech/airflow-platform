@@ -66,9 +66,7 @@ def test_a_ratio_exactly_at_threshold_does_not_raise() -> None:
 
 
 def test_zero_rows_read_never_raises_a_division_by_zero_or_any_other_error() -> None:
-    breaker = RejectionRateCircuitBreaker(
-        threshold=0.10, total_rows_read=0, total_rows_rejected=0
-    )
+    breaker = RejectionRateCircuitBreaker(threshold=0.10, total_rows_read=0, total_rows_rejected=0)
 
     result = breaker.apply(_make_context())
 

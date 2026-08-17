@@ -282,10 +282,7 @@ _ENCODING_PROOF_TEXT = (
 # ambiguous between near-identical Western-European codepages -- itself a
 # real, useful finding, not a test-authoring mistake).
 _CP1252_DISTINCTIVE_TEXT = (
-    "id,quote\n1,She said "
-    "“bonjour” "
-    "— a warm greeting from café Zurich, "
-    "déjà vu — crowd cheered\n"
+    "id,quote\n1,She said “bonjour” — a warm greeting from café Zurich, déjà vu — crowd cheered\n"
 )
 
 

@@ -358,10 +358,14 @@ def test_discover_files_discovers_normally_once_marker_object_is_present() -> No
 
     with_marker_uris = set(with_marker_metadata.files_by_uri)
     no_marker_uris = set(no_marker_metadata.files_by_uri)
-    assert with_marker_uris == no_marker_uris == {
-        "s3://raw/" + _BATCH_PATH + "data1.csv",
-        "s3://raw/" + _BATCH_PATH + "data2.csv",
-    }
+    assert (
+        with_marker_uris
+        == no_marker_uris
+        == {
+            "s3://raw/" + _BATCH_PATH + "data1.csv",
+            "s3://raw/" + _BATCH_PATH + "data2.csv",
+        }
+    )
     # The marker object was stripped before the per-object loop -- it was
     # never hashed, registered, batched or assigned as its own file.
     assert "s3://raw/" + _MARKER_KEY not in with_marker_metadata.files_by_uri

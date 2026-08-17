@@ -110,8 +110,7 @@ class ValidityRangeRule(StreamingStage):
                         source_row_number=chunk.first_ordinal + i,
                         error_type="VALIDITY_RANGE_UNPARSEABLE",
                         error_message=(
-                            f"value {raw_value!r} at column {self._column_name!r} "
-                            "is not numeric"
+                            f"value {raw_value!r} at column {self._column_name!r} is not numeric"
                         ),
                         raw_line=_reconstruct_raw_line(row),
                         error_column=self._column_name,

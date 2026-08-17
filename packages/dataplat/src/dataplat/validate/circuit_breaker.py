@@ -116,10 +116,7 @@ class RejectionRateCircuitBreaker(BarrierStage):
 
         ratio = self._total_rows_rejected / self._total_rows_read
         if ratio > self._threshold:
-            msg = (
-                f"rejection rate {ratio:.2%} exceeds configured threshold "
-                f"{self._threshold:.2%}"
-            )
+            msg = f"rejection rate {ratio:.2%} exceeds configured threshold {self._threshold:.2%}"
             raise QualityThresholdExceeded(
                 msg,
                 context={

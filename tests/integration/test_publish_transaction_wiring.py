@@ -817,9 +817,9 @@ def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env)
         batch_key="wiring_conflict_guard_blocked:backfill:1",
         status="OPEN",
     )
-    older_csv = (
-        _CSV_HEADER + _row_with_event_ts(9_405_001, "2025-01-01T00:00:00+00:00")
-    ).encode("utf-8")
+    older_csv = (_CSV_HEADER + _row_with_event_ts(9_405_001, "2025-01-01T00:00:00+00:00")).encode(
+        "utf-8"
+    )
     backfill_object_key = "customers/conflict_guard_blocked_backfill.csv"
     env.s3_client.put_object(
         Bucket=env.scratch_bucket,

@@ -297,8 +297,7 @@ def _apply_referential_barrier(
     target_table = rule.params.get("target_table")
     if target_table is None:
         msg = (
-            f"quality rule {rule.rule_id!r} (rule_type=REFERENTIAL) declares no "
-            "params.target_table"
+            f"quality rule {rule.rule_id!r} (rule_type=REFERENTIAL) declares no params.target_table"
         )
         raise ConfigurationError(msg, context={"rule_id": rule.rule_id})
 
@@ -580,13 +579,9 @@ def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestr
         # claim below, so the SAME trace_id/span_id land on the claimed row.
         span_context = otel_trace.get_current_span().get_span_context()
         trace_id = (
-            otel_trace.format_trace_id(span_context.trace_id)
-            if span_context.is_valid
-            else None
+            otel_trace.format_trace_id(span_context.trace_id) if span_context.is_valid else None
         )
-        span_id = (
-            otel_trace.format_span_id(span_context.span_id) if span_context.is_valid else None
-        )
+        span_id = otel_trace.format_span_id(span_context.span_id) if span_context.is_valid else None
 
         claimed = ctx.metadata.claim_ingestion_run(
             idempotency_key=ctx.run.idempotency_key,

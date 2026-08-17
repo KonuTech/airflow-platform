@@ -332,7 +332,9 @@ def test_resolution_scoped_to_business_key_across_batches_and_idempotent_on_repl
     assert second_resolved_count == 0
 
 
-def test_resolve_rejected_records_for_business_keys_is_the_only_write_path_to_resolution_type() -> None:  # noqa: E501
+def test_resolve_rejected_records_for_business_keys_is_the_only_write_path_to_resolution_type() -> (
+    None
+):
     """T-08-08/D-04: no method on `PostgresMetadataRepository` other than the resolver can SET it.
 
     Scans every method's own source for the literal SQL assignment pattern
