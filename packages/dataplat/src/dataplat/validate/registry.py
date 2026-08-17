@@ -26,6 +26,7 @@ from dataplat.pipeline.engine import RaggedRowGuard
 from dataplat.validate.circuit_breaker import RejectionRateCircuitBreaker
 from dataplat.validate.completeness import CompletenessRule
 from dataplat.validate.pattern import PatternRule
+from dataplat.validate.uniqueness import UniquenessRule
 from dataplat.validate.validity_range import ValidityRangeRule
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 VALIDATION_RULE_REGISTRY: dict[str, type[StreamingStage | BarrierStage]] = {
     "STRUCTURAL": RaggedRowGuard,
     "QUALITY_COMPLETENESS": CompletenessRule,
+    "QUALITY_UNIQUENESS": UniquenessRule,
     "QUALITY_VALIDITY_RANGE": ValidityRangeRule,
     "QUALITY_PATTERN": PatternRule,
     "CIRCUIT_BREAKER": RejectionRateCircuitBreaker,
