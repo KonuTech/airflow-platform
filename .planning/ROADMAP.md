@@ -39,7 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Vault Secrets & Workload Identity** - Vault becomes the only source of runtime credentials, with positive and negative service-account identity tests (completed 2026-08-14)
 - [x] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization (completed 2026-08-15)
 - [x] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking (completed 2026-08-16)
-- [ ] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection
+- [x] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection (completed 2026-08-17)
 - [ ] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation
 - [ ] **Phase 10: CDC & Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history, late-arriving corrections by history recomputation, and a CDC `Source` with an ordering barrier
 - [ ] **Phase 11: CI/CD Completion & Operations** - Ephemeral kind E2E in CI proving the environment rebuilds from the repo, plus runbooks, retention and rebuild-from-raw
@@ -476,8 +476,8 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 08-13-PLAN.md — tests/dagtest/ new tier: dag.test() proves backfill DagRun mechanics (wave 7)
-- [ ] 08-14-PLAN.md — Live-cluster proof: real orphan-order race (VALID-07) + real airflow dags backfill re-entry (VALID-08) (wave 7)
+- [x] 08-13-PLAN.md — tests/dagtest/ new tier: dag.test() proves backfill DagRun mechanics (wave 7)
+- [x] 08-14-PLAN.md — Live-cluster proof: real orphan-order race (VALID-07) + real airflow dags backfill re-entry (VALID-08) (wave 7)
 
 **Research stage**: S8 + S9. **Skip `--research-phase`** — shapes are specified in ARCHITECTURE Q2 and FEATURES §3.2/§3.3.
 
