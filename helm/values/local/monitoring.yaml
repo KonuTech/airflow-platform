@@ -123,14 +123,19 @@ grafana:
     enabled: true
     size: 2Gi # dashboards/provisioning state only -- no metric data lives here
 
-  # Sized like vault.yaml's own local profile (T-05 precedent): a single,
-  # lightweight, always-on service in this cluster. `sidecar.resources`
-  # covers BOTH the dashboards and datasources sidecar containers this
-  # chart renders by default (verified via `helm template` this session --
-  # ONE values key sizes both).
+  # CPU request trimmed from 100m to 50m (quick task 260817-rvq): matches
+  # `helm/values/ci/monitoring.yaml`'s own already-vetted `grafana.resources.
+  # requests.cpu` value for this same component, not a new independently
+  # derived number. Live 15m-average measurement this session found grafana
+  # (main + 2 sidecars combined) using ~12.2m actual vs 150m previously
+  # requested (100m main + 25m sidecar) -- still several-times headroom at
+  # 50m. Memory untouched. `sidecar.resources` covers BOTH the dashboards
+  # and datasources sidecar containers this chart renders by default
+  # (verified via `helm template` this session -- ONE values key sizes
+  # both).
   resources:
     requests:
-      cpu: 100m
+      cpu: 50m
       memory: 256Mi
     limits:
       cpu: 500m
@@ -145,9 +150,13 @@ grafana:
       defaultDatasourceEnabled: false
       alertmanager:
         enabled: false
+    # CPU request trimmed from 25m to 10m (quick task 260817-rvq): matches
+    # `helm/values/ci/monitoring.yaml`'s own already-vetted `grafana.sidecar.
+    # resources.requests.cpu` value, backed by the same live-measured
+    # ~12.2m combined grafana usage cited above. Memory untouched.
     resources:
       requests:
-        cpu: 25m
+        cpu: 10m
         memory: 32Mi
       limits:
         cpu: 100m
@@ -686,28 +695,43 @@ grafana:
               annotations:
                 summary: "Row-level reject rate exceeded 10% for 5m."
 
+# CPU request trimmed from 50m to 20m (quick task 260817-rvq): matches
+# `helm/values/ci/monitoring.yaml`'s own already-vetted `kube-state-metrics.
+# resources.requests.cpu` value. Live 15m-average measurement this session
+# found kube-state-metrics using ~2.2m actual vs 50m previously requested.
+# Memory untouched.
 kube-state-metrics:
   resources:
     requests:
-      cpu: 50m
+      cpu: 20m
       memory: 64Mi
     limits:
       cpu: 200m
       memory: 128Mi
 
+# CPU request trimmed from 50m to 20m (quick task 260817-rvq): matches
+# `helm/values/ci/monitoring.yaml`'s own already-vetted `prometheus-node-
+# exporter.resources.requests.cpu` value. Live 15m-average measurement this
+# session found the 3 daemonset node-exporter instances combined using
+# ~2.7m actual vs 50m/instance previously requested. Memory untouched.
 prometheus-node-exporter:
   resources:
     requests:
-      cpu: 50m
+      cpu: 20m
       memory: 32Mi
     limits:
       cpu: 200m
       memory: 64Mi
 
+# CPU request trimmed from 50m to 20m (quick task 260817-rvq): matches
+# `helm/values/ci/monitoring.yaml`'s own already-vetted `prometheusOperator.
+# resources.requests.cpu` value. Live 15m-average measurement this session
+# found kube-prometheus-operator using ~2.6m actual vs 50m previously
+# requested. Memory untouched.
 prometheusOperator:
   resources:
     requests:
-      cpu: 50m
+      cpu: 20m
       memory: 128Mi
     limits:
       cpu: 200m
@@ -716,7 +740,10 @@ prometheusOperator:
   # (verified via `helm template` this session -- job-createSecret.yaml and
   # job-patchWebhook.yaml both read prometheusOperator.admissionWebhooks.
   # patch.resources; there is no separate `.create.resources` key in this
-  # chart version).
+  # chart version). Intentionally excluded from this quick task's CPU trim
+  # (260817-rvq) -- this is a short-lived admission-webhook patch Job, not a
+  # long-running always-on pod, and it was not part of the live-measured
+  # steady-state usage this trim is based on. Left at its pre-existing 20m.
   admissionWebhooks:
     patch:
       resources:
@@ -748,9 +775,14 @@ prometheus:
             requests:
               storage: 5Gi
 
+    # CPU request trimmed from 250m to 100m (quick task 260817-rvq): matches
+    # `helm/values/ci/monitoring.yaml`'s own already-vetted `prometheus.
+    # prometheusSpec.resources.requests.cpu` value. Live 15m-average
+    # measurement this session found prometheus using ~23.6m actual vs 250m
+    # previously requested. Memory untouched.
     resources:
       requests:
-        cpu: 250m
+        cpu: 100m
         memory: 512Mi
       limits:
         cpu: "1"
