@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 from dataplat.metadata.repository import MetadataRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from psycopg import Connection
@@ -526,11 +527,15 @@ class PostgresMetadataRepository(MetadataRepository):
         come from this method's own arguments, never from `RejectedRecord`
         (which carries none of them). `resolution_type` is never set here —
         every inserted row lands at migration 0015's `'PENDING'` column
-        default; `resolve_rejected_records_for_batch` below is the only
-        method that ever changes it. `RejectedRecord` has no
+        default; `resolve_rejected_records_for_business_keys` below is the
+        only method that ever changes it. `RejectedRecord` has no
         `source_byte_offset` field today, so it is always bound `None`.
-        `raw_line`/`error_message` — untrusted CSV content — cross into SQL
-        exclusively via `%s` placeholders (T-08-07), never string-formatted.
+        `raw_line`/`error_message`/`business_key` — untrusted CSV content —
+        cross into SQL exclusively via `%s` placeholders (T-08-07/T-08-28),
+        never string-formatted. `record.business_key` (migration 0020) is
+        bound `None` when the row's business-key value could not be
+        reliably extracted (D-25) — this method never guesses or defaults
+        it.
         """
         for record in rejected:
             conn.execute(
@@ -538,8 +543,8 @@ class PostgresMetadataRepository(MetadataRepository):
                 INSERT INTO meta.rejected_records (
                     run_id, file_id, batch_id, source_row_number,
                     source_byte_offset, raw_line, error_type, error_column,
-                    error_message
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    error_message, business_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     run_id,
@@ -551,38 +556,61 @@ class PostgresMetadataRepository(MetadataRepository):
                     record.error_type,
                     record.error_column,
                     record.error_message,
+                    record.business_key,
                 ),
             )
 
-    def resolve_rejected_records_for_batch(
+    def resolve_rejected_records_for_business_keys(
         self,
         *,
         conn: Connection[Any],
-        batch_id: int,
+        dataset_id: int,
+        business_keys: Sequence[str],
         resolved_by_run_id: int,
         resolution_type: str,
     ) -> int:
-        """See `MetadataRepository.resolve_rejected_records_for_batch`.
+        """See `MetadataRepository.resolve_rejected_records_for_business_keys`.
 
         This is the ONLY method on this class — and the ONLY code path
         anywhere in this codebase — that can ever change
         `resolution_type`/`resolved_by_run_id` on `meta.rejected_records`
-        (D-04, T-08-08). No narrower per-row variant exists, and none may be
-        added: the single `WHERE batch_id = %s AND resolution_type =
-        'PENDING'` predicate below is D-03's whole-batch-only granularity,
-        made concrete — this method's sole scoping parameter is a
-        `batch_id`, never a row id, a list of row ids, or a `file_id`.
+        (D-04/D-24, T-08-08). No per-row variant exists, and none may be
+        added: the single `UPDATE ... FROM meta.batches WHERE ...` below is
+        D-24's whole-set-side-effect-only granularity, made concrete against
+        D-23's new `(dataset_id, business_key)` matching predicate — this
+        method's scoping parameters are a `dataset_id` and a set of
+        `business_keys`, never a row id or a list of row ids.
+
+        Guards `business_keys=[]` as an explicit no-op FIRST (mirrors the
+        Protocol docstring's documented "0 is a legitimate outcome" framing)
+        — an empty Postgres array bound via `= ANY(%s)` would already select
+        zero rows, but the explicit guard avoids issuing a statement at all
+        for the common empty-call case. `business_keys` is bound as a plain
+        Python `list` through a single `%s` placeholder — psycopg3 adapts it
+        to a Postgres array automatically (T-08-29) — never individually
+        interpolated per-value, never built via string concatenation. A
+        `NULL` `business_key` row is structurally never matched by
+        `= ANY(%s)` regardless of what `business_keys` contains (D-25) — no
+        extra `WHERE business_key IS NOT NULL` clause is needed for that
+        guarantee to hold.
+
         Never opens its own connection and never commits/rolls back `conn`,
         matching `finalize_publication`'s documented exception.
         """
+        if not business_keys:
+            return 0
         cursor = conn.execute(
             """
             UPDATE meta.rejected_records
                SET resolution_type = %s,
                    resolved_by_run_id = %s
-             WHERE batch_id = %s AND resolution_type = 'PENDING'
+              FROM meta.batches
+             WHERE meta.batches.batch_id = meta.rejected_records.batch_id
+               AND meta.batches.dataset_id = %s
+               AND meta.rejected_records.business_key = ANY(%s)
+               AND meta.rejected_records.resolution_type = 'PENDING'
             """,
-            (resolution_type, resolved_by_run_id, batch_id),
+            (resolution_type, resolved_by_run_id, dataset_id, list(business_keys)),
         )
         return int(cursor.rowcount)
 

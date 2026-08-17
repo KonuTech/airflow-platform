@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from psycopg import Connection
@@ -552,9 +553,12 @@ class MetadataRepository(Protocol):
 
         Maps to ``INSERT INTO meta.rejected_records (run_id, file_id,
         batch_id, source_row_number, raw_line, error_type, error_column,
-        error_message) VALUES (...)`` for each `RejectedRecord` in
-        `rejected` (migration 0015). `resolution_type` is left to its
-        `'PENDING'` column default — this method never sets it directly.
+        error_message, business_key) VALUES (...)`` for each `RejectedRecord`
+        in `rejected` (migration 0015, `business_key` added by migration
+        0020). `resolution_type` is left to its `'PENDING'` column default —
+        this method never sets it directly. Also inserts `record.business_key`
+        for each `RejectedRecord` — `None` when the row's business-key value
+        could not be reliably extracted (D-25).
 
         Like `record_validation_results`, `conn` is caller-supplied and
         never committed or rolled back here — must land inside the SAME
@@ -566,34 +570,63 @@ class MetadataRepository(Protocol):
                 `finalize_publication` run against.
             run_id: The run these rejects belong to.
             file_id: The file these rejects were read from.
-            batch_id: The batch these rejects belong to — needed later by
-                `resolve_rejected_records_for_batch`'s own `WHERE batch_id =
-                %s` predicate.
+            batch_id: The batch these rejects belong to.
             rejected: The rejected rows to persist, in any order.
         """
         ...
 
-    def resolve_rejected_records_for_batch(
+    def resolve_rejected_records_for_business_keys(
         self,
         *,
         conn: Connection[Any],
-        batch_id: int,
+        dataset_id: int,
+        business_keys: Sequence[str],
         resolved_by_run_id: int,
         resolution_type: str,
     ) -> int:
-        """Resolve every still-PENDING reject in one batch, as a single whole-batch side effect.
+        """Resolve every still-PENDING reject sharing a business key, as a whole-set side effect.
 
         Maps to ``UPDATE meta.rejected_records SET resolution_type = %s,
-        resolved_by_run_id = %s WHERE batch_id = %s AND resolution_type =
-        'PENDING' RETURNING rejected_record_id`` (migration 0015).
+        resolved_by_run_id = %s FROM meta.batches WHERE
+        meta.batches.batch_id = meta.rejected_records.batch_id AND
+        meta.batches.dataset_id = %s AND meta.rejected_records.business_key
+        = ANY(%s) AND meta.rejected_records.resolution_type = 'PENDING'``
+        (migration 0020's `business_key` column, joined against
+        `meta.batches.dataset_id` for dataset scoping).
 
-        Whole-batch side effect only (D-04) — no per-row variant exists
-        anywhere in this codebase, and none may be added: a backfill run
-        completing, or an explicit batch-level discard operation, are the
-        ONLY two call sites this method has. This is the ONLY write path to
-        `resolution_type`/`resolved_by_run_id` anywhere in this codebase —
-        `record_rejected_records` above never sets either column, leaving
-        every newly-inserted row at its `'PENDING'` column default.
+        This REPLACES this Protocol's prior, strictly `batch_id`-scoped
+        resolution method (D-23's gap-closure fix, `08-CONTEXT.md` "Gap
+        closure: VALID-08 backfill resolution scoping"): `discover_files`'s
+        `batch_key` is a
+        pure function of a file's `content_sha256`, so a content-differing
+        correction of a previously-rejected row always discovers under a
+        NEW `batch_id` — a strictly `batch_id`-scoped resolve call could
+        never touch the ORIGINAL batch's PENDING row. Matching on
+        `(dataset_id, business_key)` instead means this method resolves
+        every PENDING reject sharing that business key across ANY `batch_id`
+        within the dataset, regardless of which batch originally rejected it
+        or which batch the correction discovers under.
+
+        Still a whole-set side effect only (D-24 — D-03's whole-batch-only
+        granularity is preserved, only the matching predicate changes): no
+        per-row variant exists anywhere in this codebase, and none may be
+        added. A backfill run completing, or an explicit batch-level discard
+        operation, are the ONLY two call sites this method has. This is the
+        ONLY write path to `resolution_type`/`resolved_by_run_id` anywhere
+        in this codebase — `record_rejected_records` above never sets
+        either column, leaving every newly-inserted row at its `'PENDING'`
+        column default.
+
+        A `NULL` `business_key` row is NEVER matched by this method
+        regardless of what `business_keys` contains (D-25) — PostgreSQL's
+        `= ANY(array)` operator structurally never matches `NULL` against
+        any array of non-NULL values, so a row whose business-key value
+        could not be reliably extracted at rejection time stays `PENDING`
+        until an explicit batch-level discard.
+
+        `business_keys=[]` is a legitimate no-op returning `0`, mirroring
+        the old method's "0 rows affected is a legitimate outcome" framing
+        (e.g. a caller with nothing new to resolve on this pass).
 
         Like the two methods above, `conn` is caller-supplied and never
         committed or rolled back here.
@@ -601,7 +634,11 @@ class MetadataRepository(Protocol):
         Args:
             conn: An already-open connection, inside an already-open
                 transaction.
-            batch_id: The batch whose PENDING rejects are being resolved.
+            dataset_id: The dataset whose PENDING rejects are being
+                resolved — scopes the match so the SAME business-key value
+                in a DIFFERENT dataset is never touched.
+            business_keys: The business-key values whose PENDING rejects
+                should resolve. An empty sequence is a legitimate no-op.
             resolved_by_run_id: The run (a backfill run, or the run
                 performing an explicit discard) responsible for this
                 resolution — the FK lineage answers "was this ever fixed,
@@ -613,8 +650,9 @@ class MetadataRepository(Protocol):
                 from that state.
 
         Returns:
-            The number of rows resolved by this call. `0` when the batch had
-            no PENDING rejects — a legitimate, non-error outcome (e.g. a
-            second resolution attempt against an already-resolved batch).
+            The number of rows resolved by this call. `0` when there were no
+            matching PENDING rejects (including when `business_keys=[]`) —
+            a legitimate, non-error outcome (e.g. a second resolution
+            attempt against an already-resolved set).
         """
         ...

@@ -111,6 +111,17 @@ class RejectedRecord:
             stage threads the true raw physical line through instead.
         error_column: The column the failure is attributed to, when the
             failure is column-specific. ``None`` for row-level failures.
+        business_key: The dataset's configured business-key column value
+            (``ColumnContract.business_key``, ``config/model.py``) for this
+            row, as a ``str``, extracted by whichever stage created this
+            ``RejectedRecord``. ``None`` when no ``business_key`` column is
+            configured for the dataset, or when this row's value at that
+            column is empty/absent/unreliable (D-25 -- e.g. a
+            structural/ragged-row rejection, where field positions are not
+            trustworthy enough to read a business-key value from). This is
+            the field ``MetadataRepository.
+            resolve_rejected_records_for_business_keys`` matches on,
+            replacing the old strict-``batch_id`` matching (D-23).
     """
 
     source_row_number: int
@@ -118,6 +129,7 @@ class RejectedRecord:
     error_message: str
     raw_line: str
     error_column: str | None = None
+    business_key: str | None = None
 
 
 @dataclass
