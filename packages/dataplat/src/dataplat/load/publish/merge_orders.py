@@ -49,6 +49,17 @@ if TYPE_CHECKING:
 # `StagingLoader` from `ctx.config.dataset` + a numeric `run_id`, never from
 # CSV row content. Every column/table name below is a literal, hardcoded
 # against normalized.orders's real schema (migration 0016).
+#
+# `normalized.orders.order_date IS NULL OR ...` (CR-01-adjacent finding,
+# phase-08 code review, WR-04): unlike `merge.py`'s `event_ts` (declared
+# `nullable: false`), `order_date` IS `nullable: true` (orders.yaml) --
+# plain `EXCLUDED.order_date >= normalized.orders.order_date` is NULL
+# (not TRUE) in three-valued SQL logic whenever the EXISTING row's
+# order_date is NULL, so the whole `WHERE` clause would evaluate NULL and
+# the row would be "locked but left unchanged" FOREVER, even by an update
+# that legitimately fills in a real date. The `IS NULL OR` branch treats an
+# existing NULL as "always supersede-able", matching this platform's core
+# value that no data is ever silently dropped or left uncorrectable.
 _PUBLISH_SQL = """
 INSERT INTO normalized.orders (
     order_id, customer_id, order_date, amount,
@@ -69,7 +80,8 @@ ON CONFLICT (order_id) DO UPDATE
        _run_id = EXCLUDED._run_id, _file_id = EXCLUDED._file_id,
        _batch_id = EXCLUDED._batch_id, _source_row_number = EXCLUDED._source_row_number
  WHERE normalized.orders._record_hash IS DISTINCT FROM EXCLUDED._record_hash
-   AND EXCLUDED.order_date >= normalized.orders.order_date
+   AND (normalized.orders.order_date IS NULL
+        OR EXCLUDED.order_date >= normalized.orders.order_date)
 """
 
 

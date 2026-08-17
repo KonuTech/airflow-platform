@@ -143,7 +143,7 @@ def _insert_staging_row(  # noqa: PLR0913 -- one keyword per staging column, mir
     *,
     order_id: str,
     customer_id: str,
-    order_date: str,
+    order_date: str | None,
     amount: str,
     run_id: int,
     file_id: int,
@@ -314,3 +314,86 @@ def test_republishing_the_identical_staged_row_is_a_no_op(
         ).fetchone()
     assert count is not None
     assert count[0] == 1
+
+
+@pytest.mark.integration
+def test_a_null_order_date_can_still_be_corrected_by_a_later_publish(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """WR-04 (phase-08 code review): an existing NULL `order_date` must not block corrections.
+
+    `order_date` is `nullable: true` (orders.yaml) -- unlike `merge.py`'s
+    `event_ts` (`nullable: false`), which the `>= ` "latest wins" guard was
+    originally written for. Plain SQL `EXCLUDED.order_date >=
+    normalized.orders.order_date` is NULL, not TRUE, whenever the EXISTING
+    row's `order_date` is NULL (three-valued logic), so an unguarded clause
+    would leave that row "locked but unchanged" forever, even by an update
+    that legitimately fills in a real date -- a silent, permanent block on
+    correction. This proves `OrdersMergePublisher`'s `... IS NULL OR ...`
+    guard fixes exactly that.
+    """
+    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="orders_null_date")
+    order_id = "9201"
+
+    with psycopg.connect(migrated_dsn) as conn:
+        first_table = "staging.orders_test_null_date_1"
+        _create_staging_table(conn, first_table)
+        _insert_staging_row(
+            conn,
+            first_table,
+            order_id=order_id,
+            customer_id="5004",
+            order_date=None,
+            amount="10.00",
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"null-order-date-v1").digest(),
+        )
+        first_result = OrdersMergePublisher().publish(_make_context(), first_table, conn)
+        conn.commit()
+    assert first_result.rows_affected == 1
+
+    with psycopg.connect(migrated_dsn) as verify_conn:
+        row = verify_conn.execute(
+            "SELECT order_date FROM normalized.orders WHERE order_id = %s",
+            (int(order_id),),
+        ).fetchone()
+    assert row is not None
+    assert row[0] is None
+
+    # A later publish for the SAME order_id, now with a real date and
+    # different content (different hash, so the `IS DISTINCT FROM` guard
+    # doesn't itself suppress the write) -- must actually update the row,
+    # not get silently no-op'd by the NULL comparison.
+    with psycopg.connect(migrated_dsn) as conn:
+        second_table = "staging.orders_test_null_date_2"
+        _create_staging_table(conn, second_table)
+        _insert_staging_row(
+            conn,
+            second_table,
+            order_id=order_id,
+            customer_id="5004",
+            order_date="2026-06-01",
+            amount="15.00",
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"null-order-date-v2").digest(),
+        )
+        second_result = OrdersMergePublisher().publish(_make_context(), second_table, conn)
+        conn.commit()
+
+    assert second_result.rows_affected == 1
+
+    with psycopg.connect(migrated_dsn) as verify_conn:
+        row = verify_conn.execute(
+            "SELECT order_date, amount FROM normalized.orders WHERE order_id = %s",
+            (int(order_id),),
+        ).fetchone()
+    assert row is not None
+    assert row[0].isoformat() == "2026-06-01"
+    assert str(row[1]) == "15.00"
