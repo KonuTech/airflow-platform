@@ -80,7 +80,7 @@ def _require_docker() -> None:
 
 @pytest.fixture(scope="session")
 def postgres_dsn() -> Iterator[str]:
-    """A throwaway PostgreSQL 18 container, with `etl_app` created, unmigrated.
+    """A throwaway PostgreSQL 18 container, with `etl_app`/`analytics_owner` created, unmigrated.
 
     PG 18 — the analytical database's pinned major (CLAUDE.md); the Airflow
     metadata major is capped at 17, and this fixture must never accidentally
@@ -103,6 +103,18 @@ def postgres_dsn() -> Iterator[str]:
             # beyond LOGIN. Every grant this phase's migrations issue is
             # proven against this same starting state.
             cur.execute("CREATE ROLE etl_app LOGIN")
+            # `cnpg-analytics.yaml`'s `initdb.owner: analytics_owner` makes
+            # CloudNativePG auto-create this role as part of its own
+            # bootstrap, ahead of `postInitApplicationSQL` — a real cluster
+            # never migrates without it already existing. Migration 0013
+            # (`GRANT SELECT ON meta.v_customers_lineage TO analytics_owner`)
+            # started depending on that role existing here too, but this
+            # fixture was never updated to create it (found via a genuine
+            # `alembic upgrade head` failure, `UndefinedObject: role
+            # "analytics_owner" does not exist" — not caused by this plan's
+            # own new migrations, but blocking verification of every
+            # migration from 0013 onward, including this plan's 0014-0016).
+            cur.execute("CREATE ROLE analytics_owner LOGIN")
         yield dsn
 
 

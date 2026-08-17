@@ -36,7 +36,10 @@ EXPECTED_TABLES = {
     ("meta", "batch_files"),
     ("meta", "ingestion_runs"),
     ("meta", "schema_versions"),
+    ("meta", "validation_results"),
+    ("meta", "rejected_records"),
     ("normalized", "customers"),
+    ("normalized", "orders"),
 }
 
 # Every table this phase's migrations GRANT etl_app access to — the same set
@@ -49,6 +52,7 @@ HASH_VERSION_COLUMNS = [
     ("meta", "config_versions", "hash_version"),
     ("meta", "schema_versions", "hash_version"),
     ("normalized", "customers", "_record_hash_version"),
+    ("normalized", "orders", "_record_hash_version"),
 ]
 
 
