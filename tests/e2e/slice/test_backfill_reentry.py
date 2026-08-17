@@ -40,21 +40,28 @@ COMPLETELY SEPARATE identifier space from Airflow's `dag_run.run_id`/`.id`.
 the latter -- this test's resolution assertion below queries and asserts
 against that analytical-database run identity exclusively.
 
-Honest limit, stated plainly rather than hidden: `resolve_rejected_records_
-for_batch` (D-05) is scoped by `meta.batches.batch_id`, and `batch_key` is a
-pure function of the file's own `content_sha256`
-(`dataplat.discovery.discover_files`'s own documented formula,
-`f"{dataset_name}:{content_sha256_hex[:16]}"`). Correcting a row necessarily
-changes the file's bytes, so the corrected re-upload discovers under a NEW
-`file_id`/`batch_id`, distinct from the original bad file's. This test still
-asserts the plan's own literal claim (the previously-PENDING row flips to
-`REDRIVEN`, linked to the new run) exactly as written, because that is the
-documented, LOCKED intent (08-CONTEXT.md D-05: "a batch's PENDING rows may
-belong to a PRIOR run") -- if this specific assertion ever fails against a
-fully-deployed live cluster, that is real, valuable information about a
-content-hash/batch-scoping gap between the locked intent and the current
-`discovery.py` implementation, not a flaw in this test. See this plan's own
-SUMMARY.md for the full architecture analysis this docstring summarizes.
+Resolution mechanism, current and live-proven (08-18): `resolve_rejected_
+records_for_business_keys` (D-23) matches on `(dataset_id, business_key)`,
+NOT `meta.batches.batch_id`. `run_ingest`'s post-publish barrier
+(`_apply_post_publish_barriers_and_persist`, `pipeline/run.py`) queries its
+own just-staged rows for the dataset's configured business-key column and
+resolves every matching PENDING reject across the WHOLE dataset, regardless
+of which batch originally recorded it. This is exactly why a content-
+differing correction works: correcting a row necessarily changes the file's
+bytes, so the corrected re-upload discovers under a NEW `file_id`/`batch_id`
+(`batch_key` is a pure function of `content_sha256`,
+`dataplat.discovery.discover_files`'s own documented formula,
+`f"{dataset_name}:{content_sha256_hex[:16]}"`) -- yet the original PENDING
+reject still resolves, because the predicate matches on the published
+business key, not on that new batch_id. `08-16` added the schema/contract
+(`meta.rejected_records.business_key`), `08-17` wired extraction into every
+`RejectedRecord`, and `08-18` (this plan) wired the real business-key
+derivation into `run_ingest`'s publish transaction and proved it live
+against this cluster: `pytest tests/e2e/slice/test_backfill_reentry.py -x
+-m cluster` passed, `test_backfill_resolves_previously_rejected_row`
+reached and passed `_assert_row_resolved`, and a direct `meta.
+rejected_records` query confirmed exactly one row transitioned
+PENDING -> REDRIVEN. See `08-18-SUMMARY.md` for the full proof record.
 
 `airflow backfill create` itself carries a documented, live-confirmed
 transient: `_create_backfill_dag_run_non_partitioned`'s `SELECT ... FOR
@@ -541,10 +548,11 @@ def _assert_row_resolved(
     resolution_type, resolved_by_run_id = resolved_row
     assert resolution_type == "REDRIVEN", (
         f"expected the original rejected_record_id={rejected_record_id!r} to show "
-        f"resolution_type='REDRIVEN' after the backfill run, got {resolution_type!r} -- D-05 "
-        f"requires a completed backfill run to resolve the batch's PENDING rejects; see this "
-        f"module's own docstring for the documented content-hash/batch-scoping caveat if this "
-        f"assertion is the one that fails"
+        f"resolution_type='REDRIVEN' after the backfill run, got {resolution_type!r} -- D-23's "
+        f"business-key-scoped resolve (resolve_rejected_records_for_business_keys, matching on "
+        f"(dataset_id, business_key) rather than batch_id) requires the corrected run's own "
+        f"published business key to match this row's; see this module's own docstring for the "
+        f"live-proven mechanism if this assertion is the one that fails"
     )
     assert resolved_by_run_id == expected_resolved_by_run_id, (
         f"expected resolved_by_run_id={expected_resolved_by_run_id!r} (the corrected file's "
@@ -594,7 +602,7 @@ def test_backfill_resolves_previously_rejected_row(
     airflow_metadata_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
-    """VALID-08/D-01/D-05, live: a real `airflow backfill create` re-entry, real resolution.
+    """VALID-08/D-01/D-23, live: a real `airflow backfill create` re-entry, real resolution.
 
     Uploads a `customers` CSV with one row failing `customers.yaml`'s real
     `QUALITY_COMPLETENESS` rule on `name` -- waits for the run to SUCCEED
