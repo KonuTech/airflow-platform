@@ -14,11 +14,12 @@
 # batching:/columns: blocks), adapted to normalized.orders's four business
 # columns (order_id, customer_id, order_date, amount).
 #
-# No quality: block yet -- that lands in plan 08-08, which wires
-# ReferentialIntegrityBarrier's D-16 orphan-order handling
-# (error_type=REFERENTIAL_ORPHAN, strategy=QUARANTINE_RECORD). This plan's
-# job is only to make `orders` a real, working second dataset through the
-# full staging->publish pipeline (see this file's own PLAN.md objective).
+# quality: is 08-08's own addition -- D-16's orphan-order handling
+# (ReferentialIntegrityBarrier, error_type=REFERENTIAL_ORPHAN,
+# strategy=QUARANTINE_RECORD). Unlike customers.yaml's quality: block
+# (completeness/uniqueness/validity-range/pattern), orders' only rule is
+# REFERENTIAL -- the two datasets' quality: blocks are deliberately not
+# identical shapes (08-PATTERNS.md line 548).
 #
 # No filename:/normalization: blocks either -- customers.yaml's own
 # precedent (no filename-mask delivery shape, no numeric/currency locale
@@ -54,6 +55,13 @@ load:
   target: normalized.orders
 batching:
   max_units_per_run: 100
+
+quality:
+  rules:
+    - rule_id: orders_customer_id_referential
+      rule_type: REFERENTIAL
+      strategy: QUARANTINE_RECORD
+      column: customer_id
 
 # columns: is D-17's minimal orders schema -- order_id/customer_id/
 # order_date/amount, mirroring customers.yaml's own columns: shape and
