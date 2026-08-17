@@ -68,6 +68,11 @@ def _row(customer_id: int, *, empty_name: bool = False) -> str:
     return f"{customer_id},{name},US,1990-01-01,2026-01-01T00:00:00+00:00\n"
 
 
+def _row_with_event_ts(customer_id: int, event_ts: str) -> str:
+    """One well-formed customers CSV row with an explicit `event_ts` (CR-01's conflict-guard proof)."""  # noqa: E501, W505
+    return f"{customer_id},Name{customer_id},US,1990-01-01,{event_ts}\n"
+
+
 def _csv_bytes(*, good_count: int, bad_count: int, start_id: int) -> bytes:
     """`good_count` well-formed rows followed by `bad_count` empty-`name` rows, from `start_id`."""
     lines = [_CSV_HEADER]
@@ -705,6 +710,155 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
     _own_row_number, own_resolution_type, own_resolved_by = own_state[0]
     assert own_resolution_type == "PENDING"
     assert own_resolved_by is None
+
+
+# --- Test C3: CR-01 (phase-08 code review) -- a business key that merely ---
+# --- STAGED, but that the Publisher's own conflict-guard left "locked but --
+# --- unchanged", must NOT resolve its PENDING reject ------------------------
+
+
+def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env) -> None:
+    """The exact CR-01 false-positive-resolution path, closed.
+
+    Reproduces the review's concrete scenario: a row for `customer_id=9405001` is rejected
+    under an ORIGINAL batch for an unrelated reason, `PENDING`, with `business_key="9405001"`.
+    Independently, a *different*, legitimately-newer row for the SAME `customer_id`
+    (`event_ts=T3`) is ALREADY published (seeded directly, exactly as if an entirely separate
+    prior run had legitimately published it -- deliberately NOT run through `run_ingest`
+    itself here, since that run's own resolve call would -- correctly, by D-23's own
+    business-key-scoped design -- resolve the seeded PENDING reject the moment it actually
+    publishes, before this test even reaches its own CR-01 scenario). An operator then uploads
+    a "corrected" file that fixes the original violation for the *original*, OLDER `event_ts=T2`
+    row -- it now survives streaming validation and stages. `MergePublisher`'s own
+    `WHERE ... AND EXCLUDED.event_ts >= normalized.customers.event_ts` conflict guard evaluates
+    `false` (`T2 < T3`): the row is "locked but unchanged", nothing is written to
+    `normalized.customers`. Before CR-01's fix, `published_business_keys` was read from the
+    staging table itself, so `"9405001"` appeared in it regardless -- the original `PENDING`
+    reject flipped to `REDRIVEN` even though the target row was never actually corrected. After
+    the fix, `published_business_keys` comes from `MergePublisher`'s own `RETURNING customer_id`
+    -- populated ONLY by rows the `INSERT ... ON CONFLICT` statement actually affected -- so the
+    conflict-guard-blocked row's business key never reaches the resolution call at all, and the
+    original reject must still show `PENDING`.
+    """
+    dataset_id = env.metadata.get_or_create_dataset("customers")
+    config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
+    file_id = env.metadata.create_file(
+        dataset_id=dataset_id,
+        object_uri="s3://raw/wiring/conflict_guard_blocked.csv",
+        content_sha256=hashlib.sha256(b"wiring-conflict-guard-blocked").digest(),
+        hash_version=1,
+        size_bytes=10,
+        filename="conflict_guard_blocked.csv",
+        status="DISCOVERED",
+    )
+
+    # The seeded PENDING reject represents the ORIGINAL, older-event_ts row
+    # that was rejected for an unrelated reason (e.g. a pattern violation),
+    # under a SEPARATE batch_id from either run below.
+    original_batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key="wiring_conflict_guard_blocked:original:1",
+        status="OPEN",
+    )
+    prior_run_id = env.metadata.create_ingestion_run(
+        idempotency_key="wiring_conflict_guard_blocked:prior",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+        status="FAILED",
+        file_id=file_id,
+        batch_id=original_batch_id,
+    )
+    _insert_pending_reject(
+        env.migrated_dsn,
+        run_id=prior_run_id,
+        file_id=file_id,
+        batch_id=original_batch_id,
+        source_row_number=1,
+        business_key="9405001",
+    )
+
+    # Step 1: a DIFFERENT, unrelated, legitimately-newer row for the SAME
+    # customer_id (event_ts=T3) is ALREADY published -- seeded directly via
+    # SQL (see docstring for why this is deliberately NOT a real
+    # `run_ingest` call), reusing `prior_run_id`/`file_id`/`original_batch_id`
+    # as its lineage FKs purely because they are already valid rows this
+    # test seeded -- their identity is otherwise irrelevant here, this row's
+    # `event_ts` is the only thing this test's assertion depends on.
+    with psycopg.connect(env.migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO normalized.customers (
+                customer_id, name, country, birth_date, event_ts,
+                _run_id, _file_id, _batch_id, _source_row_number,
+                _record_hash, _record_hash_version
+            ) VALUES (
+                9405001, 'NewerUnrelated', 'US', '1990-01-01',
+                '2026-06-01T00:00:00+00:00', %s, %s, %s, 1, %s, 1
+            )
+            """,
+            (
+                prior_run_id,
+                file_id,
+                original_batch_id,
+                hashlib.sha256(b"newer-unrelated-content").digest(),
+            ),
+        )
+        conn.commit()
+
+    # Step 2: the "corrected" file -- fixing the ORIGINAL violation -- stages
+    # an OLDER event_ts (T2 < T3) for the SAME customer_id. It survives
+    # streaming validation (no completeness violation this time) and lands
+    # in staging, but MergePublisher's conflict guard must leave the
+    # existing (newer) target row untouched.
+    backfill_batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key="wiring_conflict_guard_blocked:backfill:1",
+        status="OPEN",
+    )
+    older_csv = (
+        _CSV_HEADER + _row_with_event_ts(9_405_001, "2025-01-01T00:00:00+00:00")
+    ).encode("utf-8")
+    backfill_object_key = "customers/conflict_guard_blocked_backfill.csv"
+    env.s3_client.put_object(
+        Bucket=env.scratch_bucket,
+        Key=backfill_object_key,
+        Body=older_csv,
+    )
+    backfill_run_id, _ = env.metadata.get_or_create_ingestion_run(
+        idempotency_key="wiring_conflict_guard_blocked:backfill",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+        file_id=file_id,
+        batch_id=backfill_batch_id,
+    )
+    backfill_ctx = _make_ctx(
+        env,
+        run_id=backfill_run_id,
+        file_id=file_id,
+        batch_id=backfill_batch_id,
+        object_key=backfill_object_key,
+        idempotency_key="wiring_conflict_guard_blocked:backfill",
+        rejection_rate_threshold=0.5,
+    )
+    backfill_receipt = run_ingest(backfill_ctx)
+    assert backfill_receipt.status == "SUCCEEDED"
+
+    # The publish itself was correctly a no-op: the conflict guard left the
+    # newer row in place, nothing written by the backfill run.
+    assert _customers_count_for_run(env.migrated_dsn, run_id=backfill_run_id) == 0
+
+    # The CR-01 proof: the original reject must NOT have flipped to
+    # REDRIVEN -- the business key only staged, it was never actually
+    # published by the backfill run.
+    original_state = _resolution_state(env.migrated_dsn, batch_id=original_batch_id)
+    assert len(original_state) == 1
+    _row_number, resolution_type, resolved_by_run_id = original_state[0]
+    assert resolution_type == "PENDING"
+    assert resolved_by_run_id is None
 
 
 # --- Test D: VALID-04's MinIO-artifact half ---------------------------------

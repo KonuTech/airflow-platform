@@ -75,6 +75,8 @@ from dataplat.validate.referential import ReferentialIntegrityBarrier
 from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from psycopg import Connection
 
     from dataplat.config.model import QualityRuleConfig
@@ -328,6 +330,7 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
     batch_id: int,
     finished_at: datetime,
     staging_result: StagingResult,
+    published_business_keys: Sequence[str],
     all_rejected: list[RejectedRecord],
     all_findings: list[ValidationResult],
 ) -> str:
@@ -361,6 +364,13 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
             ``finalize_publication`` receives, never independently computed.
         staging_result: This run's already-completed ``StagingLoader.load()``
             result.
+        published_business_keys: The business-key values ``publisher.publish()``
+            ACTUALLY inserted or updated in the target table this run
+            (``PublishResult.published_business_keys``) -- NOT merely
+            whatever staged. Drives the resolution call below (CR-01,
+            phase-08 code review): a business key that only staged, but
+            whose conflict-guard ``WHERE`` clause left the target row
+            "locked but unchanged", must never resolve a PENDING reject.
         all_rejected: Every ``RejectedRecord`` known so far this run --
             seeded by the caller from staging-time rejections plus the
             referential barrier's own orphans.
@@ -410,13 +420,20 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
     # instead of batch_id is what lets this call reach the ORIGINAL batch's
     # PENDING row regardless.
     #
-    # published_business_keys is read from staging_result.staging_table
-    # itself (still a live, queryable table on THIS transaction's own conn
-    # at this point -- the DROP TABLE happens later, on a separate
-    # connection, after this whole transaction commits), using the dataset's
-    # configured business-key column. When no column is marked
-    # business_key=True, published_business_keys stays empty and this call
-    # is a documented no-op for that dataset.
+    # published_business_keys is the CALLER's parameter -- sourced from
+    # ``publisher.publish()``'s own ``PublishResult.published_business_keys``
+    # (CR-01, phase-08 code review), never re-derived from
+    # ``staging_result.staging_table``. A business key that merely SURVIVED
+    # streaming validation and landed in staging is not the same as one this
+    # transaction's publish statement actually inserted/updated: both
+    # concrete `Publisher`s have a conflict-guard `WHERE` clause on their
+    # `ON CONFLICT DO UPDATE` that can leave a conflicting row "locked but
+    # unchanged" (e.g. a staged row that does not improve on what is already
+    # published) -- and resolving a PENDING reject for a business key that
+    # was never actually written would silently mark a still-wrong row as
+    # REDRIVEN. When no column is marked business_key=True,
+    # published_business_keys stays empty and this call is a documented
+    # no-op for that dataset.
     #
     # MUST still run BEFORE record_rejected_records below: the method's
     # WHERE clause has no run-id exclusion, so calling this AFTER inserting
@@ -425,19 +442,8 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
     # (CR-01, phase-08 code review). This ordering is what makes CR-01's
     # guarantee hold under the new predicate too: a run's own fresh reject's
     # business key was never published this run (the row that got rejected
-    # never entered staging in the first place), so the SELECT DISTINCT below
-    # can never surface it.
-    business_key_column = next(
-        (c.name for c in ctx.config.columns if c.business_key),
-        None,
-    )
-    published_business_keys: list[str] = []
-    if business_key_column is not None:
-        rows = conn.execute(
-            f"SELECT DISTINCT {business_key_column} FROM {staging_result.staging_table} "  # noqa: S608 -- business_key_column/staging_result.staging_table are config/run-derived identifiers only (T-04-01/T-08-15 precedent), never CSV content
-            f"WHERE {business_key_column} IS NOT NULL",
-        ).fetchall()
-        published_business_keys = [str(row[0]) for row in rows]
+    # never entered staging in the first place, so it can never appear in
+    # ``publisher.publish()``'s own ``RETURNING`` output either).
     ctx.metadata.resolve_rejected_records_for_business_keys(
         conn=conn,
         dataset_id=dataset_id,
@@ -725,6 +731,7 @@ def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestr
                         batch_id=batch_id,
                         finished_at=finished_at,
                         staging_result=staging_result,
+                        published_business_keys=result.published_business_keys,
                         all_rejected=all_rejected,
                         all_findings=all_findings,
                     )

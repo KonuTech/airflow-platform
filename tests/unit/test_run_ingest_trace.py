@@ -161,6 +161,7 @@ class _FakeStagingLoader:
 @dataclass
 class _FakePublishResult:
     rows_affected: int = 2
+    published_business_keys: tuple[str, ...] = ()
 
 
 class _FakePublisher:

@@ -82,6 +82,7 @@ ON CONFLICT (order_id) DO UPDATE
  WHERE normalized.orders._record_hash IS DISTINCT FROM EXCLUDED._record_hash
    AND (normalized.orders.order_date IS NULL
         OR EXCLUDED.order_date >= normalized.orders.order_date)
+RETURNING order_id
 """
 
 
@@ -126,10 +127,19 @@ class OrdersMergePublisher(Publisher):
             ``cursor.rowcount`` after the ``INSERT ... ON CONFLICT``
             executes (PostgreSQL's own command-tag count of rows inserted
             or updated -- a row "locked but left unchanged" by a false
-            ``DO UPDATE ... WHERE`` is correctly excluded), and whose
-            ``outcome`` is always ``"PUBLISHED"``.
+            ``DO UPDATE ... WHERE`` is correctly excluded), whose
+            ``published_business_keys`` is the ``order_id`` of every row
+            this statement's ``RETURNING`` clause actually surfaced --
+            i.e. the exact same set ``rows_affected`` counts, never the
+            staging table's own contents (CR-01, phase-08 code review) --
+            and whose ``outcome`` is always ``"PUBLISHED"``.
         """
         cursor = conn.execute(
             _PUBLISH_SQL.format(staging_table=staging_table),
         )
-        return PublishResult(rows_affected=cursor.rowcount, outcome="PUBLISHED")
+        published_business_keys = tuple(str(row[0]) for row in cursor.fetchall())
+        return PublishResult(
+            rows_affected=cursor.rowcount,
+            outcome="PUBLISHED",
+            published_business_keys=published_business_keys,
+        )

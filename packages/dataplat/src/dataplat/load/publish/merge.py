@@ -68,6 +68,7 @@ ON CONFLICT (customer_id) DO UPDATE
        _batch_id = EXCLUDED._batch_id, _source_row_number = EXCLUDED._source_row_number
  WHERE normalized.customers._record_hash IS DISTINCT FROM EXCLUDED._record_hash
    AND EXCLUDED.event_ts >= normalized.customers.event_ts
+RETURNING customer_id
 """
 
 
@@ -111,10 +112,19 @@ class MergePublisher(Publisher):
             ``cursor.rowcount`` after the ``INSERT ... ON CONFLICT``
             executes (PostgreSQL's own command-tag count of rows inserted
             or updated -- a row "locked but left unchanged" by a false
-            ``DO UPDATE ... WHERE`` is correctly excluded), and whose
-            ``outcome`` is always ``"PUBLISHED"``.
+            ``DO UPDATE ... WHERE`` is correctly excluded), whose
+            ``published_business_keys`` is the ``customer_id`` of every ROW
+            this statement's ``RETURNING`` clause actually surfaced --
+            i.e. the exact same set ``rows_affected`` counts, never the
+            staging table's own contents (CR-01, phase-08 code review) --
+            and whose ``outcome`` is always ``"PUBLISHED"``.
         """
         cursor = conn.execute(
             _PUBLISH_SQL.format(staging_table=staging_table),
         )
-        return PublishResult(rows_affected=cursor.rowcount, outcome="PUBLISHED")
+        published_business_keys = tuple(str(row[0]) for row in cursor.fetchall())
+        return PublishResult(
+            rows_affected=cursor.rowcount,
+            outcome="PUBLISHED",
+            published_business_keys=published_business_keys,
+        )

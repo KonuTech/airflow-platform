@@ -7,6 +7,18 @@ minimal here — ``rows_affected``/``outcome`` — because the richer
 ``MERGE ... RETURNING merge_action()`` shape (STACK.md, PostgreSQL 17) is
 Phase 4's ``merge`` Publisher's job to populate, not this protocol's to
 over-specify before a single concrete ``Publisher`` exists.
+
+``published_business_keys`` (CR-01, phase-08 code review) was added once a
+concrete correctness bug surfaced: a business key that merely *staged*
+successfully is not the same as one this publish call actually
+inserted/updated. Both concrete ``Publisher``s (``merge.py``/
+``merge_orders.py``) have a conflict-guard ``WHERE`` clause on their
+``ON CONFLICT DO UPDATE`` that can leave a conflicting row "locked but
+unchanged" -- excluded from ``rows_affected`` -- whenever the incoming
+staged row does not actually improve on what's already published. Callers
+that need to know which business keys THIS publish call actually affected
+(e.g. ``run.py``'s post-publish reject-resolution barrier) must use
+``published_business_keys``, never a blind read of the staging table.
 """
 
 from __future__ import annotations
@@ -29,10 +41,19 @@ class PublishResult:
             inserted, updated or otherwise affected.
         outcome: A short, stable, machine-readable outcome code, e.g.
             ``"PUBLISHED"``.
+        published_business_keys: The business-key values this publish call
+            ACTUALLY inserted or updated in the target table (i.e. every row
+            the ``ON CONFLICT DO UPDATE ... WHERE`` guard did not silently
+            leave "locked but unchanged"), as strings, deduplicated. Distinct
+            from -- and always a subset of -- whatever business keys merely
+            survived streaming validation and landed in the staging table.
+            Defaults to an empty tuple for any ``Publisher`` that has not
+            been updated to populate it.
     """
 
     rows_affected: int
     outcome: str
+    published_business_keys: tuple[str, ...] = ()
 
 
 class Publisher(Protocol):
