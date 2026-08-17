@@ -116,7 +116,31 @@ def csv_ingest_customers() -> None:
     # key list to XCom), then the LOAD-10 pre-pod-launch gate fanned out
     # over it -- discover never runs for a file the gate rejects.
     matched_keys = list_matched_keys(bucket="raw", prefix="customers/*.csv")
-    gate = integrity_gate.partial(bucket="raw", dataset_name="customers").expand(key=matched_keys)
+
+    # Cap the mapped fan-out at 3 concurrent pods: integrity_gate is a plain
+    # @task (no container_resources override), so every mapped instance
+    # inherits the Helm chart's default worker-pod CPU request
+    # (workers.kubernetes.resources.requests.cpu: 250m,
+    # helm/values/local/airflow.yaml). kind worker nodes have only
+    # ~700-800m real headroom after the fixed platform baseline
+    # (kind/cluster.yaml), so an unbounded fan-out over a matched-key
+    # backlog starves other DAGs'/tasks' pod scheduling cluster-wide.
+    # Capping at 3 (750m) keeps the mapped fan-out under that headroom --
+    # the same root cause and mechanism already fixed for `ingest` below
+    # via its own concurrency cap (debug session
+    # airflow-scheduler-stuck-tasks, commit 6ea4129). `.override(...)` (not
+    # `.partial(...)` with the same kwarg) because a TaskFlow task's own
+    # `.partial()` validates kwargs against the DECORATED FUNCTION's
+    # signature (bucket/key/dataset_name) and folds them into op_kwargs --
+    # `.override()` is the documented way to set a BaseOperator-level field
+    # (verified live against the installed apache-airflow-task-sdk 1.3.0:
+    # passing this field straight into `.partial()` raises `TypeError:
+    # partial() got an unexpected keyword argument`).
+    gate = (
+        integrity_gate.override(max_active_tis_per_dag=3)
+        .partial(bucket="raw", dataset_name="customers")
+        .expand(key=matched_keys)
+    )
 
     discover = KubernetesPodOperator(
         task_id="discover",

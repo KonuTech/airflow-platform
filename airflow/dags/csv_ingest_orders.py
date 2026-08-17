@@ -114,7 +114,21 @@ def csv_ingest_orders() -> None:
     # key list to XCom), then the LOAD-10 pre-pod-launch gate fanned out
     # over it -- discover never runs for a file the gate rejects.
     matched_keys = list_matched_keys(bucket="raw", prefix="orders/*.csv")
-    gate = integrity_gate.partial(bucket="raw", dataset_name="orders").expand(key=matched_keys)
+
+    # Same kind-worker-node CPU-headroom mitigation as
+    # csv_ingest_customers.py's own integrity_gate (see that file for the
+    # full rationale) -- integrity_gate has no container_resources
+    # override, so an unbounded fan-out over a matched-key backlog would
+    # inherit the Helm chart's 250m default worker-pod CPU request per
+    # mapped instance and starve other DAGs'/tasks' pod scheduling
+    # cluster-wide. `.override(...)`, not the same kwarg passed straight
+    # into `.partial(...)` -- see csv_ingest_customers.py's own comment for
+    # why.
+    gate = (
+        integrity_gate.override(max_active_tis_per_dag=3)
+        .partial(bucket="raw", dataset_name="orders")
+        .expand(key=matched_keys)
+    )
 
     discover = KubernetesPodOperator(
         task_id="discover",
