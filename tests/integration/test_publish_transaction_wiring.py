@@ -141,8 +141,26 @@ def _make_config(*, rejection_rate_threshold: float) -> DatasetConfig:
 
 
 def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
-    """Insert a synthetic `meta.config_versions` row directly via SQL (this suite's own convention)."""  # noqa: E501, W505
+    """Get-or-insert a synthetic, CURRENT `meta.config_versions` row directly via SQL.
+
+    `meta.config_versions` enforces at most one CURRENT (`valid_to IS NULL`) row per
+    `dataset_id` (migration 0001's `uq_config_versions_current_per_dataset` partial unique
+    index). This file's original per-test-unique-dataset convention never collided with that,
+    but Test C/C2 below now share the SAME "customers" dataset_id (D-23's dataset-scoping
+    requirement, `meta.batches.dataset_id` join) -- a second call for that same dataset_id must
+    REUSE the first call's row, not attempt a second CURRENT insert.
+    """
     with psycopg.connect(dsn) as conn:
+        existing = conn.execute(
+            """
+            SELECT config_version_id
+              FROM meta.config_versions
+             WHERE dataset_id = %(dataset_id)s AND valid_to IS NULL
+            """,
+            {"dataset_id": dataset_id},
+        ).fetchone()
+        if existing is not None:
+            return int(existing[0])
         row = conn.execute(
             """
             INSERT INTO meta.config_versions (
@@ -170,13 +188,14 @@ def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
         return int(row[0])
 
 
-def _insert_pending_reject(
+def _insert_pending_reject(  # noqa: PLR0913 -- matches meta.rejected_records' own seeded column set
     migrated_dsn: str,
     *,
     run_id: int,
     file_id: int,
     batch_id: int,
     source_row_number: int,
+    business_key: str | None = None,
 ) -> None:
     """Seed one PENDING `meta.rejected_records` row directly via SQL (mirrors `test_backfill_resolution.py`)."""  # noqa: E501, W505
     with psycopg.connect(migrated_dsn) as conn:
@@ -184,8 +203,8 @@ def _insert_pending_reject(
             """
             INSERT INTO meta.rejected_records (
                 run_id, file_id, batch_id, source_row_number, raw_line,
-                error_type, error_message
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                error_type, error_message, business_key
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 run_id,
@@ -194,7 +213,8 @@ def _insert_pending_reject(
                 source_row_number,
                 f"row-{source_row_number}",
                 "RAGGED_ROW",
-                "seeded directly for D-05 backfill-resolution proof",
+                "seeded directly for D-05/D-23 backfill-resolution proof",
+                business_key,
             ),
         )
         conn.commit()
@@ -446,26 +466,26 @@ def test_quarantine_under_threshold_succeeds_and_persists_both(env: _Env) -> Non
     assert "rejection_rate_circuit_breaker" in rule_ids
 
 
-# --- Test C: D-05/D-01/D-02/D-03 -- a backfill run resolves the batch's ----
-# --- PENDING rejected_records rows, through run_ingest itself, not the -----
-# --- method directly -------------------------------------------------------
+# --- Test C: D-05/D-01/D-02/D-03/D-23 -- a backfill run resolves an --------
+# --- EARLIER, DIFFERENT batch's PENDING rejected_records rows, through -----
+# --- run_ingest itself, not the method directly -----------------------------
 
 
-@pytest.mark.skip(
-    reason=(
-        "D-23 gap-closure (plan 08-16, 08-CONTEXT.md 'Gap closure: VALID-08 backfill "
-        "resolution scoping') replaces run_ingest's batch_id-scoped resolve call with a "
-        "business-key-scoped one. This test's PENDING rows are seeded with no business_key "
-        "(NULL), which D-25 says can NEVER auto-resolve under the new mechanism -- its "
-        "premise is now structurally incompatible, not merely unwired. Plan 08-16 leaves "
-        "run_ingest's resolve call a documented business_keys=[] placeholder pending plan "
-        "08-18's own real business-key derivation + live-cluster proof, which rebuilds this "
-        "exact D-05 live-through-run_ingest test scoped to a real business_key."
-    ),
-)
 def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
-    """A SUCCEEDED run sharing a batch_id with 2 seeded PENDING rows flips them to REDRIVEN."""
-    dataset_id = env.metadata.get_or_create_dataset("wiring_backfill_resolution")
+    """A SUCCEEDED run publishing a business key resolves an EARLIER, DIFFERENT batch's PENDING
+    reject sharing that business key -- the exact VALID-08 gap 08-VERIFICATION.md confirmed
+    live: `discover_files`'s `batch_key` is a pure function of a file's `content_sha256`, so a
+    content-differing correction of a previously-rejected row always discovers under a NEW
+    `batch_id`. Only a `(dataset_id, business_key)`-scoped resolve call (D-23) -- never a
+    strictly `batch_id`-scoped one -- can ever reach the ORIGINAL batch's PENDING row.
+    """
+    # D-23's resolution predicate joins on `meta.batches.dataset_id` --
+    # everything seeded here MUST belong to the SAME dataset `ctx.config.dataset`
+    # ("customers", `_make_config`'s own hardcoded value) resolves to via
+    # `get_or_create_dataset` inside `run_ingest` itself, not a distinct
+    # `wiring_*`-named dataset (the old batch_id-only resolve never joined
+    # on dataset_id, so this never mattered before D-23).
+    dataset_id = env.metadata.get_or_create_dataset("customers")
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
     file_id = env.metadata.create_file(
         dataset_id=dataset_id,
@@ -476,13 +496,20 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
         filename="backfill_resolution.csv",
         status="DISCOVERED",
     )
-    batch_id = env.metadata.create_batch(
+
+    # The seeded PENDING rejects live under a SEPARATE, distinct batch_id
+    # from the "backfill" run's own batch below -- this IS the
+    # content-differing-correction shape: a corrected file discovers under a
+    # NEW batch, yet the OLD batch's PENDING row must still resolve.
+    original_batch_id = env.metadata.create_batch(
         dataset_id=dataset_id,
-        batch_key="wiring_backfill_resolution:2026-08-17:1",
+        batch_key="wiring_backfill_resolution:original:1",
         status="OPEN",
     )
 
-    # Simulate a PRIOR run that rejected 2 rows against this SAME batch_id.
+    # Simulate a PRIOR run that rejected 2 rows against the ORIGINAL batch,
+    # each carrying the business_key of a customer_id the "backfill" run
+    # below WILL publish.
     prior_run_id = env.metadata.create_ingestion_run(
         idempotency_key="wiring_backfill_resolution:prior",
         dataset_id=dataset_id,
@@ -491,26 +518,33 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
         processor_image_digest="sha256:testdigest",
         status="FAILED",
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=original_batch_id,
     )
     _insert_pending_reject(
         env.migrated_dsn,
         run_id=prior_run_id,
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=original_batch_id,
         source_row_number=1,
+        business_key="9402001",
     )
     _insert_pending_reject(
         env.migrated_dsn,
         run_id=prior_run_id,
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=original_batch_id,
         source_row_number=2,
+        business_key="9402002",
     )
 
-    # The "backfill" run: a SECOND run_ingest call sharing the SAME batch_id
-    # (D-01 -- no separate redrive mechanism), an all-good row set (no new
-    # rejections of its own, so it SUCCEEDS).
+    # The "backfill" run: a corrected file discovering under a NEW, SEPARATE
+    # batch_id from the original -- publishing customer_ids
+    # 9402001-9402003, two of which match the seeded rejects' business_key.
+    backfill_batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key="wiring_backfill_resolution:corrected:1",
+        status="OPEN",
+    )
     csv_bytes = _csv_bytes(good_count=3, bad_count=0, start_id=9_402_001)
     object_key = "customers/backfill_resolution_redrive.csv"
     env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
@@ -521,13 +555,13 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
         processor_version="0.1.0",
         processor_image_digest="sha256:testdigest",
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=backfill_batch_id,
     )
     ctx = _make_ctx(
         env,
         run_id=backfill_run_id,
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=backfill_batch_id,
         object_key=object_key,
         idempotency_key="wiring_backfill_resolution:backfill",
         rejection_rate_threshold=0.5,
@@ -537,11 +571,13 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
 
     assert receipt.status == "SUCCEEDED"
 
-    # D-03/D-05 live proof, through run_ingest itself: both seeded rows now
-    # show REDRIVEN, resolved_by_run_id equal to the NEW run's run_id -- D-02
-    # is proven by the fact publisher.publish() above ran completely
-    # unchanged (the SAME merge/ON CONFLICT strategy every other run uses).
-    state = _resolution_state(env.migrated_dsn, batch_id=batch_id)
+    # D-03/D-05/D-23 live proof, through run_ingest itself: the ORIGINAL
+    # batch's 2 seeded rows now show REDRIVEN, resolved_by_run_id equal to
+    # the NEW, DIFFERENT batch's own run_id -- proving business-key-scoped
+    # resolution crosses batch boundaries. D-02 is proven by the fact
+    # publisher.publish() above ran completely unchanged (the SAME
+    # merge/ON CONFLICT strategy every other run uses).
+    state = _resolution_state(env.migrated_dsn, batch_id=original_batch_id)
     assert len(state) == 2
     for _row_number, resolution_type, resolved_by_run_id in state:
         assert resolution_type == "REDRIVEN"
@@ -552,31 +588,26 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
 # --- ONLY a prior run's PENDING rejects, never its own fresh ones ----------
 
 
-@pytest.mark.skip(
-    reason=(
-        "D-23 gap-closure (plan 08-16, 08-CONTEXT.md 'Gap closure: VALID-08 backfill "
-        "resolution scoping') replaces run_ingest's batch_id-scoped resolve call with a "
-        "business-key-scoped one. This test's PENDING rows are seeded with no business_key "
-        "(NULL), which D-25 says can NEVER auto-resolve under the new mechanism -- its "
-        "premise is now structurally incompatible, not merely unwired. Plan 08-16 leaves "
-        "run_ingest's resolve call a documented business_keys=[] placeholder pending plan "
-        "08-18's own real business-key derivation + live-cluster proof, which rebuilds this "
-        "exact CR-01 regression proof scoped to a real business_key."
-    ),
-)
 def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
-    """The exact CR-01 regression: a run must not immediately REDRIVEN its own rejects.
+    """The exact CR-01 regression, restated under D-23's business-key-scoped predicate: a run
+    must not immediately REDRIVEN its own rejects.
 
-    `resolve_rejected_records_for_batch`'s `WHERE batch_id = %s AND
-    resolution_type = 'PENDING'` has no run-id exclusion, so calling it
-    AFTER `record_rejected_records` for the SAME run would flip this run's
-    own just-inserted rejects to REDRIVEN too -- a run "backfill resolving"
-    rejections it just created itself. Distinguishes this from
-    `test_backfill_run_resolves_the_batch_pending_rejects` above, whose
-    backfill run rejects nothing of its own and therefore cannot exercise
-    this path.
+    `resolve_rejected_records_for_business_keys`'s `WHERE ... business_key = ANY(%s) AND
+    resolution_type = 'PENDING'` has no run-id exclusion, so calling it AFTER
+    `record_rejected_records` for the SAME run would flip this run's own just-inserted rejects
+    to REDRIVEN too, IF their business_key happened to appear in `published_business_keys` --
+    but it structurally never can: a row this run rejects was never staged (`CompletenessRule`
+    rejects it BEFORE staging), so its business_key was never published this run and the
+    `SELECT DISTINCT` over the staging table can never surface it. Also proves cross-batch
+    resolution still works here too: the prior run's seeded reject, under a SEPARATE batch_id
+    but sharing a business_key that IS one of the backfill file's own published customer_ids,
+    still resolves -- distinguished from the run's OWN fresh reject (a business_key that was
+    NEVER published, since that row failed CompletenessRule before ever reaching staging).
     """
-    dataset_id = env.metadata.get_or_create_dataset("wiring_backfill_own_rejects")
+    # Same D-23 dataset-scoping requirement as Test C above -- seeded rows
+    # must belong to the SAME "customers" dataset ctx.config.dataset resolves
+    # to, not a distinct wiring_*-named one.
+    dataset_id = env.metadata.get_or_create_dataset("customers")
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
     file_id = env.metadata.create_file(
         dataset_id=dataset_id,
@@ -587,13 +618,21 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
         filename="backfill_own_rejects.csv",
         status="DISCOVERED",
     )
-    batch_id = env.metadata.create_batch(
+
+    # The seeded PENDING reject lives under a SEPARATE batch_id from the
+    # backfill run's own below -- proving cross-batch resolution still
+    # works here too, not just the CR-01 non-self-resolution guarantee.
+    original_batch_id = env.metadata.create_batch(
         dataset_id=dataset_id,
-        batch_key="wiring_backfill_own_rejects:2026-08-17:1",
+        batch_key="wiring_backfill_own_rejects:original:1",
         status="OPEN",
     )
 
-    # Simulate a PRIOR run that rejected 1 row against this SAME batch_id.
+    # Simulate a PRIOR run that rejected 1 row against the ORIGINAL batch,
+    # with a business_key matching one of the backfill run's own GOOD,
+    # published customer_ids (9404001-9404009) below -- proving cross-batch
+    # resolution -- deliberately NOT customer_id 9404010, the backfill run's
+    # own rejected row (that distinction is the CR-01 proof further down).
     prior_run_id = env.metadata.create_ingestion_run(
         idempotency_key="wiring_backfill_own_rejects:prior",
         dataset_id=dataset_id,
@@ -602,19 +641,26 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
         processor_image_digest="sha256:testdigest",
         status="FAILED",
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=original_batch_id,
     )
     _insert_pending_reject(
         env.migrated_dsn,
         run_id=prior_run_id,
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=original_batch_id,
         source_row_number=1,
+        business_key="9404005",
     )
 
-    # The "backfill" run: shares the SAME batch_id, but ALSO rejects one row
-    # of its own (under threshold, so it still SUCCEEDS) -- the exact
-    # scenario CR-01 flags.
+    # The "backfill" run: a NEW, SEPARATE batch_id from the original --
+    # publishes customer_ids 9404001-9404009 and ALSO rejects one row of
+    # its own (customer_id 9404010, empty name -- under threshold, so it
+    # still SUCCEEDS) -- the exact scenario CR-01 flags.
+    backfill_batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key="wiring_backfill_own_rejects:backfill:1",
+        status="OPEN",
+    )
     csv_bytes = _csv_bytes(good_count=9, bad_count=1, start_id=9_404_001)
     object_key = "customers/backfill_own_rejects_redrive.csv"
     env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
@@ -625,13 +671,13 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
         processor_version="0.1.0",
         processor_image_digest="sha256:testdigest",
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=backfill_batch_id,
     )
     ctx = _make_ctx(
         env,
         run_id=backfill_run_id,
         file_id=file_id,
-        batch_id=batch_id,
+        batch_id=backfill_batch_id,
         object_key=object_key,
         idempotency_key="wiring_backfill_own_rejects:backfill",
         rejection_rate_threshold=0.5,
@@ -641,22 +687,22 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
 
     assert receipt.status == "SUCCEEDED"
 
-    state = {
-        row[0]: (row[1], row[2]) for row in _resolution_state(env.migrated_dsn, batch_id=batch_id)
-    }
-    assert len(state) == 2
-
-    # The PRIOR run's row: resolved by the backfill run, as Test C proves.
-    prior_resolution_type, prior_resolved_by = state[1]
+    # The PRIOR run's row, under the ORIGINAL, DIFFERENT batch: resolved by
+    # the backfill run -- cross-batch resolution still holds here too.
+    original_state = _resolution_state(env.migrated_dsn, batch_id=original_batch_id)
+    assert len(original_state) == 1
+    _row_number, prior_resolution_type, prior_resolved_by = original_state[0]
     assert prior_resolution_type == "REDRIVEN"
     assert prior_resolved_by == backfill_run_id
 
-    # This run's OWN fresh reject (whichever row number isn't the prior
-    # run's seeded row 1): MUST still be PENDING, un-resolved -- the CR-01
-    # regression proof. Before the fix, this row incorrectly showed
-    # REDRIVEN/resolved_by_run_id == backfill_run_id immediately.
-    own_row_number = next(iter(set(state) - {1}))
-    own_resolution_type, own_resolved_by = state[own_row_number]
+    # This run's OWN fresh reject, under the backfill run's OWN, separate
+    # batch: a business key that was never published (this row failed
+    # CompletenessRule before ever reaching staging) can never be resolved
+    # -- the CR-01 regression proof, now grounded in business-key identity
+    # rather than batch_id happenstance.
+    own_state = _resolution_state(env.migrated_dsn, batch_id=backfill_batch_id)
+    assert len(own_state) == 1
+    _own_row_number, own_resolution_type, own_resolved_by = own_state[0]
     assert own_resolution_type == "PENDING"
     assert own_resolved_by is None
 
