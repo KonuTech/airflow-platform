@@ -265,15 +265,20 @@ class _FakeMetadataRepository:
     ) -> None:
         del conn, run_id, file_id, batch_id, rejected
 
-    def resolve_rejected_records_for_batch(
+    def get_or_create_dataset(self, dataset_name: str) -> int:
+        del dataset_name
+        return 1
+
+    def resolve_rejected_records_for_business_keys(
         self,
         *,
         conn: object,
-        batch_id: int,
+        dataset_id: int,
+        business_keys: object,
         resolved_by_run_id: int,
         resolution_type: str,
     ) -> int:
-        del conn, batch_id, resolved_by_run_id, resolution_type
+        del conn, dataset_id, business_keys, resolved_by_run_id, resolution_type
         return 0
 
 

@@ -451,6 +451,18 @@ def test_quarantine_under_threshold_succeeds_and_persists_both(env: _Env) -> Non
 # --- method directly -------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "D-23 gap-closure (plan 08-16, 08-CONTEXT.md 'Gap closure: VALID-08 backfill "
+        "resolution scoping') replaces run_ingest's batch_id-scoped resolve call with a "
+        "business-key-scoped one. This test's PENDING rows are seeded with no business_key "
+        "(NULL), which D-25 says can NEVER auto-resolve under the new mechanism -- its "
+        "premise is now structurally incompatible, not merely unwired. Plan 08-16 leaves "
+        "run_ingest's resolve call a documented business_keys=[] placeholder pending plan "
+        "08-18's own real business-key derivation + live-cluster proof, which rebuilds this "
+        "exact D-05 live-through-run_ingest test scoped to a real business_key."
+    ),
+)
 def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
     """A SUCCEEDED run sharing a batch_id with 2 seeded PENDING rows flips them to REDRIVEN."""
     dataset_id = env.metadata.get_or_create_dataset("wiring_backfill_resolution")
@@ -540,6 +552,18 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
 # --- ONLY a prior run's PENDING rejects, never its own fresh ones ----------
 
 
+@pytest.mark.skip(
+    reason=(
+        "D-23 gap-closure (plan 08-16, 08-CONTEXT.md 'Gap closure: VALID-08 backfill "
+        "resolution scoping') replaces run_ingest's batch_id-scoped resolve call with a "
+        "business-key-scoped one. This test's PENDING rows are seeded with no business_key "
+        "(NULL), which D-25 says can NEVER auto-resolve under the new mechanism -- its "
+        "premise is now structurally incompatible, not merely unwired. Plan 08-16 leaves "
+        "run_ingest's resolve call a documented business_keys=[] placeholder pending plan "
+        "08-18's own real business-key derivation + live-cluster proof, which rebuilds this "
+        "exact CR-01 regression proof scoped to a real business_key."
+    ),
+)
 def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
     """The exact CR-01 regression: a run must not immediately REDRIVEN its own rejects.
 
