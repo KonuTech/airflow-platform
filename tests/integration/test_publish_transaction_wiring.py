@@ -536,6 +536,107 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
         assert resolved_by_run_id == backfill_run_id
 
 
+# --- Test C2: CR-01 (phase-08 code review) -- a backfill run must resolve --
+# --- ONLY a prior run's PENDING rejects, never its own fresh ones ----------
+
+
+def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
+    """The exact CR-01 regression: a run must not immediately REDRIVEN its own rejects.
+
+    `resolve_rejected_records_for_batch`'s `WHERE batch_id = %s AND
+    resolution_type = 'PENDING'` has no run-id exclusion, so calling it
+    AFTER `record_rejected_records` for the SAME run would flip this run's
+    own just-inserted rejects to REDRIVEN too -- a run "backfill resolving"
+    rejections it just created itself. Distinguishes this from
+    `test_backfill_run_resolves_the_batch_pending_rejects` above, whose
+    backfill run rejects nothing of its own and therefore cannot exercise
+    this path.
+    """
+    dataset_id = env.metadata.get_or_create_dataset("wiring_backfill_own_rejects")
+    config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
+    file_id = env.metadata.create_file(
+        dataset_id=dataset_id,
+        object_uri="s3://raw/wiring/backfill_own_rejects.csv",
+        content_sha256=hashlib.sha256(b"wiring-backfill-own-rejects").digest(),
+        hash_version=1,
+        size_bytes=10,
+        filename="backfill_own_rejects.csv",
+        status="DISCOVERED",
+    )
+    batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key="wiring_backfill_own_rejects:2026-08-17:1",
+        status="OPEN",
+    )
+
+    # Simulate a PRIOR run that rejected 1 row against this SAME batch_id.
+    prior_run_id = env.metadata.create_ingestion_run(
+        idempotency_key="wiring_backfill_own_rejects:prior",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+        status="FAILED",
+        file_id=file_id,
+        batch_id=batch_id,
+    )
+    _insert_pending_reject(
+        env.migrated_dsn,
+        run_id=prior_run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        source_row_number=1,
+    )
+
+    # The "backfill" run: shares the SAME batch_id, but ALSO rejects one row
+    # of its own (under threshold, so it still SUCCEEDS) -- the exact
+    # scenario CR-01 flags.
+    csv_bytes = _csv_bytes(good_count=9, bad_count=1, start_id=9_404_001)
+    object_key = "customers/backfill_own_rejects_redrive.csv"
+    env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
+    backfill_run_id, _ = env.metadata.get_or_create_ingestion_run(
+        idempotency_key="wiring_backfill_own_rejects:backfill",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+        file_id=file_id,
+        batch_id=batch_id,
+    )
+    ctx = _make_ctx(
+        env,
+        run_id=backfill_run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        object_key=object_key,
+        idempotency_key="wiring_backfill_own_rejects:backfill",
+        rejection_rate_threshold=0.5,
+    )
+
+    receipt = run_ingest(ctx)
+
+    assert receipt.status == "SUCCEEDED"
+
+    state = {
+        row[0]: (row[1], row[2]) for row in _resolution_state(env.migrated_dsn, batch_id=batch_id)
+    }
+    assert len(state) == 2
+
+    # The PRIOR run's row: resolved by the backfill run, as Test C proves.
+    prior_resolution_type, prior_resolved_by = state[1]
+    assert prior_resolution_type == "REDRIVEN"
+    assert prior_resolved_by == backfill_run_id
+
+    # This run's OWN fresh reject (whichever row number isn't the prior
+    # run's seeded row 1): MUST still be PENDING, un-resolved -- the CR-01
+    # regression proof. Before the fix, this row incorrectly showed
+    # REDRIVEN/resolved_by_run_id == backfill_run_id immediately.
+    own_row_number = next(iter(set(state) - {1}))
+    own_resolution_type, own_resolved_by = state[own_row_number]
+    assert own_resolution_type == "PENDING"
+    assert own_resolved_by is None
+
+
 # --- Test D: VALID-04's MinIO-artifact half ---------------------------------
 
 

@@ -396,6 +396,22 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
         all_findings.extend(volume_barrier.apply(ctx).findings)
 
     ctx.metadata.record_validation_results(conn=conn, run_id=run_id, results=all_findings)
+    # D-05: unconditional, never gated behind `all_rejected`/an `if` -- a
+    # batch's PENDING rows may belong to a PRIOR run, not this run's own
+    # rejections. A no-op (0 rows affected) when nothing is PENDING for this
+    # batch_id -- the method's own WHERE clause is the filter, not this call
+    # site. MUST run BEFORE record_rejected_records below: the WHERE clause
+    # matches on `batch_id` + `resolution_type = 'PENDING'` alone, with no
+    # run-id exclusion, so calling this AFTER inserting this run's own fresh
+    # rejects would immediately flip them to REDRIVEN too -- a run "backfill
+    # resolving" rejections it just created itself, before any actual
+    # backfill happened (CR-01, phase-08 code review).
+    ctx.metadata.resolve_rejected_records_for_batch(
+        conn=conn,
+        batch_id=batch_id,
+        resolved_by_run_id=run_id,
+        resolution_type="REDRIVEN",
+    )
     if all_rejected:
         ctx.metadata.record_rejected_records(
             conn=conn,
@@ -404,17 +420,6 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
             batch_id=batch_id,
             rejected=all_rejected,
         )
-    # D-05: unconditional, never gated behind `all_rejected`/an `if` -- a
-    # batch's PENDING rows may belong to a PRIOR run, not this run's own
-    # rejections. A no-op (0 rows affected) when nothing is PENDING for this
-    # batch_id -- the method's own WHERE clause is the filter, not this call
-    # site.
-    ctx.metadata.resolve_rejected_records_for_batch(
-        conn=conn,
-        batch_id=batch_id,
-        resolved_by_run_id=run_id,
-        resolution_type="REDRIVEN",
-    )
 
     # VALID-04's MinIO-artifact half -- the SAME all_findings/all_rejected
     # objects just persisted to Postgres above, never a second,
