@@ -64,8 +64,14 @@ _NFD_NAME = unicodedata.normalize("NFD", "Wiśniewski")
 _CLEAN_ROW = ("1", "Alice", "US", "1950-03-14", "2026-01-05T08:15:00Z")
 _EMPTY_BIRTH_DATE_ROW = ("3", "Carol", "CA", "", "2026-03-01T09:30:00Z")
 _INVALID_DATE_ROW = ("4", "Dave", "DE", "2026-13-45", "2026-04-01T10:00:00Z")
+# Distinct customer_ids (5, 6) -- NOT the same business key: as of plan
+# 08-11, customers.yaml carries a real QUALITY_UNIQUENESS rule on
+# customer_id (D-09), so two staged rows sharing one customer_id would
+# now correctly have the second REJECT_RECORD-ed before ever reaching
+# _record_hash computation, making Assertion 4 below vacuous. NFC-invariant
+# hashing is proven per-row instead (see Assertion 4).
 _NFC_NAME_ROW = ("5", _NFC_NAME, "PL", "1980-05-20", "2026-05-01T11:00:00Z")
-_NFD_NAME_ROW = ("5", _NFD_NAME, "PL", "1980-05-20", "2026-05-01T11:00:00Z")
+_NFD_NAME_ROW = ("6", _NFD_NAME, "PL", "1980-05-20", "2026-05-01T11:00:00Z")
 
 _ROWS = (
     _CLEAN_ROW,
@@ -192,29 +198,38 @@ def test_customers_real_config_normalizes_birth_date_and_event_ts_end_to_end(
     # silently staged -- absent from the staged table entirely.
     assert "4" not in by_customer_id
 
-    # --- Assertion 4: an NFC/NFD name pair, otherwise business-identical,
-    # produces the SAME _record_hash in the real pipeline -- UnicodeNormalizer
-    # runs before _record_hash is computed, not only in its own unit test.
-    # Sanity check FIRST: the two SOURCE forms fed into the CSV really are
-    # byte-distinct (this is what makes the proof below non-vacuous) --
-    # unicodedata.normalize("NFC", ...) vs "NFD" always differ in byte
-    # length for a character with a canonical decomposition, e.g. "ś".
+    # --- Assertion 4: an NFC-sourced row and an NFD-sourced row (distinct
+    # customer_ids -- see _NFD_NAME_ROW's comment) each independently stage
+    # with the SAME NFC-normalized name and a hash computed from that NFC
+    # form -- UnicodeNormalizer runs before _record_hash is computed, not
+    # only in its own unit test. Sanity check FIRST: the two SOURCE forms
+    # fed into the CSV really are byte-distinct (this is what makes the
+    # proof below non-vacuous) -- unicodedata.normalize("NFC", ...) vs
+    # "NFD" always differ in byte length for a character with a canonical
+    # decomposition, e.g. "ś".
     assert _NFC_NAME != _NFD_NAME
-    name_pair_rows = by_customer_id["5"]
-    assert len(name_pair_rows) == 2
+    nfc_rows = by_customer_id["5"]
+    nfd_rows = by_customer_id["6"]
+    assert len(nfc_rows) == 1
+    assert len(nfd_rows) == 1
     # UnicodeNormalizer runs unconditionally LAST, replacing each row's own
     # `name` field with its NFC form BEFORE _record_hash is computed -- so
-    # by the time either row reaches this staging table, the once-NFD form
-    # has already converged onto the SAME NFC text UnicodeNormalizer wrote
-    # for the once-NFC row. Both facts (converged text AND converged hash)
-    # are asserted together: this convergence is exactly what closes T-06-01
-    # in the real pipeline, not merely in UnicodeNormalizer's own isolated
-    # unit test.
-    staged_names = {row[1] for row in name_pair_rows}
-    assert staged_names == {_NFC_NAME}
-    hashes = {bytes(row[4]) for row in name_pair_rows}
-    assert len(hashes) == 1
-    expected_pipe_joined = "|".join(
+    # the once-NFD row's staged name has already converged onto the SAME
+    # NFC text as the once-NFC row's, and each row's own hash is computed
+    # from that converged NFC form -- this convergence-per-row is exactly
+    # what closes T-06-01 in the real pipeline, not merely in
+    # UnicodeNormalizer's own isolated unit test.
+    assert nfc_rows[0][1] == _NFC_NAME
+    assert nfd_rows[0][1] == _NFC_NAME
+    expected_nfc_pipe_joined = "|".join(
         ("5", _NFC_NAME, "PL", "1980-05-20", _expected_utc_instant(_NFC_NAME_ROW[4])),
     )
-    assert next(iter(hashes)) == hashlib.sha256(expected_pipe_joined.encode("utf-8")).digest()
+    expected_nfd_pipe_joined = "|".join(
+        ("6", _NFC_NAME, "PL", "1980-05-20", _expected_utc_instant(_NFD_NAME_ROW[4])),
+    )
+    assert (
+        bytes(nfc_rows[0][4]) == hashlib.sha256(expected_nfc_pipe_joined.encode("utf-8")).digest()
+    )
+    assert (
+        bytes(nfd_rows[0][4]) == hashlib.sha256(expected_nfd_pipe_joined.encode("utf-8")).digest()
+    )
