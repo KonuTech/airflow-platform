@@ -21,7 +21,7 @@ Out of scope for this phase: anomaly detection over time-series validation histo
 - **D-03:** Granularity is whole-batch only. A backfill acts on the entire rejection set for a run/file — never an individual row or an arbitrary subset.
 - **D-04:** Resolution lifecycle on `meta.rejected_records` is exactly **2 states**: `PENDING` and `RESOLVED` (reached via either `REDRIVEN`-via-backfill or `DISCARDED`-via-explicit-batch-level-operator-action — model these as a `resolution_type` value, not a third top-level state). **Hard constraint: no per-row manual state editing, ever.** Resolution changes happen only as a whole-batch side effect of a backfill run completing, or an explicit batch-level discard operation. Do not build any UI, API, or SQL convenience that lets an operator flip a single row's status.
 - **D-05:** When a backfill run completes, the rejected_records rows it supersedes are marked resolved and linked (FK) to the new run_id — this linkage is how lineage answers "was this ever fixed, and by what run."
-- **D-06:** No new tooling for operators to find what to backfill. They query `meta.rejected_records` / `meta.files` directly via SQL — matches the platform's existing SQL-queryable-lineage philosophy (no dashboard, no CLI helper for this in Phase 8).
+- **D-06 [informational]:** No new tooling for operators to find what to backfill. They query `meta.rejected_records` / `meta.files` directly via SQL — matches the platform's existing SQL-queryable-lineage philosophy (no dashboard, no CLI helper for this in Phase 8).
 
 ### Bad-record strategy assignment
 - **D-07:** Strategy (`FAIL_FILE` / `REJECT_RECORD` / `QUARANTINE_FILE` / `QUARANTINE_RECORD` / `WARN_AND_CONTINUE`) is assigned **per-rule-type**, dataset-configurable — each rule/rule_type (FILE / STRUCTURAL / SCHEMA / TYPE / QUALITY / REFERENTIAL) declares its own strategy in the dataset YAML. Not one blanket strategy per dataset.
@@ -29,7 +29,7 @@ Out of scope for this phase: anomaly detection over time-series validation histo
 - **D-09:** `customers.yaml` gets a **real** `quality:` block (not corpus/fixture-only) — proves the full VALID-01/02/03/04 chain live against the one real cycling dataset.
 - **D-10:** A separate, configurable **run-level rejection-rate threshold** (e.g. FAIL if >10% of rows rejected) acts as a circuit breaker layered on top of row-level strategies — each rule keeps its own row-level strategy, but the aggregate can still escalate the whole run to FAIL.
 - **D-11:** When a run escalates to FAIL, **nothing publishes** — the entire atomic publish transaction (Phase 4's staging → single-writer publish) rolls back. FAIL is unambiguous: nothing from this run reaches the warehouse. Good rows land only once the file is corrected and backfilled (ties directly to D-01).
-- **D-12:** `meta.rejected_records` and `meta.validation_results` are **plain tables**, not partitioned, in this phase. Partitioning (if ever needed) is a retention concern for Phase 11 and a well-trodden later migration, not something to build speculatively now.
+- **D-12 [informational]:** `meta.rejected_records` and `meta.validation_results` are **plain tables**, not partitioned, in this phase. Partitioning (if ever needed) is a retention concern for Phase 11 and a well-trodden later migration, not something to build speculatively now.
 
 ### Referential integrity scope (VALID-07)
 - **D-13:** VALID-07 is proven with a **real second dataset**, not fixtures only: a new `orders` dataset referencing `customers` (`customer_id` FK).
