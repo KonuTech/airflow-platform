@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 
 import psycopg
+import pytest
 from psycopg.rows import dict_row
 
 from csv_processor.source import CsvSource
@@ -42,6 +43,55 @@ from tests.integration.test_run_ingest import (  # noqa: F401 -- re-exported as 
     _validated_bucket,
     env,
 )
+
+# Matches every sibling tests/integration/*.py module's own
+# `pytestmark = pytest.mark.integration` idiom (e.g. test_migrations.py's own
+# fix, documented in its module docstring) -- without it, `-m integration`
+# (this plan's own <verify> command) silently selects zero tests instead of
+# the intended subset.
+pytestmark = pytest.mark.integration
+
+
+def _seed_silver_customer_and_dedup_audit(
+    dsn: str,
+    *,
+    customer_id: int,
+    run_id: int,
+    dataset_id: int,
+) -> None:
+    """Seed one `silver.customers` row + a covering `meta.dedup_audit` row (raw SQL).
+
+    Mirrors this file's own convention of seeding directly against the
+    migrated schema rather than going through dbt (D-12's own bridge is
+    proven at the view-SQL level here; dbt's own execution is proven
+    elsewhere, plan 08.1-08).
+    """
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            """
+            INSERT INTO silver.customers
+                (customer_id, name, country, birth_date, event_ts,
+                 _run_id, _file_id, _batch_id, _source_row_number, _record_hash,
+                 _dbt_loaded_at)
+            SELECT %s, 'Ada Lovelace', 'GB', NULL, NULL,
+                   c._run_id, c._file_id, c._batch_id, c._source_row_number,
+                   c._record_hash, now()
+              FROM normalized.customers c
+             WHERE c.customer_id = %s
+             LIMIT 1
+            """,
+            (str(customer_id), customer_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO meta.dedup_audit
+                (dataset_id, dbt_invocation_id, model_name,
+                 min_run_id, max_run_id, records_received, records_accepted,
+                 records_deduplicated)
+            VALUES (%s, %s, 'silver_customers', %s, %s, 5, 3, 2)
+            """,
+            (dataset_id, "22222222-2222-2222-2222-222222222222", run_id, run_id),
+        )
 
 
 def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
@@ -89,6 +139,17 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
     receipt = run_ingest(ctx)
     assert receipt.status == "SUCCEEDED"
 
+    # D-12: seed a corresponding silver row + covering dedup_audit row
+    # directly via raw SQL (mirroring this file's own established seeding
+    # convention) so the view's new LEFT JOINs resolve to real, non-NULL
+    # data for this customer_id.
+    _seed_silver_customer_and_dedup_audit(
+        env.migrated_dsn,
+        customer_id=customer_id,
+        run_id=run_id,
+        dataset_id=dataset_id,
+    )
+
     expected_content_sha256 = hashlib.sha256(csv_bytes).digest()
 
     with psycopg.connect(env.migrated_dsn, row_factory=dict_row) as conn:
@@ -130,6 +191,64 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
     # finding, migration 0012's own docstring) -- assert the raw exception
     # JSONB column is not even a key in the fetched row.
     assert "error_detail" not in row
+
+    # D-12: the dbt/silver hop's four new columns, populated from the
+    # silver.customers + meta.dedup_audit rows seeded above.
+    assert row["silver_loaded_at"] is not None
+    assert row["dbt_invocation_id"] == "22222222-2222-2222-2222-222222222222"
+    assert row["dbt_run_at"] is not None
+    assert row["dbt_invocation_records_deduplicated"] == 2
+
+
+def test_lineage_view_returns_null_dbt_hop_columns_when_no_silver_data_exists(
+    env: _Env,  # noqa: F811 -- pytest fixture-injection param name, not a real redefinition
+) -> None:
+    """A gold row with no corresponding silver/dedup_audit data still returns a row.
+
+    Proves the `LEFT JOIN` contract: never an error, never a dropped row --
+    the four new dbt/silver-hop columns simply come back `NULL`.
+    """
+    customer_id = 9_300_002
+    csv_bytes = _csv_bytes(1, start_id=customer_id)
+    key_suffix = "lineage_no_silver"
+
+    run_id, file_id, batch_id, object_key = _seed_pending_run(
+        env,
+        key_suffix=key_suffix,
+        csv_bytes=csv_bytes,
+    )
+    dataset_id = env.metadata.get_or_create_dataset(f"run_ingest_{key_suffix}")
+    ctx = PipelineContext(
+        run=RunContext(
+            run_id=run_id,
+            idempotency_key=f"run_ingest_{key_suffix}:1",
+            file_id=file_id,
+            batch_id=batch_id,
+        ),
+        config=_make_config(),
+        metadata=env.metadata,
+        objects=env.objects,
+        db=env.pool,
+        log=get_logger(),
+        source=CsvSource(bucket=env.scratch_bucket, key=object_key, dataset_id=dataset_id),
+    )
+
+    receipt = run_ingest(ctx)
+    assert receipt.status == "SUCCEEDED"
+
+    # Deliberately no silver.customers/meta.dedup_audit seeding -- this
+    # customer_id has no corresponding silver history.
+    with psycopg.connect(env.migrated_dsn, row_factory=dict_row) as conn:
+        row = conn.execute(
+            "SELECT * FROM meta.v_customers_lineage WHERE customer_id = %s",
+            (customer_id,),
+        ).fetchone()
+
+    assert row is not None, f"no meta.v_customers_lineage row for customer_id={customer_id}"
+    assert row["silver_loaded_at"] is None
+    assert row["dbt_invocation_id"] is None
+    assert row["dbt_run_at"] is None
+    assert row["dbt_invocation_records_deduplicated"] is None
 
 
 def test_lineage_view_is_absent_for_an_unpublished_customer_id(
