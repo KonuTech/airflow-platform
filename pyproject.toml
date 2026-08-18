@@ -52,7 +52,7 @@ dev = [
   # official `apache/airflow:3.3.0-python3.12` image (STACK.md); this repo
   # never builds a custom Airflow image, so no runtime image is affected by
   # this addition either way. Versions match STACK.md's pinned matrix exactly.
-  "apache-airflow==3.3.0",
+  "apache-airflow==3.3.1",
   "apache-airflow-providers-cncf-kubernetes==10.19.0",
   "apache-airflow-providers-amazon",   # S3KeySensor -- unpinned like STACK.md's own
                                         # providers-postgres/-standard entries; the
