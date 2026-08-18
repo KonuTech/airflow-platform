@@ -1,7 +1,8 @@
 """tests/e2e/observability/test_trace_propagation.py -- OBS-10's live, end-to-end trace-ID proof.
 
-D-12/OBS-10: a real `csv_ingest_customers` DagRun's mapped `ingest`
-KubernetesPodOperator task launches a pod carrying a well-formed W3C
+D-12/OBS-10: a real `csv_ingest_customers` DagRun's mapped `stage`
+KubernetesPodOperator task (08.1-12: the trace root, replacing the old
+single `ingest` task) launches a pod carrying a well-formed W3C
 `TRACEPARENT` env var (`airflow/dags/_common/tracing_kpo.py`'s
 `TracingKubernetesPodOperator`), and the trace-ID segment inside it equals
 `meta.ingestion_runs.trace_id` for the SAME run -- proving OBS-10's whole
@@ -12,12 +13,12 @@ extraction -> `pipeline.run_ingest`'s own child span -> persisted
 Reuses `tests/e2e/slice/`'s own established file-drop-and-poll mechanism
 (mirrors `test_smoke_and_idempotency.py`'s shape: upload a small,
 uniquely-named CSV to `s3://raw/customers/`, letting the already-unpaused
-`csv_ingest_customers` DAG's `S3KeySensor -> discover -> ingest` chain run
+`csv_ingest_customers` DAG's `S3KeySensor -> discover -> stage` chain run
 naturally -- no second triggering mechanism invented).
 
 **The deletion race, and why it is survivable:**
 `airflow/dags/_common/kpo.py`'s `common_kpo_kwargs()` sets
-`on_finish_action: "delete_succeeded_pod"`, so the launched `ingest` pod is
+`on_finish_action: "delete_succeeded_pod"`, so the launched `stage` pod is
 deleted shortly after it succeeds -- capturing its spec is a genuine race.
 This module wins that race structurally, not by luck:
 `dataplat.pipeline.run.run_ingest` writes `trace_id`/`span_id`/
@@ -286,6 +287,6 @@ def test_ingest_pod_dag_context_matches_persisted_lineage_row(
     lineage = poll_lineage_dag_context(analytics_connection, run_id=claimed["run_id"])
     assert lineage["dag_id"] == claimed["dag_id"] == _CUSTOMERS_DAG_ID
     assert lineage["dag_run_id"] == claimed["dag_run_id"]
-    assert lineage["task_id"] == claimed["task_id"] == "ingest"
+    assert lineage["task_id"] == claimed["task_id"] == "stage"
     assert lineage["map_index"] is not None
     assert lineage["k8s_namespace"] == _ETL_NAMESPACE

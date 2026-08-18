@@ -1,26 +1,19 @@
 """``csv_ingest_orders`` -- the second real ingestion DAG (D-14, D-15, D-16).
 
-Mirrors ``csv_ingest_customers.py``'s shape exactly (D-14): same trigger
-design (deferrable ``S3KeySensor``), same D-18 ``list_matched_keys ->
-integrity_gate`` gate ahead of ``discover``, same ORCH-01..09 task graph --
-``dataset="orders"`` substituted everywhere ``"customers"`` appeared.
+Mirrors csv_ingest_customers.py's shape exactly (D-14): same trigger design, same D-18
+list_matched_keys -> integrity_gate gate ahead of discover, same 08.1-12
+discover -> stage -> dbt_build -> publish graph -- dataset="orders" substituted everywhere
+"customers" appeared. dbt_build's own construction is IDENTICAL between the two files
+(service_account_name="dbt", vault_k8s_role="dbt", image_variable="dbt_image"): dbt's
+project is dataset-agnostic, so an unscoped dbt build from either DAG builds BOTH
+silver_customers and silver_orders -- re-running it from the OTHER DAG moments later is a
+safe, idempotent no-op for whichever model has nothing new (deliberate design, not oversight).
 
-D-15: scheduled off ``customers_asset``, an ``Asset("s3://normalized/
-customers")`` matching ``csv_ingest_customers.py``'s own ``outlets=[...]``
-declaration BY URI -- Airflow's ``DagBag`` gives each DAG file a unique
-module name (T-08-26), so a plain cross-file ``from csv_ingest_customers
-import customers_asset`` re-executes and re-registers that whole module
-under a second name, duplicating the ``csv_ingest_customers`` dag_id; two
-independently-constructed ``Asset`` objects sharing a URI schedule
-identically without that re-execution. ``orders`` declares no ``outlets``
-of its own this phase (D-16): it consumes the customers Asset, it produces
-none.
-
-Business logic (parsing/validation/typing/DB writes) stays entirely inside
-the ``csv-processor`` image's ``dataplat`` CLI, launched only via
-``KubernetesPodOperator`` (ORCH-02) -- identical discipline to
-``csv_ingest_customers.py``, never imports ``dataplat``/``csv_processor``
-directly (ADR-0004).
+D-15: scheduled off customers_asset, matching customers.py's own publish outlets=[...] BY
+URI (Airflow matches Asset scheduling by URI, not object identity -- a cross-file import
+would re-register the whole customers module under a second name, T-08-26). D-16: orders
+declares no outlets this phase -- it consumes the Asset, nothing depends on orders yet.
+Business logic stays inside pods via KubernetesPodOperator (ORCH-02), never imported (ADR-0004).
 """
 
 from __future__ import annotations
@@ -39,16 +32,12 @@ from _common.tracing_kpo import TracingKubernetesPodOperator
 
 log = logging.getLogger(__name__)
 
-# D-15: same URI as csv_ingest_customers.py's own `customers_asset` --
-# Airflow matches Asset scheduling by URI, not Python object identity, so a
-# second, independently-constructed object here is the correct pattern (see
-# module docstring for why a cross-file import is NOT).
-customers_asset = Asset("s3://normalized/customers")
+customers_asset = Asset("s3://normalized/customers")  # D-15: same URI, own object (see docstring)
 
 _DISCOVER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "100m", "memory": "128Mi"}, limits={"cpu": "500m", "memory": "256Mi"}
 )
-_INGEST_RESOURCES = k8s.V1ResourceRequirements(
+_STAGE_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"}, limits={"cpu": "2", "memory": "4Gi"}
 )
 _INGEST_EXTRA_ENV_VARS = [k8s.V1EnvVar(name="DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", value="2")]
@@ -67,9 +56,9 @@ def resolve_window(dag_run=None) -> dict[str, str | None]:  # noqa: ANN001 -- Ai
 
 
 @task
-def build_ingest_args(discovered: dict) -> list[list[str]]:
-    """Reshape ``discover``'s XCom into one ``ingest`` CLI argv per discovered unit."""
-    return [["ingest", "--assignment", unit["assignment_uri"]] for unit in discovered["units"]]
+def build_stage_args(discovered: dict) -> list[list[str]]:
+    """Reshape ``discover``'s XCom into one ``stage`` CLI argv per discovered unit."""
+    return [["stage", "--assignment", unit["assignment_uri"]] for unit in discovered["units"]]
 
 
 @task
@@ -83,10 +72,7 @@ def aggregate_receipts(receipts: list[dict]) -> None:
     )
 
 
-# schedule=[customers_asset] (D-15), not a cron string: this DAG only ever
-# runs after customers' own `ingest` task publishes. start_date is required
-# by the @dag decorator regardless of trigger mechanism (matches
-# csv_ingest_customers.py's own literal).
+# schedule=[customers_asset] (D-15): this DAG only runs after customers' own publish lands GOLD.
 @dag(
     dag_id="csv_ingest_orders",
     schedule=[customers_asset],
@@ -109,27 +95,13 @@ def csv_ingest_orders() -> None:
         retry_exponential_backoff=True,
     )
     resolve_window()
-
-    # D-18: Airflow's OWN listing of the same prefix (the sensor pushes no
-    # key list to XCom), then the LOAD-10 pre-pod-launch gate fanned out
-    # over it -- discover never runs for a file the gate rejects.
-    matched_keys = list_matched_keys(bucket="raw", prefix="orders/*.csv")
-
-    # Same kind-worker-node CPU-headroom mitigation as
-    # csv_ingest_customers.py's own integrity_gate (see that file for the
-    # full rationale) -- integrity_gate has no container_resources
-    # override, so an unbounded fan-out over a matched-key backlog would
-    # inherit the Helm chart's 250m default worker-pod CPU request per
-    # mapped instance and starve other DAGs'/tasks' pod scheduling
-    # cluster-wide. `.override(...)`, not the same kwarg passed straight
-    # into `.partial(...)` -- see csv_ingest_customers.py's own comment for
-    # why.
+    matched_keys = list_matched_keys(bucket="raw", prefix="orders/*.csv")  # D-18
+    # Cap at 3 pods (kind CPU headroom); .override(), not .partial() (validates fn signature).
     gate = (
         integrity_gate.override(max_active_tis_per_dag=3)
         .partial(bucket="raw", dataset_name="orders")
         .expand(key=matched_keys)
     )
-
     discover = KubernetesPodOperator(
         task_id="discover",
         cmds=["dataplat"],
@@ -139,21 +111,39 @@ def csv_ingest_orders() -> None:
         **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
     )
     wait_for_files >> matched_keys >> gate >> discover
-
-    # Fan-out bounded upstream by batching.max_units_per_run; D-12: ingest is
-    # the trace root (OBS-10). max_active_tis_per_dag=1 matches
-    # csv_ingest_customers.py's own kind-worker-node CPU-headroom mitigation.
-    # No outlets= here (D-16): orders produces no Asset this phase.
-    ingest = TracingKubernetesPodOperator.partial(
-        task_id="ingest",
+    # D-12: stage is the trace root (OBS-10). No outlets here (D-16): orders produces no Asset.
+    stage = TracingKubernetesPodOperator.partial(
+        task_id="stage",
         cmds=["dataplat"],
         retries=3,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=1,
-        **common_kpo_kwargs(resources=_INGEST_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
-    ).expand(arguments=build_ingest_args(discover.output))
-
-    aggregate_receipts(ingest.output)
+        **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
+    ).expand(arguments=build_stage_args(discover.output))
+    # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
+    dbt_build = KubernetesPodOperator(
+        task_id="dbt_build",
+        retries=2,
+        retry_exponential_backoff=True,
+        max_active_tis_per_dag=1,
+        **common_kpo_kwargs(
+            resources=_DISCOVER_RESOURCES,
+            service_account_name="dbt",
+            image_variable="dbt_image",
+            vault_k8s_role="dbt",
+            include_dataplat_credentials=False,
+        ),
+    )
+    publish = KubernetesPodOperator(
+        task_id="publish",
+        cmds=["dataplat"],
+        arguments=["publish", "--dataset", "orders"],
+        retries=3,
+        retry_exponential_backoff=True,
+        **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
+    )
+    stage >> dbt_build >> publish
+    aggregate_receipts(stage.output)
 
 
 csv_ingest_orders()

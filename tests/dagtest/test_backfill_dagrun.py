@@ -12,10 +12,11 @@ task-graph shape, a genuinely different `run_id` per logical date -- not the
 real resolution-state-transition logic inside a launched pod (plan 08-03's
 own tier) and not a full live-cluster proof (plan 08-14's own tier).
 `csv_ingest_customers.py`'s module docstring makes the claim this test
-exists to check mechanically: "a backfilled run just re-invokes
-wait_for_files -> discover -> ingest against the CURRENT state" -- i.e. a
-backfill run is not a structurally different code path from a normal
-scheduled run.
+exists to check mechanically: a backfilled run just re-invokes
+wait_for_files -> discover -> stage -> dbt_build -> publish against the
+CURRENT state -- i.e. a backfill run is not a structurally different code
+path from a normal scheduled run (08.1-12: updated for the stage/dbt_build/
+publish split that replaced the single `ingest` task).
 """
 
 from __future__ import annotations
@@ -54,8 +55,9 @@ def test_backfill_dagrun_customers_succeeds_and_is_structurally_stable(
     Args:
         load_dag: `tests/dagtest/conftest.py`'s `DagBag`-backed loader.
         mock_kpo_execute: The recorded-calls list `conftest.py`'s fixture
-            yields -- used below to prove `discover`/`ingest` genuinely ran
-            through the mock, not skipped by an upstream failure.
+            yields -- used below to prove `discover`/`stage`/`dbt_build`/
+            `publish` genuinely ran through the mock, not skipped by an
+            upstream failure.
         mock_s3_infrastructure: Doubles every S3/`boto3` touchpoint the DAG's
             sensor/gate/list tasks use (no return value needed by this test).
     """
@@ -95,11 +97,11 @@ def test_backfill_dagrun_customers_succeeds_and_is_structurally_stable(
     task_ids_2 = {ti.task_id for ti in dag_run_2.get_task_instances()}
     assert task_ids_1 == task_ids_2
 
-    # The sensor/gate/discover/ingest chain all "ran," per the mock -- not
-    # short-circuited by an upstream failure. mock_kpo_execute accumulates
-    # across BOTH dag.test() calls above, so both task_ids must appear.
+    # The sensor/gate/discover/stage/dbt_build/publish chain all "ran," per
+    # the mock -- not short-circuited by an upstream failure. mock_kpo_execute
+    # accumulates across BOTH dag.test() calls above, so all task_ids must appear.
     mocked_task_ids = {call["task_id"] for call in mock_kpo_execute}
-    assert mocked_task_ids == {"discover", "ingest"}
+    assert mocked_task_ids == {"discover", "stage", "dbt_build", "publish"}
 
 
 def test_backfill_dagrun_orders_succeeds(
@@ -125,4 +127,4 @@ def test_backfill_dagrun_orders_succeeds(
     assert _all_task_instances_succeeded(dag_run)
 
     mocked_task_ids = {call["task_id"] for call in mock_kpo_execute}
-    assert mocked_task_ids == {"discover", "ingest"}
+    assert mocked_task_ids == {"discover", "stage", "dbt_build", "publish"}

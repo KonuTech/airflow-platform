@@ -93,6 +93,9 @@ def test_max_active_runs_is_one(dagbag: DagBag) -> None:
 
 
 def test_namespace_and_service_account(dagbag: DagBag) -> None:
+    """dbt_build runs under its OWN "dbt" ServiceAccount (08.1-12, T-08.1-28) -- every
+    other KPO-shaped task in either DAG stays on "csv-processor", unchanged.
+    """
     checked = 0
     for dag_id in _BOTH_DAG_IDS:
         for task in dagbag.dags[dag_id].tasks:
@@ -100,11 +103,13 @@ def test_namespace_and_service_account(dagbag: DagBag) -> None:
             if attrs is None:
                 continue
             assert attrs.get("namespace") == "etl", f"{task.task_id} has the wrong namespace"
-            assert attrs.get("service_account_name") == "csv-processor", (
+            expected_sa = "dbt" if task.task_id == "dbt_build" else "csv-processor"
+            assert attrs.get("service_account_name") == expected_sa, (
                 f"{task.task_id} has the wrong service_account_name"
             )
             checked += 1
-    assert checked >= 3, "expected discover, ingest and the smoke pod to all be checked"
+    # discover, stage, dbt_build, publish in each DAG (8) + the smoke pod (1).
+    assert checked >= 9, "expected discover/stage/dbt_build/publish (both DAGs) + smoke pod"
 
 
 def test_integrity_gate_upstream_of_discover(dagbag: DagBag) -> None:
@@ -161,13 +166,25 @@ def test_orders_dag_present_and_asset_scheduled(dagbag: DagBag) -> None:
     )
 
 
-def test_customers_ingest_declares_outlets(dagbag: DagBag) -> None:
-    """D-15: `csv_ingest_customers`'s `ingest` task publishes the customers Asset via outlets."""
+def test_customers_publish_declares_outlets(dagbag: DagBag) -> None:
+    """D-15: `csv_ingest_customers`'s `publish` task publishes the customers Asset via outlets."""
     dag = dagbag.dags["csv_ingest_customers"]
-    ingest = dag.task_dict["ingest"]
-    outlets = ingest.outlets
-    assert outlets, "ingest declares no outlets"
+    publish = dag.task_dict["publish"]
+    outlets = publish.outlets
+    assert outlets, "publish declares no outlets"
     outlet_uris = {asset.uri for asset in outlets if isinstance(asset, Asset)}
     assert _CUSTOMERS_ASSET_URI in outlet_uris, (
-        f"ingest's outlets do not include {_CUSTOMERS_ASSET_URI}"
+        f"publish's outlets do not include {_CUSTOMERS_ASSET_URI}"
     )
+
+
+def test_dbt_build_runs_between_stage_and_publish(dagbag: DagBag) -> None:
+    """08.1-12: `stage -> dbt_build -> publish` holds in both DAGs."""
+    for dag_id in ("csv_ingest_customers", "csv_ingest_orders"):
+        dag = dagbag.dags[dag_id]
+        assert "stage" in dag.task_dict["dbt_build"].upstream_task_ids, (
+            f"{dag_id}: dbt_build is not gated by stage"
+        )
+        assert "dbt_build" in dag.task_dict["publish"].upstream_task_ids, (
+            f"{dag_id}: publish is not gated by dbt_build"
+        )
