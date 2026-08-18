@@ -73,9 +73,9 @@ The target architecture is:
 │   Airflow   │          │    MinIO    │             │ PostgreSQL      │
 │             │          │             │             │ Analytical DB   │
 │ Scheduler   │          │ Data Lake   │             │                 │
-│ API Server  │          │ S3 API      │             │ staging         │
-│ DAG Proc.   │          │             │             │ warehouse       │
-│ Triggerer   │          │             │             │ analytics       │
+│ API Server  │          │ S3 API      │             │ staging (bronze)│
+│ DAG Proc.   │          │             │             │ silver (dbt)    │
+│ Triggerer   │          │             │             │ warehouse (gold)│
 └──────┬──────┘          └──────▲──────┘             └────────▲────────┘
        │                        │                             │
        │ TaskFlow /             │                             │
@@ -100,6 +100,11 @@ The target architecture is:
                     ▼             ▼             ▼
                  Airflow      ETL Pods       CI/CD
 ```
+
+Inside the "PostgreSQL / Analytical DB" box shown above, dbt (Postgres adapter) performs the
+bronze-to-silver transformation -- cleaning, deduplication, and late-arriving-event resolution --
+landing in a persisted silver schema. Gold publish remains the responsibility of the existing
+Python MergePublisher, unchanged. See section 36 for the full pipeline.
 
 ---
 
@@ -174,16 +179,21 @@ Airflow PostgreSQL
 
 A completely separate PostgreSQL deployment for ETL and analytical workloads.
 
-It stores:
+It stores three schema layers, each with a distinct owner:
 
-* staging data
-* normalized data
-* warehouse data
+* **staging/bronze** -- raw, append-only landing tables; owned by the Python CSV Processor
+* **silver** -- cleaned, deduplicated, late-arriving-event-resolved tables; owned by dbt (Postgres
+  adapter), a new schema introduced for this pipeline
+* **warehouse/gold** -- normalized, business-ready tables including SCD dimensions; owned
+  exclusively by the Python MergePublisher via `INSERT ... ON CONFLICT` inside the single META-03
+  transaction, never via dbt's `merge` incremental strategy
+
+It also stores, unchanged and Python/meta-schema-owned:
+
 * analytical tables
 * ingestion metadata
 * data-quality metadata
 * schema metadata
-* SCD dimensions
 
 Architecture:
 
@@ -191,10 +201,26 @@ Architecture:
 CSV Processor
       │
       ▼
-Analytical PostgreSQL
+Analytical PostgreSQL (staging/bronze)
+      │
+      ▼
+dbt (Postgres adapter, bronze-to-silver)
+      │
+      ▼
+Analytical PostgreSQL (silver)
+      │
+      ▼
+Python MergePublisher (silver-to-gold, INSERT ... ON CONFLICT)
+      │
+      ▼
+Analytical PostgreSQL (warehouse/gold)
 ```
 
 The separation must remain clear even if both databases run inside the same Kubernetes cluster.
+Within the Analytical PostgreSQL instance itself, the bronze/staging, silver and warehouse/gold
+layers are separate schemas with separate role grants -- dbt's role gets read access to staging
+and write access only to silver; gold writes remain exclusively the Python publisher's (see
+section 81.6, least privilege).
 
 ---
 
@@ -383,17 +409,29 @@ Data Quality Validation
 Normalization
      │
      ▼
-Deduplication
-     │
-     ▼
-Transactional Load
+Transactional Load (into PostgreSQL staging/bronze)
      │
      ├───────────────┐
      ▼               ▼
    VALID           INVALID
      │               │
      ▼               ▼
-PostgreSQL       Quarantine
+PostgreSQL (staging) Quarantine
+     │
+     ▼
+dbt (Postgres adapter): bronze -> silver
+(cleaning, deduplication, late-arriving-event resolution)
+     │
+     ▼
+PostgreSQL (silver)
+     │
+     ▼
+Python MergePublisher: silver -> gold
+(atomic publication -- INSERT ... ON CONFLICT, single
+transaction with watermark + run-status)
+     │
+     ▼
+PostgreSQL (warehouse/gold)
 ```
 
 ---
