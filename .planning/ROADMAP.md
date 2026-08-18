@@ -513,10 +513,42 @@ Plans:
 **Goal:** A dbt (Postgres adapter) bronze-to-silver transformation stage exists, producing a persisted, deduplicated silver schema with correct late-arriving-event handling — while the existing Python `MergePublisher` continues to own the atomic silver-to-gold publish inside the META-03 transaction, unchanged
 **Requirements**: DEDUP-01, DEDUP-02, DEDUP-03, DEDUP-04, INCR-03, INCR-04, QUAL-10 (remapped from Phase 9 per `08.1-RESEARCH.md`'s confirmed mapping; LOAD-09 and OBS-07 are extended, not reassigned — they stay Phase 4/Phase 7, Complete)
 **Depends on:** Phase 8
-**Plans:** 0 plans
+**Plans:** 13 plans in 7 waves
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 08.1 to break down)
+**Wave 1**
+
+- [ ] 08.1-01-PLAN.md — Migrations A: dbt_app role, durable bronze tables, silver tables with UNIQUE business-key constraint
+- [ ] 08.1-02-PLAN.md — dbt Docker image (dbt-core 1.12.2/dbt-postgres 1.11.0) + standalone Vault secret resolver
+- [ ] 08.1-03-PLAN.md — dbt ServiceAccount, Vault policy/role/secret (etl/dbt-db, five discrete fields)
+- [ ] 08.1-04-PLAN.md — ADR-0010 (dbt boundary decision) + PROJECT.md/REQUIREMENTS.md narrowing
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 08.1-05-PLAN.md — Migrations B: meta.dedup_audit/dedup_decisions, meta.run_stages (D-17 two-phase claim)
+- [ ] 08.1-06-PLAN.md — StagingLoader.promote_to_durable_bronze(), Publisher.publish() source_table rename, DeduplicationConfig docstring fix
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 08.1-07-PLAN.md — repository.py run_stages claim/heartbeat methods + discovery.py D-18 idempotency-key/replay_of_run_id extension
+- [ ] 08.1-08-PLAN.md — dbt project scaffolding + silver_customers/silver_orders models (DEDUP-01..04, INCR-03/04, QUAL-10)
+- [ ] 08.1-09-PLAN.md — Migrations C: meta.v_customers_lineage dbt-hop extension, gold physical modeling via indexes (D-13)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 08.1-10-PLAN.md — pipeline/run.py split: stage_ingest() + publish_ingest()
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 08.1-11-PLAN.md — csv_processor CLI split: stage/publish commands replacing ingest
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 08.1-12-PLAN.md — DAG wiring: dbt_build task + stage/publish split, both DAGs
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 08.1-13-PLAN.md — Live-cluster proof: infrastructure activation, fresh-file E2E, D-16 backfill verification
 
 **Context:** Emerged from a `/gsd-explore` session (2026-08-18) that reopened PROJECT.md's original "dbt excluded" Key Decision after a medallion-architecture (bronze/silver/gold) proposal surfaced mid-discussion of Phase 9. Full reasoning: `.planning/notes/dbt-silver-layer-architecture-decision.md`. Deliberately narrow scope: dbt does NOT touch bronze ingestion (stays Python/`csv_processor`, Phases 1–8 unchanged) and does NOT touch gold publish (stays the existing `MergePublisher`, avoiding the PG `MERGE` concurrency bug — BUG #18279 — and preserving META-03's single-transaction guarantee). Phase 9's paused dedup-strategy discussion (`.planning/phases/09-.../09-DISCUSS-CHECKPOINT.json`) needs to be revisited against this phase's real silver-schema shape once planned — dedup may move fully into dbt models, or the earlier-locked Python `DeduplicationStage` may become a secondary safety net on top of dbt's output.
 
