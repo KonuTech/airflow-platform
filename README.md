@@ -2055,6 +2055,11 @@ csv_processor/
     └── validation_report.py
 ```
 
+dbt (Postgres adapter) owns bronze-to-silver transformation as a separate `dbt/` project outside
+this package (see section 75) -- `csv_processor` remains responsible for bronze ingestion
+(discovery through normalization and transactional load into staging) and never re-implements
+dbt's transformation logic.
+
 Keep business logic out of DAG files wherever practical.
 
 ---
@@ -2339,6 +2344,13 @@ airflow-etl-platform/
 │   ├── scd/
 │   ├── storage/
 │   └── models/
+│
+├── dbt/
+│   ├── models/
+│   │   ├── staging/     # bronze source definitions, read-only
+│   │   └── silver/      # cleaned, deduplicated, late-arriving-resolved models
+│   ├── dbt_project.yml
+│   └── profiles.yml
 │
 ├── schemas/
 ├── configs/
@@ -3158,6 +3170,7 @@ Add:
 * data contracts
 * lineage
 * observability
+* dbt bronze-to-silver transformation (cleaning, deduplication, late-arriving-event resolution)
 
 ## Phase 9 — CDC and SCD
 
@@ -3171,6 +3184,8 @@ Add:
 * SCD Type 2
 * historical corrections
 * CDC/SCD integration
+
+(SCD Type 2 remains Python-owned; dbt snapshot was evaluated and rejected -- see section 54.)
 
 ## Phase 10 — CI/CD
 
@@ -3293,7 +3308,7 @@ The final platform should demonstrate:
 37. File identity is distinct from record identity.
 38. Duplicate records within files can be detected.
 39. Duplicate records across batches can be detected.
-40. Dataset-specific deduplication strategies are supported.
+40. Dataset-specific deduplication strategies are supported. Cross-batch/cross-file deduplication into the silver layer is implemented as dbt models (Postgres adapter); a Python-owned secondary safety net may layer on top per Phase 9's dedup-strategy decision.
 41. Deduplication is auditable.
 42. Incremental processing is supported.
 43. Watermarks are persisted safely.
@@ -3305,7 +3320,7 @@ The final platform should demonstrate:
 49. Backfills are supported correctly.
 50. Backfills remain idempotent.
 51. Historical schemas can be used for backfills.
-52. Transactional/atomic loading is supported.
+52. Transactional/atomic loading is supported. The silver-to-gold publish stays the existing Python MergePublisher (pg_advisory_xact_lock + INSERT ... ON CONFLICT), never dbt's SQL MERGE, per the PostgreSQL MERGE concurrency bug (BUG #18279).
 53. Partial failures are recoverable.
 54. Large files can be processed without loading everything into memory.
 55. Source/target reconciliation is supported.
@@ -3380,6 +3395,10 @@ The final platform should demonstrate:
 112. Operational runbooks exist.
 113. The environment can be recreated from the repository.
 114. Analytical data can be rebuilt from immutable raw data where practical.
+115. Bronze-to-silver transformation (cleaning, deduplication, late-arriving-event resolution) is implemented as dbt (Postgres adapter) models, landing in a persisted silver schema in the analytical PostgreSQL.
+116. Silver-to-gold publish remains exclusively Python-owned (MergePublisher), using INSERT ... ON CONFLICT inside the single META-03 transaction with watermark and run-status -- dbt's merge incremental strategy (SQL MERGE) is never used against gold, avoiding PostgreSQL BUG #18279.
+117. SCD Type 2 (sections 54-61) remains entirely Python-owned; dbt snapshot was evaluated and explicitly rejected as a CDC/event-stream replacement.
+118. The dbt role follows least privilege: read access to staging/bronze schemas, write access only to its own silver schema (section 81.6).
 
 ---
 
