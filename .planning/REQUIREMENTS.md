@@ -244,7 +244,7 @@ Explicitly excluded, with reasoning, to prevent scope creep.
 | Feature | Reason |
 |---------|--------|
 | Cloud deployment (AWS/GCP/Azure) | Local kind is the target. Swap-out seams (MinIO→S3, Vault→cloud KMS) are preserved, but porting is not this milestone |
-| dbt or an external transformation framework | README §36/§54–61 model transformation and SCD in Python; adding dbt forks the transformation story across two paradigms |
+| dbt as an end-to-end (bronze→gold) transformation framework | As of Phase 08.1 (ADR-0010), dbt owns bronze-to-silver transformation narrowly (DEDUP-01..04, INCR-03, INCR-04, QUAL-10 — see Traceability table's Phase 08.1 rows for those IDs); gold publish and SCD2 remain explicitly Python-owned, per PG BUG #18279 and META-03's single-transaction guarantee |
 | Streaming ingestion (Kafka, Kinesis, Debezium runtime) | CDC is supported *architecturally* as a pluggable `Source`; no broker is deployed. This is also why exactly-once cannot be claimed |
 | Real production datasets or PII | Corpus is synthetic by construction, so fixtures are committable, reproducible and safe to scan |
 | Docker Compose as a workload platform | Forbidden by README §3.1. May appear only as a developer convenience for isolated unit-test dependencies |
