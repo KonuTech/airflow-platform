@@ -62,7 +62,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Exact reverse of `upgrade()`: silver first (empty once 0023's downgrade has run), then role."""
+    """Reverse of `upgrade()`: silver first (empty once 0023's downgrade has run), then role."""
     op.execute("DROP SCHEMA silver")
     op.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA staging REVOKE SELECT ON TABLES FROM dbt_app")
     op.execute("REVOKE SELECT ON ALL TABLES IN SCHEMA staging FROM dbt_app")
