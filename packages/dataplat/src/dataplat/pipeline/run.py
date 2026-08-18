@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING, Any, cast
 from opentelemetry import trace as otel_trace
 
 from dataplat.errors import ConfigurationError, DataPlatformError
+from dataplat.load.publish.registry import resolve_publisher
 from dataplat.load.staging import StagingLoader
 from dataplat.models.receipt import Receipt
 from dataplat.observability import metrics, tracing
@@ -757,3 +758,191 @@ def stage_ingest(
                 status=run_status,
             )
 
+
+def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
+    """Claim every currently-``STAGED`` run for one dataset, publish from silver, finalize.
+
+    A single, unmapped invocation per dataset -- never per-run (RESEARCH.md
+    Open Question 1, resolved by plan 08.1-07's ``meta.run_stages``/
+    ``list_staged_run_ids`` machinery): dbt's own watermark-driven batching
+    (D-05) may consolidate several ``stage_ingest`` runs' bronze
+    contributions into one deduplicated silver pass, so this function reads
+    ``silver.<dataset>`` unconditionally -- the SAME idempotent ``INSERT ...
+    ON CONFLICT`` upsert ``merge.py`` already proves safe to re-run -- and
+    finalizes every currently-``STAGED`` run in one atomic transaction
+    (META-03, unchanged from ``run_ingest``'s own guarantee).
+
+    Args:
+        ctx: The current pipeline context. ``ctx.run`` is never read (this
+            function is not scoped to one run); ``ctx.config.dataset``
+            resolves both the dataset to query and the ``silver.<dataset>``
+            source table; ``ctx.config.load.strategy``/``.target`` resolve
+            the ``Publisher`` and the advisory-lock key, unchanged from
+            ``run_ingest``'s own usage.
+
+    Returns:
+        A plain ``dict``, not a ``Receipt`` -- a ``Receipt`` is
+        single-``run_id``-shaped, and this function may finalize several
+        runs per invocation. Keys: ``"status"`` (always ``"SUCCEEDED"`` on a
+        normal return -- a run-fatal exception propagates uncaught, same
+        "catches nothing" contract as ``stage_ingest``), ``"runs_finalized"``
+        (the list of ``run_id``s this call finalized, possibly empty),
+        ``"rows_loaded"`` (this pass's total affected-row count -- see the
+        aggregate-attribution note at this function's own
+        ``finalize_publication`` call site), ``"duration_ms"``.
+    """
+    log = get_logger()
+    start = time.monotonic()
+
+    dataset_id = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
+    # Taken BEFORE opening any connection or transaction (Test 1's own
+    # requirement) -- a dataset with nothing currently STAGED costs this
+    # function exactly one read, never an advisory lock or a publish
+    # statement.
+    staged = ctx.metadata.list_staged_run_ids(dataset_id=dataset_id)
+    if not staged:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        log.info("publish_ingest.no_op", dataset=ctx.config.dataset)
+        return {
+            "status": "SUCCEEDED",
+            "runs_finalized": [],
+            "rows_loaded": 0,
+            "duration_ms": duration_ms,
+        }
+
+    # D-04's bounded label set, mirroring `stage_ingest`'s own metrics
+    # discipline -- emitted only once there is genuinely staged work to
+    # finalize, matching "a skip is not a run in flight" above.
+    metrics.increment(
+        "runs_started",
+        1,
+        dataset=ctx.config.dataset,
+        stage="publish_ingest",
+        status="running",
+    )
+    run_status = "failed"
+    finalized_run_ids: list[int] = []
+    try:
+        # `pipeline.publish` -- the SAME child span name `run_ingest` always
+        # used for its own atomic publish transaction segment, unchanged.
+        with (
+            tracing.start_span("pipeline.publish"),
+            ctx.db.connection() as conn,
+            conn.transaction(),
+        ):
+            # Single-writer publication per dataset (LOAD-09): every writer
+            # to this target serializes on the SAME advisory-lock key before
+            # touching it -- UNCHANGED from `run_ingest`'s own mechanism.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"publish:{ctx.config.load.target}",),
+            )
+            publisher = resolve_publisher(ctx.config.load.strategy)
+            # The retargeted call (plan 08.1-06's renamed `source_table`
+            # parameter): `merge.py`'s own SQL text requires ZERO change --
+            # only this call site's argument value differs from before this
+            # plan (a per-run scratch table, then; the dbt-consolidated
+            # silver table, now).
+            source_table = f"silver.{ctx.config.dataset}"
+            result = publisher.publish(ctx, source_table, conn)
+
+            finished_at = datetime.now(tz=UTC)
+            duration_ms = int((time.monotonic() - start) * 1000)
+
+            for run_id, file_id, batch_id, report_uri in staged:
+                claimed_stage_id = ctx.metadata.claim_run_stage(
+                    run_id=run_id,
+                    stage_name="PUBLISH",
+                    try_number=1,
+                    pod_name=os.environ.get("HOSTNAME", "unknown"),
+                )
+                if claimed_stage_id is None:
+                    # A concurrent claim already owns this run's publish hop
+                    # -- defensive, should not happen under the advisory
+                    # lock already held above, but never assumed.
+                    continue
+
+                # Aggregate, per-PASS (not per-run) attribution, documented
+                # explicitly here rather than left as an unstated gap:
+                # `publisher.publish()` above ran ONCE per `publish_ingest`
+                # invocation as a single upsert pass over the ENTIRE
+                # cumulative `silver.<dataset>` table (never scoped to one
+                # run's own `_run_id` range -- `merge.py`'s `_PUBLISH_SQL`
+                # has no such filter, and adding one is out of this plan's
+                # scope, see 08.1-06's "merge.py's own SQL text requires
+                # ZERO change" constraint), so `result.rows_affected` is
+                # this pass's TOTAL affected-row count, not any single run's
+                # own contribution -- every run finalized in this SAME loop
+                # is attributed the SAME aggregate value. This does not
+                # corrupt `normalized.<dataset>`/`silver.<dataset>` data --
+                # it only means `meta.ingestion_runs.rows_loaded`, summed
+                # across a multi-run finalize pass, over-counts relative to
+                # any one run's true contribution. A finer, genuinely
+                # per-run count would require `merge.py`'s `_PUBLISH_SQL` to
+                # `RETURNING _run_id` and a client-side `GROUP BY` -- real
+                # added complexity, out of this plan's scope; this is the
+                # same class of accepted, documented aggregate-metric
+                # imprecision as `run_ingest`'s own `rows_deduplicated`
+                # precedent (see this module's own git history), not an
+                # unstated gap.
+                ctx.metadata.finalize_publication(
+                    conn=conn,
+                    run_id=run_id,
+                    file_id=file_id,
+                    batch_id=batch_id,
+                    rows_loaded=result.rows_affected,
+                    finished_at=finished_at,
+                    duration_ms=duration_ms,
+                    report_uri=report_uri,
+                    schema_version_id=None,
+                )
+                ctx.metadata.complete_run_stage(
+                    run_id=run_id,
+                    stage_name="PUBLISH",
+                    status="SUCCEEDED",
+                    finished_at=finished_at,
+                )
+                finalized_run_ids.append(run_id)
+
+            if finalized_run_ids:
+                # D-05/D-23: resolve PENDING rejects by the business key(s)
+                # THIS pass actually published, mirroring
+                # `run_ingest`'s own pre-08.1-10 call exactly, except for
+                # `resolved_by_run_id`'s own attribution -- documented here
+                # as this plan's own deliberate simplification, mirroring
+                # `rows_deduplicated`'s own approximate-but-documented
+                # aggregate-attribution precedent above: a multi-run
+                # finalize pass attributes resolution to the LATEST run
+                # finalized this pass, never re-derived per business key.
+                ctx.metadata.resolve_rejected_records_for_business_keys(
+                    conn=conn,
+                    dataset_id=dataset_id,
+                    business_keys=result.published_business_keys,
+                    resolved_by_run_id=max(finalized_run_ids),
+                    resolution_type="REDRIVEN",
+                )
+
+        log.info(
+            "publish_ingest.succeeded",
+            dataset=ctx.config.dataset,
+            runs_finalized=finalized_run_ids,
+            rows_loaded=result.rows_affected,
+            duration_ms=duration_ms,
+        )
+        run_status = "succeeded"
+        return {
+            "status": "SUCCEEDED",
+            "runs_finalized": finalized_run_ids,
+            "rows_loaded": result.rows_affected,
+            "duration_ms": duration_ms,
+        }
+    finally:
+        # Never an `except` -- same "catches nothing" contract as
+        # `stage_ingest` (module docstring).
+        metrics.increment(
+            "runs_finished",
+            1,
+            dataset=ctx.config.dataset,
+            stage="publish_ingest",
+            status=run_status,
+        )
