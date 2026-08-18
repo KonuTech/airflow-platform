@@ -22,6 +22,14 @@ from alembic.config import Config
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+# Matches every sibling tests/integration/*.py module's own
+# `pytestmark = pytest.mark.integration` idiom (e.g. test_backfill_
+# resolution.py, test_volume_anomaly.py) -- this module never carried it
+# despite needing the same throwaway-Docker-container fixtures, which made
+# `-m integration`-filtered invocations (this plan's own <verify> commands)
+# silently select zero tests instead of the intended subset.
+pytestmark = pytest.mark.integration
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "migrations" / "alembic.ini"
 
@@ -39,14 +47,22 @@ EXPECTED_TABLES = {
     ("meta", "schema_versions"),
     ("meta", "validation_results"),
     ("meta", "rejected_records"),
+    # Plan 08.1-05, migration 0024 (dbt's own dedup audit trail, D-09).
+    ("meta", "dedup_audit"),
+    ("meta", "dedup_decisions"),
+    # Plan 08.1-05, migration 0025 (D-17's two-phase claim state machine).
+    ("meta", "run_stages"),
     ("normalized", "customers"),
     ("normalized", "orders"),
 }
 
-# Every table this phase's migrations GRANT etl_app access to — the same set
-# as EXPECTED_TABLES, named separately so a future table added to one without
+# Every table this phase's migrations GRANT etl_app exactly SELECT/INSERT/
+# UPDATE on — deliberately NOT EXPECTED_TABLES itself: meta.dedup_audit and
+# meta.dedup_decisions (migration 0024) are etl_app SELECT-only (dbt_app owns
+# the INSERT path there), so they are excluded from this narrower set even
+# though they belong in EXPECTED_TABLES. A future table added to one without
 # the other is a visible diff, not a coincidence of reuse.
-GRANTED_TABLES = sorted(EXPECTED_TABLES)
+GRANTED_TABLES = sorted(EXPECTED_TABLES - {("meta", "dedup_audit"), ("meta", "dedup_decisions")})
 
 HASH_VERSION_COLUMNS = [
     ("meta", "files", "hash_version"),
@@ -299,6 +315,9 @@ def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> Non
         ("meta", "files"),
         ("meta", "ingestion_runs"),
         ("meta", "v_customers_lineage"),
+        # Migration 0024 (plan 08.1-05): read access for dashboards, never write.
+        ("meta", "dedup_audit"),
+        ("meta", "dedup_decisions"),
     }
     assert set(granted.keys()) == expected_objects, (
         f"grafana_reader must hold grants on exactly {expected_objects}, got {set(granted.keys())}"
@@ -506,14 +525,123 @@ def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
             assert owner_row is not None, f"silver.{table} does not exist"
             assert owner_row[0] == "dbt_app", f"silver.{table} owner is {owner_row[0]!r}"
 
-        # Negative: D-08's hard boundary — zero grants on normalized or meta.
+        # Negative: D-08's hard boundary — zero grants on normalized, and on
+        # meta except the narrow meta.dedup_audit/meta.dedup_decisions slice
+        # migration 0024 (plan 08.1-05) carves out.
         forbidden_grants = conn.execute(
             """
             SELECT table_schema, table_name
               FROM information_schema.role_table_grants
-             WHERE grantee = 'dbt_app' AND table_schema IN ('normalized', 'meta')
+             WHERE grantee = 'dbt_app'
+               AND (
+                   table_schema = 'normalized'
+                   OR (table_schema = 'meta'
+                       AND table_name NOT IN ('dedup_audit', 'dedup_decisions'))
+               )
             """,
         ).fetchall()
         assert forbidden_grants == [], (
-            f"dbt_app must never be granted on normalized/meta, found: {forbidden_grants}"
+            f"dbt_app must never be granted on normalized/meta "
+            f"(beyond dedup_audit/dedup_decisions), found: {forbidden_grants}"
+        )
+
+
+def test_dbt_app_can_insert_dedup_audit_but_not_update_or_delete(migrated_dsn: str) -> None:
+    """T-08.1-10: `dbt_app` gets INSERT on dedup_audit/dedup_decisions, never UPDATE/DELETE.
+
+    Connects as the throwaway container's superuser and `SET ROLE dbt_app`
+    for the duration of the check — `dbt_app` carries no password in the
+    migrations themselves (migration 0021's own docstring: the password is
+    set out-of-band, by a Vault-bootstrap script extension), so `SET ROLE`
+    (available to a superuser without a password) is how this test exercises
+    `dbt_app`'s *actual* grants rather than merely reading
+    `information_schema.role_table_grants` rows.
+    """
+    _seed_minimal_lineage_row(migrated_dsn, dataset_name="test_migrations_dedup_audit_grants")
+    with psycopg.connect(migrated_dsn, autocommit=True) as conn:
+        dataset_row = conn.execute(
+            "SELECT dataset_id FROM meta.datasets WHERE dataset_name = %s",
+            ("test_migrations_dedup_audit_grants",),
+        ).fetchone()
+        assert dataset_row is not None
+        dataset_id = dataset_row[0]
+
+        conn.execute("SET ROLE dbt_app")
+        try:
+            insert_row = conn.execute(
+                """
+                INSERT INTO meta.dedup_audit
+                    (dataset_id, dbt_invocation_id, model_name,
+                     records_received, records_accepted, records_deduplicated)
+                VALUES (%s, %s, %s, 10, 8, 2)
+                RETURNING dedup_audit_id
+                """,
+                (dataset_id, "11111111-1111-1111-1111-111111111111", "silver_customers"),
+            ).fetchone()
+            assert insert_row is not None
+            dedup_audit_id = insert_row[0]
+
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(
+                    "UPDATE meta.dedup_audit SET records_received = 99 WHERE dedup_audit_id = %s",
+                    (dedup_audit_id,),
+                )
+
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(
+                    "DELETE FROM meta.dedup_audit WHERE dedup_audit_id = %s",
+                    (dedup_audit_id,),
+                )
+        finally:
+            conn.execute("RESET ROLE")
+
+
+def test_run_stages_enforces_unique_run_id_stage_name(migrated_dsn: str) -> None:
+    """D-17: `meta.run_stages` enforces `UNIQUE(run_id, stage_name)`."""
+    run_id, _file_id, _batch_id = _seed_minimal_lineage_row(
+        migrated_dsn,
+        dataset_name="test_migrations_run_stages_unique",
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO meta.run_stages (run_id, stage_name, status)
+            VALUES (%s, 'STAGE_LOAD', 'PENDING')
+            """,
+            (run_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                """
+                INSERT INTO meta.run_stages (run_id, stage_name, status)
+                VALUES (%s, 'STAGE_LOAD', 'PENDING')
+                """,
+                (run_id,),
+            )
+        conn.rollback()
+
+
+def test_dbt_app_has_no_grant_on_run_stages(migrated_dsn: str) -> None:
+    """D-02: `etl_app` claims/heartbeats `meta.run_stages`; `dbt_app` never touches it."""
+    with psycopg.connect(migrated_dsn) as conn:
+        etl_app_grants = conn.execute(
+            """
+            SELECT privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'etl_app' AND table_schema = 'meta' AND table_name = 'run_stages'
+            """,
+        ).fetchall()
+        assert {row[0] for row in etl_app_grants} == {"SELECT", "INSERT", "UPDATE"}
+
+        dbt_app_grants = conn.execute(
+            """
+            SELECT privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'dbt_app' AND table_schema = 'meta' AND table_name = 'run_stages'
+            """,
+        ).fetchall()
+        assert dbt_app_grants == [], (
+            f"dbt_app must have zero grant on meta.run_stages, found: {dbt_app_grants}"
         )
