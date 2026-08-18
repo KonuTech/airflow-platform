@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
-status: ready_to_plan
-stopped_at: Phase 08 complete (18/18) — ready to discuss Phase 9
-last_updated: 2026-08-17T23:23:52.536Z
-last_activity: 2026-08-17 -- Phase 08 execution started
+status: planning
+stopped_at: "Completed quick task 260817-mvp: capped integrity_gate concurrency, root-caused and fixed the "discover reliability" misdiagnosis"
+last_updated: "2026-08-18T08:44:03.200Z"
+last_activity: 2026-08-17
 progress:
-  total_phases: 11
-  completed_phases: 7
+  total_phases: 12
+  completed_phases: 8
   total_plans: 88
   completed_plans: 88
-  percent: 64
+  percent: 67
 ---
 
 # Project State
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 ## Current Position
 
-Phase: 9
+Phase: 08.1
 Plan: Not started
 Status: Ready to plan
 Last activity: 2026-08-17
@@ -68,6 +68,10 @@ Progress: [██████████] 100%
 | Phase 08 P09 | 10min | 2 tasks | 4 files |
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 08.1 inserted after Phase 8: dbt Silver Transformation Layer — emerged from /gsd-explore (2026-08-18), reopening PROJECT.md's dbt-excluded decision; full reasoning in .planning/notes/dbt-silver-layer-architecture-decision.md (URGENT)
 
 ### Decisions
 

@@ -508,6 +508,18 @@ Plans:
 - Statistical thresholds only. **No ML anomaly detection** — README §53 mandates simple configurable thresholds first, and PROJECT.md holds that line.
 - File integrity (LOAD-10) and manifests (LOAD-11) gate ingestion *before* parsing; the manifest may be the authoritative input to a run, pairing with the frozen-manifest rule from Phase 4.
 
+### Phase 08.1: dbt Silver Transformation Layer (INSERTED)
+
+**Goal:** A dbt (Postgres adapter) bronze-to-silver transformation stage exists, producing a persisted, deduplicated silver schema with correct late-arriving-event handling — while the existing Python `MergePublisher` continues to own the atomic silver-to-gold publish inside the META-03 transaction, unchanged
+**Requirements**: TBD (planning discussion needed — likely reshapes DEDUP-01..04 as originally mapped to Phase 9)
+**Depends on:** Phase 8
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 08.1 to break down)
+
+**Context:** Emerged from a `/gsd-explore` session (2026-08-18) that reopened PROJECT.md's original "dbt excluded" Key Decision after a medallion-architecture (bronze/silver/gold) proposal surfaced mid-discussion of Phase 9. Full reasoning: `.planning/notes/dbt-silver-layer-architecture-decision.md`. Deliberately narrow scope: dbt does NOT touch bronze ingestion (stays Python/`csv_processor`, Phases 1–8 unchanged) and does NOT touch gold publish (stays the existing `MergePublisher`, avoiding the PG `MERGE` concurrency bug — BUG #18279 — and preserving META-03's single-transaction guarantee). Phase 9's paused dedup-strategy discussion (`.planning/phases/09-.../09-DISCUSS-CHECKPOINT.json`) needs to be revisited against this phase's real silver-schema shape once planned — dedup may move fully into dbt models, or the earlier-locked Python `DeduplicationStage` may become a secondary safety net on top of dbt's output.
+
 ### Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery
 
 **Goal**: The platform processes only what is new, never loses late data, recovers from partial failure without reading logs, and can prove target matches source

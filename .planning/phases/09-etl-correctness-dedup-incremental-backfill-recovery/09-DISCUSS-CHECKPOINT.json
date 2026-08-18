@@ -1,0 +1,59 @@
+{
+  "phase": "9",
+  "phase_name": "ETL Correctness — Dedup, Incremental, Backfill & Recovery",
+  "timestamp": "2026-08-18T00:00:00Z",
+  "areas_completed": ["Deduplication strategy & audit", "Incremental processing & watermarks"],
+  "areas_remaining": ["Backfill & late/out-of-order data", "Recovery, checkpointing & reconciliation"],
+  "decisions": {
+    "Deduplication strategy & audit": [
+      {
+        "question": "Should the dedup strategy interface live as a new pre-publish pipeline Stage, or wrap/audit the existing MergePublisher DISTINCT ON logic in place?",
+        "answer": "New pre-publish Stage (recommended) — a DeduplicationStage runs before publish, computes duplicates via the strategy interface, writes meta.dedup_audit; MergePublisher's DISTINCT ON becomes redundant once the stage guarantees at-most-one-row-per-key.",
+        "options_presented": ["New pre-publish Stage (recommended)", "Audit wrapper around existing SQL", "You decide"]
+      },
+      {
+        "question": "Which dedup strategy applies at which scope (within-file vs across-files/batches/runs)?",
+        "answer": "Layered defense, not scope-split: business-key (PK/FK) dedup is the PRIMARY/first line of defence at every scope. Exact-row-hash dedup is a SECONDARY, stronger-mechanics check, also applied both within-file AND across-file/batch (not scope-limited to within-file only). User's words: \"using hash values should also prove useful across files/batches... we have to use PK and FK for deduplication as first line of defence. Hash values are second line of defence — even if they are stronger in their mechanics.\"",
+        "options_presented": ["Exact-hash within-file, business-key across", "Business-key dedup everywhere, exact-hash is a special case", "You decide"]
+      },
+      {
+        "question": "Execution order and division of labor between the two layers (hash-collapse-first-then-business-key-resolves, vs business-key-groups-then-hash-classifies-within-group)?",
+        "answer": "Left to Claude's discretion during planning/research, WITH an explicit hard constraint: the mechanics must correctly handle late events arriving between files — an older event for a business key already seen in a later batch must still be recognized as stale/duplicate, never blindly re-applied. This must stay consistent with the existing MergePublisher guard `EXCLUDED.event_ts >= normalized.customers.event_ts`. User explicitly flagged this cross-area link to late-arriving/out-of-order data (Incremental & watermarks / Backfill areas) rather than deciding in isolation.",
+        "options_presented": ["Hash-collapse first, then business-key resolves", "Business-key first, hash as a tiebreak signal", "You decide"]
+      },
+      {
+        "question": "Does 'across batches and ingestion runs' (DEDUP-02) mean comparing incoming rows against rows ALREADY published in normalized.customers/orders from prior runs, not just other rows in the current run's staging?",
+        "answer": "Yes — compare against target table too. A lone row in today's file that exactly matches an already-published row's hash must be counted as a cross-run duplicate in meta.dedup_audit, not just silently no-op'd by ON CONFLICT's WHERE guard.",
+        "options_presented": ["Yes — compare against target table too (recommended)", "No — scope stays within-run only", "You decide"]
+      },
+      {
+        "question": "Does the dedup strategy interface apply to both customers AND orders, or customers only this phase?",
+        "answer": "Both customers and orders — the interface and meta.dedup_audit apply uniformly to any dataset with a deduplication: block; orders.yaml gets one too.",
+        "options_presented": ["Both customers and orders", "Customers only — orders stays as-is"]
+      }
+    ],
+    "Incremental processing & watermarks": [
+      {
+        "question": "What does 'incremental' mean for file-drop CSV ingestion, given file-level idempotency already prevents reprocessing (Phase 4) — is the watermark purely observational (audit/freshness gauge) or does it also actively filter/gate rows within a file?",
+        "answer": "You decide — left to Claude's discretion during planning/research.",
+        "options_presented": ["Watermark = high-water mark for audit/visibility only", "Watermark also filters rows within a file", "You decide"]
+      },
+      {
+        "question": "Which watermark strategy (EVENT_TIMESTAMP / MONOTONIC_ID / BATCH_ID / FILE_SEQUENCE) fits customers/orders?",
+        "answer": "You decide — left to Claude's discretion during planning/research.",
+        "options_presented": ["EVENT_TIMESTAMP", "BATCH_ID", "You decide"]
+      }
+    ]
+  },
+  "paused": true,
+  "pause_reason": "User raised a milestone-level architecture question (dbt + medallion architecture — bronze/silver/gold, motivated by positive prior experience with dbt for deduplication and late-arriving-event handling) while discussing the 'Backfill & late/out-of-order data' area. This collided with a locked decision: PROJECT.md Key Decisions + REQUIREMENTS.md Out of Scope both excluded dbt. Phase 9 discussion was paused to have that conversation properly via /gsd-explore rather than deciding it as a side effect of this session.",
+  "resolution": "RESOLVED via /gsd-explore session (2026-08-18). Outcome: dbt is back in scope, narrowly — bronze→silver only (cleaning/dedup/late-arriving-event resolution into a NEW persisted silver Postgres schema). Gold stays entirely Python-owned (existing MergePublisher, pg_advisory_xact_lock + INSERT...ON CONFLICT, inside the META-03 transaction) — dbt-postgres's 'merge' strategy compiles to real PG MERGE, which collides with the same BUG #18279 this project's MergePublisher already avoids, and dbt's per-model transactions can't participate in META-03's single-transaction guarantee. Full reasoning: .planning/notes/dbt-silver-layer-architecture-decision.md. A new phase, 08.1 'dbt Silver Transformation Layer', was inserted into ROADMAP.md between Phase 8 and Phase 9 (not yet planned/discussed) to own this work. IMPORTANT — before resuming THIS Phase 9 discussion: the 'Deduplication strategy & audit' area below already locked a Python pre-publish DeduplicationStage as the dedup mechanism. That decision needs to be reconciled against Phase 08.1's real silver-schema shape once it exists — dedup may move fully into dbt models (silver IS the deduplicated layer), or the Python DeduplicationStage may survive as a secondary safety net on top of dbt's already-deduplicated silver output (the business-key-primary/hash-secondary layered-defense reasoning the user gave still applies, it just needs a new home). Recommend running /gsd:discuss-phase 08.1 and/or /gsd:plan-phase 08.1 BEFORE resuming this Phase 9 discussion, so the remaining Phase 9 areas (Backfill & late/out-of-order data, Recovery/checkpointing/reconciliation) are discussed with the real silver-layer shape in hand rather than guessed at.",
+  "deferred_ideas": [],
+  "canonical_refs": [
+    "packages/dataplat/src/dataplat/load/publish/merge.py — MergePublisher's current DISTINCT ON + ON CONFLICT dedup logic, to be superseded by the new pre-publish DeduplicationStage",
+    "packages/dataplat/src/dataplat/load/publish/merge_orders.py — OrdersMergePublisher, gets the same dedup treatment",
+    "packages/dataplat/src/dataplat/config/model.py DeduplicationConfig (lines 93-109) — strategy/keys/order_by fields, references a DEDUP_REGISTRY that does not exist in code yet",
+    ".planning/research/ARCHITECTURE.md line 238 — meta.dedup_audit table shape (run_id, strategy, keys jsonb, records_received/accepted/rejected/deduplicated)",
+    ".planning/research/ARCHITECTURE.md line 273 — dedup_decisions table also named for the Correctness phase, not yet in the earlier line-238 shape — reconcile during research"
+  ]
+}
