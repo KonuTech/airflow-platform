@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psycopg
+import pytest
 from alembic import command
 from alembic.config import Config
 
@@ -304,3 +305,215 @@ def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> Non
     )
     for obj, privileges in granted.items():
         assert privileges == {"SELECT"}, f"{obj}: expected exactly SELECT, got {privileges}"
+
+
+def _silver_constraint_types(dsn: str, *, table: str, column: str) -> tuple[str, ...]:
+    """Return every `table_constraints.constraint_type` covering one silver column alone.
+
+    Mirrors `_customers_customer_id_constraint_types` above, generalised to
+    `schema="silver"` and a caller-supplied table/column (D-14's business-key
+    UNIQUE constraint exists on two different tables here, not one).
+    """
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            """
+            SELECT tc.constraint_type
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+               AND tc.table_schema = kcu.table_schema
+             WHERE tc.table_schema = 'silver'
+               AND tc.table_name = %s
+               AND kcu.column_name = %s
+            """,
+            (table, column),
+        ).fetchall()
+    return tuple(row[0] for row in rows)
+
+
+def _seed_minimal_lineage_row(dsn: str, *, dataset_name: str) -> tuple[int, int, int]:
+    """Insert one minimal row apiece into datasets/config_versions/files/batches/ingestion_runs.
+
+    Returns `(run_id, file_id, batch_id)` — the three lineage FK targets
+    `silver.customers`/`silver.orders` require on every row. Exists so this
+    module's UNIQUE-constraint tests can INSERT a real row directly into
+    silver — bypassing dbt entirely, per the plan's own acceptance criteria —
+    without depending on the full `run_ingest()` pipeline machinery
+    `tests/integration/test_run_ingest.py` exercises for a different purpose.
+    `dataset_name` should be unique per test to avoid colliding with rows
+    other modules seed into the same session-scoped `migrated_dsn`.
+    """
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        dataset_row = conn.execute(
+            """
+            INSERT INTO meta.datasets (dataset_name)
+            VALUES (%s)
+            ON CONFLICT (dataset_name) DO UPDATE SET dataset_name = EXCLUDED.dataset_name
+            RETURNING dataset_id
+            """,
+            (dataset_name,),
+        ).fetchone()
+        assert dataset_row is not None
+        dataset_id = dataset_row[0]
+
+        config_version_row = conn.execute(
+            """
+            INSERT INTO meta.config_versions
+                (dataset_id, version, config_hash, config_document,
+                 config_schema_version, valid_from)
+            VALUES (%s, 1, %s, '{}'::jsonb, 1, now())
+            RETURNING config_version_id
+            """,
+            (dataset_id, f"{dataset_name}-hash"),
+        ).fetchone()
+        assert config_version_row is not None
+        config_version_id = config_version_row[0]
+
+        file_row = conn.execute(
+            """
+            INSERT INTO meta.files
+                (dataset_id, object_uri, content_sha256, size_bytes, filename, status)
+            VALUES (%s, %s, %s, 0, 'test.csv', 'DISCOVERED')
+            RETURNING file_id
+            """,
+            (dataset_id, f"s3://raw/{dataset_name}/test.csv", f"{dataset_name}-sha".encode()),
+        ).fetchone()
+        assert file_row is not None
+        file_id = file_row[0]
+
+        batch_row = conn.execute(
+            """
+            INSERT INTO meta.batches (dataset_id, batch_key, status)
+            VALUES (%s, %s, 'OPEN')
+            RETURNING batch_id
+            """,
+            (dataset_id, f"{dataset_name}-batch"),
+        ).fetchone()
+        assert batch_row is not None
+        batch_id = batch_row[0]
+
+        run_row = conn.execute(
+            """
+            INSERT INTO meta.ingestion_runs
+                (idempotency_key, dataset_id, config_version_id, processor_version,
+                 processor_image_digest, status)
+            VALUES (%s, %s, %s, 'test', 'sha256:test', 'SUCCEEDED')
+            RETURNING run_id
+            """,
+            (f"{dataset_name}:1", dataset_id, config_version_id),
+        ).fetchone()
+        assert run_row is not None
+        run_id = run_row[0]
+    return run_id, file_id, batch_id
+
+
+def test_silver_customer_id_has_a_real_unique_constraint(migrated_dsn: str) -> None:
+    """D-14: `silver.customers.customer_id` carries a real UNIQUE constraint, not just dbt logic."""
+    assert _silver_constraint_types(migrated_dsn, table="customers", column="customer_id") == (
+        "UNIQUE",
+    )
+
+    run_id, file_id, batch_id = _seed_minimal_lineage_row(
+        migrated_dsn,
+        dataset_name="test_migrations_silver_customers_unique",
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO silver.customers
+                (customer_id, name, country, birth_date, event_ts,
+                 _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+            VALUES (%s, 'Ada', 'US', NULL, NULL, %s, %s, %s, 1, %s)
+            """,
+            ("dup-customer-1", run_id, file_id, batch_id, b"hash-1"),
+        )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                """
+                INSERT INTO silver.customers
+                    (customer_id, name, country, birth_date, event_ts,
+                     _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+                VALUES (%s, 'Ada Duplicate', 'US', NULL, NULL, %s, %s, %s, 2, %s)
+                """,
+                ("dup-customer-1", run_id, file_id, batch_id, b"hash-2"),
+            )
+        conn.rollback()
+
+
+def test_silver_order_id_has_a_real_unique_constraint(migrated_dsn: str) -> None:
+    """D-14: `silver.orders.order_id` carries a real UNIQUE constraint, not just dbt logic."""
+    assert _silver_constraint_types(migrated_dsn, table="orders", column="order_id") == ("UNIQUE",)
+
+    run_id, file_id, batch_id = _seed_minimal_lineage_row(
+        migrated_dsn,
+        dataset_name="test_migrations_silver_orders_unique",
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO silver.orders
+                (order_id, customer_id, order_date, amount,
+                 _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+            VALUES (%s, 'cust-1', NULL, NULL, %s, %s, %s, 1, %s)
+            """,
+            ("dup-order-1", run_id, file_id, batch_id, b"hash-1"),
+        )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                """
+                INSERT INTO silver.orders
+                    (order_id, customer_id, order_date, amount,
+                     _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+                VALUES (%s, 'cust-1', NULL, NULL, %s, %s, %s, 2, %s)
+                """,
+                ("dup-order-1", run_id, file_id, batch_id, b"hash-2"),
+            )
+        conn.rollback()
+
+
+def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
+    """D-08: `dbt_app` reads `staging`, owns `silver`, and touches nothing in normalized/meta."""
+    with psycopg.connect(migrated_dsn) as conn:
+        # Positive: staging USAGE + SELECT on exactly its two tables.
+        staging_usable = conn.execute(
+            "SELECT has_schema_privilege('dbt_app', 'staging', 'USAGE')",
+        ).fetchone()
+        assert staging_usable is not None
+        assert staging_usable[0] is True, "dbt_app lacks USAGE on schema staging"
+
+        staging_grants = conn.execute(
+            """
+            SELECT table_schema, table_name, privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'dbt_app' AND table_schema = 'staging'
+            """,
+        ).fetchall()
+        staging_tables = {(schema, name) for schema, name, _ in staging_grants}
+        assert staging_tables == {("staging", "customers"), ("staging", "orders")}, staging_tables
+        for _, _, privilege in staging_grants:
+            assert privilege == "SELECT", f"dbt_app should only ever hold SELECT, got {privilege}"
+
+        # Positive: dbt_app owns both silver tables outright.
+        for table in ("customers", "orders"):
+            owner_row = conn.execute(
+                "SELECT tableowner FROM pg_tables WHERE schemaname = 'silver' AND tablename = %s",
+                (table,),
+            ).fetchone()
+            assert owner_row is not None, f"silver.{table} does not exist"
+            assert owner_row[0] == "dbt_app", f"silver.{table} owner is {owner_row[0]!r}"
+
+        # Negative: D-08's hard boundary — zero grants on normalized or meta.
+        forbidden_grants = conn.execute(
+            """
+            SELECT table_schema, table_name
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'dbt_app' AND table_schema IN ('normalized', 'meta')
+            """,
+        ).fetchall()
+        assert forbidden_grants == [], (
+            f"dbt_app must never be granted on normalized/meta, found: {forbidden_grants}"
+        )
