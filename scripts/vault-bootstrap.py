@@ -49,6 +49,14 @@ step). It creates, if not already present:
       `hvac`-in-pod for ETL), so this step also materializes both values as
       a Kubernetes Secret Grafana's Helm values reference by name -- see
       `_ensure_grafana_secrets`
+  (k) policy `dbt` (read access to exactly one KV path), role `dbt` (bound
+      to ServiceAccount `dbt` in namespace `etl`, FINAL binding -- same
+      precedent as (c)/(d)), and the `etl/dbt-db` KV secret VALUE (plan
+      08.1-03) -- FIVE discrete fields (`host`/`port`/`user`/`password`/
+      `dbname`), never one `dsn` string, since dbt-postgres needs discrete
+      connection parameters. `dbt_app`'s password is generated FRESH the
+      same `kubectl exec`-driven `ALTER ROLE` way (h)'s `etl_app` password
+      is -- see `_ensure_dbt_secret`
 
 Every step is idempotent: re-running this script against an already-
 bootstrapped Vault performs zero writes and prints "already present" for
@@ -111,6 +119,14 @@ _AIRFLOW_POLICY = """\
 path "airflow/data/connections/*" { capabilities = ["read"] }
 """
 
+# (k) dbt's own least-privilege Vault identity (plan 08.1-03), mirroring
+# csv-processor's pattern exactly: one policy, scoped to exactly one KV
+# path -- `etl/dbt-db`, never `etl/analytics-db` (that path stays
+# csv-processor-only; dbt authenticates as `dbt_app`, a distinct DB role).
+_DBT_POLICY = """\
+path "etl/data/dbt-db" { capabilities = ["read"] }
+"""
+
 _AUDIT_DEVICE_PATH = "/vault/audit/audit.log"
 
 # (h)/(i) The live Kubernetes Secret and CNPG `Cluster` these two steps
@@ -127,6 +143,13 @@ _ANALYTICS_DATABASE = "analytics"
 _ANALYTICS_APP_ROLE = "etl_app"
 _MINIO_APP_SECRET_NAME = "minio-app"  # noqa: S105 -- a K8s Secret's `metadata.name`, not a credential
 _MINIO_APP_ACCESS_KEY = "etl-app"
+
+# (k) dbt's own PostgreSQL role (plan 08.1-03/D-08) -- a SIBLING constant to
+# `_ANALYTICS_APP_ROLE`, not a reuse of it. `dbt_app` is a separate role
+# from `etl_app`, targeting the SAME `_ANALYTICS_CLUSTER`/
+# `_ANALYTICS_DATABASE` primary pod via the identical `kubectl exec`
+# mechanism -- see `_ensure_dbt_secret`.
+_DBT_APP_ROLE = "dbt_app"
 
 # (j) Grafana (plan 07-06) -- a third Vault-consumer shape, distinct from
 # both of Phase 5's tiers (Airflow's native VaultBackend; hvac-in-pod for
@@ -905,6 +928,66 @@ def _ensure_grafana_secrets(client: hvac.Client, kubectl_context: str) -> None:
     print(f"Secret {_MONITORING_NAMESPACE}/{_GRAFANA_SECRET_NAME}: applied")
 
 
+def _ensure_dbt_secret(client: hvac.Client, kubectl_context: str) -> None:
+    """(k) Populate `etl/dbt-db`'s KV secret VALUE, if not already present.
+
+    Same read-then-skip-or-write shape as `_ensure_etl_secrets`'s own
+    `etl/analytics-db` block, but writes FIVE discrete credential fields
+    (host/port/user/password/dbname) rather than one `dsn` string --
+    deliberately diverging from `_ensure_etl_secrets`'s single-field
+    convention, since `docker/dbt/resolve_secrets.py` (plan 08.1-02) reads
+    these five field names literally: dbt-postgres needs discrete
+    connection parameters, not one DSN string.
+
+    On `hvac.exceptions.InvalidPath`: generate a fresh `dbt_app` PostgreSQL
+    password via `secrets.token_hex(32)`, `ALTER ROLE dbt_app WITH PASSWORD
+    ...` against the SAME `_ANALYTICS_CLUSTER`/`_ANALYTICS_DATABASE`
+    primary pod `_ensure_etl_secrets` already targets (the identical
+    `kubectl exec` mechanism, resolved fresh here too -- the same pattern
+    `_ensure_grafana_secrets` also follows for its own `grafana_reader`
+    password), then write the five fields to Vault KV.
+
+    Never prints `password`.
+
+    Args:
+        client: An `hvac.Client` authenticated with the root token.
+        kubectl_context: The kubectl context to read/exec through.
+    """
+    try:
+        client.secrets.kv.v2.read_secret_version(mount_point="etl", path="dbt-db")
+        print("secret etl/dbt-db: already present")
+    except hvac.exceptions.InvalidPath:
+        primary_pod = _kubectl_cluster_primary_pod(
+            kubectl_context,
+            namespace=_DATA_NAMESPACE,
+            cluster=_ANALYTICS_CLUSTER,
+        )
+        # secrets.token_hex's charset is pure [0-9a-f] -- it cannot contain
+        # the `'` character the SQL string literal below depends on, so
+        # this is not an injection vector (T-05-13), the same reasoning
+        # _ensure_etl_secrets documents for etl_app's own password.
+        password = secrets.token_hex(32)
+        _kubectl_exec_psql(
+            kubectl_context,
+            namespace=_DATA_NAMESPACE,
+            pod=primary_pod,
+            database=_ANALYTICS_DATABASE,
+            sql=f"ALTER ROLE {_DBT_APP_ROLE} WITH PASSWORD '{password}';",
+        )
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="etl",
+            path="dbt-db",
+            secret={
+                "host": f"{_ANALYTICS_CLUSTER}-rw.{_DATA_NAMESPACE}",
+                "port": "5432",
+                "user": _DBT_APP_ROLE,
+                "password": password,
+                "dbname": _ANALYTICS_DATABASE,
+            },
+        )
+        print("secret etl/dbt-db: created")
+
+
 def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
     """Run every idempotent bootstrap step against an authenticated, unsealed `client`.
 
@@ -935,6 +1018,20 @@ def bootstrap(client: hvac.Client, kubectl_context: str) -> None:
         bound_service_account_namespaces=["etl"],
         policies=["csv-processor"],
     )
+
+    _ensure_policy(client, "dbt", _DBT_POLICY)
+    # FINAL binding, one ServiceAccount, no ambiguity -- matches
+    # csv-processor's own precedent above, not Airflow's multi-SA case
+    # below (dbt has exactly one identity: the `dbt` ServiceAccount in
+    # namespace `etl`, kubernetes/rbac-etl.yaml, plan 08.1-03).
+    _ensure_kubernetes_role(
+        client,
+        name="dbt",
+        bound_service_account_names=["dbt"],
+        bound_service_account_namespaces=["etl"],
+        policies=["dbt"],
+    )
+    _ensure_dbt_secret(client, kubectl_context)
 
     _ensure_policy(client, "airflow", _AIRFLOW_POLICY)
     # EMPIRICALLY CORRECTED (plan 05-03) from plan 05-01's original
