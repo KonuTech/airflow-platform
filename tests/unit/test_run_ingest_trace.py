@@ -1,31 +1,41 @@
-"""Unit tests for ``dataplat.pipeline.run.run_ingest``'s tracing/metrics (plan 07-05 Task 2).
+"""Unit tests for ``dataplat.pipeline.run.stage_ingest``'s tracing/metrics.
 
-Covers: ``run_ingest`` opens its own ``pipeline.run_ingest`` span and passes
-its ``trace_id``/``span_id`` into ``claim_ingestion_run`` (``None``/``None``
-when no active parent context and tracing is unconfigured -- an invalid span
-context, never a garbage all-zero hex string; a genuine CHILD of an
-extracted parent context otherwise -- same ``trace_id``, a NEW ``span_id``);
-``runs_started``/``runs_finished`` are emitted exactly once each around a
-claimed run, on both the success and run-fatal-exception paths, but NEVER on
-a refused claim; and the publish transaction's ``pipeline.publish`` span is
-a genuine child of ``pipeline.run_ingest``.
+Migrated from ``run_ingest`` (plan 07-05 Task 2's original scope) to
+``stage_ingest`` (plan 08.1-10's D-02/D-04 claim/stage/publish split; plan
+08.1-11 fixes the resulting ``ImportError`` this file's own collection would
+otherwise raise, since ``run_ingest`` no longer exists in
+``dataplat.pipeline.run``).
 
-Everything below the claim (staging, publish) runs against fakes, never a
-real database or object store -- this file is offline/``tests/unit``-tier by
-design. ``run_module.StagingLoader``/``run_module.resolve_publisher`` are
-monkeypatched exactly like ``tests/integration/test_run_ingest.py``'s own
-``test_crash_between_staging_and_publish_leaves_no_partial_state_and_retry_succeeds``
-patches ``resolve_publisher`` to simulate a crash -- this file mirrors that
-same style at the unit-test tier.
+Covers: ``stage_ingest`` opens its own ``pipeline.stage_ingest`` span (renamed
+from ``pipeline.run_ingest``, OBS-10) and passes its ``trace_id``/``span_id``
+into ``claim_ingestion_run`` (``None``/``None`` when no active parent context
+and tracing is unconfigured -- an invalid span context, never a garbage
+all-zero hex string; a genuine CHILD of an extracted parent context otherwise
+-- same ``trace_id``, a NEW ``span_id``); ``runs_started``/``runs_finished``
+are emitted exactly once each around a claimed run, on both the success and
+run-fatal-exception paths, but NEVER on a refused claim.
+
+Dropped from the original file: the "``pipeline.publish`` is a genuine child
+of ``pipeline.run_ingest``" behavior. That relationship no longer exists
+structurally after the split -- ``stage_ingest`` never opens a
+``pipeline.publish`` span at all (that lives entirely inside the separate
+``publish_ingest`` function, invoked as its own, later, unrelated call), so
+there is no parent-child span pair to assert on here anymore.
+
+Everything below the claim (staging, the quality gate, durable-bronze
+promotion) runs against fakes, never a real database or object store -- this
+file is offline/``tests/unit``-tier by design. ``run_module.StagingLoader`` is
+monkeypatched exactly like ``tests/integration/test_stage_ingest.py``'s own
+style, mirrored at the unit-test tier.
 
 Parent-child span relationships are proven against real, recording OTel SDK
 spans captured by an ``InMemorySpanExporter`` wired directly onto
 ``tracing._provider`` (bypassing the public ``configure(otlp_endpoint=...)``,
-which always builds a real ``OTLPSpanExporter`` -- mirrors
+which always builds a real ``OTLPSpanExporter``) -- mirrors
 ``test_tracing.py``'s own sanctioned direct-poke-at-``tracing._provider``
-pattern, SLF001-suppressed there for the identical reason). Every test
-resets ``tracing``/``metrics`` back to a genuine no-op afterward so no state
-leaks into sibling test files.
+pattern, SLF001-suppressed there for the identical reason). Every test resets
+``tracing``/``metrics`` back to a genuine no-op afterward so no state leaks
+into sibling test files.
 """
 
 from __future__ import annotations
@@ -54,7 +64,7 @@ from dataplat.models.identity import RunContext
 from dataplat.observability import metrics, tracing
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.pipeline.run import run_ingest
+from dataplat.pipeline.run import stage_ingest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -94,28 +104,15 @@ def _configure_in_memory_tracing() -> InMemorySpanExporter:
 
 
 class _FakeObjectStore:
-    """A stand-in ``ObjectStore`` -- ``run_ingest`` (08-11) writes a report via ``put_object``."""
+    """A stand-in ``ObjectStore`` -- ``stage_ingest`` writes a report via ``put_object``."""
 
     def put_object(self, bucket: str, key: str, body: bytes) -> None:
         del bucket, key, body
 
 
-class _FakeCursor:
-    def execute(self, *args: object, **kwargs: object) -> _FakeCursor:
-        del args, kwargs
-        return self
-
-    def fetchone(self) -> None:
-        return None
-
-    def fetchall(self) -> list[tuple[object, ...]]:
-        return []
-
-
 class _FakeConnection:
-    def execute(self, *args: object, **kwargs: object) -> _FakeCursor:
+    def execute(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
-        return _FakeCursor()
 
     def transaction(self) -> Self:
         return self
@@ -157,33 +154,37 @@ class _FakeStagingLoader:
             schema_version_id=None,
         )
 
-
-@dataclass
-class _FakePublishResult:
-    rows_affected: int = 2
-    published_business_keys: tuple[str, ...] = ()
-
-
-class _FakePublisher:
-    def publish(self, ctx: PipelineContext, staging_table: str, conn: object) -> _FakePublishResult:
-        del ctx, staging_table, conn
-        return _FakePublishResult()
+    def promote_to_durable_bronze(
+        self,
+        ctx: PipelineContext,
+        conn: object,
+        staging_result: StagingResult,
+    ) -> None:
+        del ctx, conn, staging_result
 
 
-def _fake_resolve_publisher(strategy: str) -> _FakePublisher:
-    del strategy
-    return _FakePublisher()
+class _BoomStagingLoader:
+    """A ``StagingLoader`` stand-in that raises before staging ever completes.
 
+    Simulates a run-fatal failure inside ``stage_ingest``'s own staging
+    connection block -- the direct replacement for the original file's
+    ``_boom_resolve_publisher`` (a publish-time crash), since ``stage_ingest``
+    no longer touches ``resolve_publisher`` at all (that call moved entirely
+    into the separate ``publish_ingest`` function, D-04's split).
+    """
 
-def _boom_resolve_publisher(strategy: str) -> _FakePublisher:
-    del strategy
-    msg = "simulated crash before the publish transaction begins"
-    raise RuntimeError(msg)
+    def __init__(self, *, target_columns: tuple[str, ...], chunk_size: int = 1000) -> None:
+        del target_columns, chunk_size
+
+    def load(self, ctx: PipelineContext, staging_conn: object, on_progress: Any) -> StagingResult:
+        del ctx, staging_conn, on_progress
+        msg = "simulated crash before staging completes"
+        raise RuntimeError(msg)
 
 
 @dataclass
 class _FakeMetadataRepository:
-    """An in-memory ``MetadataRepository`` double covering exactly what ``run_ingest`` calls."""
+    """An in-memory ``MetadataRepository`` double covering exactly what ``stage_ingest`` calls."""
 
     claim_result: tuple[int, str] | None
     status_for_skip: str | None = None
@@ -223,21 +224,8 @@ class _FakeMetadataRepository:
         del run_id
         return self.status_for_skip
 
-    def finalize_publication(  # noqa: PLR0913 -- mirrors the real Protocol's column set
-        self,
-        *,
-        conn: object,
-        run_id: int,
-        file_id: int,
-        batch_id: int,
-        rows_loaded: int,
-        finished_at: object,
-        duration_ms: int,
-        report_uri: str | None,
-        schema_version_id: int | None = None,
-    ) -> None:
-        del conn, run_id, file_id, batch_id, rows_loaded
-        del finished_at, duration_ms, report_uri, schema_version_id
+    def update_ingestion_run_status(self, *, run_id: int, status: str, **fields: object) -> None:
+        del run_id, status, fields
 
     def heartbeat_ingestion_run(
         self,
@@ -273,23 +261,12 @@ class _FakeMetadataRepository:
         del dataset_name
         return 1
 
-    def resolve_rejected_records_for_business_keys(
-        self,
-        *,
-        conn: object,
-        dataset_id: int,
-        business_keys: object,
-        resolved_by_run_id: int,
-        resolution_type: str,
-    ) -> int:
-        del conn, dataset_id, business_keys, resolved_by_run_id, resolution_type
-        return 0
-
 
 def _make_config() -> DatasetConfig:
-    """A minimal, valid `DatasetConfig` -- `run_ingest` now reads `.columns`
-    unconditionally, to find the business-key column for the post-publish
-    resolution query (D-23, plan 08-18)."""
+    """A minimal, valid `DatasetConfig` -- no `quality` rules configured, so
+    `stage_ingest`'s own referential/circuit-breaker/volume-anomaly barriers
+    are all no-ops on this path (`_find_quality_rule` returns `None` for
+    every rule type when `ctx.config.quality is None`)."""
     return DatasetConfig(
         dataset="customers",
         config_schema_version=1,
@@ -325,7 +302,12 @@ def _make_ctx(*, metadata: _FakeMetadataRepository) -> PipelineContext:
     # shape at runtime (see each class's own docstring) but not nominally --
     # `type: ignore[arg-type]` on each is expected, not a real type error.
     return PipelineContext(
-        run=RunContext(run_id=1, idempotency_key="run_ingest_trace_unit:1", file_id=1, batch_id=1),
+        run=RunContext(
+            run_id=1,
+            idempotency_key="stage_ingest_trace_unit:1",
+            file_id=1,
+            batch_id=1,
+        ),
         config=_make_config(),
         metadata=metadata,  # type: ignore[arg-type]
         objects=_FakeObjectStore(),  # type: ignore[arg-type]
@@ -363,13 +345,12 @@ def test_claim_receives_none_trace_id_and_span_id_with_no_parent_context(
 ) -> None:
     tracing.configure(otlp_endpoint=None)
     monkeypatch.setattr(run_module, "StagingLoader", _FakeStagingLoader)
-    monkeypatch.setattr(run_module, "resolve_publisher", _fake_resolve_publisher)
     metadata = _FakeMetadataRepository(claim_result=(1, "RUNNING"))
     ctx = _make_ctx(metadata=metadata)
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
+    assert receipt.status == "STAGED"
     assert len(metadata.claim_calls) == 1
     assert metadata.claim_calls[0]["trace_id"] is None
     assert metadata.claim_calls[0]["span_id"] is None
@@ -383,14 +364,13 @@ def test_claim_receives_a_child_span_matching_trace_id_and_a_new_span_id(
 ) -> None:
     _configure_in_memory_tracing()
     monkeypatch.setattr(run_module, "StagingLoader", _FakeStagingLoader)
-    monkeypatch.setattr(run_module, "resolve_publisher", _fake_resolve_publisher)
     metadata = _FakeMetadataRepository(claim_result=(1, "RUNNING"))
     ctx = _make_ctx(metadata=metadata)
 
     parent_ctx = propagate.extract({"traceparent": _WELL_FORMED_TRACEPARENT})
     token = otel_context.attach(parent_ctx)
     try:
-        run_ingest(ctx)
+        stage_ingest(ctx)
     finally:
         otel_context.detach(token)
 
@@ -416,13 +396,12 @@ def test_runs_started_and_runs_finished_succeeded_are_each_emitted_once(
     tracing.configure(otlp_endpoint=None)
     calls = _record_increment_calls(monkeypatch)
     monkeypatch.setattr(run_module, "StagingLoader", _FakeStagingLoader)
-    monkeypatch.setattr(run_module, "resolve_publisher", _fake_resolve_publisher)
     metadata = _FakeMetadataRepository(claim_result=(1, "RUNNING"))
     ctx = _make_ctx(metadata=metadata)
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
+    assert receipt.status == "STAGED"
     started = [c for c in calls if c[0] == "runs_started"]
     finished = [c for c in calls if c[0] == "runs_finished"]
     assert len(started) == 1
@@ -430,7 +409,7 @@ def test_runs_started_and_runs_finished_succeeded_are_each_emitted_once(
     assert started[0][2]["dataset"] == "customers"
     assert started[0][2]["status"] == "running"
     assert finished[0][2]["dataset"] == "customers"
-    assert finished[0][2]["status"] == "succeeded"
+    assert finished[0][2]["status"] == "staged"
 
 
 # --- Behavior 4: run-fatal exception -> runs_finished(failed) + propagates -
@@ -441,13 +420,12 @@ def test_runs_finished_failed_is_emitted_and_the_exception_still_propagates(
 ) -> None:
     tracing.configure(otlp_endpoint=None)
     calls = _record_increment_calls(monkeypatch)
-    monkeypatch.setattr(run_module, "StagingLoader", _FakeStagingLoader)
-    monkeypatch.setattr(run_module, "resolve_publisher", _boom_resolve_publisher)
+    monkeypatch.setattr(run_module, "StagingLoader", _BoomStagingLoader)
     metadata = _FakeMetadataRepository(claim_result=(1, "RUNNING"))
     ctx = _make_ctx(metadata=metadata)
 
     with pytest.raises(RuntimeError, match="simulated crash"):
-        run_ingest(ctx)
+        stage_ingest(ctx)
 
     started = [c for c in calls if c[0] == "runs_started"]
     finished = [c for c in calls if c[0] == "runs_finished"]
@@ -464,33 +442,10 @@ def test_refused_claim_emits_neither_runs_started_nor_runs_finished(
 ) -> None:
     tracing.configure(otlp_endpoint=None)
     calls = _record_increment_calls(monkeypatch)
-    metadata = _FakeMetadataRepository(claim_result=None, status_for_skip="SUCCEEDED")
+    metadata = _FakeMetadataRepository(claim_result=None, status_for_skip="STAGED")
     ctx = _make_ctx(metadata=metadata)
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
     assert receipt.status == "SKIPPED_DUPLICATE"
     assert calls == []
-
-
-# --- Behavior 6: pipeline.publish is a genuine child of pipeline.run_ingest -
-
-
-def test_publish_span_is_a_genuine_child_of_the_run_ingest_span(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    exporter = _configure_in_memory_tracing()
-    monkeypatch.setattr(run_module, "StagingLoader", _FakeStagingLoader)
-    monkeypatch.setattr(run_module, "resolve_publisher", _fake_resolve_publisher)
-    metadata = _FakeMetadataRepository(claim_result=(1, "RUNNING"))
-    ctx = _make_ctx(metadata=metadata)
-
-    run_ingest(ctx)
-
-    spans = {span.name: span for span in exporter.get_finished_spans()}
-    assert "pipeline.run_ingest" in spans
-    assert "pipeline.publish" in spans
-    run_span = spans["pipeline.run_ingest"]
-    publish_span = spans["pipeline.publish"]
-    assert publish_span.parent is not None
-    assert publish_span.parent.span_id == run_span.context.span_id

@@ -263,7 +263,7 @@ class _FakeIngestObjectStore:
 
 
 class _FakeIngestMetadata:
-    """Only `get_or_create_dataset` is exercised on this path before `run_ingest` is faked out."""
+    """Only `get_or_create_dataset` is exercised on this path before `stage_ingest` is faked out."""
 
     def get_or_create_dataset(self, dataset_name: str) -> int:
         del dataset_name
