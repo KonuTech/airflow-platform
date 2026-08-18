@@ -594,3 +594,54 @@ def test_dbt_app_can_insert_dedup_audit_but_not_update_or_delete(migrated_dsn: s
                 )
         finally:
             conn.execute("RESET ROLE")
+
+
+def test_run_stages_enforces_unique_run_id_stage_name(migrated_dsn: str) -> None:
+    """D-17: `meta.run_stages` enforces `UNIQUE(run_id, stage_name)`."""
+    run_id, _file_id, _batch_id = _seed_minimal_lineage_row(
+        migrated_dsn,
+        dataset_name="test_migrations_run_stages_unique",
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO meta.run_stages (run_id, stage_name, status)
+            VALUES (%s, 'STAGE_LOAD', 'PENDING')
+            """,
+            (run_id,),
+        )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                """
+                INSERT INTO meta.run_stages (run_id, stage_name, status)
+                VALUES (%s, 'STAGE_LOAD', 'PENDING')
+                """,
+                (run_id,),
+            )
+        conn.rollback()
+
+
+def test_dbt_app_has_no_grant_on_run_stages(migrated_dsn: str) -> None:
+    """D-02: `etl_app` claims/heartbeats `meta.run_stages`; `dbt_app` never touches it."""
+    with psycopg.connect(migrated_dsn) as conn:
+        etl_app_grants = conn.execute(
+            """
+            SELECT privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'etl_app' AND table_schema = 'meta' AND table_name = 'run_stages'
+            """,
+        ).fetchall()
+        assert {row[0] for row in etl_app_grants} == {"SELECT", "INSERT", "UPDATE"}
+
+        dbt_app_grants = conn.execute(
+            """
+            SELECT privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'dbt_app' AND table_schema = 'meta' AND table_name = 'run_stages'
+            """,
+        ).fetchall()
+        assert dbt_app_grants == [], (
+            f"dbt_app must have zero grant on meta.run_stages, found: {dbt_app_grants}"
+        )
