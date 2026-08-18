@@ -69,11 +69,13 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAGS_FOLDER = REPO_ROOT / "airflow" / "dags"
 
-# The same fixture value tests/unit/conftest.py's own `dagbag` fixture uses
-# for `Variable.get("csv_processor_image")` at DAG-parse time (common_kpo_
-# kwargs()) -- this tier never launches a real pod, so the value is never
-# resolved against a real registry.
+# The same fixture values tests/unit/conftest.py's own `dagbag` fixture uses
+# for `Variable.get(image_variable)` at DAG-parse time (common_kpo_kwargs())
+# -- this tier never launches a real pod, so neither value is ever resolved
+# against a real registry. 08.1-12 adds the second: `dbt_build`'s own
+# `image_variable="dbt_image"` override.
 _TEST_FIXTURE_IMAGE = "localhost:5001/csv-processor:test-fixture"
+_TEST_FIXTURE_DBT_IMAGE = "localhost:5001/dbt:test-fixture"
 
 # The env vars `airflow_env` owns for the duration of the test session --
 # restored to their pre-fixture values on teardown so a later, unrelated
@@ -87,6 +89,7 @@ _AIRFLOW_ENV_KEYS = (
     "AIRFLOW__CORE__LOAD_EXAMPLES",
     "AIRFLOW__CORE__DAGS_FOLDER",
     "AIRFLOW_VAR_CSV_PROCESSOR_IMAGE",
+    "AIRFLOW_VAR_DBT_IMAGE",
 )
 
 
@@ -182,10 +185,12 @@ def airflow_env(airflow_metadata_dsn: str) -> Iterator[None]:
     os.environ["AIRFLOW__CORE__EXECUTOR"] = "LocalExecutor"
     os.environ["AIRFLOW__CORE__LOAD_EXAMPLES"] = "False"
     os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = str(DAGS_FOLDER)
-    # common_kpo_kwargs()'s Variable.get("csv_processor_image") at DAG-parse
-    # time -- same mechanism, same value, as tests/unit/conftest.py's own
-    # `dagbag` fixture.
+    # common_kpo_kwargs()'s Variable.get(image_variable) at DAG-parse time --
+    # same mechanism, same values, as tests/unit/conftest.py's own `dagbag`
+    # fixture. Both `discover`/`stage`/`publish`'s "csv_processor_image" AND
+    # `dbt_build`'s "dbt_image" (08.1-12) must resolve for DagBag to parse.
     os.environ["AIRFLOW_VAR_CSV_PROCESSOR_IMAGE"] = _TEST_FIXTURE_IMAGE
+    os.environ["AIRFLOW_VAR_DBT_IMAGE"] = _TEST_FIXTURE_DBT_IMAGE
     if str(DAGS_FOLDER) not in sys.path:
         sys.path.insert(0, str(DAGS_FOLDER))
 
@@ -249,26 +254,30 @@ def mock_kpo_execute(airflow_env: None) -> Iterator[list[dict[str, Any]]]:  # no
     CLAUDE.md's own documented pattern: "Mock the KPO in unit tests: patch
     `KubernetesPodOperator.execute` and assert on the constructed pod spec."
     Patching the PARENT class (`KubernetesPodOperator`, not
-    `TracingKubernetesPodOperator`) covers both `discover` (a plain KPO) and
-    `ingest` (`TracingKubernetesPodOperator`, which only overrides
-    `build_pod_request_obj()`, never `execute()` -- verified directly against
-    `airflow/dags/_common/tracing_kpo.py`) with the ONE patch, matching this
-    module's own "one shared mechanism, not two" discipline.
+    `TracingKubernetesPodOperator`) covers `discover`/`dbt_build`/`publish`
+    (plain KPOs) and `stage` (`TracingKubernetesPodOperator`, which only
+    overrides `build_pod_request_obj()`, never `execute()` -- verified
+    directly against `airflow/dags/_common/tracing_kpo.py`) with the ONE
+    patch, matching this module's own "one shared mechanism, not two"
+    discipline (08.1-12: `stage`/`dbt_build`/`publish` replace the old
+    single `ingest` task).
 
     A plain function, not a `unittest.mock.MagicMock`: only a real function
     object is a descriptor, so `patch.object(KubernetesPodOperator, "execute",
     new=_fake_execute)` makes `some_kpo_instance.execute(context)` correctly
     auto-bind `self` -- required here because the canned return value differs
-    by `self.task_id` (`discover` needs an XCom shape `build_ingest_args` can
-    consume; `ingest` needs a receipt shape `aggregate_receipts` can sum). A
-    bare `MagicMock` is not a descriptor and would silently drop `self`,
-    losing that distinction (verified empirically while building this fixture).
+    by `self.task_id` (`discover` needs an XCom shape `build_stage_args` can
+    consume; every other task gets a receipt shape `aggregate_receipts` can
+    sum, harmless for `dbt_build`/`publish` since nothing downstream reads
+    their XCom). A bare `MagicMock` is not a descriptor and would silently
+    drop `self`, losing that distinction (verified empirically while
+    building this fixture).
 
     Yields:
         A list of `{"task_id": ...}` records, one per real invocation --
-        lets a test assert the mock was genuinely exercised for BOTH
-        `discover` and `ingest`, not skipped/short-circuited by an upstream
-        failure.
+        lets a test assert the mock was genuinely exercised for
+        `discover`/`stage`/`dbt_build`/`publish`, not skipped/short-
+        circuited by an upstream failure.
     """
     from airflow.providers.cncf.kubernetes.operators.pod import (  # noqa: PLC0415 -- deferred, see load_dag above
         KubernetesPodOperator,
@@ -323,10 +332,11 @@ def mock_s3_infrastructure(airflow_env: None) -> Iterator[None]:  # noqa: ARG001
     `dag.test()` would still complete without raising (it swallows per-task
     exceptions, verified directly against the installed `DAG.test` source),
     but `wait_for_files`/`list_matched_keys`/`gate` would all fail against a
-    nonexistent `minio_default` connection, `discover`/`ingest` would never
-    run, and `mock_kpo_execute`'s own mock would sit unexercised -- silently
-    defeating this plan's own must_haves truth ("the sensor/gate/discover/
-    ingest chain all 'ran,' per the mock").
+    nonexistent `minio_default` connection, `discover`/`stage`/`dbt_build`/
+    `publish` would never run, and `mock_kpo_execute`'s own mock would sit
+    unexercised -- silently defeating this plan's own must_haves truth ("the
+    sensor/gate/discover/stage/dbt_build/publish chain all 'ran,' per the
+    mock").
 
     `S3Hook.list_keys`/`S3Hook.get_conn` are patched with `return_value=`
     (a `MagicMock`, not a plain function): neither needs `self` -- both are

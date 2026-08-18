@@ -15,12 +15,13 @@ each test function's same-named parameter):
    resolves once ``airflow/dags`` is itself on ``sys.path`` -- true inside a
    real Airflow process (its own startup adds the configured
    ``core.dags_folder`` to ``sys.path``) but not inside a bare test process.
-2. ``common_kpo_kwargs`` calls ``Variable.get("csv_processor_image")`` at
-   DAG-parse time. ``airflow.sdk.Variable.get`` resolves through Airflow's
-   layered secrets-backend chain, which includes the standard
-   ``AIRFLOW_VAR_<KEY>``-environment-variable backend *before* any live
-   API-server call -- setting that one env var here is the standard,
-   documented, offline-safe way to satisfy a parse-time ``Variable.get``
+2. ``common_kpo_kwargs`` calls ``Variable.get(image_variable)`` at DAG-parse
+   time -- ``"csv_processor_image"`` for ``discover``/``stage``/``publish``,
+   ``"dbt_image"`` for ``dbt_build`` (08.1-12). ``airflow.sdk.Variable.get``
+   resolves through Airflow's layered secrets-backend chain, which includes
+   the standard ``AIRFLOW_VAR_<KEY>``-environment-variable backend *before*
+   any live API-server call -- setting both env vars here is the standard,
+   documented, offline-safe way to satisfy every parse-time ``Variable.get``
    call in a structural test, with no live metadata DB or API server
    anywhere in the loop.
 """
@@ -56,12 +57,18 @@ def dagbag() -> DagBag:
     dags_folder_str = str(DAGS_FOLDER)
     if dags_folder_str not in sys.path:
         sys.path.insert(0, dags_folder_str)
-    previous = os.environ.get("AIRFLOW_VAR_CSV_PROCESSOR_IMAGE")
+    previous_csv = os.environ.get("AIRFLOW_VAR_CSV_PROCESSOR_IMAGE")
+    previous_dbt = os.environ.get("AIRFLOW_VAR_DBT_IMAGE")
     os.environ["AIRFLOW_VAR_CSV_PROCESSOR_IMAGE"] = "localhost:5001/csv-processor:test-fixture"
+    os.environ["AIRFLOW_VAR_DBT_IMAGE"] = "localhost:5001/dbt:test-fixture"
     try:
         return DagBag(dag_folder=dags_folder_str)
     finally:
-        if previous is None:
+        if previous_csv is None:
             os.environ.pop("AIRFLOW_VAR_CSV_PROCESSOR_IMAGE", None)
         else:
-            os.environ["AIRFLOW_VAR_CSV_PROCESSOR_IMAGE"] = previous
+            os.environ["AIRFLOW_VAR_CSV_PROCESSOR_IMAGE"] = previous_csv
+        if previous_dbt is None:
+            os.environ.pop("AIRFLOW_VAR_DBT_IMAGE", None)
+        else:
+            os.environ["AIRFLOW_VAR_DBT_IMAGE"] = previous_dbt
