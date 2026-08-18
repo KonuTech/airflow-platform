@@ -105,6 +105,15 @@ cluster = [
   # import must not silently couple to whichever transitive version a
   # DIFFERENT package happens to resolve.
   "requests>=2.32,<3",
+  # plan 08.1-08: tests/integration/test_dbt_*.py shell out to a real `dbt
+  # build` (subprocess.run) against the same testcontainers PostgreSQL
+  # `migrated_dsn` already provides -- same reasoning as boto3/psycopg/hvac
+  # above (a test tier's own direct dependency must not couple to whichever
+  # version something else happens to resolve later), and same versions
+  # `docker/dbt/Dockerfile` pins for the real dbt image, so `dbt build`'s
+  # behavior in this dev/test venv matches the deployed image exactly.
+  "dbt-core==1.12.2",
+  "dbt-postgres==1.11.0",
 ]
 
 [tool.ruff]
@@ -198,6 +207,7 @@ markers = [
   "manifests: requires rendered manifests under build/ and the pinned helm and kubeconform binaries; excluded from the offline gate",
   "integration: needs a local Docker daemon (testcontainers PostgreSQL/MinIO); excluded from the offline gate (06-17-PLAN.md)",
   "dagtest: needs a local Docker daemon (testcontainers PostgreSQL for Airflow metadata); excluded from the offline gate",
+  "dbt: shells out to a real dbt build against testcontainers PostgreSQL; excluded from the offline gate",
 ]
 
 [tool.coverage.run]

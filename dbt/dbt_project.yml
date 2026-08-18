@@ -1,0 +1,23 @@
+# dbt/dbt_project.yml -- the first dbt project in this repository (08.1-08).
+#
+# `name`/`profile` match `dbt/profiles.yml`'s top-level key exactly (see that
+# file's own header comment for the full env_var()-only connection shape).
+#
+# Deliberately declares NO `+schema:` override anywhere in this file's
+# `models:` block, and no model/folder anywhere in `dbt/models/**` declares
+# one either (08.1-RESEARCH.md Pitfall 3): dbt's default `generate_schema_
+# name` macro concatenates `{{ target.schema }}_{{ custom_schema }}` --
+# stacking a `+schema: silver` override here on top of `profiles.yml`'s own
+# `schema: silver` target would silently produce `silver_silver`, not
+# `silver`. The single sanctioned schema decision lives in `profiles.yml`'s
+# target; `dbt/macros/generate_schema_name.sql` makes that the ONLY schema
+# decision point possible, even if a future model config ever adds one.
+name: 'airflow_platform_silver'
+version: '1.0.0'
+profile: 'airflow_platform'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+models:
+  airflow_platform_silver: {}
