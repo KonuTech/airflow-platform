@@ -513,7 +513,7 @@ Plans:
 **Goal:** A dbt (Postgres adapter) bronze-to-silver transformation stage exists, producing a persisted, deduplicated silver schema with correct late-arriving-event handling — while the existing Python `MergePublisher` continues to own the atomic silver-to-gold publish inside the META-03 transaction, unchanged
 **Requirements**: DEDUP-01, DEDUP-02, DEDUP-03, DEDUP-04, INCR-03, INCR-04, QUAL-10 (remapped from Phase 9 per `08.1-RESEARCH.md`'s confirmed mapping; LOAD-09 and OBS-07 are extended, not reassigned — they stay Phase 4/Phase 7, Complete)
 **Depends on:** Phase 8
-**Plans:** 9/13 plans executed
+**Plans:** 11/13 plans executed
 
 Plans:
 **Wave 1**
@@ -536,11 +536,11 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 08.1-10-PLAN.md — pipeline/run.py split: stage_ingest() + publish_ingest()
+- [x] 08.1-10-PLAN.md — pipeline/run.py split: stage_ingest() + publish_ingest()
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 08.1-11-PLAN.md — csv_processor CLI split: stage/publish commands replacing ingest
+- [x] 08.1-11-PLAN.md — csv_processor CLI split: stage/publish commands replacing ingest
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
