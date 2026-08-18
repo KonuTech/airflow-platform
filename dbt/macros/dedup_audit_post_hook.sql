@@ -2,55 +2,86 @@
   dedup_audit_post_hook.sql -- the atomic, same-transaction meta.dedup_audit
   + meta.dedup_decisions write (D-09, DEDUP-04).
 
-  Called from a silver model's own `post_hook` config (never wrapped in a
-  string/`transaction=False` -- a Postgres `post_hook` runs inside the SAME
+  Called from a silver model's own `post_hook` config (never
+  `transaction=False` -- a Postgres `post_hook` runs inside the SAME
   transaction as the model's own DML by default, 08.1-RESEARCH.md
   Architecture Pattern 2 -- so a rollback of the model's own write also
   rolls back this audit write).
 
-  Design choice worth documenting explicitly (deviates from this plan's own
+  Design choices worth documenting explicitly (deviate from this plan's own
   literal `dedup_audit_post_hook(dataset_id, business_key_column,
   watermark_floor)` sketch, which assumed a pre-resolved `dataset_id`
-  integer and a re-derived ranking CTE over bronze alone):
+  integer and a re-derived ranking CTE over bronze alone) -- ALL three
+  verified empirically against a real, multi-invocation `dbt build` while
+  developing this plan; each replaced an approach that looked correct on a
+  single first run but broke on a second (incremental) run:
 
   1. `dataset_name` (a plain string, e.g. 'customers'), not a pre-resolved
      `dataset_id` integer, is accepted here -- `dataset_id` is resolved by
      a raw SQL scalar subquery against `meta.datasets` INSIDE this macro's
-     own INSERT, evaluated at hook-EXECUTION time. This sidesteps a real
-     compile-time ordering hazard: dbt's `config()` must textually precede
-     any `is_incremental()` call that depends on it for THIS model's own
-     `materialized` flag to be visible, but resolving `dataset_id` via a
-     compile-time `run_query()` would need to run BEFORE the `config()`
-     call that consumes it as a `post_hook` argument -- doable, but adds a
-     second `run_query()` round-trip and a second Jinja-timing assumption
-     for no real benefit over a plain SQL subquery that runs exactly once,
-     in the same transaction, at the same time everything else here does.
-     **Known gap, not fixed by this plan** (file scope is the dbt project
-     only, not new migrations): `dbt_app` currently has `USAGE` on schema
-     `meta` (migration 0024) and `SELECT, INSERT` on
-     `meta.dedup_audit`/`meta.dedup_decisions` specifically, but no
-     `SELECT` grant on `meta.datasets` itself -- a live `dbt build` running
-     as `dbt_app` will fail this subquery with a permission error until a
-     follow-up migration adds `GRANT SELECT ON meta.datasets TO dbt_app`.
-     This plan's own integration tests (`tests/integration/test_dbt_*.py`)
-     run `dbt build` against the testcontainers superuser DSN, not
-     `dbt_app`, so they do not exercise this gap -- tracked in this plan's
-     own SUMMARY.md, not silently left undocumented.
+     own INSERT, evaluated at hook-EXECUTION time. **Known gap, not fixed
+     by this plan** (file scope is the dbt project only, not new
+     migrations): `dbt_app` currently has `USAGE` on schema `meta`
+     (migration 0024) and `SELECT, INSERT` on `meta.dedup_audit`/
+     `meta.dedup_decisions` specifically, but no `SELECT` grant on
+     `meta.datasets` itself -- a live `dbt build` running as `dbt_app` will
+     fail this subquery with a permission error until a follow-up migration
+     adds `GRANT SELECT ON meta.datasets TO dbt_app`. This plan's own
+     integration tests (`tests/integration/test_dbt_*.py`) run `dbt build`
+     against the testcontainers superuser DSN, not `dbt_app`, so they do
+     not exercise this gap -- tracked in this plan's own SUMMARY.md, not
+     silently left undocumented.
 
-  2. Rather than re-deriving a SECOND, independent `row_number()` ranking
+  2. `source_schema`/`source_identifier`/`target_schema`/`target_identifier`
+     are all plain STRINGS (e.g. 'staging', 'customers', 'silver'), never a
+     `{{ source(...) }}`/`{{ this }}` Relation object passed as one of THIS
+     macro's own arguments. Passing `source('bronze', 'customers')` and/or
+     `this` as arguments to this macro -- called from inside a
+     `{% set post_hook_sql %}...{% endset %}` capture block -- produced
+     inconsistent, WRONG relation names across otherwise-identical runs
+     (observed both `source_relation` and `target_relation` independently
+     resolving to this MODEL's own default, un-aliased relation name at
+     different times, never a reliable pattern tied to argument position or
+     order). Plain string schema/identifier pairs, interpolated directly
+     into `{{ schema }}.{{ identifier }}` inside this macro's own SQL body,
+     sidestep that instability entirely.
+
+  3. There is deliberately NO `watermark_floor` argument here at all. The
+     original design passed the model's own `{% set watermark_floor =
+     run_query(...) %}`-computed value straight into this macro. Empirically
+     wrong on any run past the first: the model's OWN body (rendered in
+     dbt's "real" compile pass) correctly saw `watermark_floor = 1` on a
+     second invocation, but the SAME variable, captured into the
+     `post_hook_sql` string that becomes part of `config()`'s own `post_hook`
+     value, was frozen at `0` -- dbt evaluates whatever Jinja a `post_hook`
+     config value depends on as part of a SEPARATE, EARLIER pass used to
+     build the node's `model.config` (before the "real" compile pass that
+     renders the model's SELECT body), and `run_query()` is not reliable in
+     that earlier pass. Rather than depend on that timing at all, this
+     macro derives its OWN watermark independently, from `meta.dedup_audit`'s
+     own history for this model: `coalesce(max(max_run_id), 0)` across every
+     PRIOR audit row for `model_name = target_identifier` (zero prior rows
+     -> floor 0, matching "process everything" on a model's first-ever
+     invocation). This is provably equivalent to the model's own
+     `max(_run_id) from <target>` floor under normal operation, since
+     `meta.dedup_audit` and the target table are always written together in
+     the SAME transaction -- and it needs no value handed across the
+     unreliable config-vs-compile pass boundary at all.
+
+  4. Rather than re-deriving a SECOND, independent `row_number()` ranking
      over bronze alone (which cannot see rows the calling model's own
      ranking compared against a pre-existing SILVER row for the same
      business key -- the exact case D-06's late-arrival-loses test proves),
-     this macro compares each new bronze row directly against `{{
-     target_relation }}`'s OWN, now-materialized, POST-write state: a
-     bronze row is "kept" iff its own `(_file_id, _source_row_number)`
-     matches the row currently resident in `target_relation` for that
-     business key; every other new bronze row for that key is "dropped".
-     This is provably consistent with whatever the model's own
-     materialization actually decided (it reads the real outcome, not a
-     parallel re-derivation that could drift from it), and it naturally
-     covers BOTH within-batch duplicates and a late-arriving row losing
-     against an already-resident silver row, with one same shape.
+     this macro compares each new bronze row directly against the target
+     table's OWN, now-materialized, POST-write state: a bronze row is
+     "kept" iff its own `(_file_id, _source_row_number)` matches the row
+     currently resident in the target for that business key; every other
+     new bronze row for that key is "dropped". This is provably consistent
+     with whatever the model's own materialization actually decided (it
+     reads the real outcome, not a parallel re-derivation that could drift
+     from it), and it naturally covers BOTH within-batch duplicates and a
+     late-arriving row losing against an already-resident silver row, with
+     one same shape.
 
   Args:
     dataset_name: the dataset's `meta.datasets.dataset_name` (e.g.
@@ -58,34 +89,33 @@
       subquery below.
     business_key_column: the calling model's own business-key column name
       (e.g. 'customer_id').
-    watermark_floor: the SAME `_run_id` floor value the calling model's own
-      `is_incremental()`-guarded `WHERE` clause used -- captured ONCE by
-      the caller (a `{% set %}` at the top of the model) and passed here
-      unchanged, so the audit's notion of "what changed this run" can never
-      drift from the model's own notion.
-    source_relation: the compiled `source('bronze', <table>)` relation the
-      calling model itself reads from -- passed in explicitly rather than
-      re-derived from a table-name string, so this macro never has to parse
-      `this.identifier` to guess which bronze source belongs to which model.
-    target_relation: `{{ this }}` from the calling model's own context --
-      always safe to reference here (unlike inside the model's own SELECT
-      body pre-materialization) because a `post_hook` runs strictly AFTER
-      the model's materialization completes, so the target table is
-      guaranteed to already exist by this point, even on this model's
-      very first-ever invocation (this project's silver tables are
-      Alembic-created up front, migration 0023 -- `is_incremental()` is
-      therefore true from dbt's very first build here, never false).
+    source_schema: the bronze source's schema (e.g. 'staging', matching
+      `dbt/models/staging/_sources.yml`'s `schema: staging`).
+    source_identifier: the bronze source's table name (e.g. 'customers').
+    target_schema: the schema the calling model's OWN table lives in (e.g.
+      `target.schema`, always 'silver').
+    target_identifier: the calling model's own configured `alias` (e.g.
+      'customers') -- also used as `meta.dedup_audit.model_name`, so this
+      macro's own self-derived watermark (point 3 above) stays scoped to
+      the correct model across invocations.
 #}
-{% macro dedup_audit_post_hook(dataset_name, business_key_column, watermark_floor, source_relation, target_relation) %}
-with new_bronze as (
-    select *
-    from {{ source_relation }}
-    where _run_id > {{ watermark_floor }}
+{% macro dedup_audit_post_hook(dataset_name, business_key_column, source_schema, source_identifier, target_schema, target_identifier) %}
+with prior_watermark as (
+    select coalesce(max(max_run_id), 0) as floor
+    from meta.dedup_audit
+    where model_name = '{{ target_identifier }}'
+),
+
+new_bronze as (
+    select b.*
+    from {{ source_schema }}.{{ source_identifier }} b
+    cross join prior_watermark
+    where b._run_id > prior_watermark.floor
 ),
 
 current_winners as (
     select *
-    from {{ target_relation }}
+    from {{ target_schema }}.{{ target_identifier }}
 ),
 
 classified as (
@@ -114,7 +144,7 @@ audit_insert as (
     select
         (select dataset_id from meta.datasets where dataset_name = '{{ dataset_name }}'),
         '{{ invocation_id }}',
-        '{{ target_relation.identifier }}',
+        '{{ target_identifier }}',
         (select min(_run_id) from new_bronze),
         (select max(_run_id) from new_bronze),
         (select count(*) from new_bronze),

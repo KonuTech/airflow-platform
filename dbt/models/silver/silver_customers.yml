@@ -1,0 +1,75 @@
+# dbt/models/silver/silver_customers.yml -- native dbt contract (D-14,
+# 08.1-RESEARCH.md Architecture Pattern 3): `contract: enforced: true`
+# VALIDATES this model's own column list/types against the pre-existing
+# `silver.customers` table (Alembic-created, migration 0023) rather than
+# generating DDL for it -- Postgres is the strictest dbt adapter here,
+# generating REAL, enforced database-level constraints, not merely
+# documentation, on any table it DOES create.
+#
+# `data_type` values match migration 0023's real DDL exactly (all-TEXT
+# business columns, four bigint lineage columns, bytea hash, smallint hash
+# version, timestamptz dbt bookkeeping column).
+#
+# `data_tests: [not_null, unique]` on customer_id is a cheap, complementary
+# layer (CONTEXT.md's own "layered defense" convention) -- NOT a substitute
+# for the real DB-level UNIQUE constraint migration 0023 already created:
+# Pitfall 5 (08.1-RESEARCH.md) is explicit that `dbt build`'s test step
+# does not block a bad model write, since the model's data is already
+# committed by the time a `unique`/`not_null` *test* would report failure.
+# `tests/integration/test_silver_constraints.py` proves the REAL constraint
+# is what's load-bearing, bypassing dbt entirely.
+version: 2
+
+models:
+  - name: silver_customers
+    config:
+      contract:
+        enforced: true
+      on_schema_change: fail
+    columns:
+      - name: customer_id
+        data_type: text
+        constraints:
+          - type: not_null
+          - type: unique
+        data_tests:
+          - not_null
+          - unique
+      - name: name
+        data_type: text
+        constraints:
+          - type: not_null
+      - name: country
+        data_type: text
+        constraints:
+          - type: not_null
+      - name: birth_date
+        data_type: text
+      - name: event_ts
+        data_type: text
+      - name: _run_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _file_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _batch_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _source_row_number
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _record_hash
+        data_type: bytea
+        constraints:
+          - type: not_null
+      - name: _record_hash_version
+        data_type: smallint
+        constraints:
+          - type: not_null
+      - name: _dbt_loaded_at
+        data_type: timestamp with time zone
