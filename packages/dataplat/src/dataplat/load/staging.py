@@ -764,7 +764,7 @@ class StagingLoader:
         durable_table = f"staging.{ctx.config.dataset}"
         column_list = ", ".join((*self._target_columns, *_LINEAGE_COLUMN_NAMES))
         conn.execute(
-            f"INSERT INTO {durable_table} ({column_list}) "
+            f"INSERT INTO {durable_table} ({column_list}) "  # noqa: S608 -- durable_table/column_list/staging_result.staging_table are config/run-derived identifiers (T-08.1-13, this plan's threat model), never CSV content
             f"SELECT {column_list} FROM {staging_result.staging_table}",
         )
         conn.execute(f"DROP TABLE IF EXISTS {staging_result.staging_table}")

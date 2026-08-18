@@ -265,7 +265,12 @@ def test_promote_appends_staged_rows_and_drops_the_scratch_buffer(
         ("1", "Alice", "US", "1990-01-01", "2026-01-01T00:00:00+00:00"),
         ("2", "Bob", "UK", "1992-02-02", "2026-01-02T00:00:00+00:00"),
     )
-    ctx = _make_context(run_id=run_id, source=_FakeSource([rows]), file_id=file_id, batch_id=batch_id)
+    ctx = _make_context(
+        run_id=run_id,
+        source=_FakeSource([rows]),
+        file_id=file_id,
+        batch_id=batch_id,
+    )
     loader = StagingLoader(target_columns=TARGET_COLUMNS)
 
     staging_result = loader.load(ctx, conn)
