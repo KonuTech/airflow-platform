@@ -207,12 +207,13 @@ class MetadataRepository(Protocol):
         status: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> int:
         """Insert one row into `meta.ingestion_runs`.
 
         Maps to ``meta.ingestion_runs(idempotency_key, dataset_id, file_id,
         batch_id, config_version_id, processor_version,
-        processor_image_digest, status)``.
+        processor_image_digest, status, replay_of_run_id)``.
 
         Args:
             idempotency_key: The unique key that makes retries free (Q7) —
@@ -228,6 +229,13 @@ class MetadataRepository(Protocol):
             status: The run's initial status.
             file_id: The single file this run processes, when applicable.
             batch_id: The batch this run processes, when applicable.
+            replay_of_run_id: The `meta.ingestion_runs.run_id` of an OLDER-
+                formula run for the same file that already `SUCCEEDED`
+                (D-18), when this run exists specifically to re-process that
+                file under an extended idempotency-key formula. `None` when
+                this run is not a replay of an earlier one -- the common
+                case. Defaults to `None` so every existing caller keeps
+                compiling unchanged.
 
         Returns:
             The newly inserted row's `run_id`.
@@ -244,12 +252,13 @@ class MetadataRepository(Protocol):
         processor_image_digest: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> tuple[int, str]:
         """Idempotently pre-allocate one `meta.ingestion_runs` row, discovery-time.
 
-        Maps to ``INSERT INTO meta.ingestion_runs (...) VALUES (...,
-        'PENDING') ON CONFLICT (idempotency_key) DO UPDATE SET
-        idempotency_key = EXCLUDED.idempotency_key RETURNING run_id,
+        Maps to ``INSERT INTO meta.ingestion_runs (..., replay_of_run_id)
+        VALUES (..., 'PENDING', ...) ON CONFLICT (idempotency_key) DO UPDATE
+        SET idempotency_key = EXCLUDED.idempotency_key RETURNING run_id,
         status``.
 
         Distinct from `claim_ingestion_run` below (Pitfall 5): this method
@@ -273,6 +282,18 @@ class MetadataRepository(Protocol):
                 execute this run.
             file_id: The single file this run processes, when applicable.
             batch_id: The batch this run processes, when applicable.
+            replay_of_run_id: The `meta.ingestion_runs.run_id` of an OLDER-
+                formula run for the same file that already `SUCCEEDED`
+                (D-18). Applied ONLY on this call's first-ever insert for
+                `idempotency_key` -- the `ON CONFLICT ... DO UPDATE`
+                clause's `SET` list deliberately excludes this column
+                (mirrors `get_or_create_batch`'s own documented "status
+                deliberately excluded from the conflict SET clause"
+                reasoning), so a rediscovery of an already-claimed replay
+                run never silently clears its own lineage back to `NULL`.
+                `None` when this run is not a replay of an earlier one --
+                the common case. Defaults to `None` so every existing caller
+                keeps compiling unchanged.
 
         Returns:
             A `(run_id, status)` tuple: `run_id` is stable across repeat
@@ -281,6 +302,30 @@ class MetadataRepository(Protocol):
             call, whatever it already was on a repeat call) -- the caller
             uses this to decide whether to include the unit in a
             Dynamic-Task-Mapping expand list.
+        """
+        ...
+
+    def find_latest_succeeded_run_for_file(self, *, file_id: int) -> int | None:
+        """Look up the most recent `SUCCEEDED` run for a file, across any idempotency-key formula.
+
+        Maps to ``SELECT run_id FROM meta.ingestion_runs WHERE file_id = %s
+        AND status = 'SUCCEEDED' ORDER BY run_id DESC LIMIT 1``.
+
+        This is D-18's lookup step, called by `discovery.py` (plan 08.1-07
+        Task 3) BEFORE creating a new run under the extended idempotency-key
+        formula, to discover whether an older-formula run for the same file
+        already succeeded -- so that new run can carry a `replay_of_run_id`
+        pointing back at it. Only ever matches `status = 'SUCCEEDED'`
+        (T-08.1-17): a `RUNNING`/`PENDING`/`FAILED` old-formula run is never
+        mistaken for a completed one to replay from.
+
+        Args:
+            file_id: The `meta.files.file_id` to search for a prior
+                `SUCCEEDED` run.
+
+        Returns:
+            The most recent matching run's `run_id`, or `None` if this file
+            has never had a `SUCCEEDED` run.
         """
         ...
 
@@ -425,6 +470,165 @@ class MetadataRepository(Protocol):
         Returns:
             The row's current `status`, or `None` if no row matches
             `run_id`.
+        """
+        ...
+
+    def claim_run_stage(
+        self,
+        *,
+        run_id: int,
+        stage_name: str,
+        try_number: int,
+        pod_name: str,
+    ) -> int | None:
+        """Exclusively claim one `meta.run_stages` row, gated on its owning run's own status.
+
+        Maps to ``INSERT INTO meta.run_stages (run_id, stage_name, status,
+        lease_expires_at, pod_name, try_number, started_at) SELECT ...,
+        'RUNNING', now() + interval '5 minutes', ..., now() WHERE EXISTS
+        (SELECT 1 FROM meta.ingestion_runs WHERE run_id = ... AND status =
+        'STAGED') ON CONFLICT (run_id, stage_name) DO UPDATE SET status =
+        'RUNNING', lease_expires_at = EXCLUDED.lease_expires_at, pod_name =
+        EXCLUDED.pod_name, try_number = EXCLUDED.try_number WHERE
+        meta.run_stages.status IN ('PENDING', 'FAILED') OR
+        (meta.run_stages.status = 'RUNNING' AND meta.run_stages.
+        lease_expires_at < now()) RETURNING run_stage_id``.
+
+        This is the ONE claim method in this Protocol with a cross-table
+        guard (D-17, RESEARCH.md Open Question 1): two conditions must BOTH
+        hold for a claim to succeed --
+
+        1. `meta.ingestion_runs.status` for `run_id` must be `'STAGED'` --
+           enforced by the `INSERT`'s own `WHERE EXISTS` clause, which
+           applies even on a first-ever claim (no pre-existing `run_stages`
+           row to gate against otherwise). A run whose stage hop has not
+           genuinely completed (still `'RUNNING'`, or terminal `'FAILED'`/
+           `'SUCCEEDED'` under the wrong hop) can NEVER be claimed here --
+           this is what stops a retried `stage` task and a live `publish`
+           claim from ever colliding on the same lease (Pitfall 2).
+        2. The `run_stages` row itself (if one already exists for `(run_id,
+           stage_name)`) must be in a claimable state -- `'PENDING'`/
+           `'FAILED'`, or `'RUNNING'` with an expired lease -- enforced by
+           the `ON CONFLICT ... DO UPDATE ... WHERE` clause, mirroring
+           `claim_ingestion_run`'s own claimability predicate.
+
+        Both checks are evaluated inside the SAME `INSERT` statement as the
+        claim itself -- no read-then-write race window between checking
+        staged-ness and claiming (T-08.1-15).
+
+        Args:
+            run_id: The `meta.ingestion_runs.run_id` whose stage hop is being
+                claimed.
+            stage_name: The stage being claimed -- `"STAGE_LOAD"` or
+                `"PUBLISH"` this phase (migration 0025's own documented
+                vocabulary).
+            try_number: This attempt's 1-based try number.
+            pod_name: The Kubernetes pod name claiming this stage.
+
+        Returns:
+            The claimed row's `run_stage_id` on success. `None` when the
+            claim is correctly refused -- `run_id`'s own status is not
+            `'STAGED'`, or the `run_stages` row (if any) is not in a
+            claimable state (a concurrent claim currently holds a live
+            lease). Both are expected outcomes, not invariant violations,
+            mirroring `claim_ingestion_run`'s own `None`-is-not-an-error
+            contract.
+        """
+        ...
+
+    def heartbeat_run_stage(
+        self,
+        *,
+        run_id: int,
+        stage_name: str,
+        lease_expires_at: datetime,
+    ) -> None:
+        """Refresh a RUNNING `run_stages` row's lease; a silent no-op once it is not.
+
+        Maps to ``UPDATE meta.run_stages SET lease_expires_at = %s WHERE
+        run_id = %s AND stage_name = %s AND status = 'RUNNING'``.
+
+        Self-guarded exactly like `heartbeat_ingestion_run` (CR-01,
+        `04-REVIEW.md`): a stray heartbeat tick landing after
+        `complete_run_stage` has already committed a terminal status for
+        this `(run_id, stage_name)` must be a silent no-op -- no exception,
+        no rows affected, no status change -- never an overwrite of the
+        just-committed terminal status back to `RUNNING` with a fresh lease.
+
+        Args:
+            run_id: The run whose stage-hop lease is being refreshed.
+            stage_name: The stage being refreshed.
+            lease_expires_at: The new lease expiry, only applied while the
+                row is still `RUNNING`.
+        """
+        ...
+
+    def complete_run_stage(
+        self,
+        *,
+        run_id: int,
+        stage_name: str,
+        status: str,
+        finished_at: datetime,
+    ) -> None:
+        """Transition one `meta.run_stages` row to its terminal status.
+
+        Maps to ``UPDATE meta.run_stages SET status = %s, finished_at = %s
+        WHERE run_id = %s AND stage_name = %s``.
+
+        Args:
+            run_id: The run whose stage hop is completing.
+            stage_name: The stage completing.
+            status: The terminal status to record -- `'SUCCEEDED'` or
+                `'FAILED'`.
+            finished_at: The stage's completion timestamp.
+        """
+        ...
+
+    def get_run_stage_status(self, *, run_id: int, stage_name: str) -> str | None:
+        """Read one `meta.run_stages` row's current `status`, without claiming it.
+
+        Maps to ``SELECT status FROM meta.run_stages WHERE run_id = %s AND
+        stage_name = %s``. A pure read, mirroring `get_ingestion_run_status`'s
+        own read-only contract -- never writes.
+
+        Args:
+            run_id: The run to read.
+            stage_name: The stage to read.
+
+        Returns:
+            The row's current `status`, or `None` if no `run_stages` row
+            exists yet for this `(run_id, stage_name)` pair.
+        """
+        ...
+
+    def list_staged_run_ids(self, *, dataset_id: int) -> list[tuple[int, int, int, str | None]]:
+        """List every run currently ready for `publish_ingest` to claim.
+
+        Maps to ``SELECT run_id, file_id, batch_id, report_uri FROM
+        meta.ingestion_runs WHERE dataset_id = %s AND status = 'STAGED'
+        ORDER BY run_id ASC``.
+
+        Returns every `(run_id, file_id, batch_id, report_uri)` quadruple
+        whose owning run has reached `'STAGED'` for the given dataset --
+        `publish_ingest` (plan 08.1-10) needs `file_id`/`batch_id` alongside
+        each `run_id` to call `finalize_publication`, and needs the
+        ALREADY-set `report_uri` (written by `stage_ingest`'s own
+        `update_ingestion_run_status` call) to pass straight back through
+        unchanged, since `finalize_publication` always sets this column and
+        a `None` would silently clobber the real VALID-04 report URI
+        `stage_ingest` already wrote. `ORDER BY run_id ASC` is deterministic,
+        mirroring `find_file_by_content_hash`'s own load-bearing-ordering
+        precedent (CR-02, `04-REVIEW.md`).
+
+        Args:
+            dataset_id: The dataset to list staged runs for.
+
+        Returns:
+            Every `(run_id, file_id, batch_id, report_uri)` quadruple for
+            this dataset's `'STAGED'` runs, ordered by `run_id` ascending. A
+            run that later completes `publish_ingest` (`'SUCCEEDED'`) no
+            longer appears here.
         """
         ...
 
