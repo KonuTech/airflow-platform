@@ -71,7 +71,8 @@ def _build_image() -> str:
         check=False,
     )
     assert build.returncode == 0, (
-        f"docker build failed (exit {build.returncode}):\nstdout:\n{build.stdout}\nstderr:\n{build.stderr}"
+        f"docker build failed (exit {build.returncode}):\n"
+        f"stdout:\n{build.stdout}\nstderr:\n{build.stderr}"
     )
     return image
 
@@ -108,7 +109,8 @@ def test_image_builds_and_prints_its_version() -> None:
             check=False,
         )
         assert run.returncode == 0, (
-            f"docker run failed (exit {run.returncode}):\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}"
+            f"docker run failed (exit {run.returncode}):\n"
+            f"stdout:\n{run.stdout}\nstderr:\n{run.stderr}"
         )
 
         stdout = run.stdout.strip()

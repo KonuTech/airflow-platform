@@ -33,7 +33,7 @@ import hvac
 import hvac.exceptions
 
 _VAULT_MOUNT_POINT = "etl"
-_VAULT_SECRET_PATH = "dbt-db"
+_VAULT_SECRET_PATH = "dbt-db"  # noqa: S105 -- a Vault KV path segment, not a credential value
 
 # field -> env var this script writes it to, for dbt's profiles.yml env_var()
 # calls to read.
@@ -102,8 +102,8 @@ def main() -> None:
         )
         raise SystemExit(1) from exc
 
-    os.execvp(  # noqa: S606 -- fixed argv, no shell, no user input; PID-1 replacement is deliberate
-        "dbt",
+    os.execvp(  # noqa: S606 -- fixed argv, no shell, no user input; PID-1 replacement is the point
+        "dbt",  # noqa: S607 -- resolved from PATH deliberately, matching csv-processor's own entrypoint convention
         ["dbt", "build", "--project-dir", "/app/dbt", "--profiles-dir", "/app/dbt", *sys.argv[1:]],
     )
 
