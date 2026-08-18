@@ -454,6 +454,56 @@ def test_on_conflict_fails_without_the_unique_constraint_migration_0006_adds(
             conn.commit()
 
 
+def test_publish_reads_from_an_arbitrarily_named_source_table(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+) -> None:
+    """08.1-06 Task 2: proves the FROM-clause is genuinely parameter-driven.
+
+    `_PUBLISH_SQL`'s `FROM {staging_table}` interpolation accepts ANY
+    fully-qualified table name -- this is not hardcoded to any `staging.`/
+    `silver.` prefix anywhere in `merge.py`'s source. Hand-builds a table
+    literally named `test_silver_customers_arbitrary_name` (matching
+    `_STAGING_COLUMNS_DDL`'s exact shape) and publishes from it directly,
+    proving the caller -- not `merge.py` itself -- decides what "source"
+    means (plan 08.1-10 onward passes `silver.customers`, never a scratch
+    table).
+    """
+    run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="arbitrary_name")
+    source_table = "test_silver_customers_arbitrary_name"
+    customer_id = "9001"
+
+    with psycopg.connect(migrated_dsn) as conn:
+        _create_staging_table(conn, source_table)
+        _insert_staging_row(
+            conn,
+            source_table,
+            customer_id=customer_id,
+            name="ArbitraryName",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-08-13T10:00:00+00:00",
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"arbitrary-name").digest(),
+        )
+        result = MergePublisher().publish(_make_context(), source_table, conn)
+        conn.commit()
+
+    assert result.outcome == "PUBLISHED"
+    assert result.rows_affected == 1
+
+    with psycopg.connect(migrated_dsn) as verify_conn:
+        row = verify_conn.execute(
+            "SELECT name FROM normalized.customers WHERE customer_id = %s",
+            (int(customer_id),),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "ArbitraryName"
+
+
 # --- 04-06 Task 2: atomicity, concurrency, lineage, batch uniqueness ------
 #
 # The four tests below are 04-06's own contribution -- proving META-03's

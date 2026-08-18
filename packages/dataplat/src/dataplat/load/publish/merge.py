@@ -93,17 +93,19 @@ class MergePublisher(Publisher):
     def publish(
         self,
         ctx: PipelineContext,  # noqa: ARG002 -- unused; see class docstring + Args below
-        staging_table: str,
+        source_table: str,
         conn: Connection[Any],
     ) -> PublishResult:
-        """Publish ``staging_table``'s rows into ``normalized.customers``.
+        """Publish ``source_table``'s rows into ``normalized.customers``.
 
         Args:
             ctx: The current pipeline context. Unused -- see the class
                 docstring.
-            staging_table: The fully-qualified staging table to read from,
-                e.g. ``"staging.customers__r8123"``. Interpolated into the
-                statement as an identifier only -- see the module docstring.
+            source_table: The fully-qualified table to read from -- a
+                per-run scratch staging table before plan 08.1-10, e.g.
+                ``"staging.customers__r8123"``, or ``silver.customers`` from
+                plan 08.1-10 onward. Interpolated into the statement as an
+                identifier only -- see the module docstring.
             conn: An open connection, inside an open transaction the caller
                 owns. Never committed or rolled back here.
 
@@ -116,11 +118,11 @@ class MergePublisher(Publisher):
             ``published_business_keys`` is the ``customer_id`` of every ROW
             this statement's ``RETURNING`` clause actually surfaced --
             i.e. the exact same set ``rows_affected`` counts, never the
-            staging table's own contents (CR-01, phase-08 code review) --
+            source table's own contents (CR-01, phase-08 code review) --
             and whose ``outcome`` is always ``"PUBLISHED"``.
         """
         cursor = conn.execute(
-            _PUBLISH_SQL.format(staging_table=staging_table),
+            _PUBLISH_SQL.format(staging_table=source_table),
         )
         published_business_keys = tuple(str(row[0]) for row in cursor.fetchall())
         return PublishResult(

@@ -69,10 +69,10 @@ class Publisher(Protocol):
     def publish(
         self,
         ctx: PipelineContext,
-        staging_table: str,
+        source_table: str,
         conn: Connection[Any],
     ) -> PublishResult:
-        """Commit ``staging_table``'s rows to this dataset's target table.
+        """Commit ``source_table``'s rows to this dataset's target table.
 
         ``conn`` carries an already-open transaction that this call must not
         commit or roll back itself: the engine owns the transaction
@@ -81,8 +81,9 @@ class Publisher(Protocol):
 
         Args:
             ctx: The current pipeline context.
-            staging_table: The fully-qualified staging table this call reads
-                from.
+            source_table: The fully-qualified table this call reads from --
+                a per-run scratch staging table before plan 08.1-10,
+                ``silver.<dataset>`` from plan 08.1-10 onward.
             conn: An open connection, inside an open transaction.
 
         Returns:

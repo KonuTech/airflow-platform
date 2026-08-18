@@ -127,15 +127,15 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 ### DEDUP — Deduplication and Audit
 
 - [ ] **DEDUP-01**: Duplicate records within a single file are detected — *(DoD 38)*
-- [ ] **DEDUP-02**: Duplicate records across files, batches and ingestion runs are detected — *(DoD 39)*
-- [ ] **DEDUP-03**: Deduplication strategy is selected per dataset through a strategy interface supporting exact-row hash and business-key at minimum, extensible to key+timestamp, latest-wins, source-priority and batch-aware — never `SELECT DISTINCT` — *(DoD 40)*
+- [x] **DEDUP-02**: Duplicate records across files, batches and ingestion runs are detected — *(DoD 39)*
+- [x] **DEDUP-03**: Deduplication strategy is selected per dataset through a strategy interface supporting exact-row hash and business-key at minimum, extensible to key+timestamp, latest-wins, source-priority and batch-aware — never `SELECT DISTINCT` — *(DoD 40)*
 - [ ] **DEDUP-04**: Deduplication is auditable — source file, batch, dataset, records received/accepted/rejected/deduplicated, strategy and duplicate count are retained, with enough information to explain why a record was removed — *(DoD 41)*
 
 ### INCR — Incremental Processing, Late Data and Backfills
 
 - [ ] **INCR-01**: Incremental processing works without full dataset reloads, via timestamp/watermark, monotonic ID, batch ID or file-based strategies — *(DoD 42)*
 - [ ] **INCR-02**: Watermarks advance only from observed *committed* cursor values, lagged, inside the publication transaction — and use `>=` with idempotent merge, never `>` — *(DoD 43)*
-- [ ] **INCR-03**: Records arriving after their expected window are routed to the correct historical partition and never discarded — *(DoD 47)*
+- [x] **INCR-03**: Records arriving after their expected window are routed to the correct historical partition and never discarded — *(DoD 47)*
 - [ ] **INCR-04**: Records arriving out of event-time order are handled correctly — *(DoD 48)*
 - [ ] **INCR-05**: Backfills run through the same pipeline as normal ingestion — discovery, inspection, validation, normalization, deduplication, load, lineage — with no simplified bypass path — *(DoD 49)*
 - [ ] **INCR-06**: Backfills are idempotent, use correct historical files, respect historical schema versions and handle missing files explicitly — *(DoD 50)*
@@ -356,12 +356,12 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | LOAD-11 | Phase 8 | Complete |
 | LOAD-12 | Phase 4 | Pending |
 | DEDUP-01 | Phase 08.1 | Pending |
-| DEDUP-02 | Phase 08.1 | Pending |
-| DEDUP-03 | Phase 08.1 | Pending |
+| DEDUP-02 | Phase 08.1 | Complete |
+| DEDUP-03 | Phase 08.1 | Complete |
 | DEDUP-04 | Phase 08.1 | Pending |
 | INCR-01 | Phase 9 | Pending |
 | INCR-02 | Phase 9 | Pending |
-| INCR-03 | Phase 08.1 | Pending |
+| INCR-03 | Phase 08.1 | Complete |
 | INCR-04 | Phase 08.1 | Pending |
 | INCR-05 | Phase 9 | Pending |
 | INCR-06 | Phase 9 | Pending |
