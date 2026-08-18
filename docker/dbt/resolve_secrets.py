@@ -25,12 +25,20 @@ trail lives in Vault's own audit log, not in pod stdout).
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 import hvac
 import hvac.exceptions
+
+# OBS-03: no `print()` anywhere outside scripts/**/tools/corpus/__main__.py
+# (tests/policy/test_print_ban_scope.py) -- stdlib `logging`, matching
+# airflow/dags/csv_ingest_customers.py's/csv_ingest_orders.py's own
+# `logging.getLogger(__name__)` pattern for non-`dataplat` modules that
+# can't use `dataplat.observability`'s structlog configuration.
+log = logging.getLogger(__name__)
 
 _VAULT_MOUNT_POINT = "etl"
 _VAULT_SECRET_PATH = "dbt-db"  # noqa: S105 -- a Vault KV path segment, not a credential value
@@ -95,10 +103,10 @@ def main() -> None:
         # ref shape and the exception, matching
         # dataplat.secrets.resolver.resolve_secret's own no-secret-in-error
         # discipline.
-        print(  # noqa: T201 -- entrypoint diagnostic to stderr, not a resolved secret
-            f"resolve_secrets: failed to resolve vault://{_VAULT_MOUNT_POINT}/"
-            f"{_VAULT_SECRET_PATH}#<field>: {exc}",
-            file=sys.stderr,
+        log.exception(
+            "resolve_secrets: failed to resolve vault://%s/%s#<field>",
+            _VAULT_MOUNT_POINT,
+            _VAULT_SECRET_PATH,
         )
         raise SystemExit(1) from exc
 
