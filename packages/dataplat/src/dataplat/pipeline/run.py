@@ -237,8 +237,7 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
         receipt_status = "SKIPPED_CONCURRENT"
     else:
         msg = (
-            "claim_ingestion_run refused the claim but no SUCCEEDED/STAGED/RUNNING "
-            "row explains why"
+            "claim_ingestion_run refused the claim but no SUCCEEDED/STAGED/RUNNING row explains why"
         )
         raise DataPlatformError(
             msg,
