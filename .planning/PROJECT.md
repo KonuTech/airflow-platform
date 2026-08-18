@@ -148,7 +148,7 @@ LOAD-11 — 9/9.
 ### Out of Scope
 
 - **Cloud deployment (AWS/GCP/Azure)** — local kind is the target; the architecture keeps swap-out paths open (MinIO→S3, Vault→cloud KMS) but porting is not this milestone
-- **dbt or an external transformation framework** — README §36/§54 model transformation and SCD logic in the Python layer; adding dbt would fork the transformation story. Revisit if the warehouse layer outgrows Python
+- **dbt as an end-to-end (bronze→gold) transformation framework** — as of Phase 08.1 (ADR-0010), dbt owns bronze-to-silver transformation narrowly; gold publish (`MergePublisher`'s `INSERT ... ON CONFLICT`, avoiding PG BUG #18279) and SCD2 remain explicitly Python-owned and out of dbt's scope, so this exclusion is narrowed, not lifted
 - **Streaming ingestion (Kafka/Kinesis)** — CDC is supported *architecturally* as a pluggable source, but no streaming broker is deployed
 - **Real production datasets or PII** — corpus is fully synthetic, so fixtures are committable and reproducible
 - **Docker Compose as a workload platform** — explicitly forbidden by README §3.1; Compose may only appear as a developer convenience for isolated unit-test dependencies
@@ -195,7 +195,7 @@ LOAD-11 — 9/9.
 | Prometheus + Grafana + OpenTelemetry tracing | User chose the most complete observability tier. Largest optional addition in the project; justified by "foundation for real work" | — Pending |
 | Ephemeral kind cluster in GitHub Actions for E2E | Only way CI can prove §113 "environment can be recreated from the repository". Requires the trimmed CI cluster profile above | — Pending |
 | Repository moved to WSL ext4 | Measured 50–60× penalty on small-file operations over the 9p `/mnt/c` mount; compounds across pytest, uv, Docker builds and DAG parsing | ✓ Good |
-| dbt excluded | README models transformation and SCD in Python (§36, §54–61). Introducing dbt would split the transformation story across two paradigms | — Pending |
+| dbt scoped to bronze→silver only (superseded 08.1) | dbt's `merge` incremental strategy compiles to literal PostgreSQL `MERGE`, the same concurrency hazard (PG BUG #18279) `MergePublisher` was built to avoid; dbt's own per-model transactions cannot participate in META-03's single-transaction publish guarantee. Gold and SCD2 stay Python-owned | ✓ Good (ADR-0010) |
 
 ## Evolution
 
