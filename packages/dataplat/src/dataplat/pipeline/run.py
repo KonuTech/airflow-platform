@@ -1,55 +1,84 @@
-"""``run_ingest`` -- claim, stage, publish-transaction, receipt: the pod-side orchestration.
+"""``stage_ingest``/``publish_ingest`` -- the pod-side orchestration, split (D-02/D-04).
 
-This is the one place every idempotency guarantee this platform makes
-actually executes: claim-once (``MetadataRepository.claim_ingestion_run``),
-single-writer publication (``pg_advisory_xact_lock`` + a ``Publisher``), and
-atomic status commit (``MetadataRepository.finalize_publication`` inside the
-SAME transaction as the ``Publisher``'s own write -- META-03). It is
-source-agnostic: nothing here knows or cares whether ``ctx.source`` is a CSV,
-a future JSON/Parquet source, or anything else -- that knowledge lives
-entirely behind the ``Source``/``StreamingStage`` protocol seam (ADR-0008).
+This module used to define one function, ``run_ingest``: claim, stage,
+publish (one atomic transaction), receipt -- all in a single pod invocation.
+Plan 08.1-10 splits it into two, matching this phase's dbt bronze-to-silver
+architecture:
 
-Two connections cross this function, deliberately never the same one
-(ARCHITECTURE.md's checkpointing-vs-transactions split, 04-RESEARCH.md
-Pattern 1): staging is checkpointed per chunk and lives OUTSIDE the publish
-transaction, so a crash mid-staging never rolls back rows already COPY-ed;
-publication is the one atomic barrier -- ``pg_advisory_xact_lock``, the
-``Publisher``'s ``INSERT ... ON CONFLICT``, and ``finalize_publication``'s
-three status ``UPDATE``s all commit or roll back together, in one
-transaction, or none of them land at all.
+- ``stage_ingest`` -- claim (``MetadataRepository.claim_ingestion_run``),
+  stream through ``StagingLoader`` into a per-run scratch buffer, run the
+  referential-integrity/circuit-breaker/volume-anomaly quality gate BEFORE
+  any of it becomes durable, promote whatever survives into the durable,
+  cumulative bronze table (``StagingLoader.promote_to_durable_bronze``,
+  plan 08.1-06) and mark the run ``STAGED`` -- never ``SUCCEEDED``. dbt reads
+  bronze between here and ``publish_ingest`` (plan 08.1-08's incremental
+  models, orchestrated by a dedicated DAG task, plan 08.1-12), consolidating
+  possibly-several ``stage_ingest`` runs' bronze contributions into
+  ``silver.<dataset>``.
+- ``publish_ingest`` -- a single, unmapped, per-dataset invocation (never
+  per-run): claims every currently-``STAGED`` run via ``meta.run_stages``
+  (plan 08.1-07), publishes ``silver.<dataset>``'s current state into
+  ``normalized.<dataset>`` through the SAME ``Publisher``/advisory-lock
+  mechanism ``run_ingest`` always used (unchanged from before this plan --
+  only the source table argument differs), and finalizes every claimed run
+  in ONE atomic transaction (META-03's single-transaction guarantee,
+  unchanged).
 
-The heartbeat thread is D-11's actual mechanism: ``meta.ingestion_runs.
-rows_read``/``rows_parsed`` are kept genuinely live during a long staging
-load (refreshed on an interval, alongside the crash-recovery lease), not
-left ``NULL`` until ``finalize_publication`` runs at the very end -- so a
-poller (an E2E test, an operator, ``make ingest-demo``) watching this run's
-progress mid-load sees real, moving numbers, not silence.
+Why the quality-gate logic moved to ``stage_ingest`` (not incidental scope
+creep -- a genuine consequence of D-04's split): before this plan,
+``_apply_referential_barrier`` and the circuit breaker ran inside the publish
+transaction, filtering the PER-RUN SCRATCH staging table immediately before
+the publish ``SELECT`` read it. After this plan, that scratch table's whole
+lifecycle (create -> COPY -> promote -> drop) collapses into ``stage_ingest``
+alone -- by the time ``publish_ingest`` ever runs, the scratch table is long
+gone, and ``publish_ingest`` may be finalizing SEVERAL ``stage_ingest`` runs'
+worth of dbt-consolidated silver data in one pass, so a per-run filtering
+step no longer has a single scratch table to operate against. Filtering at
+staging time -- before any of it reaches durable bronze -- is also strictly
+*more* correct: bad data never even enters the append-only, cumulative
+bronze table dbt reads from. ``resolve_rejected_records_for_business_keys``
+is the ONE exception that stays in ``publish_ingest``: it must use
+``published_business_keys`` from the actual publish result (a
+publish-time-only concept, CR-01's own already-proven reasoning), never from
+rows that merely survived staging.
 
-This function catches nothing: a run-fatal exception (a genuinely broken
+Both functions are source-agnostic: neither knows or cares whether
+``ctx.source`` is a CSV, a future JSON/Parquet source, or anything else --
+that knowledge lives entirely behind the ``Source``/``StreamingStage``
+protocol seam (ADR-0008). ``publish_ingest`` additionally never even reads
+``ctx.source`` at all -- it operates purely on ``silver.<dataset>``, already
+resolved by ``ctx.config.dataset``.
+
+The heartbeat thread (``stage_ingest`` only -- ``publish_ingest`` never
+claims ``meta.ingestion_runs`` directly, so it has no lease to heartbeat) is
+D-11's actual mechanism: ``meta.ingestion_runs.rows_read``/``rows_parsed``
+are kept genuinely live during a long staging load (refreshed on an
+interval, alongside the crash-recovery lease), not left ``NULL`` until the
+final status update runs at the very end.
+
+Neither function catches anything: a run-fatal exception (a genuinely broken
 staging table create, a claim upsert failing for a reason other than
-"already claimed", a publish-transaction failure) propagates OUT of
-``run_ingest`` uncaught, to whichever CLI command called it (``csv_processor.
-cli.ingest`` -- a later task in this plan) -- the "always write a receipt,
-even on a run-fatal failure" contract belongs to that call site, not to this
-one. On every exit path, success or failure, this function guarantees two
-things: its own heartbeat thread is stopped, and -- once a claim has
-genuinely succeeded -- a ``runs_finished`` counter increment is observed
-(D-03's live "runs currently in-flight"/"recent failure rate" gauges, plan
-07-05). The latter is emitted from a ``finally`` block, never an ``except``,
-so a run-fatal exception is a pure side-effect observation on the way
-through -- never swallowed, never converted -- and this function still
-"catches nothing" in the sense above.
+"already claimed", a publish-transaction failure) propagates OUT, uncaught,
+to whichever CLI command called it -- the "always write a receipt, even on a
+run-fatal failure" contract belongs to that call site, not to this module. On
+every exit path, success or failure, ``stage_ingest``/``publish_ingest`` each
+guarantee two things: their own heartbeat/claim-adjacent state is left
+consistent, and -- once real work has genuinely begun -- a ``runs_finished``
+counter increment is observed (D-03's live "runs currently in-flight"/"recent
+failure rate" gauges). The latter is emitted from a ``finally`` block, never
+an ``except``, so a run-fatal exception is a pure side-effect observation on
+the way through -- never swallowed, never converted.
 
-The whole claim-through-return body also runs inside its own
-``pipeline.run_ingest`` span (OBS-10): a genuine CHILD of whatever parent
+``stage_ingest`` runs inside its own ``pipeline.stage_ingest`` span (renamed
+from ``pipeline.run_ingest``, OBS-10): a genuine CHILD of whatever parent
 context ``dataplat.cli``'s ``TRACEPARENT`` extraction attached, or a fresh
-root span when no parent was ever extracted. Its ``trace_id``/``span_id``
-are captured and passed straight into ``claim_ingestion_run``, so
-``meta.ingestion_runs.trace_id`` carries the SAME trace id Airflow's own
-task span started with -- proving cross-process trace continuity -- while
-``span_id`` is always a genuinely new value, this run's own. The atomic
-publish transaction additionally gets its own nested ``pipeline.publish``
-child span, the "-> PostgreSQL" segment of that same trace.
+root span when no parent was ever extracted. Its ``trace_id``/``span_id`` are
+captured and passed straight into ``claim_ingestion_run``, so
+``meta.ingestion_runs.trace_id`` carries the SAME trace id Airflow's own task
+span started with. ``publish_ingest`` keeps the SAME ``pipeline.publish``
+child span name ``run_ingest`` always used for its own atomic publish
+transaction -- unchanged, since that segment's shape (advisory lock ->
+Publisher -> finalize) is otherwise identical to before.
 """
 
 from __future__ import annotations
@@ -65,7 +94,6 @@ from typing import TYPE_CHECKING, Any, cast
 from opentelemetry import trace as otel_trace
 
 from dataplat.errors import ConfigurationError, DataPlatformError
-from dataplat.load.publish.registry import resolve_publisher
 from dataplat.load.staging import StagingLoader
 from dataplat.models.receipt import Receipt
 from dataplat.observability import metrics, tracing
@@ -75,8 +103,6 @@ from dataplat.validate.referential import ReferentialIntegrityBarrier
 from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from psycopg import Connection
 
     from dataplat.config.model import QualityRuleConfig
@@ -116,7 +142,7 @@ _TARGET_COLUMNS_BY_DATASET: dict[str, tuple[str, ...]] = {
 def _target_columns_for_dataset(dataset: str) -> tuple[str, ...]:
     """Resolve ``dataset`` through ``_TARGET_COLUMNS_BY_DATASET``, or fail loudly.
 
-    Split out of ``run_ingest`` itself purely to keep that function's own
+    Split out of ``stage_ingest`` itself purely to keep that function's own
     statement count under ``PLR0915``'s threshold -- no behavior change from
     an inlined lookup.
 
@@ -134,7 +160,7 @@ def _target_columns_for_dataset(dataset: str) -> tuple[str, ...]:
     try:
         return _TARGET_COLUMNS_BY_DATASET[dataset]
     except KeyError:
-        msg = f"run_ingest has no _TARGET_COLUMNS_BY_DATASET entry for dataset {dataset!r}"
+        msg = f"stage_ingest has no _TARGET_COLUMNS_BY_DATASET entry for dataset {dataset!r}"
         raise DataPlatformError(
             msg,
             context={"dataset": dataset, "known_datasets": sorted(_TARGET_COLUMNS_BY_DATASET)},
@@ -145,7 +171,7 @@ class _Progress:
     """A small, mutable holder for the heartbeat's live row counts.
 
     Written by the staging loader's ``on_progress`` callback (the thread
-    running ``run_ingest`` itself), read by the heartbeat thread -- plain
+    running ``stage_ingest`` itself), read by the heartbeat thread -- plain
     attribute assignment from one writer is safe to read from another
     thread under the GIL for this monitoring-only, eventually-consistent
     use case (D-11); no lock is needed.
@@ -169,8 +195,19 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
     """Build the ``Receipt`` for a claim that ``claim_ingestion_run`` refused.
 
     No staging is ever attempted on this path (behavior spec) -- this is
-    the very first thing ``run_ingest`` may do, before any connection to
-    ``ctx.db`` is opened for staging or publication.
+    the very first thing ``stage_ingest`` may do, before any connection to
+    ``ctx.db`` is opened for staging.
+
+    A ``'STAGED'`` row (this plan's own new terminal status for
+    ``stage_ingest``) is treated identically to ``'SUCCEEDED'`` here (plan
+    08.1-10 Task 1 Test 3's own decision, recorded in this plan's SUMMARY):
+    both mean "this run's ``stage_ingest`` work already genuinely completed,
+    a repeat call is a legitimate duplicate, not an error" --
+    ``claim_ingestion_run``'s own claimability predicate (``status IN
+    ('PENDING', 'FAILED') OR (status = 'RUNNING' AND lease expired)``)
+    already excludes ``'STAGED'`` exactly the same way it excludes
+    ``'SUCCEEDED'``, so the two statuses share the same "already done, do
+    not redo" semantics from this function's point of view.
 
     Args:
         ctx: The current pipeline context. Only ``ctx.run``/``ctx.metadata``
@@ -178,26 +215,30 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
 
     Returns:
         A ``Receipt`` whose ``status`` is ``"SKIPPED_DUPLICATE"`` (the run
-        already ``SUCCEEDED``) or ``"SKIPPED_CONCURRENT"`` (the run is
-        ``RUNNING`` under a still-live lease held by another claimant).
+        already ``SUCCEEDED`` or ``STAGED``) or ``"SKIPPED_CONCURRENT"``
+        (the run is ``RUNNING`` under a still-live lease held by another
+        claimant).
 
     Raises:
         DataPlatformError: ``claim_ingestion_run`` refused the claim but
-            ``get_ingestion_run_status`` finds neither a ``SUCCEEDED`` nor a
-            ``RUNNING`` row explaining the refusal (including no row at
-            all) -- a genuine run-fatal condition: this phase's ``ingest``
-            CLI always pre-allocates the run at discovery time before
-            ``run_ingest`` is ever called, so an unexplained refusal means
-            that invariant did not hold.
+            ``get_ingestion_run_status`` finds none of ``SUCCEEDED``,
+            ``STAGED`` or ``RUNNING`` explaining the refusal (including no
+            row at all) -- a genuine run-fatal condition: this phase's
+            ``ingest`` CLI always pre-allocates the run at discovery time
+            before ``stage_ingest`` is ever called, so an unexplained
+            refusal means that invariant did not hold.
     """
     log = get_logger()
     status = ctx.metadata.get_ingestion_run_status(run_id=ctx.run.run_id)
-    if status == "SUCCEEDED":
+    if status in ("SUCCEEDED", "STAGED"):
         receipt_status = "SKIPPED_DUPLICATE"
     elif status == "RUNNING":
         receipt_status = "SKIPPED_CONCURRENT"
     else:
-        msg = "claim_ingestion_run refused the claim but no SUCCEEDED/RUNNING row explains why"
+        msg = (
+            "claim_ingestion_run refused the claim but no SUCCEEDED/STAGED/RUNNING "
+            "row explains why"
+        )
         raise DataPlatformError(
             msg,
             context={
@@ -207,7 +248,7 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
             },
         )
     log.info(
-        "run_ingest.skipped",
+        "stage_ingest.skipped",
         run_id=ctx.run.run_id,
         idempotency_key=ctx.run.idempotency_key,
         status=receipt_status,
@@ -228,7 +269,7 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
 def _find_quality_rule(ctx: PipelineContext, rule_type: str) -> QualityRuleConfig | None:
     """Return this run's first ``ctx.config.quality.rules`` entry matching ``rule_type``.
 
-    Split out of ``run_ingest`` purely to keep its own statement count under
+    Split out purely to keep the caller's own statement count under
     ``PLR0915``'s threshold -- no behavior change from an inlined loop.
     Returns ``None`` both when ``ctx.config.quality`` itself is unset and
     when it is set but declares no rule of this type -- every caller treats
@@ -259,18 +300,24 @@ def _apply_referential_barrier(
 ) -> tuple[list[RejectedRecord], list[ValidationResult]]:
     """Run ``ReferentialIntegrityBarrier`` when configured, deleting every orphan from staging.
 
-    Split out of ``run_ingest`` purely to keep its own statement count under
+    Split out purely to keep the caller's own statement count under
     ``PLR0915``'s threshold. A no-op (returns two empty lists, no query
     issued) when ``ctx.config.quality`` declares no ``REFERENTIAL`` rule --
     this is what keeps a dataset with no referential relationship
-    (``customers``) behaving exactly as ``run_ingest`` did before this plan.
+    (``customers``) behaving exactly as before.
 
     Args:
         ctx: The current pipeline context.
-        conn: The SAME connection ``run_ingest``'s publish transaction uses
-            -- every orphan-row ``DELETE`` this function issues lands inside
-            that same transaction, so a later rollback (e.g. the circuit
-            breaker tripping) undoes it too.
+        conn: ``stage_ingest``'s own ``staging_conn`` (plan 08.1-10) --
+            before this plan, this ran against a SEPARATE publish
+            transaction's connection; there is no separate publish
+            transaction anymore at this point in the control flow, so this
+            now runs on the SAME connection ``StagingLoader.load()`` already
+            used. Every orphan-row ``DELETE`` this function issues lands
+            inside that same connection's implicit transaction, so a later
+            exception (e.g. the circuit breaker tripping) rolls back
+            everything on it, including the just-completed COPY, when the
+            caller's ``with`` block exits.
         staging_result: This run's already-completed ``StagingLoader.load()``
             result -- ``staging_result.staging_table`` names the table to
             anti-join and delete orphan rows from.
@@ -320,7 +367,7 @@ def _apply_referential_barrier(
     return list(barrier_result.rejected), list(barrier_result.findings)
 
 
-def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword per already-known run identity/result value, mirrors merge_orders.py's shape
+def _apply_staging_quality_gate_and_persist(  # noqa: PLR0913 -- one keyword per already-known run identity/result value, mirrors merge_orders.py's shape
     ctx: PipelineContext,
     conn: Connection[Any],
     *,
@@ -329,47 +376,45 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
     batch_id: int,
     finished_at: datetime,
     staging_result: StagingResult,
-    published_business_keys: Sequence[str],
     all_rejected: list[RejectedRecord],
     all_findings: list[ValidationResult],
 ) -> str:
-    """Run circuit-breaker/volume barriers, persist, resolve the batch, write the report.
+    """Run circuit-breaker/volume barriers, persist findings/rejects, write the MinIO report.
 
-    Split out of ``run_ingest`` purely to keep its own statement count under
-    ``PLR0915``'s threshold. Every step here executes AFTER
-    ``publisher.publish()`` and strictly before ``finalize_publication`` --
-    matching this plan's own ordering rationale: by the time a run is marked
-    SUCCEEDED, every quality check has already run and passed, AND every
-    batch this run supersedes has already been marked resolved.
+    Renamed from ``_apply_post_publish_barriers_and_persist`` (plan 08.1-10):
+    every step here now runs BEFORE ``StagingLoader.promote_to_durable_bronze``,
+    inside ``stage_ingest``'s own ``staging_conn`` -- matching this plan's own
+    ordering rationale that bad data must never reach durable bronze, not
+    merely never reach gold. The one piece that stayed behind in
+    ``publish_ingest`` is ``resolve_rejected_records_for_business_keys``: it
+    needs ``published_business_keys``, a publish-time-only value this
+    function has no access to (``Publisher.publish()`` has not run yet at
+    staging time).
 
     Args:
         ctx: The current pipeline context.
-        conn: The SAME connection ``run_ingest``'s publish transaction uses
-            -- every write here (validation results, rejected records, the
-            batch-resolution UPDATE) lands inside that same transaction. A
-            ``QualityThresholdExceeded`` raised by the circuit breaker
-            propagates straight out of this function uncaught, rolling back
-            everything written here plus everything the caller already
-            wrote on ``conn`` (D-11).
+        conn: ``stage_ingest``'s own ``staging_conn`` -- every write here
+            (validation results, rejected records) lands inside that same
+            connection's implicit transaction. A ``QualityThresholdExceeded``
+            raised by the circuit breaker propagates straight out of this
+            function uncaught, rolling back everything written here plus
+            everything the caller already wrote on ``conn`` -- including the
+            just-completed COPY (D-11), since ``promote_to_durable_bronze``
+            has not run yet at this point in ``stage_ingest``'s own control
+            flow.
         run_id: This run's ``meta.ingestion_runs.run_id``.
         file_id: This run's ``meta.files.file_id``.
-        batch_id: This run's ``meta.batches.batch_id``. D-05's resolution
+        batch_id: This run's ``meta.batches.batch_id`` -- only drives
+            ``record_rejected_records``' own insert here; D-05's resolution
             scope moved off this parameter under D-23 (business-key-scoped,
-            not batch-scoped, resolution -- plan 08-16); this parameter no
-            longer drives the resolution call below, only
-            ``record_rejected_records``' own insert.
-        finished_at: This run's finish timestamp, reused for the report
-            artifact's ``generated_at`` field -- the SAME value
-            ``finalize_publication`` receives, never independently computed.
+            not batch-scoped), and resolution itself now lives in
+            ``publish_ingest``, not here.
+        finished_at: This run's staging-completion timestamp, reused for the
+            report artifact's ``generated_at`` field -- the SAME value
+            ``stage_ingest``'s own status update receives, never
+            independently computed.
         staging_result: This run's already-completed ``StagingLoader.load()``
             result.
-        published_business_keys: The business-key values ``publisher.publish()``
-            ACTUALLY inserted or updated in the target table this run
-            (``PublishResult.published_business_keys``) -- NOT merely
-            whatever staged. Drives the resolution call below (CR-01,
-            phase-08 code review): a business key that only staged, but
-            whose conflict-guard ``WHERE`` clause left the target row
-            "locked but unchanged", must never resolve a PENDING reject.
         all_rejected: Every ``RejectedRecord`` known so far this run --
             seeded by the caller from staging-time rejections plus the
             referential barrier's own orphans.
@@ -383,8 +428,8 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
         for a run that reaches this call (VALID-04's MinIO-artifact half).
     """
     # D-23: computed unconditionally, once, at the top of this function --
-    # both the VOLUME barrier below and the resolution call further down
-    # need it, and it must never be queried twice for one run.
+    # the VOLUME barrier below needs it, and it must never be queried twice
+    # for one run.
     dataset_id = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
 
     if ctx.config.quality is not None and ctx.config.quality.rejection_rate_threshold is not None:
@@ -409,47 +454,6 @@ def _apply_post_publish_barriers_and_persist(  # noqa: PLR0913 -- one keyword pe
         all_findings.extend(volume_barrier.apply(ctx).findings)
 
     ctx.metadata.record_validation_results(conn=conn, run_id=run_id, results=all_findings)
-    # D-05/D-23: resolve PENDING rejects by the business key THIS run
-    # actually published -- a PENDING row sharing this run's published
-    # business key may belong to an entirely different batch, from a prior
-    # run -- that is the whole point of this predicate, D-23. discover_files'
-    # batch_key is a pure function of a file's content_sha256, so a
-    # content-differing correction of a previously-rejected row always
-    # discovers under a NEW batch_id; matching on (dataset_id, business_key)
-    # instead of batch_id is what lets this call reach the ORIGINAL batch's
-    # PENDING row regardless.
-    #
-    # published_business_keys is the CALLER's parameter -- sourced from
-    # ``publisher.publish()``'s own ``PublishResult.published_business_keys``
-    # (CR-01, phase-08 code review), never re-derived from
-    # ``staging_result.staging_table``. A business key that merely SURVIVED
-    # streaming validation and landed in staging is not the same as one this
-    # transaction's publish statement actually inserted/updated: both
-    # concrete `Publisher`s have a conflict-guard `WHERE` clause on their
-    # `ON CONFLICT DO UPDATE` that can leave a conflicting row "locked but
-    # unchanged" (e.g. a staged row that does not improve on what is already
-    # published) -- and resolving a PENDING reject for a business key that
-    # was never actually written would silently mark a still-wrong row as
-    # REDRIVEN. When no column is marked business_key=True,
-    # published_business_keys stays empty and this call is a documented
-    # no-op for that dataset.
-    #
-    # MUST still run BEFORE record_rejected_records below: the method's
-    # WHERE clause has no run-id exclusion, so calling this AFTER inserting
-    # this run's own fresh rejects would immediately flip matching ones back
-    # to REDRIVEN too -- a run "resolving" rejections it just created itself
-    # (CR-01, phase-08 code review). This ordering is what makes CR-01's
-    # guarantee hold under the new predicate too: a run's own fresh reject's
-    # business key was never published this run (the row that got rejected
-    # never entered staging in the first place, so it can never appear in
-    # ``publisher.publish()``'s own ``RETURNING`` output either).
-    ctx.metadata.resolve_rejected_records_for_business_keys(
-        conn=conn,
-        dataset_id=dataset_id,
-        business_keys=published_business_keys,
-        resolved_by_run_id=run_id,
-        resolution_type="REDRIVEN",
-    )
     if all_rejected:
         ctx.metadata.record_rejected_records(
             conn=conn,
@@ -496,26 +500,26 @@ def _heartbeat_loop(
     after a full interval with no stop signal.
 
     CR-01 (``04-REVIEW.md``): this is exactly the call site where a stray
-    tick could otherwise regress a just-committed ``SUCCEEDED`` status back
-    to ``RUNNING``. ``stop_event.set()`` (in ``run_ingest``'s ``finally``
-    block) only fires AFTER the publish transaction has already committed
-    and the trailing staging-table drop has run -- a tick landing in that
-    narrow window still calls this loop's body one more time. Calling
-    ``ctx.metadata.heartbeat_ingestion_run`` (not the generic, unconditional
-    ``update_ingestion_run_status``) makes that stray call a silent no-op
-    instead of a status regression: its ``WHERE status = 'RUNNING'`` guard
-    means a run that has already reached a terminal status is left
-    untouched.
+    tick could otherwise regress a just-committed terminal status (today,
+    ``STAGED`` -- ``stage_ingest`` is this loop's only caller) back to
+    ``RUNNING``. ``stop_event.set()`` (in ``stage_ingest``'s ``finally``
+    block) only fires AFTER staging's own connection has already committed
+    -- a tick landing in that narrow window still calls this loop's body one
+    more time. Calling ``ctx.metadata.heartbeat_ingestion_run`` (not the
+    generic, unconditional ``update_ingestion_run_status``) makes that stray
+    call a silent no-op instead of a status regression: its ``WHERE status =
+    'RUNNING'`` guard means a run that has already reached a terminal status
+    is left untouched.
 
     Args:
         ctx: The current pipeline context. Only ``ctx.metadata`` is used.
         run_id: The claimed run this heartbeat keeps alive.
         progress: The shared, mutable holder ``on_progress`` writes and this
             loop reads -- never mutated here, only read.
-        stop_event: Set by ``run_ingest``'s ``finally`` block to stop this
+        stop_event: Set by ``stage_ingest``'s ``finally`` block to stop this
             loop.
         interval_seconds: Seconds between heartbeats. Production callers
-            never override ``run_ingest``'s default; this module's own
+            never override ``stage_ingest``'s default; this module's own
             integration tests shrink it so a heartbeat is observable
             without a real-time wait.
     """
@@ -528,51 +532,53 @@ def _heartbeat_loop(
         )
 
 
-def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestration is genuinely this function's one job (plan 08-11 adds barrier-stage wiring); the barrier/persistence/report logic itself is already split into `_apply_referential_barrier`/`_apply_post_publish_barriers_and_persist` above, so further splitting here would only fragment one linear control flow across more functions for no readability gain
+def stage_ingest(
     ctx: PipelineContext,
     *,
     heartbeat_interval_seconds: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
 ) -> Receipt:
-    """Claim, stage, publish (one atomic transaction), and report on one ingestion run.
+    """Claim, stage, quality-gate, promote to durable bronze, and mark one run ``STAGED``.
+
+    Replaces ``run_ingest``'s claim-through-publish body up to (but not
+    including) publication itself (D-04): this function's own terminal
+    status is ``"STAGED"``, never ``"SUCCEEDED"`` -- publication is
+    ``publish_ingest``'s job, run separately, possibly consolidating several
+    ``stage_ingest`` runs' bronze contributions (via dbt) into one pass.
 
     Args:
         ctx: The current pipeline context -- ``ctx.run.idempotency_key``
             names the run to claim; ``ctx.run.file_id``/``ctx.run.batch_id``
-            (populated by the ``ingest`` CLI from the frozen
+            (populated by the ``ingest``/``stage`` CLI from the frozen
             ``AssignmentDocument`` before this function is ever called) are
-            the file/batch this run's publication marks
-            ``PROCESSED``/``PUBLISHED``; ``ctx.source`` is the already
-            source-specific reader this function streams through
-            ``StagingLoader`` without ever inspecting.
+            the file/batch this run's staging progress is recorded against;
+            ``ctx.source`` is the already source-specific reader this
+            function streams through ``StagingLoader`` without ever
+            inspecting.
         heartbeat_interval_seconds: Seconds between lease/row-count
             heartbeats, well under the 5-minute lease duration. Defaults to
-            60s. This module's own tests override it directly; the real
-            `ingest` CLI (`csv_processor.cli.ingest`) reads it from
-            `DATAPLAT_HEARTBEAT_INTERVAL_SECONDS` (unset -- i.e. every
-            production KPO pod except the one `csv_ingest_customers.py`'s
-            `ingest` task sets it on -- falls back to this same 60s
-            default), so a live E2E run can shrink it without changing
-            production behavior anywhere else.
+            60s. This module's own tests override it directly.
 
     Returns:
-        A ``Receipt``: ``status="SUCCEEDED"`` after a genuine claim, stage
-        and publish; ``status="SKIPPED_DUPLICATE"`` or
+        A ``Receipt``: ``status="STAGED"`` after a genuine claim, stage and
+        durable-bronze promotion (``rows_loaded=0`` -- staging never writes
+        to gold); ``status="SKIPPED_DUPLICATE"`` or
         ``status="SKIPPED_CONCURRENT"`` immediately, with no staging
         attempted, when the claim was refused because the run already
-        succeeded or is concurrently in progress elsewhere.
+        reached ``STAGED``/``SUCCEEDED`` or is concurrently in progress
+        elsewhere.
 
     Raises:
         DataPlatformError: The claim was refused for a reason
             ``_skipped_receipt`` cannot explain (see its own docstring), or
             ``ctx.run.file_id``/``ctx.run.batch_id`` is unset. Any other
-            run-fatal exception raised while staging or publishing
-            propagates unmodified -- this function adds no second
-            catch-once boundary; see the module docstring.
+            run-fatal exception raised while staging propagates unmodified
+            -- this function adds no second catch-once boundary; see the
+            module docstring.
     """
     log = get_logger()
     start = time.monotonic()
 
-    with tracing.start_span("pipeline.run_ingest"):
+    with tracing.start_span("pipeline.stage_ingest"):
         # This run's own span -- a genuine CHILD of whatever parent context
         # `dataplat.cli`'s TRACEPARENT extraction attached (OBS-10), or a
         # fresh root span when no parent was ever extracted. Read BEFORE the
@@ -606,21 +612,18 @@ def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestr
             "runs_started",
             1,
             dataset=ctx.config.dataset,
-            stage="run_ingest",
+            stage="stage_ingest",
             status="running",
         )
-        # Set to "succeeded" only as the LAST statement before this
-        # function's normal return, below -- any exception raised anywhere
-        # in between (file_id/batch_id validation, staging, publish, the
-        # trailing DROP TABLE, or the rows_deduplicated/log.info
-        # computation) leaves this at "failed", observed by the `finally`
-        # below. This is a SECOND, OUTER try/finally -- distinct from and
-        # surrounding the inner staging/publish try/finally below; the two
-        # are never conflated.
+        # Set to "staged" only as the LAST statement before this function's
+        # normal return, below -- any exception raised anywhere in between
+        # (file_id/batch_id validation, staging, the quality gate, or the
+        # log.info computation) leaves this at "failed", observed by the
+        # `finally` below.
         run_status = "failed"
         try:
             if ctx.run.file_id is None or ctx.run.batch_id is None:
-                msg = "run_ingest requires ctx.run.file_id and ctx.run.batch_id to be set"
+                msg = "stage_ingest requires ctx.run.file_id and ctx.run.batch_id to be set"
                 raise DataPlatformError(
                     msg,
                     context={"run_id": run_id, "idempotency_key": ctx.run.idempotency_key},
@@ -638,157 +641,106 @@ def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestr
             heartbeat_thread = threading.Thread(
                 target=_heartbeat_loop,
                 args=(ctx, run_id, progress, stop_heartbeat, heartbeat_interval_seconds),
-                name=f"run-ingest-heartbeat-{run_id}",
+                name=f"stage-ingest-heartbeat-{run_id}",
                 daemon=True,
             )
             heartbeat_thread.start()
 
             try:
-                # Staging runs OUTSIDE the publish transaction, on its own
-                # connection (ARCHITECTURE.md's checkpointing-vs-transactions
-                # split): checkpointed per chunk, never part of the atomic
-                # barrier below. `pool.connection()`'s own context-manager
-                # behavior commits on clean exit, making the staged table
-                # visible to the separate connection the publish transaction
-                # opens next.
+                loader = StagingLoader(
+                    target_columns=_target_columns_for_dataset(ctx.config.dataset),
+                )
+                # Staging, the quality gate and the durable-bronze promotion
+                # all now live on this ONE connection, in its ONE implicit
+                # transaction (plan 08.1-10's whole point): a
+                # QualityThresholdExceeded raised by the quality gate below
+                # rolls back the COPY, the referential barrier's DELETEs and
+                # the just-recorded validation/reject rows together, and
+                # `promote_to_durable_bronze` -- reached only when the gate
+                # does NOT raise -- never runs at all (Test 2's exact
+                # guarantee). `pool.connection()`'s own context-manager
+                # behavior commits on clean exit.
                 with ctx.db.connection() as staging_conn:
-                    staging_result = StagingLoader(
-                        target_columns=_target_columns_for_dataset(ctx.config.dataset),
-                    ).load(
+                    staging_result = loader.load(
                         ctx,
                         staging_conn,
                         on_progress=_on_progress,
                     )
 
-                finished_at = datetime.now(tz=UTC)
-                # OBS-10's "-> PostgreSQL" segment: opens strictly inside the
-                # outer `pipeline.run_ingest` span above, so it becomes a
-                # genuine child span automatically -- no extra
-                # parent-context plumbing needed. Covers only the atomic
-                # publish transaction itself -- never the staging load above
-                # or the trailing DROP TABLE below, each on its own,
-                # separate connection.
-                with (
-                    tracing.start_span("pipeline.publish"),
-                    ctx.db.connection() as conn,
-                    conn.transaction(),
-                ):
-                    # Single-writer publication per dataset (LOAD-09): every
-                    # writer to this target serializes on the SAME
-                    # advisory-lock key before touching it.
-                    conn.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                        (f"publish:{ctx.config.load.target}",),
-                    )
-                    publisher = resolve_publisher(ctx.config.load.strategy)
-
-                    # Barrier-stage wiring (plan 08-11): referential runs
-                    # BEFORE publish, deleting every orphan row from the
-                    # staging table on THIS transaction's own `conn` -- so
-                    # `publisher.publish()`'s own unconditional
-                    # `SELECT * FROM {staging_table}` never sees it. A no-op
-                    # when no REFERENTIAL rule is configured (customers.yaml
-                    # today).
+                    finished_at = datetime.now(tz=UTC)
                     all_rejected: list[RejectedRecord] = list(staging_result.rejected_records)
                     all_findings: list[ValidationResult] = []
                     referential_rejected, referential_findings = _apply_referential_barrier(
                         ctx,
-                        conn,
+                        staging_conn,
                         staging_result,
                     )
                     all_rejected.extend(referential_rejected)
                     all_findings.extend(referential_findings)
 
-                    result = publisher.publish(ctx, staging_result.staging_table, conn)
-                    # Measured HERE, immediately after the publish that does
-                    # the actual work, not after the trailing DROP TABLE
-                    # below: this is the number `finalize_publication`
-                    # persists inside the SAME transaction as that publish,
-                    # so it must exist before that call and before the
-                    # transaction commits. Reused as-is for the Receipt/log
-                    # after the `with` block exits -- one canonical
-                    # duration, never two slightly different numbers for one
-                    # run.
-                    duration_ms = int((time.monotonic() - start) * 1000)
-
-                    # Circuit breaker + volume anomaly (post-publish),
-                    # persistence, D-05's batch resolution and the MinIO
-                    # report artifact -- all inside this SAME transaction,
-                    # all strictly BEFORE finalize_publication (plan 08-11).
-                    # A QualityThresholdExceeded raised inside here
-                    # propagates straight out of this `with` block uncaught,
-                    # rolling back the DELETE/publish above too (D-11).
-                    report_uri = _apply_post_publish_barriers_and_persist(
+                    report_uri = _apply_staging_quality_gate_and_persist(
                         ctx,
-                        conn,
+                        staging_conn,
                         run_id=run_id,
                         file_id=file_id,
                         batch_id=batch_id,
                         finished_at=finished_at,
                         staging_result=staging_result,
-                        published_business_keys=result.published_business_keys,
                         all_rejected=all_rejected,
                         all_findings=all_findings,
                     )
 
-                    # META-03: lands inside the SAME transaction as the
-                    # Publisher's own write -- the `with` block's exit
-                    # commits both together, or rolls back both together on
-                    # any exception.
-                    ctx.metadata.finalize_publication(
-                        conn=conn,
-                        run_id=run_id,
-                        file_id=file_id,
-                        batch_id=batch_id,
-                        rows_loaded=result.rows_affected,
-                        finished_at=finished_at,
-                        duration_ms=duration_ms,
-                        report_uri=report_uri,
-                        schema_version_id=staging_result.schema_version_id,
-                    )
+                    # The ONE genuinely new call this plan adds (plan
+                    # 08.1-06): everything that survived the quality gate
+                    # above -- never the raw, pre-filtered scratch contents
+                    # -- is appended into the durable, cumulative bronze
+                    # table dbt reads from.
+                    loader.promote_to_durable_bronze(ctx, staging_conn, staging_result)
 
-                # Pitfall 2: an explicit DROP after the publish transaction
-                # has committed, on a fresh connection -- never ON COMMIT
-                # DROP (invalid for an UNLOGGED table; only TEMPORARY tables
-                # support it).
-                with ctx.db.connection() as drop_conn:
-                    drop_conn.execute(f"DROP TABLE IF EXISTS {staging_result.staging_table}")
+                duration_ms = int((time.monotonic() - start) * 1000)
+                # Replaces `finalize_publication`'s three-table UPDATE with
+                # this ONE-table status transition -- files/batches stay
+                # untouched here; they move to PROCESSED/PUBLISHED inside
+                # `publish_ingest`'s own `finalize_publication` call instead.
+                # Issued AFTER `staging_conn`'s own transaction has already
+                # committed (the `with` block above has exited cleanly) --
+                # `update_ingestion_run_status` opens its own separate
+                # connection (the `MetadataRepository` Protocol's contract),
+                # so ordering it after that commit, not before or "inside"
+                # it, is what keeps a crash between the two from ever
+                # showing STAGED without the durable bronze rows it claims
+                # to describe already being visible.
+                ctx.metadata.update_ingestion_run_status(
+                    run_id=run_id,
+                    status="STAGED",
+                    finished_at=finished_at,
+                    duration_ms=duration_ms,
+                    rows_read=staging_result.rows_read,
+                    rows_parsed=staging_result.rows_parsed,
+                    rows_invalid=staging_result.rows_rejected,
+                    report_uri=report_uri,
+                    schema_version_id=staging_result.schema_version_id,
+                )
             finally:
                 stop_heartbeat.set()
                 heartbeat_thread.join(timeout=heartbeat_interval_seconds + 5)
 
-            # duration_ms was already computed above, right after publish,
-            # and reused here as-is (see the comment at its assignment) --
-            # never recomputed against `time.monotonic()` again, which would
-            # silently fold in the trailing DROP TABLE's time and produce a
-            # second, slightly larger number for the same run.
-            # This phase does not separately track "collapsed by DISTINCT ON
-            # / duplicate customer_id within one batch" from "suppressed as
-            # a no-op write by the WHERE guard" -- both reduce rows_parsed to
-            # a smaller rows_affected, and a finer split is Phase 9's
-            # meta.dedup_decisions territory (merge.py's own module
-            # docstring), not this phase's. Clamped at 0 because a later,
-            # larger customer_id set touching already-published rows (an
-            # UPDATE, not an INSERT) can make rows_affected exceed this
-            # run's own rows_parsed with no dedup having happened at all.
-            rows_deduplicated = max(staging_result.rows_parsed - result.rows_affected, 0)
             log.info(
-                "run_ingest.succeeded",
+                "stage_ingest.staged",
                 run_id=run_id,
                 rows_read=staging_result.rows_read,
-                rows_loaded=result.rows_affected,
+                rows_parsed=staging_result.rows_parsed,
                 rows_invalid=staging_result.rows_rejected,
-                rows_deduplicated=rows_deduplicated,
                 duration_ms=duration_ms,
             )
-            run_status = "succeeded"
+            run_status = "staged"
             return Receipt(
                 run_id=run_id,
-                status="SUCCEEDED",
+                status="STAGED",
                 rows_read=staging_result.rows_read,
-                rows_loaded=result.rows_affected,
+                rows_loaded=0,
                 rows_invalid=staging_result.rows_rejected,
-                rows_deduplicated=rows_deduplicated,
+                rows_deduplicated=0,
                 duration_ms=duration_ms,
                 rows_quarantined=len(all_rejected),
                 report_uri=report_uri,
@@ -801,6 +753,7 @@ def run_ingest(  # noqa: PLR0915 -- claim/stage/publish/barrier/receipt orchestr
                 "runs_finished",
                 1,
                 dataset=ctx.config.dataset,
-                stage="run_ingest",
+                stage="stage_ingest",
                 status=run_status,
             )
+

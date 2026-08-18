@@ -25,7 +25,11 @@ class Receipt(BaseModel):
 
     Attributes:
         run_id: The ``meta.ingestion_runs.run_id`` this receipt reports on.
-        status: The run's terminal status, e.g. ``"SUCCEEDED"``, ``"FAILED"``.
+        status: The run's terminal status, e.g. ``"SUCCEEDED"``, ``"FAILED"``,
+            or ``"STAGED"`` (plan 08.1-10's D-04 split: ``stage_ingest``'s
+            own terminal status -- staging and the pre-bronze quality gate
+            completed, publication is a separate, later ``publish_ingest``
+            call, possibly consolidating several ``STAGED`` runs at once).
         rows_read: Number of rows read from the source file.
         rows_loaded: Number of rows actually published to the target table.
         rows_invalid: Number of rows rejected by validation.
