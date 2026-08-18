@@ -513,7 +513,7 @@ Plans:
 **Goal:** A dbt (Postgres adapter) bronze-to-silver transformation stage exists, producing a persisted, deduplicated silver schema with correct late-arriving-event handling — while the existing Python `MergePublisher` continues to own the atomic silver-to-gold publish inside the META-03 transaction, unchanged
 **Requirements**: DEDUP-01, DEDUP-02, DEDUP-03, DEDUP-04, INCR-03, INCR-04, QUAL-10 (remapped from Phase 9 per `08.1-RESEARCH.md`'s confirmed mapping; LOAD-09 and OBS-07 are extended, not reassigned — they stay Phase 4/Phase 7, Complete)
 **Depends on:** Phase 8
-**Plans:** 6/13 plans executed
+**Plans:** 9/13 plans executed
 
 Plans:
 **Wave 1**
@@ -530,9 +530,9 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 08.1-07-PLAN.md — repository.py run_stages claim/heartbeat methods + discovery.py D-18 idempotency-key/replay_of_run_id extension
-- [ ] 08.1-08-PLAN.md — dbt project scaffolding + silver_customers/silver_orders models (DEDUP-01..04, INCR-03/04, QUAL-10)
-- [ ] 08.1-09-PLAN.md — Migrations C: meta.v_customers_lineage dbt-hop extension, gold physical modeling via indexes (D-13)
+- [x] 08.1-07-PLAN.md — repository.py run_stages claim/heartbeat methods + discovery.py D-18 idempotency-key/replay_of_run_id extension
+- [x] 08.1-08-PLAN.md — dbt project scaffolding + silver_customers/silver_orders models (DEDUP-01..04, INCR-03/04, QUAL-10)
+- [x] 08.1-09-PLAN.md — Migrations C: meta.v_customers_lineage dbt-hop extension, gold physical modeling via indexes (D-13)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
