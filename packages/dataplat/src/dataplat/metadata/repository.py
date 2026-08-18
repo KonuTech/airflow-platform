@@ -207,12 +207,13 @@ class MetadataRepository(Protocol):
         status: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> int:
         """Insert one row into `meta.ingestion_runs`.
 
         Maps to ``meta.ingestion_runs(idempotency_key, dataset_id, file_id,
         batch_id, config_version_id, processor_version,
-        processor_image_digest, status)``.
+        processor_image_digest, status, replay_of_run_id)``.
 
         Args:
             idempotency_key: The unique key that makes retries free (Q7) —
@@ -228,6 +229,13 @@ class MetadataRepository(Protocol):
             status: The run's initial status.
             file_id: The single file this run processes, when applicable.
             batch_id: The batch this run processes, when applicable.
+            replay_of_run_id: The `meta.ingestion_runs.run_id` of an OLDER-
+                formula run for the same file that already `SUCCEEDED`
+                (D-18), when this run exists specifically to re-process that
+                file under an extended idempotency-key formula. `None` when
+                this run is not a replay of an earlier one -- the common
+                case. Defaults to `None` so every existing caller keeps
+                compiling unchanged.
 
         Returns:
             The newly inserted row's `run_id`.
@@ -244,12 +252,13 @@ class MetadataRepository(Protocol):
         processor_image_digest: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> tuple[int, str]:
         """Idempotently pre-allocate one `meta.ingestion_runs` row, discovery-time.
 
-        Maps to ``INSERT INTO meta.ingestion_runs (...) VALUES (...,
-        'PENDING') ON CONFLICT (idempotency_key) DO UPDATE SET
-        idempotency_key = EXCLUDED.idempotency_key RETURNING run_id,
+        Maps to ``INSERT INTO meta.ingestion_runs (..., replay_of_run_id)
+        VALUES (..., 'PENDING', ...) ON CONFLICT (idempotency_key) DO UPDATE
+        SET idempotency_key = EXCLUDED.idempotency_key RETURNING run_id,
         status``.
 
         Distinct from `claim_ingestion_run` below (Pitfall 5): this method
@@ -273,6 +282,18 @@ class MetadataRepository(Protocol):
                 execute this run.
             file_id: The single file this run processes, when applicable.
             batch_id: The batch this run processes, when applicable.
+            replay_of_run_id: The `meta.ingestion_runs.run_id` of an OLDER-
+                formula run for the same file that already `SUCCEEDED`
+                (D-18). Applied ONLY on this call's first-ever insert for
+                `idempotency_key` -- the `ON CONFLICT ... DO UPDATE`
+                clause's `SET` list deliberately excludes this column
+                (mirrors `get_or_create_batch`'s own documented "status
+                deliberately excluded from the conflict SET clause"
+                reasoning), so a rediscovery of an already-claimed replay
+                run never silently clears its own lineage back to `NULL`.
+                `None` when this run is not a replay of an earlier one --
+                the common case. Defaults to `None` so every existing caller
+                keeps compiling unchanged.
 
         Returns:
             A `(run_id, status)` tuple: `run_id` is stable across repeat
@@ -281,6 +302,30 @@ class MetadataRepository(Protocol):
             call, whatever it already was on a repeat call) -- the caller
             uses this to decide whether to include the unit in a
             Dynamic-Task-Mapping expand list.
+        """
+        ...
+
+    def find_latest_succeeded_run_for_file(self, *, file_id: int) -> int | None:
+        """Look up the most recent `SUCCEEDED` run for a file, across any idempotency-key formula.
+
+        Maps to ``SELECT run_id FROM meta.ingestion_runs WHERE file_id = %s
+        AND status = 'SUCCEEDED' ORDER BY run_id DESC LIMIT 1``.
+
+        This is D-18's lookup step, called by `discovery.py` (plan 08.1-07
+        Task 3) BEFORE creating a new run under the extended idempotency-key
+        formula, to discover whether an older-formula run for the same file
+        already succeeded -- so that new run can carry a `replay_of_run_id`
+        pointing back at it. Only ever matches `status = 'SUCCEEDED'`
+        (T-08.1-17): a `RUNNING`/`PENDING`/`FAILED` old-formula run is never
+        mistaken for a completed one to replay from.
+
+        Args:
+            file_id: The `meta.files.file_id` to search for a prior
+                `SUCCEEDED` run.
+
+        Returns:
+            The most recent matching run's `run_id`, or `None` if this file
+            has never had a `SUCCEEDED` run.
         """
         ...
 

@@ -262,6 +262,7 @@ class PostgresMetadataRepository(MetadataRepository):
         status: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> int:
         """See `MetadataRepository.create_ingestion_run`."""
         with self._pool.connection() as conn:
@@ -270,8 +271,8 @@ class PostgresMetadataRepository(MetadataRepository):
                 INSERT INTO meta.ingestion_runs (
                     idempotency_key, dataset_id, file_id, batch_id,
                     config_version_id, processor_version,
-                    processor_image_digest, status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    processor_image_digest, status, replay_of_run_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING run_id
                 """,
                 (
@@ -283,6 +284,7 @@ class PostgresMetadataRepository(MetadataRepository):
                     processor_version,
                     processor_image_digest,
                     status,
+                    replay_of_run_id,
                 ),
             ).fetchone()
             if row is None:  # pragma: no cover - RETURNING always yields a row here
@@ -300,16 +302,25 @@ class PostgresMetadataRepository(MetadataRepository):
         processor_image_digest: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> tuple[int, str]:
-        """See `MetadataRepository.get_or_create_ingestion_run`."""
+        """See `MetadataRepository.get_or_create_ingestion_run`.
+
+        `replay_of_run_id` is deliberately excluded from the `ON CONFLICT
+        ... DO UPDATE` clause's `SET` list (D-18): it is a first-insert-only
+        value, applied only when this call performs the FIRST insert for
+        `idempotency_key` -- a repeat call's `replay_of_run_id` argument
+        (which its caller does not necessarily recompute identically) must
+        never silently clobber the lineage already recorded on the row.
+        """
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 INSERT INTO meta.ingestion_runs (
                     idempotency_key, dataset_id, file_id, batch_id,
                     config_version_id, processor_version,
-                    processor_image_digest, status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING')
+                    processor_image_digest, status, replay_of_run_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING', %s)
                 ON CONFLICT (idempotency_key) DO UPDATE
                     SET idempotency_key = EXCLUDED.idempotency_key
                 RETURNING run_id, status
@@ -322,12 +333,27 @@ class PostgresMetadataRepository(MetadataRepository):
                     config_version_id,
                     processor_version,
                     processor_image_digest,
+                    replay_of_run_id,
                 ),
             ).fetchone()
             if row is None:  # pragma: no cover - RETURNING always yields a row here
                 msg = "INSERT ... ON CONFLICT ... RETURNING run_id, status returned no row"
                 raise RuntimeError(msg)
             return int(row[0]), str(row[1])
+
+    def find_latest_succeeded_run_for_file(self, *, file_id: int) -> int | None:
+        """See `MetadataRepository.find_latest_succeeded_run_for_file`."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id FROM meta.ingestion_runs
+                 WHERE file_id = %s AND status = 'SUCCEEDED'
+                 ORDER BY run_id DESC
+                 LIMIT 1
+                """,
+                (file_id,),
+            ).fetchone()
+            return None if row is None else int(row[0])
 
     def claim_ingestion_run(  # noqa: PLR0913 -- matches the run-identity/trace/dag-context columns this method persists in one UPDATE
         self,
