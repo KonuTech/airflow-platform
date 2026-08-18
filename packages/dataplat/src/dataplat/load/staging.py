@@ -718,3 +718,53 @@ class StagingLoader:
             schema_version_id=schema_version_id,
             rejected_records=all_rejected,
         )
+
+    def promote_to_durable_bronze(
+        self,
+        ctx: PipelineContext,
+        conn: Connection[Any],
+        staging_result: StagingResult,
+    ) -> None:
+        """Append this attempt's staged rows into the durable, cumulative ``staging.<dataset>``.
+
+        This is a SEPARATE method from ``load()`` rather than folded into
+        it, deliberately: ``load()`` is Phase 6/8's already-proven
+        chunked-``COPY`` path into the per-run scratch buffer
+        (``staging.<dataset>__r<run_id>``) -- left untouched here. This
+        method is the NEW D-01 promotion step (``08.1-CONTEXT.md``), called
+        by ``stage_ingest`` (plan 08.1-10) only AFTER any referential-
+        integrity/circuit-breaker filtering has already run against the
+        scratch buffer, so exactly what survives that filtering is what
+        gets promoted into the durable, dbt-readable bronze table --
+        never the raw, pre-filtered scratch contents.
+
+        ``durable_table`` (``staging.<dataset>``, migration 0022) has no
+        ``__r<run_id>`` suffix: it is the one stable, cumulative table for
+        this dataset, and this call only ever appends to it (never
+        ``TRUNCATE``/``DELETE`` first) -- D-01's "stable, cumulative,
+        append-only" requirement. The scratch buffer's own lifecycle now
+        fully collapses into this one connection's transaction scope: it is
+        dropped here, on the SAME ``conn``, immediately after the append,
+        rather than needing to survive into a later, separate publish
+        transaction the way it did before this method existed.
+
+        Never commits or rolls back ``conn`` itself -- same ownership
+        contract as ``load()`` and ``Publisher.publish()``: the caller
+        decides when the promoted rows become visible to other connections.
+
+        Args:
+            ctx: The current pipeline context. Only ``ctx.config.dataset``
+                is read.
+            conn: An open connection this method issues the ``INSERT``/
+                ``DROP TABLE`` against. Never committed or rolled back here.
+            staging_result: The ``StagingResult`` this attempt's own
+                ``load()`` call returned -- its ``staging_table`` names the
+                scratch buffer to append from and then drop.
+        """
+        durable_table = f"staging.{ctx.config.dataset}"
+        column_list = ", ".join((*self._target_columns, *_LINEAGE_COLUMN_NAMES))
+        conn.execute(
+            f"INSERT INTO {durable_table} ({column_list}) "
+            f"SELECT {column_list} FROM {staging_result.staging_table}",
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {staging_result.staging_table}")
