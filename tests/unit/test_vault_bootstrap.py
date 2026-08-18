@@ -307,6 +307,105 @@ def test_ensure_policy_skips_when_body_matches(vault_bootstrap) -> None:
     client.sys.create_or_update_policy.assert_not_called()
 
 
+# -- _ensure_dbt_secret ---------------------------------------------------------
+
+
+def test_ensure_dbt_secret_generates_password_and_writes_five_fields_when_dbt_db_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    vault_bootstrap,
+) -> None:
+    """`etl/dbt-db` absent -- regenerates `dbt_app`'s password via the same
+    `kubectl exec` + `ALTER ROLE` mechanism `_ensure_etl_secrets` uses for
+    `etl_app`, then writes FIVE discrete credential fields (never one `dsn`
+    string) straight to Vault KV.
+    """
+    client = MagicMock()
+    client.secrets.kv.v2.read_secret_version.side_effect = hvac.exceptions.InvalidPath
+
+    mock_run = MagicMock(
+        side_effect=[
+            _completed(stdout="analytics-db-1"),  # kubectl get cluster ... currentPrimary
+            _completed(stdout=""),  # kubectl exec ... psql
+        ],
+    )
+    monkeypatch.setattr(vault_bootstrap.subprocess, "run", mock_run)
+
+    vault_bootstrap._ensure_dbt_secret(client, _KUBECTL_CONTEXT)  # noqa: SLF001 -- exercising the private function this test covers
+
+    assert mock_run.call_count == 2
+
+    exec_call = mock_run.call_args_list[1]
+    exec_argv = exec_call.args[0]
+    assert exec_argv[1:] == [
+        "--context",
+        _KUBECTL_CONTEXT,
+        "exec",
+        "-i",
+        "-n",
+        "data",
+        "analytics-db-1",
+        "--",
+        "psql",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "postgres",
+        "-d",
+        "analytics",
+    ]
+    sql = exec_call.kwargs["input"]
+    prefix = "ALTER ROLE dbt_app WITH PASSWORD '"
+    assert sql.startswith(prefix)
+    assert sql.endswith("';")
+    raw_password = sql[len(prefix) : -2]
+    assert raw_password  # non-empty
+    assert len(raw_password) == 64  # secrets.token_hex(32)'s own output shape
+    assert all(char in "0123456789abcdef" for char in raw_password)
+
+    client.secrets.kv.v2.create_or_update_secret.assert_called_once_with(
+        mount_point="etl",
+        path="dbt-db",
+        secret={
+            "host": "analytics-db-rw.data",
+            "port": "5432",
+            "user": "dbt_app",
+            "password": raw_password,
+            "dbname": "analytics",
+        },
+    )
+    written_secret = client.secrets.kv.v2.create_or_update_secret.call_args.kwargs["secret"]
+    assert set(written_secret.keys()) == {"host", "port", "user", "password", "dbname"}
+
+
+def test_ensure_dbt_secret_skips_when_dbt_db_already_present(
+    monkeypatch: pytest.MonkeyPatch,
+    vault_bootstrap,
+) -> None:
+    """An already-present `etl/dbt-db` secret is never rotated on a later
+    idempotent bootstrap run -- no `kubectl`/`psql` call, no Vault write.
+    """
+    client = MagicMock()
+    client.secrets.kv.v2.read_secret_version.return_value = {
+        "data": {
+            "data": {
+                "host": "analytics-db-rw.data",
+                "port": "5432",
+                "user": "dbt_app",
+                "password": "x",
+                "dbname": "analytics",
+            },
+        },
+    }
+
+    mock_run = MagicMock()
+    monkeypatch.setattr(vault_bootstrap.subprocess, "run", mock_run)
+
+    vault_bootstrap._ensure_dbt_secret(client, _KUBECTL_CONTEXT)  # noqa: SLF001 -- exercising the private function this test covers
+
+    mock_run.assert_not_called()
+    client.secrets.kv.v2.create_or_update_secret.assert_not_called()
+
+
 # -- non-vacuity ----------------------------------------------------------------
 
 

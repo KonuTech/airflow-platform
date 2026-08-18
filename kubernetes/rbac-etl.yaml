@@ -31,6 +31,19 @@ metadata:
   name: csv-processor
   namespace: etl
 ---
+# The `dbt` ServiceAccount (plan 08.1-03) gets NO Role of its own either,
+# for the identical reason `csv-processor` above does not: it never creates
+# further pods, only reads its own Vault-resolved credentials via
+# `docker/dbt/resolve_secrets.py`. The existing `etl-pod-launcher-role`/
+# `-rolebinding` below already grants `airflow-worker`/`airflow-scheduler`
+# the ability to launch a pod under ANY ServiceAccount in `etl`, including
+# this one -- no new Role or RoleBinding is needed.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dbt
+  namespace: etl
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
