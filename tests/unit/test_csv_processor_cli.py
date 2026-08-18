@@ -1,17 +1,24 @@
 """Unit tests for ``csv_processor.cli`` -- WR-01's Receipt-on-every-exit-path fix.
 
-Covers: ``ingest()`` writes a `status="FAILED"` `Receipt` to the XCom path for
+Covers: ``stage()`` writes a `status="FAILED"` `Receipt` to the XCom path for
 ANY exception raised inside its try body, not only `DataPlatformError` --
 regression-proving 04-REVIEW.md's WR-01 finding, where a raw, unwrapped
 exception (e.g. `psycopg.errors.DataError`, a network error, `MemoryError`)
-previously propagated with no Receipt ever written, contradicting `ingest()`'s
-own documented "every exit path" contract. Also proves the pre-existing
+previously propagated with no Receipt ever written, contradicting `stage()`'s
+own documented "every exit path" contract (the same contract `ingest()` --
+now removed, plan 08.1-11 -- always documented). Also proves the pre-existing
 `except DataPlatformError:` path is unaffected by the new `except Exception:`
 clause, since Python evaluates except clauses in the order they are written.
 
+Also covers ``publish()`` (new, plan 08.1-11, D-04's 2-command split's other
+half): writes `publish_ingest()`'s plain-dict result to the XCom path on
+success, a `{"status": "FAILED", ...}` payload on a `DataPlatformError`, and
+never constructs a per-file streaming reader -- `publish` operates on a whole
+dataset's already-staged runs, never a single assignment document.
+
 ``dataplat.cli.main()`` (not `CliRunner.invoke()`) is what actually dispatches
-into `csv_processor.cli.ingest` through the real `dataplat.plugins` entry
-point -- the same `main()`-based invocation style
+into `csv_processor.cli.stage`/`csv_processor.cli.publish` through the real
+`dataplat.plugins` entry point -- the same `main()`-based invocation style
 `tests/unit/test_cli_error_handling.py` already established for exercising
 `dataplat`'s own CLI boundary.
 """
@@ -33,6 +40,7 @@ from dataplat.config.model import (
     LoadConfig,
     SourceConfig,
 )
+from dataplat.config.registry import ConfigVersionRecord
 from dataplat.errors import ConfigurationError
 from dataplat.models.receipt import Receipt
 
@@ -60,13 +68,13 @@ def _raise_configuration_error() -> None:
     raise ConfigurationError(msg, context={"detail": "WR-01 regression test"})
 
 
-def test_ingest_writes_a_failed_receipt_for_a_non_dataplatformerror_exception(
+def test_stage_writes_a_failed_receipt_for_a_non_dataplatformerror_exception(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """WR-01: a raw, non-DataPlatformError exception still results in a written
     FAILED Receipt, even though the exception itself still propagates out of
-    `ingest()` (and out of `main()`, since `main()`'s own boundary only
+    `stage()` (and out of `main()`, since `main()`'s own boundary only
     catches `DataPlatformError`) so Airflow still observes the task fail via
     the pod's non-zero exit code.
     """
@@ -75,7 +83,7 @@ def test_ingest_writes_a_failed_receipt_for_a_non_dataplatformerror_exception(
     monkeypatch.setattr(csv_processor_cli, "_build_common", _raise_runtime_error)
 
     with pytest.raises(RuntimeError, match="not a DataPlatformError"):
-        main(["ingest", "--assignment", _ASSIGNMENT_URI])
+        main(["stage", "--assignment", _ASSIGNMENT_URI])
 
     assert xcom_path.exists()
     payload = json.loads(xcom_path.read_text(encoding="utf-8"))
@@ -154,7 +162,7 @@ def test_build_common_resolves_vault_literals_held_inside_env_vars(
     assert captured["secret_key"] == "real-secret-key"  # noqa: S105 -- a test double's literal, not a real credential
 
 
-def test_ingest_dataplatformerror_path_is_unaffected_by_the_new_except_clause(
+def test_stage_dataplatformerror_path_is_unaffected_by_the_new_except_clause(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -168,7 +176,7 @@ def test_ingest_dataplatformerror_path_is_unaffected_by_the_new_except_clause(
     monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
     monkeypatch.setattr(csv_processor_cli, "_build_common", _raise_configuration_error)
 
-    exit_code = main(["ingest", "--assignment", _ASSIGNMENT_URI])
+    exit_code = main(["stage", "--assignment", _ASSIGNMENT_URI])
 
     assert exit_code == 1
     assert xcom_path.exists()
@@ -278,16 +286,43 @@ class _FakeConfigRegistry:
         return _make_dataset_config()
 
 
+class _FakePublishConfigRegistry:
+    """Stands in for `ConfigRegistry` on `publish`'s own prologue -- `sync` never hits a DB.
+
+    Sibling to `_FakeConfigRegistry`, constructed the same `__init__(self,
+    pool)` way, but exercising `sync()` (the method `publish()` actually
+    calls) rather than `get_by_id()` (the method `stage()` calls).
+    """
+
+    def __init__(self, pool: object) -> None:
+        del pool
+
+    def sync(self, dataset_name: str, config: DatasetConfig) -> ConfigVersionRecord:
+        del dataset_name, config
+        return ConfigVersionRecord(
+            config_version_id=1,
+            version=1,
+            config_hash="test-hash",
+            is_new=False,
+        )
+
+
 def _fake_build_common() -> tuple[_FakeIngestPool, _FakeIngestMetadata, _FakeIngestObjectStore]:
     return _FakeIngestPool(), _FakeIngestMetadata(), _FakeIngestObjectStore()
 
 
-def _make_fake_run_ingest(
+def _fake_load_config(path: object, *, defaults_path: object) -> DatasetConfig:
+    """Stands in for `dataplat.config.loader.load_config` -- never reads real YAML files."""
+    del path, defaults_path
+    return _make_dataset_config()
+
+
+def _make_fake_stage_ingest(
     captured: dict[str, object],
 ) -> object:
-    """Builds a `run_ingest` stand-in that captures its `ctx` argument and returns a Receipt."""
+    """Builds a `stage_ingest` stand-in that captures its `ctx` argument and returns a Receipt."""
 
-    def _fake_run_ingest(ctx: object, *, heartbeat_interval_seconds: float = 60.0) -> Receipt:
+    def _fake_stage_ingest(ctx: object, *, heartbeat_interval_seconds: float = 60.0) -> Receipt:
         del heartbeat_interval_seconds
         captured["ctx"] = ctx
         return Receipt(
@@ -302,19 +337,32 @@ def _make_fake_run_ingest(
             report_uri=None,
         )
 
-    return _fake_run_ingest
+    return _fake_stage_ingest
 
 
-def test_ingest_populates_run_context_dag_fields_from_airflow_ctx_env_vars(
+def _make_fake_publish_ingest(
+    captured: dict[str, object],
+    result: dict[str, object],
+) -> object:
+    """Builds a `publish_ingest` stand-in that captures its `ctx` argument and returns `result`."""
+
+    def _fake_publish_ingest(ctx: object) -> dict[str, object]:
+        captured["ctx"] = ctx
+        return result
+
+    return _fake_publish_ingest
+
+
+def test_stage_populates_run_context_dag_fields_from_airflow_ctx_env_vars(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """OBS-07 gap closure (07-09): `ingest()`'s `RunContext` construction reads the 5
+    """OBS-07 gap closure (07-09): `stage()`'s `RunContext` construction reads the 5
     `AIRFLOW_CTX_*` env vars `TracingKubernetesPodOperator` injects, with `map_index`
     parsed as a genuine `int`.
     """
     monkeypatch.setenv("AIRFLOW_CTX_DAG_ID", "csv_ingest_customers")
-    monkeypatch.setenv("AIRFLOW_CTX_TASK_ID", "ingest")
+    monkeypatch.setenv("AIRFLOW_CTX_TASK_ID", "stage")
     monkeypatch.setenv("AIRFLOW_CTX_DAG_RUN_ID", "manual__2026-01-01T00:00:00+00:00")
     monkeypatch.setenv("AIRFLOW_CTX_MAP_INDEX", "3")
     monkeypatch.setenv("AIRFLOW_CTX_K8S_NAMESPACE", "etl")
@@ -324,20 +372,20 @@ def test_ingest_populates_run_context_dag_fields_from_airflow_ctx_env_vars(
     monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
     monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakeConfigRegistry)
     captured: dict[str, object] = {}
-    monkeypatch.setattr(csv_processor_cli, "run_ingest", _make_fake_run_ingest(captured))
+    monkeypatch.setattr(csv_processor_cli, "stage_ingest", _make_fake_stage_ingest(captured))
 
-    exit_code = main(["ingest", "--assignment", "s3://metadata/assignments/customers/42.json"])
+    exit_code = main(["stage", "--assignment", "s3://metadata/assignments/customers/42.json"])
 
     assert exit_code == 0
     ctx = captured["ctx"]
     assert ctx.run.dag_id == "csv_ingest_customers"
     assert ctx.run.dag_run_id == "manual__2026-01-01T00:00:00+00:00"
-    assert ctx.run.task_id == "ingest"
+    assert ctx.run.task_id == "stage"
     assert ctx.run.map_index == 3
     assert ctx.run.k8s_namespace == "etl"
 
 
-def test_ingest_leaves_map_index_none_when_airflow_ctx_map_index_is_unset(
+def test_stage_leaves_map_index_none_when_airflow_ctx_map_index_is_unset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -345,7 +393,7 @@ def test_ingest_leaves_map_index_none_when_airflow_ctx_map_index_is_unset(
     leave `RunContext.map_index` as `None`, never raise on `int(None)`.
     """
     monkeypatch.setenv("AIRFLOW_CTX_DAG_ID", "csv_ingest_customers")
-    monkeypatch.setenv("AIRFLOW_CTX_TASK_ID", "ingest")
+    monkeypatch.setenv("AIRFLOW_CTX_TASK_ID", "stage")
     monkeypatch.setenv("AIRFLOW_CTX_DAG_RUN_ID", "manual__2026-01-01T00:00:00+00:00")
     monkeypatch.setenv("AIRFLOW_CTX_K8S_NAMESPACE", "etl")
     xcom_path = tmp_path / "xcom" / "return.json"
@@ -354,10 +402,109 @@ def test_ingest_leaves_map_index_none_when_airflow_ctx_map_index_is_unset(
     monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
     monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakeConfigRegistry)
     captured: dict[str, object] = {}
-    monkeypatch.setattr(csv_processor_cli, "run_ingest", _make_fake_run_ingest(captured))
+    monkeypatch.setattr(csv_processor_cli, "stage_ingest", _make_fake_stage_ingest(captured))
 
-    exit_code = main(["ingest", "--assignment", "s3://metadata/assignments/customers/42.json"])
+    exit_code = main(["stage", "--assignment", "s3://metadata/assignments/customers/42.json"])
 
     assert exit_code == 0
     ctx = captured["ctx"]
     assert ctx.run.map_index is None
+
+
+# --- publish() (plan 08.1-11): new, lighter than stage() -- no assignment ---
+# --- document, no CsvSource, publishes every currently-STAGED run for one ---
+# --- dataset from silver into normalized via publish_ingest(). ---
+
+
+def test_publish_writes_the_publish_ingest_result_as_xcom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`main(["publish", "--dataset", "customers"])` writes `publish_ingest()`'s plain
+    dict result verbatim to the XCom path on success.
+    """
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
+    monkeypatch.setattr(csv_processor_cli, "load_config", _fake_load_config)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakePublishConfigRegistry)
+    expected_result: dict[str, object] = {
+        "status": "SUCCEEDED",
+        "runs_finalized": [7, 8],
+        "rows_loaded": 12,
+        "duration_ms": 5,
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        csv_processor_cli,
+        "publish_ingest",
+        _make_fake_publish_ingest(captured, expected_result),
+    )
+
+    exit_code = main(["publish", "--dataset", "customers"])
+
+    assert exit_code == 0
+    assert xcom_path.exists()
+    payload = json.loads(xcom_path.read_text(encoding="utf-8"))
+    assert payload == expected_result
+
+
+def test_publish_writes_a_failed_payload_for_a_dataplatformerror(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A `DataPlatformError` raised by `publish_ingest()` still results in a written
+    `{"status": "FAILED", ...}` payload (`discover()`'s own failure-payload shape,
+    not a `Receipt` -- `publish` has no single `run_id` to attribute one to), and
+    the exception still propagates through `main()`.
+    """
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
+    monkeypatch.setattr(csv_processor_cli, "load_config", _fake_load_config)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakePublishConfigRegistry)
+
+    def _fake_publish_ingest_raising(ctx: object) -> dict[str, object]:
+        del ctx
+        msg = "bad config"
+        raise ConfigurationError(msg, context={"detail": "publish failure test"})
+
+    monkeypatch.setattr(csv_processor_cli, "publish_ingest", _fake_publish_ingest_raising)
+
+    exit_code = main(["publish", "--dataset", "customers"])
+
+    assert exit_code == 1
+    assert xcom_path.exists()
+    payload = json.loads(xcom_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAILED"
+    assert payload["error_type"] == "ConfigurationError"
+
+
+def test_publish_never_constructs_a_csv_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`publish()`'s `PipelineContext` never opens a source -- `ctx.source` stays its
+    default `None`, since `publish_ingest` operates on a whole dataset's already-
+    staged runs, never a single file.
+    """
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
+    monkeypatch.setattr(csv_processor_cli, "load_config", _fake_load_config)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakePublishConfigRegistry)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        csv_processor_cli,
+        "publish_ingest",
+        _make_fake_publish_ingest(captured, {"status": "SUCCEEDED"}),
+    )
+
+    exit_code = main(["publish", "--dataset", "customers"])
+
+    assert exit_code == 0
+    ctx = captured["ctx"]
+    assert ctx.source is None
