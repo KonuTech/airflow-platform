@@ -4,8 +4,8 @@ milestone: v1.35.5
 milestone_name: milestone
 status: executing
 stopped_at: Phase 08.1 context gathered
-last_updated: "2026-08-18T15:39:09.186Z"
-last_activity: 2026-08-18 -- Phase 08.1 planning complete
+last_updated: "2026-08-18T16:35:58.687Z"
+last_activity: 2026-08-18 -- Phase 08.1 execution started
 progress:
   total_phases: 12
   completed_phases: 8
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** Every file, batch and record that enters the platform can be traced, explained, reprocessed and trusted.
-**Current focus:** Phase 9 — etl correctness — dedup, incremental, backfill & recovery
+**Current focus:** Phase 08.1 — dbt-silver-transformation-layer-dbt-postgres-adapter-owns-br
 
 ## Current Position
 
-Phase: 08.1
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-08-18 -- Phase 08.1 planning complete
+Phase: 08.1 (dbt-silver-transformation-layer-dbt-postgres-adapter-owns-br) — EXECUTING
+Plan: 1 of 13
+Status: Executing Phase 08.1
+Last activity: 2026-08-18 -- Phase 08.1 execution started
 
 Progress: [██████████] 100%
 
