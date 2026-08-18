@@ -1,4 +1,6 @@
-"""normalized.orders / normalized.customers — gold physical modeling via indexes, not partitioning (D-13).
+"""normalized.orders / normalized.customers — gold physical modeling via indexes, not partitioning.
+
+D-13.
 
 D-13 asked for "partitioning and indexing" on gold. This migration delivers
 indexing only, and the reasoning belongs here — the migration every future

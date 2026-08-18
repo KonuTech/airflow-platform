@@ -17,20 +17,19 @@
   single first run but broke on a second (incremental) run:
 
   1. `dataset_name` (a plain string, e.g. 'customers'), not a pre-resolved
-     `dataset_id` integer, is accepted here -- `dataset_id` is resolved by
-     a raw SQL scalar subquery against `meta.datasets` INSIDE this macro's
-     own INSERT, evaluated at hook-EXECUTION time. **Known gap, not fixed
-     by this plan** (file scope is the dbt project only, not new
-     migrations): `dbt_app` currently has `USAGE` on schema `meta`
-     (migration 0024) and `SELECT, INSERT` on `meta.dedup_audit`/
-     `meta.dedup_decisions` specifically, but no `SELECT` grant on
-     `meta.datasets` itself -- a live `dbt build` running as `dbt_app` will
-     fail this subquery with a permission error until a follow-up migration
-     adds `GRANT SELECT ON meta.datasets TO dbt_app`. This plan's own
-     integration tests (`tests/integration/test_dbt_*.py`) run `dbt build`
-     against the testcontainers superuser DSN, not `dbt_app`, so they do
-     not exercise this gap -- tracked in this plan's own SUMMARY.md, not
-     silently left undocumented.
+     `dataset_id` integer, is accepted here -- `dataset_id` is resolved via
+     `meta.dataset_id_for_name(text)`, a `SECURITY DEFINER` function
+     (migration 0028) called INSIDE this macro's own INSERT, evaluated at
+     hook-EXECUTION time. A direct `select dataset_id from meta.datasets
+     where dataset_name = ...` subquery was tried first and rejected: it
+     needs `SELECT` on `meta.datasets`, which fails
+     `test_dbt_app_role_is_scoped_correctly` (D-08's explicit boundary --
+     `dbt_app` gets zero grant on `meta.*` beyond `dedup_audit`/
+     `dedup_decisions`, 08.1-01-PLAN.md) and would expose every column of
+     `meta.datasets`, not just the one mapping needed. The function narrows
+     the interface to exactly `dataset_name -> dataset_id`; `dbt_app` holds
+     `EXECUTE` on it, never `SELECT` on the table, so D-08's boundary test
+     is unaffected.
 
   2. `source_schema`/`source_identifier`/`target_schema`/`target_identifier`
      are all plain STRINGS (e.g. 'staging', 'customers', 'silver'), never a
@@ -142,7 +141,7 @@ audit_insert as (
         records_received, records_accepted, records_rejected, records_deduplicated
     )
     select
-        (select dataset_id from meta.datasets where dataset_name = '{{ dataset_name }}'),
+        meta.dataset_id_for_name('{{ dataset_name }}'),
         '{{ invocation_id }}',
         '{{ target_identifier }}',
         (select min(_run_id) from new_bronze),
