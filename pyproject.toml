@@ -151,6 +151,11 @@ extend-select = ["D417"]
 # are Alembic's own `<rev>_<slug>.py` convention (leading digits); ruff's N999
 # does not fire on non-package modules, so no separate carve-out is needed for it.
 "migrations/**"   = ["INP001"]
+# docker/dbt/resolve_secrets.py is a standalone entrypoint script copied
+# directly into the dbt image (docker/dbt/Dockerfile), never imported as
+# part of any package -- same reasoning as airflow/dags/**/scripts/**/
+# migrations/** above.
+"docker/dbt/resolve_secrets.py" = ["INP001"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
