@@ -91,14 +91,30 @@ class SourceConfig(BaseModel):
 
 
 class DeduplicationConfig(BaseModel):
-    """How a dataset's deduplication stage collapses duplicate records.
+    """Documents a dataset's dedup tie-break rule; ``keys`` alone drives Python validation.
+
+    No Python dispatch registry for dedup strategies exists in this
+    codebase, and per D-07 (``08.1-CONTEXT.md``) never will: dbt's own model SQL + its
+    ``incremental_strategy``/``unique_key`` config IS the strategy
+    interface now (each dataset's ``dbt/models/silver/silver_<dataset>.sql``
+    model, plan 08.1-08). ``strategy`` and ``order_by`` are retained here as
+    human-readable documentation of the dataset's dedup tie-break rule for
+    whoever authors or reviews that dbt model -- they drive nothing in
+    Python anymore. ``keys`` is the one field still genuinely consumed in
+    Python: ``DatasetConfig``'s own
+    ``_check_deduplication_keys_are_business_key_columns`` model validator
+    reads it to confirm every named key is also declared
+    ``business_key: true`` in ``columns:``.
 
     Attributes:
-        strategy: Deduplication strategy key resolved through
-            ``DEDUP_REGISTRY``, e.g. ``"business_key_latest"``.
+        strategy: Human-readable dedup strategy label documented for the
+            dataset's dbt model, e.g. ``"business_key_latest"`` -- drives no
+            Python behavior.
         keys: Business-key column names that identify one logical record.
-        order_by: Column expressions (e.g. ``"event_ts desc"``) that decide
-            which duplicate wins.
+            Consumed by ``DatasetConfig._check_deduplication_keys_are_business_key_columns``.
+        order_by: Column expressions (e.g. ``"event_ts desc"``) documenting
+            which duplicate wins -- drives no Python behavior; the real
+            tie-break lives in the dbt model's own SQL.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
