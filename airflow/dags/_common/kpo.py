@@ -51,6 +51,10 @@ def common_kpo_kwargs(
     *,
     resources: k8s.V1ResourceRequirements,
     extra_env_vars: list[k8s.V1EnvVar] | None = None,
+    service_account_name: str = "csv-processor",
+    image_variable: str = "csv_processor_image",
+    vault_k8s_role: str = _VAULT_K8S_ROLE,
+    include_dataplat_credentials: bool = True,
 ) -> dict[str, object]:
     """Build the ``KubernetesPodOperator`` kwargs every task pod in this phase shares.
 
@@ -69,7 +73,7 @@ def common_kpo_kwargs(
             a lighter profile for ``discover`` and a heavier one for
             ``ingest`` (04-07-PLAN.md Interfaces) -- this function does not
             choose a default, so every call site is explicit (T-04-03).
-        extra_env_vars: Appended after the six shared env vars below.
+        extra_env_vars: Appended after the shared env vars below.
             ``None`` (the default) adds nothing -- ``discover`` never passes
             this. ``ingest`` uses it for
             ``DATAPLAT_HEARTBEAT_INTERVAL_SECONDS`` (discovered live, 04-08
@@ -78,18 +82,57 @@ def common_kpo_kwargs(
             proof could never observe a heartbeat through the real pod path
             -- `dataplat.pipeline.run.run_ingest`'s own default is
             unchanged; only this one task's env shrinks the interval).
+        service_account_name: Defaults to today's exact ``"csv-processor"``
+            value, so ``discover``/``stage``'s call sites need zero changes.
+            Plan 08.1-12 introduces the one caller that overrides this:
+            ``dbt_build`` runs as its own ``"dbt"`` ServiceAccount (plan
+            08.1-03), never ``csv-processor``'s, so its pod's Kubernetes-auth
+            identity can only ever resolve ``dbt``'s own narrow Vault grants.
+        image_variable: Name of the Airflow Variable this function reads via
+            ``Variable.get(...)`` for the pod's image. Defaults to today's
+            exact ``"csv_processor_image"``. Plan 08.1-12's ``dbt_build``
+            overrides this to ``"dbt_image"`` (plan 08.1-02) -- the dbt
+            image is a separate build, never the csv-processor one.
+        vault_k8s_role: The ``VAULT_K8S_ROLE`` env var's value -- which Vault
+            Kubernetes-auth role ``resolve_secrets.py``/the pod's own
+            ``hvac`` login authenticates as. Defaults to today's exact
+            ``"csv-processor"`` value (via the ``_VAULT_K8S_ROLE`` module
+            constant). Plan 08.1-12's ``dbt_build`` overrides this to
+            ``"dbt"`` (plan 08.1-03) so it authenticates as its own
+            least-privilege Vault identity, never csv-processor's.
+        include_dataplat_credentials: When ``True`` (the default, matching
+            every call site before plan 08.1-12), includes the four
+            ``DATAPLAT_DB_DSN``/``DATAPLAT_S3_*`` credential env vars. Plan
+            08.1-12's ``dbt_build`` passes ``False``: the dbt image's own
+            ``ENTRYPOINT`` resolves its own ``etl/dbt-db`` credential
+            directly, and never needs (or should be able to attempt to
+            resolve) the ``csv-processor`` credential set at all -- a
+            structural, not merely conventional, privilege boundary
+            (T-08.1-28). ``VAULT_ADDR``/``VAULT_K8S_ROLE``/
+            ``OTEL_EXPORTER_OTLP_ENDPOINT`` stay unconditional regardless:
+            every pod this function serves needs Vault + tracing.
 
     Returns:
         A kwargs mapping suitable for ``KubernetesPodOperator(**kwargs)`` or
         ``KubernetesPodOperator.partial(**kwargs)``, covering everything
-        that does NOT vary between ``discover`` and ``ingest``
-        (``task_id``, ``cmds``, ``arguments`` and ``retries`` stay
-        per-call-site).
+        that does NOT vary between ``discover``/``stage``/``dbt_build``/
+        ``publish`` (``task_id``, ``cmds``, ``arguments`` and ``retries``
+        stay per-call-site).
     """
+    dataplat_credential_env_vars = (
+        [
+            k8s.V1EnvVar(name="DATAPLAT_DB_DSN", value="vault://etl/analytics-db#dsn"),
+            k8s.V1EnvVar(name="DATAPLAT_S3_ACCESS_KEY", value="vault://etl/minio#access_key"),
+            k8s.V1EnvVar(name="DATAPLAT_S3_SECRET_KEY", value="vault://etl/minio#secret_key"),
+            k8s.V1EnvVar(name="DATAPLAT_S3_ENDPOINT_URL", value=_S3_ENDPOINT_URL),
+        ]
+        if include_dataplat_credentials
+        else []
+    )
     return {
         "namespace": "etl",
-        "service_account_name": "csv-processor",
-        "image": Variable.get("csv_processor_image"),
+        "service_account_name": service_account_name,
+        "image": Variable.get(image_variable),
         "do_xcom_push": True,
         # Debug session airflow-scheduler-stuck-tasks (2026-08-16): was
         # "delete_succeeded_pod" (keep failed pods for debugging). Confirmed
@@ -111,12 +154,9 @@ def common_kpo_kwargs(
         "get_logs": True,
         "container_resources": resources,
         "env_vars": [
-            k8s.V1EnvVar(name="DATAPLAT_DB_DSN", value="vault://etl/analytics-db#dsn"),
-            k8s.V1EnvVar(name="DATAPLAT_S3_ACCESS_KEY", value="vault://etl/minio#access_key"),
-            k8s.V1EnvVar(name="DATAPLAT_S3_SECRET_KEY", value="vault://etl/minio#secret_key"),
-            k8s.V1EnvVar(name="DATAPLAT_S3_ENDPOINT_URL", value=_S3_ENDPOINT_URL),
+            *dataplat_credential_env_vars,
             k8s.V1EnvVar(name="VAULT_ADDR", value=_VAULT_ADDR),
-            k8s.V1EnvVar(name="VAULT_K8S_ROLE", value=_VAULT_K8S_ROLE),
+            k8s.V1EnvVar(name="VAULT_K8S_ROLE", value=vault_k8s_role),
             k8s.V1EnvVar(name="OTEL_EXPORTER_OTLP_ENDPOINT", value=_OTEL_COLLECTOR_ENDPOINT),
             *(extra_env_vars or []),
         ],
