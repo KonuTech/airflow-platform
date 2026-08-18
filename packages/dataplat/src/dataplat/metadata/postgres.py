@@ -618,7 +618,7 @@ class PostgresMetadataRepository(MetadataRepository):
                    rows_loaded = %s,
                    duration_ms = %s,
                    report_uri = %s,
-                   schema_version_id = %s
+                   schema_version_id = COALESCE(%s, schema_version_id)
              WHERE run_id = %s
             """,
             (finished_at, rows_loaded, duration_ms, report_uri, schema_version_id, run_id),

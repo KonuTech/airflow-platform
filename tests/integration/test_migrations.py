@@ -460,6 +460,20 @@ def test_silver_customer_id_has_a_real_unique_constraint(migrated_dsn: str) -> N
             )
         conn.rollback()
 
+        # `silver.customers` is a single, session-shared table with no
+        # dataset_id scoping, and `MergePublisher.publish()` (`merge.py`)
+        # reads it in full, unconditionally -- a probe row left behind here
+        # would otherwise permanently pollute every real publish_ingest()
+        # call for the rest of this test session (any other file's own
+        # real, unfiltered `silver.customers` read would try to publish
+        # this non-numeric `customer_id` and fail). The first INSERT above
+        # already committed, so this cleanup needs its own explicit commit.
+        conn.execute(
+            "DELETE FROM silver.customers WHERE customer_id = %s",
+            ("dup-customer-1",),
+        )
+        conn.commit()
+
 
 def test_silver_order_id_has_a_real_unique_constraint(migrated_dsn: str) -> None:
     """D-14: `silver.orders.order_id` carries a real UNIQUE constraint, not just dbt logic."""
@@ -492,6 +506,15 @@ def test_silver_order_id_has_a_real_unique_constraint(migrated_dsn: str) -> None
                 ("dup-order-1", run_id, file_id, batch_id, b"hash-2"),
             )
         conn.rollback()
+
+        # See test_silver_customer_id_has_a_real_unique_constraint's own
+        # cleanup comment above -- `silver.orders` is the same
+        # session-shared, unscoped shape.
+        conn.execute(
+            "DELETE FROM silver.orders WHERE order_id = %s",
+            ("dup-order-1",),
+        )
+        conn.commit()
 
 
 def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:

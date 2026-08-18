@@ -119,6 +119,49 @@ def postgres_dsn() -> Iterator[str]:
         yield dsn
 
 
+@pytest.fixture(autouse=True)
+def _clean_up_non_numeric_silver_business_keys(
+    request: pytest.FixtureRequest,
+) -> Iterator[None]:
+    """Defend the shared `silver.customers`/`silver.orders` tables' one invariant every real
+    `MergePublisher`/`OrdersMergePublisher` call depends on: every row's business key must
+    cast to the gold table's own `integer` business-key column
+    (`normalized.customers.customer_id`/`normalized.orders.order_id`, migrations 0005/0016).
+
+    `silver.customers`/`silver.orders` are single, SESSION-scoped tables shared across the
+    WHOLE `tests/integration/` collection (`migrated_dsn`'s own docstring) with no per-test
+    isolation and no dataset_id scoping -- and `merge.py`'s/`merge_orders.py`'s own
+    `_PUBLISH_SQL` reads each table in FULL, unconditionally, with no `WHERE` clause at all
+    (`merge.py`'s own module docstring: "deliberately single-dataset for this phase"). A
+    handful of `tests/integration/test_dbt_*.py`'s own `dbt`-marked tests deliberately seed
+    non-numeric business keys (e.g. `"A1"`, `"D1"`, `"I1"`) via a REAL `dbt build`, to
+    exercise dedup/incremental logic in isolation from gold-layer concerns -- entirely
+    legitimate for their own purposes, but such a row, left behind, would otherwise poison
+    EVERY subsequent real publish for the rest of the session: a single non-castable
+    `customer_id`/`order_id` aborts the whole `INSERT ... SELECT` statement, not merely the
+    row that caused it.
+
+    Only actually touches the database for `dbt`-marked tests: cheap for every other test in
+    this directory (a `get_closest_marker` check, nothing else), and `test_docker_image.py`/
+    `test_objectstore.py`/`test_metrics_otlp.py`/`test_dbt_docker_image.py` -- none of which
+    request `migrated_dsn` at all -- never pay the cost of forcing that fixture's own
+    container-start-plus-migrate chain into existence just for this cleanup.
+    """
+    # Resolved eagerly, before `yield`, when it will be needed -- pytest
+    # deprecates `getfixturevalue` calls made during teardown (after
+    # `yield`), so the marker check gates WHETHER this ever touches the
+    # database, but the resolution itself always happens at setup time.
+    migrated_dsn: str | None = None
+    if request.node.get_closest_marker("dbt") is not None:
+        migrated_dsn = request.getfixturevalue("migrated_dsn")
+    yield
+    if migrated_dsn is None:
+        return
+    with psycopg.connect(migrated_dsn, autocommit=True) as conn:
+        conn.execute(r"DELETE FROM silver.customers WHERE customer_id !~ '^[0-9]+$'")
+        conn.execute(r"DELETE FROM silver.orders WHERE order_id !~ '^[0-9]+$'")
+
+
 @pytest.fixture(scope="session")
 def run_migrations() -> Callable[[str], None]:
     """A session-scoped `run_migrations(dsn)` callable: `alembic upgrade head`, in-process.

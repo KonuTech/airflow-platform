@@ -687,13 +687,25 @@ class MetadataRepository(Protocol):
                 value, not a workaround.
             schema_version_id: The `meta.schema_versions` row this run's
                 file resolved to (SCHEMA-03/06), from `StagingResult.
-                schema_version_id`. `None` when the `Source` never resolved
-                one (no `dataset_id` wired, or a non-schema-versioned
-                `Source` implementation) -- the column is nullable
-                (migration 0004, closed by migration 0009's FK), so this is
-                a real, intended value for that case, not a workaround.
-                Defaults to `None` so a caller pre-dating this parameter
-                keeps compiling unchanged.
+                schema_version_id`. `None` means "this caller has no new
+                value to set" -- the SQL's own `COALESCE(%s,
+                schema_version_id)` leaves whatever is already recorded
+                untouched in that case, rather than clobbering it back to
+                `NULL`. This matters post-08.1-10: `stage_ingest` (not
+                `publish_ingest`) is the only place a value is ever
+                resolved (`StagingResult.schema_version_id`, from
+                `Source.open()`), and it already writes that value via its
+                own `update_ingestion_run_status` call, well before
+                `publish_ingest`'s own `finalize_publication` call ever
+                runs -- `publish_ingest` always passes `None` here (it has
+                no `Source`/`StagingResult` of its own, module docstring),
+                and must not silently erase what staging already recorded.
+                A file that genuinely never resolves a schema version at
+                all (no `dataset_id` wired, or a non-schema-versioned
+                `Source` implementation) simply stays `NULL` throughout --
+                `COALESCE(NULL, NULL)` is still `NULL`. Defaults to `None`
+                so a caller pre-dating this parameter keeps compiling
+                unchanged.
         """
         ...
 
