@@ -182,6 +182,11 @@ class _FakeFileRow:
 class _FakeRunRow:
     run_id: int
     status: str
+    # 08.1-07 (D-18): tracked so find_latest_succeeded_run_for_file below can
+    # look a prior SUCCEEDED run up by file_id, mirroring the real
+    # PostgresMetadataRepository's own SELECT.
+    file_id: int | None = None
+    replay_of_run_id: int | None = None
 
 
 @dataclass
@@ -255,16 +260,31 @@ class _FakeMetadataRepository:
         processor_image_digest: str,
         file_id: int | None = None,
         batch_id: int | None = None,
+        replay_of_run_id: int | None = None,
     ) -> tuple[int, str]:
         del dataset_id, config_version_id, processor_version, processor_image_digest
-        del file_id, batch_id
+        del batch_id
         existing = self.runs_by_key.get(idempotency_key)
         if existing is not None:
             return existing.run_id, existing.status
         run_id = self._next_run_id
         self._next_run_id += 1
-        self.runs_by_key[idempotency_key] = _FakeRunRow(run_id=run_id, status="PENDING")
+        self.runs_by_key[idempotency_key] = _FakeRunRow(
+            run_id=run_id,
+            status="PENDING",
+            file_id=file_id,
+            replay_of_run_id=replay_of_run_id,
+        )
         return run_id, "PENDING"
+
+    def find_latest_succeeded_run_for_file(self, *, file_id: int) -> int | None:
+        """08.1-07 (D-18): mirrors the real repository's `ORDER BY run_id DESC LIMIT 1`."""
+        matches = [
+            row.run_id
+            for row in self.runs_by_key.values()
+            if row.file_id == file_id and row.status == "SUCCEEDED"
+        ]
+        return max(matches) if matches else None
 
     def force_run_status(self, run_id: int, status: str) -> None:
         """Test-only helper: force one run's status, simulating a completed prior attempt."""

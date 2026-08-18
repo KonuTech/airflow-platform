@@ -33,6 +33,19 @@ empty string for this term rather than blocking discovery -- ``target_partition`
 ``policy_digest`` remain unpopulated, still future-phase territory this
 plan does not touch.
 
+This plan (08.1-07, D-18) EXTENDS the formula a second time (append-only --
+the first five terms are never reordered or replaced) by appending a real
+``pipeline_version`` term, ``_PIPELINE_VERSION`` below: ``idempotency_key =
+sha256(f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}|
+{schema_version}|{pipeline_version}").hexdigest()``. Before creating a run
+under this extended key, ``discover_files`` looks up
+(``MetadataRepository.find_latest_succeeded_run_for_file``) whether an
+OLDER-formula run for the SAME file already ``SUCCEEDED``, and if so passes
+its ``run_id`` as ``replay_of_run_id`` on the new row -- this is what makes
+a historical, already-``SUCCEEDED`` file genuinely re-claimable under a new
+pipeline shape, rather than permanently invisible to it (D-16's backfill,
+plan 08.1-13, depends on this).
+
 ``meta.files.business_date`` is never populated here, and this module reads
 no wall-clock time and no Airflow scheduling-interval value anywhere
 (README §67 determinism) -- this plan's own acceptance criteria greps this
@@ -74,6 +87,20 @@ if TYPE_CHECKING:
 # CONFIG_HASH_VERSION's precedent) -- every meta.files.hash_version value
 # this module writes traces back to this constant.
 _FILE_HASH_VERSION = 1
+
+# Bumping this constant is the only sanctioned way to signal a change to the
+# PIPELINE SHAPE this dataset's runs execute under (D-18, RESEARCH.md
+# Pitfall 1) -- distinct from a change to the idempotency-key HASH RECIPE
+# itself (_FILE_HASH_VERSION's own job above). Its implicit value was "1"
+# for every run this module has ever created before this phase's 3-stage
+# (discover/stage/publish) pipeline split; this phase bumps it to "2".
+# Every meta.ingestion_runs.idempotency_key this module writes now includes
+# this value as its sixth, append-only term -- a file already SUCCEEDED
+# under the OLD ("1") formula is thereby genuinely re-claimable under the
+# NEW pipeline, rather than permanently invisible to it (see
+# find_latest_succeeded_run_for_file's own docstring for the replay half of
+# this mechanism).
+_PIPELINE_VERSION = "2"
 
 # Bytes read per streaming-hash chunk -- bounded memory (INCR-08/README
 # §39), the same "never load the whole file into memory" discipline
@@ -254,6 +281,12 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
     this function once per `MultipartGroup` its own `group_multipart_units`
     call produced.
 
+    D-18 (this plan, 08.1-07): immediately before allocating the group's
+    run, looks up whether an OLDER-formula run for the group's FIRST part
+    (`parts[0].file_id`) already `SUCCEEDED`, and passes it as
+    `replay_of_run_id` on the newly allocated row -- see the module
+    docstring's own idempotency-key formula section for the full mechanism.
+
     Args:
         metadata: Typed CRUD surface over `meta.files`/`meta.batches`/
             `meta.batch_files`/`meta.ingestion_runs`.
@@ -353,11 +386,18 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
     # Pitfall 5: APPENDS the schema-version term -- never reorders or
     # replaces the first four (see this module's own docstring). Substitutes
     # ONLY the content-hash term with the group's own order-sensitive
-    # combined hash.
+    # combined hash. D-18 (this plan, 08.1-07): APPENDS a sixth,
+    # pipeline_version term.
     idempotency_key = hashlib.sha256(
         f"{dataset_name}|{group_content_sha256_hex}|{config_hash}|{processor_image}|"
-        f"{schema_version_term}".encode(),
+        f"{schema_version_term}|{_PIPELINE_VERSION}".encode(),
     ).hexdigest()
+
+    # D-18: discover whether an OLDER-formula run for this group's FIRST
+    # part already SUCCEEDED, before creating a new run under the extended
+    # key above -- so the new row can carry replay_of_run_id pointing back
+    # at it.
+    replay_of_run_id = metadata.find_latest_succeeded_run_for_file(file_id=parts[0].file_id)
 
     run_id, status = metadata.get_or_create_ingestion_run(
         idempotency_key=idempotency_key,
@@ -367,6 +407,7 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
         config_version_id=config_version_id,
         processor_version=processor_version,
         processor_image_digest=processor_image,
+        replay_of_run_id=replay_of_run_id,
     )
 
     if status == "SUCCEEDED":
@@ -447,6 +488,12 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
     `_process_multipart_group` was added alongside it -- NO behavior change
     from before this extraction.
 
+    D-18 (this plan, 08.1-07): immediately before allocating this object's
+    run, looks up whether an OLDER-formula run for THIS object's `file_id`
+    already `SUCCEEDED`, and passes it as `replay_of_run_id` on the newly
+    allocated row -- see the module docstring's own idempotency-key formula
+    section for the full mechanism.
+
     Args:
         metadata: Typed CRUD surface over `meta.files`/`meta.batches`/
             `meta.batch_files`/`meta.ingestion_runs`.
@@ -524,11 +571,17 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
     metadata.link_batch_file(batch_id=batch_id, file_id=file_id, sequence_no=1)
 
     # Pitfall 5: APPENDS the schema-version term -- never reorders or
-    # replaces the first four (see this module's own docstring).
+    # replaces the first four (see this module's own docstring). D-18 (this
+    # plan, 08.1-07): APPENDS a sixth, pipeline_version term.
     idempotency_key = hashlib.sha256(
         f"{dataset_name}|{content_sha256_hex}|{config_hash}|{processor_image}|"
-        f"{schema_version_term}".encode(),
+        f"{schema_version_term}|{_PIPELINE_VERSION}".encode(),
     ).hexdigest()
+
+    # D-18: discover whether an OLDER-formula run for this object's file_id
+    # already SUCCEEDED, before creating a new run under the extended key
+    # above -- so the new row can carry replay_of_run_id pointing back at it.
+    replay_of_run_id = metadata.find_latest_succeeded_run_for_file(file_id=file_id)
 
     run_id, status = metadata.get_or_create_ingestion_run(
         idempotency_key=idempotency_key,
@@ -538,6 +591,7 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
         config_version_id=config_version_id,
         processor_version=processor_version,
         processor_image_digest=processor_image,
+        replay_of_run_id=replay_of_run_id,
     )
 
     if status == "SUCCEEDED":
