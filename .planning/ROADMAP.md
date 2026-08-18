@@ -511,7 +511,7 @@ Plans:
 ### Phase 08.1: dbt Silver Transformation Layer (INSERTED)
 
 **Goal:** A dbt (Postgres adapter) bronze-to-silver transformation stage exists, producing a persisted, deduplicated silver schema with correct late-arriving-event handling — while the existing Python `MergePublisher` continues to own the atomic silver-to-gold publish inside the META-03 transaction, unchanged
-**Requirements**: TBD (planning discussion needed — likely reshapes DEDUP-01..04 as originally mapped to Phase 9)
+**Requirements**: DEDUP-01, DEDUP-02, DEDUP-03, DEDUP-04, INCR-03, INCR-04, QUAL-10 (remapped from Phase 9 per `08.1-RESEARCH.md`'s confirmed mapping; LOAD-09 and OBS-07 are extended, not reassigned — they stay Phase 4/Phase 7, Complete)
 **Depends on:** Phase 8
 **Plans:** 0 plans
 
@@ -525,7 +525,7 @@ Plans:
 **Goal**: The platform processes only what is new, never loses late data, recovers from partial failure without reading logs, and can prove target matches source
 **Mode:** mvp
 **Depends on**: Phase 8
-**Requirements**: DEDUP-01, DEDUP-02, DEDUP-03, DEDUP-04, INCR-01, INCR-02, INCR-03, INCR-04, INCR-05, INCR-06, LOAD-06, VALID-05, VALID-06, QUAL-10, QUAL-11
+**Requirements**: INCR-01, INCR-02, INCR-05, INCR-06, LOAD-06, VALID-05, VALID-06, QUAL-11 (DEDUP-01..04, INCR-03, INCR-04, QUAL-10 remapped to Phase 08.1 — see `08.1-RESEARCH.md`)
 **Success Criteria** (what must be TRUE):
 
   1. The same records delivered again — within one file, across files, and across batches — result in one stored row per business key, with `meta.dedup_audit` explaining every removal by strategy, count and reason.
