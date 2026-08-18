@@ -73,9 +73,9 @@ The target architecture is:
 │   Airflow   │          │    MinIO    │             │ PostgreSQL      │
 │             │          │             │             │ Analytical DB   │
 │ Scheduler   │          │ Data Lake   │             │                 │
-│ API Server  │          │ S3 API      │             │ staging         │
-│ DAG Proc.   │          │             │             │ warehouse       │
-│ Triggerer   │          │             │             │ analytics       │
+│ API Server  │          │ S3 API      │             │ staging (bronze)│
+│ DAG Proc.   │          │             │             │ silver (dbt)    │
+│ Triggerer   │          │             │             │ warehouse (gold)│
 └──────┬──────┘          └──────▲──────┘             └────────▲────────┘
        │                        │                             │
        │ TaskFlow /             │                             │
@@ -100,6 +100,11 @@ The target architecture is:
                     ▼             ▼             ▼
                  Airflow      ETL Pods       CI/CD
 ```
+
+Inside the "PostgreSQL / Analytical DB" box shown above, dbt (Postgres adapter) performs the
+bronze-to-silver transformation -- cleaning, deduplication, and late-arriving-event resolution --
+landing in a persisted silver schema. Gold publish remains the responsibility of the existing
+Python MergePublisher, unchanged. See section 36 for the full pipeline.
 
 ---
 
@@ -174,16 +179,21 @@ Airflow PostgreSQL
 
 A completely separate PostgreSQL deployment for ETL and analytical workloads.
 
-It stores:
+It stores three schema layers, each with a distinct owner:
 
-* staging data
-* normalized data
-* warehouse data
+* **staging/bronze** -- raw, append-only landing tables; owned by the Python CSV Processor
+* **silver** -- cleaned, deduplicated, late-arriving-event-resolved tables; owned by dbt (Postgres
+  adapter), a new schema introduced for this pipeline
+* **warehouse/gold** -- normalized, business-ready tables including SCD dimensions; owned
+  exclusively by the Python MergePublisher via `INSERT ... ON CONFLICT` inside the single META-03
+  transaction, never via dbt's `merge` incremental strategy
+
+It also stores, unchanged and Python/meta-schema-owned:
+
 * analytical tables
 * ingestion metadata
 * data-quality metadata
 * schema metadata
-* SCD dimensions
 
 Architecture:
 
@@ -191,10 +201,26 @@ Architecture:
 CSV Processor
       │
       ▼
-Analytical PostgreSQL
+Analytical PostgreSQL (staging/bronze)
+      │
+      ▼
+dbt (Postgres adapter, bronze-to-silver)
+      │
+      ▼
+Analytical PostgreSQL (silver)
+      │
+      ▼
+Python MergePublisher (silver-to-gold, INSERT ... ON CONFLICT)
+      │
+      ▼
+Analytical PostgreSQL (warehouse/gold)
 ```
 
 The separation must remain clear even if both databases run inside the same Kubernetes cluster.
+Within the Analytical PostgreSQL instance itself, the bronze/staging, silver and warehouse/gold
+layers are separate schemas with separate role grants -- dbt's role gets read access to staging
+and write access only to silver; gold writes remain exclusively the Python publisher's (see
+section 81.6, least privilege).
 
 ---
 
@@ -383,17 +409,29 @@ Data Quality Validation
 Normalization
      │
      ▼
-Deduplication
-     │
-     ▼
-Transactional Load
+Transactional Load (into PostgreSQL staging/bronze)
      │
      ├───────────────┐
      ▼               ▼
    VALID           INVALID
      │               │
      ▼               ▼
-PostgreSQL       Quarantine
+PostgreSQL (staging) Quarantine
+     │
+     ▼
+dbt (Postgres adapter): bronze -> silver
+(cleaning, deduplication, late-arriving-event resolution)
+     │
+     ▼
+PostgreSQL (silver)
+     │
+     ▼
+Python MergePublisher: silver -> gold
+(atomic publication -- INSERT ... ON CONFLICT, single
+transaction with watermark + run-status)
+     │
+     ▼
+PostgreSQL (warehouse/gold)
 ```
 
 ---
@@ -972,6 +1010,12 @@ A CSV may represent a batch for a particular timestamp or processing window.
 
 Operational issues may cause records to appear in multiple batches.
 
+Cross-file, cross-batch and cross-run deduplication (the strategies enumerated below) is
+implemented as dbt (Postgres adapter) models operating on the persisted staging/bronze schema and
+landing in silver -- not as an in-memory Python step before the transactional load (see section
+36). Within-single-CSV structural checks may still happen in the Python CSV processor ahead of the
+load.
+
 Deduplication must therefore work:
 
 * inside a single CSV
@@ -1005,7 +1049,8 @@ Prefer one source over another.
 
 Use batch metadata and processing windows.
 
-The strategy must be dataset-specific.
+The strategy must be dataset-specific -- it remains dataset-specific and is expressed as dbt model
+configuration.
 
 Never assume `DISTINCT` is sufficient.
 
@@ -1024,6 +1069,10 @@ Track:
 * records deduplicated
 * deduplication strategy
 * duplicate count
+
+Deduplication auditability for the dbt-owned silver stage is tracked the same way as for the
+Python-owned bronze and gold stages -- via the `meta.dedup_audit` table (already designed, section
+65) -- so lineage does not stop at dbt's boundary (see section 83, Data Lineage).
 
 Where practical, retain enough information to determine why a record was removed.
 
@@ -1159,6 +1208,12 @@ Also handle records arriving in a different order from their event timestamps.
 
 Do not automatically discard late or out-of-order records.
 
+Bronze ingestion (file discovery, validation, transactional load into staging) treats every
+arriving file the same regardless of its event timestamp -- late/out-of-order records are never
+rejected at this layer. Resolution of late-arriving and out-of-order events into correct
+historical state happens in the dbt bronze-to-silver stage (section 36), using the record's
+event/business timestamp, not ingestion time.
+
 ---
 
 # 33. Backfilling
@@ -1238,6 +1293,13 @@ Consider:
 
 A failed load must not leave an ambiguous partially committed dataset.
 
+The atomic silver-to-gold publish (section 36) never uses SQL `MERGE` -- including dbt-postgres's
+`merge` incremental strategy -- because of a documented, verified PostgreSQL concurrency bug
+(BUG #18279) where two concurrent `MERGE` transactions can each decide independently that no
+matching row exists and both attempt an insert. The existing Python MergePublisher uses
+`pg_advisory_xact_lock` + `INSERT ... ON CONFLICT` instead, inside the single transaction that
+also advances the watermark and run status (section 28).
+
 ---
 
 # 36. Staging and Atomic Publication
@@ -1245,24 +1307,25 @@ A failed load must not leave an ambiguous partially committed dataset.
 For important loads:
 
 ```text
-MinIO
+MinIO (raw/bronze, immutable)
   ↓
-staging
+CSV Processor: discovery, validation, normalization
   ↓
-validation
+PostgreSQL staging table (bronze)
   ↓
-transformation
+dbt (Postgres adapter): bronze -> silver -- cleaning, deduplication, late-arriving-event
+resolution
   ↓
-PostgreSQL staging table
+PostgreSQL silver schema (persisted)
   ↓
-validation
+Python MergePublisher: silver -> gold -- atomic publication (pg_advisory_xact_lock + INSERT ...
+ON CONFLICT, single transaction with watermark + run-status)
   ↓
-atomic publication
-  ↓
-warehouse/target table
+warehouse/target table (gold)
 ```
 
-Consumers should not see partially loaded datasets.
+Consumers should not see partially loaded datasets -- true at every layer boundary: bronze/staging,
+silver, and warehouse/gold.
 
 ---
 
@@ -1649,6 +1712,15 @@ customer_id | country | valid_from | valid_to   | is_current
 123         | DE      | 2026-08-11 | NULL       | true
 ```
 
+**Implementation note:** SCD Type 2 (and Types 0/1) remain entirely Python-owned, even though dbt
+(Postgres adapter) owns bronze-to-silver transformation elsewhere in this pipeline (section 36).
+`dbt snapshot` was evaluated for SCD Type 2 and explicitly rejected: dbt's own documentation states
+snapshots are not a replacement for CDC or event streaming -- they re-diff a source table's current
+state rather than consuming an ordered CDC event stream with explicit operation/sequence/
+transaction-ID semantics (sections 29, 30), which is what late-arriving SCD corrections (section
+58) require. SCD2's historized dimension tables also carry the same single-transaction requirement
+as gold publish (sections 35, 36, META-03) that keeps dbt out of the gold layer generally.
+
 ---
 
 # 55. SCD Change Detection
@@ -1732,6 +1804,9 @@ Aug 15 → late record says PL from Aug 5
 
 The system must support correcting historical validity intervals according to dataset policy.
 
+See the implementation note in section 54 -- historical corrections here are Python-owned; `dbt
+snapshot` was evaluated and rejected for this exact scenario.
+
 ---
 
 # 59. SCD + CDC
@@ -1806,17 +1881,17 @@ Raw source data should remain immutable where practical.
 Prefer:
 
 ```text
-RAW
+RAW (MinIO, immutable)
  │
  │ immutable
  ▼
-STAGING
+STAGING (PostgreSQL, bronze -- CSV Processor)
  │
  ▼
-NORMALIZED
+SILVER (PostgreSQL, dbt -- cleaning, dedup, late-arriving resolution)
  │
  ▼
-WAREHOUSE
+WAREHOUSE (PostgreSQL, gold -- Python MergePublisher)
 ```
 
 Do not overwrite original source files because of processing failures.
@@ -1979,6 +2054,11 @@ csv_processor/
     ├── schema.py
     └── validation_report.py
 ```
+
+dbt (Postgres adapter) owns bronze-to-silver transformation as a separate `dbt/` project outside
+this package (see section 75) -- `csv_processor` remains responsible for bronze ingestion
+(discovery through normalization and transactional load into staging) and never re-implements
+dbt's transformation logic.
 
 Keep business logic out of DAG files wherever practical.
 
@@ -2264,6 +2344,13 @@ airflow-etl-platform/
 │   ├── scd/
 │   ├── storage/
 │   └── models/
+│
+├── dbt/
+│   ├── models/
+│   │   ├── staging/     # bronze source definitions, read-only
+│   │   └── silver/      # cleaned, deduplicated, late-arriving-resolved models
+│   ├── dbt_project.yml
+│   └── profiles.yml
 │
 ├── schemas/
 ├── configs/
@@ -3083,6 +3170,7 @@ Add:
 * data contracts
 * lineage
 * observability
+* dbt bronze-to-silver transformation (cleaning, deduplication, late-arriving-event resolution)
 
 ## Phase 9 — CDC and SCD
 
@@ -3096,6 +3184,8 @@ Add:
 * SCD Type 2
 * historical corrections
 * CDC/SCD integration
+
+(SCD Type 2 remains Python-owned; dbt snapshot was evaluated and rejected -- see section 54.)
 
 ## Phase 10 — CI/CD
 
@@ -3218,7 +3308,7 @@ The final platform should demonstrate:
 37. File identity is distinct from record identity.
 38. Duplicate records within files can be detected.
 39. Duplicate records across batches can be detected.
-40. Dataset-specific deduplication strategies are supported.
+40. Dataset-specific deduplication strategies are supported. Cross-batch/cross-file deduplication into the silver layer is implemented as dbt models (Postgres adapter); a Python-owned secondary safety net may layer on top per Phase 9's dedup-strategy decision.
 41. Deduplication is auditable.
 42. Incremental processing is supported.
 43. Watermarks are persisted safely.
@@ -3230,7 +3320,7 @@ The final platform should demonstrate:
 49. Backfills are supported correctly.
 50. Backfills remain idempotent.
 51. Historical schemas can be used for backfills.
-52. Transactional/atomic loading is supported.
+52. Transactional/atomic loading is supported. The silver-to-gold publish stays the existing Python MergePublisher (pg_advisory_xact_lock + INSERT ... ON CONFLICT), never dbt's SQL MERGE, per the PostgreSQL MERGE concurrency bug (BUG #18279).
 53. Partial failures are recoverable.
 54. Large files can be processed without loading everything into memory.
 55. Source/target reconciliation is supported.
@@ -3305,6 +3395,10 @@ The final platform should demonstrate:
 112. Operational runbooks exist.
 113. The environment can be recreated from the repository.
 114. Analytical data can be rebuilt from immutable raw data where practical.
+115. Bronze-to-silver transformation (cleaning, deduplication, late-arriving-event resolution) is implemented as dbt (Postgres adapter) models, landing in a persisted silver schema in the analytical PostgreSQL.
+116. Silver-to-gold publish remains exclusively Python-owned (MergePublisher), using INSERT ... ON CONFLICT inside the single META-03 transaction with watermark and run-status -- dbt's merge incremental strategy (SQL MERGE) is never used against gold, avoiding PostgreSQL BUG #18279.
+117. SCD Type 2 (sections 54-61) remains entirely Python-owned; dbt snapshot was evaluated and explicitly rejected as a CDC/event-stream replacement.
+118. The dbt role follows least privilege: read access to staging/bronze schemas, write access only to its own silver schema (section 81.6).
 
 ---
 
