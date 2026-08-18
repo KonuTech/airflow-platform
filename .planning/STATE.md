@@ -134,10 +134,11 @@ None yet.
 | 260817-oqy | Raise kind cluster memory budget (28GB WSL2 cap + recomputed KubeletConfiguration reservations) to relieve live CPU/memory starvation | 2026-08-17 | 811438b | [260817-oqy-raise-kind-cluster-memory-budget-28gb-ws](./quick/260817-oqy-raise-kind-cluster-memory-budget-28gb-ws/) |
 | 260817-rvq | Trim monitoring stack (grafana/tempo/otel-collector/prometheus/kube-state-metrics/prometheusOperator) Helm values CPU requests to match the already-vetted ci profile; deployed live same session | 2026-08-17 | 0404941 | [260817-rvq-trim-monitoring-stack-helm-values-cpu-re](./quick/260817-rvq-trim-monitoring-stack-helm-values-cpu-re/) |
 | 260817-umv | Fix retry-timing race in test_backfill_reentry.py's backfill retry logic (plan 08-15): gate the settle loop on backfill.completed_at, not just row-appearance, closing an AlreadyRunningBackfill collision found via live cluster re-testing | 2026-08-17 | 441a51a | [260817-umv-fix-retry-timing-race-in-test-backfill-r](./quick/260817-umv-fix-retry-timing-race-in-test-backfill-r/) |
+| 260818-f0w | Update README.md in place (not appended) to reflect the dbt bronze-to-silver medallion architecture decision: architecture diagrams/data-flow, dedup/staging/SCD sections, repo structure, roadmap and Definition of Done | 2026-08-18 | 7d32c71 | [260818-f0w-update-readme-md-to-reflect-dbt-bronze-t](./quick/260818-f0w-update-readme-md-to-reflect-dbt-bronze-t/) |
 
 ## Session Continuity
 
-Last session: 2026-08-17T14:55:00Z
-Stopped at: Completed quick task 260817-mvp: capped integrity_gate concurrency, root-caused and fixed the "discover reliability" misdiagnosis
+Last session: 2026-08-18T08:49:04Z
+Stopped at: Completed quick task 260818-f0w: updated README.md in place for the dbt bronze-to-silver medallion architecture decision
 Resume file: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/.continue-here.md
 None
