@@ -47,7 +47,7 @@ _OTEL_COLLECTOR_ENDPOINT = (
 )
 
 
-def common_kpo_kwargs(
+def common_kpo_kwargs(  # noqa: PLR0913 -- all 6 are keyword-only (08.1-12 generalization; see Args)
     *,
     resources: k8s.V1ResourceRequirements,
     extra_env_vars: list[k8s.V1EnvVar] | None = None,
