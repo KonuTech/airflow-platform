@@ -1,22 +1,25 @@
-"""``discover``/``ingest`` -- the two CLI subcommands a KubernetesPodOperator pod invokes.
+"""``discover``/``stage``/``publish`` -- the CLI subcommands a KubernetesPodOperator pod invokes.
 
 This module is ALLOWED to import ``dataplat`` -- the established, permitted
 direction (ADR-0002's Decision Outcome; ``setup.cfg``'s import-linter
 contract 1 only forbids the OTHER direction, ``dataplat`` importing
-``csv_processor``) -- and is exactly why ``discover``/``ingest`` live here,
-in ``csv_processor``, rather than inside ``dataplat.cli`` itself: this
-module needs ``csv_processor.source.CsvSource``, and ``dataplat`` must never
-know that type exists.
+``csv_processor``) -- and is exactly why ``discover``/``stage``/``publish``
+live here, in ``csv_processor``, rather than inside ``dataplat.cli`` itself:
+this module needs ``csv_processor.source.CsvSource``, and ``dataplat`` must
+never know that type exists.
 
-Neither command is ever invoked directly by an operator typing
-``csv-processor discover``; both attach to the SHARED ``dataplat.cli.cli``
+None of these commands is ever invoked directly by an operator typing
+``csv-processor discover``; all three attach to the SHARED ``dataplat.cli.cli``
 click group via ``@cli.command()`` below, and only ever run because
 ``dataplat.cli.main()`` loads this module through the ``dataplat.plugins``
 entry point declared in ``packages/csv-processor/pyproject.toml`` (see that
 function's own docstring for the other half of this design). The pod
 ``ENTRYPOINT`` stays ``["dataplat"]``; ``docker run <image> dataplat
-discover --dataset customers`` and ``docker run <image> dataplat ingest
---assignment <uri>`` are the two real invocations a KPO pod makes.
+discover --dataset customers``, ``docker run <image> dataplat stage
+--assignment <uri>`` and ``docker run <image> dataplat publish --dataset
+customers`` are the three real invocations a KPO pod makes (plan 08.1-11,
+replacing the former single ``ingest`` command with ``stage``/``publish``,
+D-04).
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from dataplat.models.identity import RunContext
 from dataplat.models.receipt import Receipt
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.pipeline.run import run_ingest
+from dataplat.pipeline.run import publish_ingest, stage_ingest
 from dataplat.schema.repository import SchemaRepository
 from dataplat.secrets.resolver import resolve_secret
 from dataplat.storage.db import create_pool
@@ -249,19 +252,22 @@ def _failure_receipt(doc: AssignmentDocument | None) -> Receipt:
 
 @cli.command()
 @click.option("--assignment", required=True, help="The s3://bucket/key URI of the assignment JSON.")
-def ingest(assignment: str) -> None:
-    """Ingest the single file named by the assignment document at `assignment`.
+def stage(assignment: str) -> None:
+    """Stage the single file named by the assignment document at `assignment`.
 
     Fetches and validates the `AssignmentDocument` (T-04-02's actual
     enforcement point -- no field is used before
     `AssignmentDocument.model_validate_json` succeeds), resolves the exact
     `DatasetConfig` version it was written against, and delegates the whole
-    claim/stage/publish orchestration to `dataplat.pipeline.run.run_ingest`.
+    claim/stage/quality-gate/promote-to-durable-bronze orchestration to
+    `dataplat.pipeline.run.stage_ingest` (plan 08.1-10/08.1-11, D-04's
+    2-command split -- this command replaces the former single `ingest`
+    command's staging half; publication is `publish`'s job, run separately).
     A `Receipt` is written to the XCom path on every exit path, success or
     failure, for ANY exception -- not only `DataPlatformError` (WR-01;
     04-REVIEW.md) -- the `finally`/`except` pairing below is this command's
-    own concern, distinct from `run_ingest`'s (which adds no receipt-writing
-    boundary of its own; see that function's docstring).
+    own concern, distinct from `stage_ingest`'s (which adds no
+    receipt-writing boundary of its own; see that function's docstring).
 
     Args:
         assignment: The `s3://bucket/key` URI of the frozen assignment
@@ -343,14 +349,14 @@ def ingest(assignment: str) -> None:
         heartbeat_interval_seconds = float(
             os.environ.get("DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", "60.0"),
         )
-        receipt = run_ingest(ctx, heartbeat_interval_seconds=heartbeat_interval_seconds)
+        receipt = stage_ingest(ctx, heartbeat_interval_seconds=heartbeat_interval_seconds)
         _write_xcom(receipt)
     except DataPlatformError:
         _write_xcom(_failure_receipt(doc))
         raise
     except Exception:
         # WR-01: deliberate, narrow, always-re-raising catch that exists
-        # solely to guarantee ingest()'s own docstring-promised
+        # solely to guarantee stage()'s own docstring-promised
         # Receipt-on-every-exit-path contract for exceptions outside the
         # DataPlatformError hierarchy (e.g. a raw psycopg.errors.DataError,
         # a network error, MemoryError). Airflow still observes the pod's
@@ -364,6 +370,108 @@ def ingest(assignment: str) -> None:
         # needed here: ruff's BLE001 check does not fire on a branch that
         # always re-raises rather than swallowing the exception.
         _write_xcom(_failure_receipt(doc))
+        raise
+    finally:
+        if pool is not None:
+            pool.close()
+
+
+@cli.command()
+@click.option("--dataset", required=True, help="The dataset name, e.g. 'customers'.")
+def publish(dataset: str) -> None:
+    """Publish every currently-``STAGED`` run for `dataset` from silver into normalized.
+
+    A lighter prologue than `stage`'s -- no frozen per-file assignment
+    document to fetch/validate, and no per-file CSV reader to open --
+    mirroring `discover`'s own shape (`_build_common()`, `load_config` +
+    `ConfigRegistry(pool).sync(dataset, config)` to obtain a real, current
+    `DatasetConfig`). Delegates the whole claim-every-STAGED-run/publish/
+    finalize orchestration to `dataplat.pipeline.run.publish_ingest` (plan
+    08.1-10/08.1-11, D-04's 2-command split's other half).
+
+    `publish_ingest` reads only `ctx.config.dataset`/`ctx.config.load.strategy`
+    from `ctx.config` -- never a `config_version_id`-pinned historical
+    config, since `MergePublisher`/`OrdersMergePublisher` hardcode their own
+    target table and do not vary their SQL by config version -- so `sync()`'s
+    own return value is discarded here; it exists only to keep
+    `meta.config_versions` current, the same side effect `discover()`'s own
+    `sync()` call already produces.
+
+    `ctx.run` is built with `run_id=0` -- a sentinel: `publish_ingest` never
+    claims a `meta.ingestion_runs` row of its own identity, so this
+    `RunContext` exists purely for tracing/log correlation, never for a real
+    claim. `ctx.source` stays its default `None` -- `publish_ingest` never
+    opens a per-file streaming reader.
+
+    A plain `dict` (not a `Receipt`) is written to the XCom path on every
+    exit path, success or failure, mirroring `discover()`'s own
+    `except DataPlatformError`/`except Exception`/`finally` shape (T-08.1-27)
+    -- `publish_ingest` has no single `run_id` to attribute a `Receipt` to on
+    failure, so a failure payload is a plain `{"status": "FAILED", ...}` dict
+    instead, matching `discover()`'s own failure-payload shape exactly.
+
+    Args:
+        dataset: The dataset name, resolved against
+            `configs/datasets/<dataset>.yaml`.
+    """
+    pool: ConnectionPool | None = None
+    try:
+        pool, metadata, objects = _build_common()
+        config = load_config(
+            Path(f"configs/datasets/{dataset}.yaml"),
+            defaults_path=Path("configs/defaults.yaml"),
+        )
+        registry = ConfigRegistry(pool)
+        registry.sync(dataset, config)
+
+        _raw_map_index = os.environ.get("AIRFLOW_CTX_MAP_INDEX")
+        run = RunContext(
+            # 0 is never a real claimed run_id -- this RunContext exists for
+            # tracing/log correlation only; publish_ingest never claims a
+            # meta.ingestion_runs row of its own identity.
+            run_id=0,
+            idempotency_key=f"publish:{dataset}",
+            attempt=int(os.environ.get("AIRFLOW_TASK_TRY_NUMBER", "1")),
+            dag_id=os.environ.get("AIRFLOW_CTX_DAG_ID"),
+            dag_run_id=os.environ.get("AIRFLOW_CTX_DAG_RUN_ID"),
+            task_id=os.environ.get("AIRFLOW_CTX_TASK_ID"),
+            map_index=int(_raw_map_index) if _raw_map_index is not None else None,
+            k8s_namespace=os.environ.get("AIRFLOW_CTX_K8S_NAMESPACE"),
+        )
+        ctx = PipelineContext(
+            run=run,
+            config=config,
+            metadata=metadata,
+            objects=objects,
+            db=pool,
+            log=get_logger(),
+        )
+        result = publish_ingest(ctx)
+        _write_xcom(result)
+    except DataPlatformError as exc:
+        _write_xcom(
+            {
+                "status": "FAILED",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        )
+        raise
+    except Exception as exc:
+        # T-08.1-27: the SAME receipt/dict-on-every-exit-path discipline
+        # `stage`'s own WR-01 catch establishes, extended to `publish` --
+        # every CLI exit path must write a receipt/dict, success or failure,
+        # never silently swallowing an exception outside the
+        # DataPlatformError hierarchy either. Because the DataPlatformError
+        # branch above is listed first, DataPlatformError instances are
+        # still only ever caught there.
+        _write_xcom(
+            {
+                "status": "FAILED",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        )
         raise
     finally:
         if pool is not None:
