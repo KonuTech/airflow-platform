@@ -1,17 +1,33 @@
-"""Integration tests for `run_ingest`'s barrier-stage/D-05/MinIO-report wiring (plan 08-11).
+"""Integration tests for `stage_ingest`/`publish_ingest`'s barrier-stage/D-05/MinIO-report
+wiring (plan 08-11).
 
-Every test drives a real `run_ingest` against real testcontainers PostgreSQL
-+ MinIO, using a real `csv_processor.source.CsvSource` -- proving the FULL
-FAIL-vs-QUARANTINE distinction (Pitfall 2), D-05's backfill-resolution
-guarantee, and VALID-04's MinIO-artifact half through the actual production
-code path, not an isolated unit test.
+Originally written against the single `run_ingest` function; migrated here after plan
+08.1-10 split it into `stage_ingest` (claim, stream, quality-gate, promote to durable
+bronze, mark `STAGED`) and `publish_ingest` (claim every currently-`STAGED` run for one
+dataset, publish `silver.<dataset>` into `normalized.<dataset>`, finalize). Per `run.py`'s
+own module docstring, the quality gate (completeness rule, circuit breaker) now runs
+entirely inside `stage_ingest` -- BEFORE any of it reaches durable bronze -- while
+`resolve_rejected_records_for_business_keys` (D-05's backfill-resolution mechanism) stays
+in `publish_ingest`, since it needs `published_business_keys` from the actual publish
+result, a publish-time-only value.
 
-This file is self-contained (its own `env`/bucket fixtures, its own
-`DatasetConfig` with a real `quality:` block) rather than importing
-`test_run_ingest.py`'s fixtures, matching this test suite's own established
-per-file helper convention (`test_publish_orders.py`/
-`test_validation_persistence.py`/`test_backfill_resolution.py` all duplicate
-helpers locally rather than sharing them).
+A real `dbt build` normally bridges bronze -> silver between the two calls; these tests
+seed `silver.customers` directly via SQL instead (mirroring `test_publish_ingest.py`'s own
+convention) for every test that needs a real publish to prove D-05/CR-01's resolution
+wiring, isolating those proofs from the separately-tested dbt hop (plan 08.1-08). A test
+whose own point never reaches publish (Test A's circuit-breaker trip, which raises during
+staging itself) calls `stage_ingest` alone.
+
+Every test drives real functions against real testcontainers PostgreSQL + MinIO, using a
+real `csv_processor.source.CsvSource` -- proving the FULL FAIL-vs-QUARANTINE distinction
+(Pitfall 2), D-05's backfill-resolution guarantee, and VALID-04's MinIO-artifact half
+through the actual production code path, not an isolated unit test.
+
+This file is self-contained (its own `env`/bucket fixtures, its own `DatasetConfig` with a
+real `quality:` block) rather than importing `test_run_ingest.py`'s fixtures, matching this
+test suite's own established per-file helper convention (`test_publish_orders.py`/
+`test_validation_persistence.py`/`test_backfill_resolution.py` all duplicate helpers
+locally rather than sharing them).
 
 Every test uses its own, widely-separated `customer_id` range (9_400_0xx and
 up) -- `normalized.customers.customer_id` is unique across the WHOLE table,
@@ -48,7 +64,7 @@ from dataplat.metadata.postgres import PostgresMetadataRepository
 from dataplat.models.identity import RunContext
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.pipeline.run import run_ingest
+from dataplat.pipeline.run import publish_ingest, stage_ingest
 from dataplat.storage.db import create_pool
 from dataplat.storage.objectstore import S3ObjectStore
 
@@ -151,9 +167,12 @@ def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
     `meta.config_versions` enforces at most one CURRENT (`valid_to IS NULL`) row per
     `dataset_id` (migration 0001's `uq_config_versions_current_per_dataset` partial unique
     index). This file's original per-test-unique-dataset convention never collided with that,
-    but Test C/C2 below now share the SAME "customers" dataset_id (D-23's dataset-scoping
-    requirement, `meta.batches.dataset_id` join) -- a second call for that same dataset_id must
-    REUSE the first call's row, not attempt a second CURRENT insert.
+    but Test B/C/C2/C3 below now ALL share the SAME "customers" dataset_id (D-23's
+    dataset-scoping requirement, `meta.batches.dataset_id` join, AND -- post-08.1-10 --
+    `publish_ingest`'s own `list_staged_run_ids(dataset_id=...)` lookup, which only ever
+    finds a run staged under "customers" when the run's own FK dataset_id matches) -- a
+    second call for that same dataset_id must REUSE the first call's row, not attempt a
+    second CURRENT insert.
     """
     with psycopg.connect(dsn) as conn:
         existing = conn.execute(
@@ -225,6 +244,71 @@ def _insert_pending_reject(  # noqa: PLR0913 -- matches meta.rejected_records' o
         conn.commit()
 
 
+def _insert_silver_row(  # noqa: PLR0913 -- one keyword per silver column, mirrors test_publish_ingest.py's own helper
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: str,
+    name: str,
+    event_ts: str,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    source_row_number: int,
+) -> None:
+    """Seed one `silver.customers` row directly via SQL -- never via a real `dbt build`.
+
+    Post-08.1-10, `publish_ingest` reads FROM `silver.<dataset>`, never from the durable
+    bronze table `stage_ingest` itself writes -- this file's own tests seed silver directly
+    (mirrors `test_publish_ingest.py`'s own convention), isolating this file's D-05/CR-01
+    resolution-wiring proofs from the separately-tested dbt hop (plan 08.1-08).
+    """
+    conn.execute(
+        """
+        INSERT INTO silver.customers (
+            customer_id, name, country, birth_date, event_ts,
+            _run_id, _file_id, _batch_id, _source_row_number,
+            _record_hash, _record_hash_version
+        ) VALUES (%s, %s, 'US', '1990-01-01', %s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            customer_id,
+            name,
+            event_ts,
+            run_id,
+            file_id,
+            batch_id,
+            source_row_number,
+            hashlib.sha256(f"{customer_id}:{name}:{event_ts}".encode()).digest(),
+        ),
+    )
+
+
+def _seed_silver_rows(  # noqa: PLR0913 -- one keyword per silver-seed identity/range value
+    env: _Env,
+    *,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    start_id: int,
+    count: int,
+) -> None:
+    """Seed `count` `silver.customers` rows mirroring `_row()`'s own row shape."""
+    with psycopg.connect(env.migrated_dsn) as conn:
+        for offset in range(count):
+            customer_id = start_id + offset
+            _insert_silver_row(
+                conn,
+                customer_id=str(customer_id),
+                name=f"Name{customer_id}",
+                event_ts="2026-01-01T00:00:00+00:00",
+                run_id=run_id,
+                file_id=file_id,
+                batch_id=batch_id,
+                source_row_number=offset + 1,
+            )
+        conn.commit()
+
+
 @dataclass
 class _Env:
     """This file's fixtures, bundled -- mirrors `test_run_ingest.py`'s own `_Env` shape."""
@@ -292,13 +376,25 @@ def _seed_pending_run(
     *,
     key_suffix: str,
     csv_bytes: bytes,
+    dataset_name: str | None = None,
 ) -> tuple[int, int, int, int, str]:
     """Seed dataset/config/file/batch/PENDING-run and upload `csv_bytes`.
+
+    Args:
+        env: This file's bundled fixtures.
+        key_suffix: Uniquifies this run's object key/batch key/idempotency key.
+        csv_bytes: The file body to upload.
+        dataset_name: The `meta.datasets` row this run is created under.
+            Defaults to a per-test-unique name (`wiring_<key_suffix>`) --
+            pass `"customers"` explicitly for any test that goes on to call
+            `publish_ingest` (see the module docstring's `_insert_config_version`
+            note for why).
 
     Returns:
         `(dataset_id, run_id, file_id, batch_id, object_key)`.
     """
-    dataset_id = env.metadata.get_or_create_dataset(f"wiring_{key_suffix}")
+    resolved_dataset_name = dataset_name if dataset_name is not None else f"wiring_{key_suffix}"
+    dataset_id = env.metadata.get_or_create_dataset(resolved_dataset_name)
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
     object_key = f"customers/{key_suffix}.csv"
     env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
@@ -403,11 +499,15 @@ def _resolution_state(migrated_dsn: str, *, batch_id: int) -> list[tuple[Any, ..
         ).fetchall()
 
 
-# --- Test A: circuit breaker trips -> zero rows anywhere for this run ------
+# --- Test A: circuit breaker trips during STAGING -> zero rows anywhere ----
 
 
 def test_circuit_breaker_trip_leaves_zero_rows_for_this_run(env: _Env) -> None:
-    """Pitfall 2's exact distinguishing test: `QualityThresholdExceeded` rolls back everything."""
+    """Pitfall 2's exact distinguishing test: `QualityThresholdExceeded` rolls back everything.
+
+    The gate now runs inside `stage_ingest` itself (`run.py`'s own module docstring) --
+    this test never reaches `publish_ingest`.
+    """
     csv_bytes = _csv_bytes(good_count=9, bad_count=1, start_id=9_400_001)
     dataset_id, run_id, file_id, batch_id, object_key = _seed_pending_run(
         env,
@@ -426,23 +526,27 @@ def test_circuit_breaker_trip_leaves_zero_rows_for_this_run(env: _Env) -> None:
     )
 
     with pytest.raises(QualityThresholdExceeded):
-        run_ingest(ctx)
+        stage_ingest(ctx)
 
     assert _fetch_validation_results(env.migrated_dsn, run_id=run_id) == []
     assert _fetch_rejected_records(env.migrated_dsn, run_id=run_id) == []
     assert _customers_count_for_run(env.migrated_dsn, run_id=run_id) == 0
 
 
-# --- Test B: under-threshold quarantine still SUCCEEDS ---------------------
+# --- Test B: under-threshold quarantine still reaches STAGED, then publishes ---
 
 
 def test_quarantine_under_threshold_succeeds_and_persists_both(env: _Env) -> None:
-    """Some QUARANTINE/REJECT rows under the breaker's threshold -> SUCCEEDED, not FAIL."""
+    """Some QUARANTINE/REJECT rows under the breaker's threshold -> STAGED, not FAIL --
+    both persisted at staging time; a subsequent `publish_ingest` then publishes exactly
+    the survivors.
+    """
     csv_bytes = _csv_bytes(good_count=9, bad_count=1, start_id=9_401_001)
     dataset_id, run_id, file_id, batch_id, object_key = _seed_pending_run(
         env,
         key_suffix="quarantine_under_threshold",
         csv_bytes=csv_bytes,
+        dataset_name="customers",
     )
     del dataset_id
     ctx = _make_ctx(
@@ -455,25 +559,38 @@ def test_quarantine_under_threshold_succeeds_and_persists_both(env: _Env) -> Non
         rejection_rate_threshold=0.5,  # 1 bad / 10 total = 10% <= 50%
     )
 
-    receipt = run_ingest(ctx)
+    stage_receipt = stage_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
-    assert receipt.rows_quarantined == 1
+    assert stage_receipt.status == "STAGED"
+    assert stage_receipt.rows_quarantined == 1
 
     rejected_rows = _fetch_rejected_records(env.migrated_dsn, run_id=run_id)
     assert len(rejected_rows) == 1
     assert rejected_rows[0][1] == "COMPLETENESS_VIOLATION"
 
-    assert _customers_count_for_run(env.migrated_dsn, run_id=run_id) == 9
-
     validation_rows = _fetch_validation_results(env.migrated_dsn, run_id=run_id)
     rule_ids = {row[0] for row in validation_rows}
     assert "rejection_rate_circuit_breaker" in rule_ids
 
+    _seed_silver_rows(
+        env,
+        run_id=run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        start_id=9_401_001,
+        count=9,
+    )
+
+    publish_result = publish_ingest(ctx)
+
+    assert publish_result["status"] == "SUCCEEDED"
+    assert run_id in publish_result["runs_finalized"]
+    assert _customers_count_for_run(env.migrated_dsn, run_id=run_id) == 9
+
 
 # --- Test C: D-05/D-01/D-02/D-03/D-23 -- a backfill run resolves an --------
 # --- EARLIER, DIFFERENT batch's PENDING rejected_records rows, through -----
-# --- run_ingest itself, not the method directly -----------------------------
+# --- stage_ingest + publish_ingest themselves, not the method directly -----
 
 
 def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
@@ -483,13 +600,18 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
     content-differing correction of a previously-rejected row always discovers under a NEW
     `batch_id`. Only a `(dataset_id, business_key)`-scoped resolve call (D-23) -- never a
     strictly `batch_id`-scoped one -- can ever reach the ORIGINAL batch's PENDING row.
+
+    `resolve_rejected_records_for_business_keys` runs inside `publish_ingest` (it needs
+    `published_business_keys` from the real publish result, a publish-time-only value) --
+    so this test's own proof requires an actual `publish_ingest` call, not just
+    `stage_ingest`.
     """
     # D-23's resolution predicate joins on `meta.batches.dataset_id` --
     # everything seeded here MUST belong to the SAME dataset `ctx.config.dataset`
     # ("customers", `_make_config`'s own hardcoded value) resolves to via
-    # `get_or_create_dataset` inside `run_ingest` itself, not a distinct
-    # `wiring_*`-named dataset (the old batch_id-only resolve never joined
-    # on dataset_id, so this never mattered before D-23).
+    # `get_or_create_dataset` -- both inside `stage_ingest` (VOLUME-barrier
+    # lookup) and inside `publish_ingest` (`list_staged_run_ids` lookup) --
+    # not a distinct `wiring_*`-named dataset.
     dataset_id = env.metadata.get_or_create_dataset("customers")
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
     file_id = env.metadata.create_file(
@@ -572,11 +694,23 @@ def test_backfill_run_resolves_the_batch_pending_rejects(env: _Env) -> None:
         rejection_rate_threshold=0.5,
     )
 
-    receipt = run_ingest(ctx)
+    stage_receipt = stage_ingest(ctx)
+    assert stage_receipt.status == "STAGED"
 
-    assert receipt.status == "SUCCEEDED"
+    _seed_silver_rows(
+        env,
+        run_id=backfill_run_id,
+        file_id=file_id,
+        batch_id=backfill_batch_id,
+        start_id=9_402_001,
+        count=3,
+    )
 
-    # D-03/D-05/D-23 live proof, through run_ingest itself: the ORIGINAL
+    publish_result = publish_ingest(ctx)
+    assert publish_result["status"] == "SUCCEEDED"
+    assert backfill_run_id in publish_result["runs_finalized"]
+
+    # D-03/D-05/D-23 live proof, through publish_ingest itself: the ORIGINAL
     # batch's 2 seeded rows now show REDRIVEN, resolved_by_run_id equal to
     # the NEW, DIFFERENT batch's own run_id -- proving business-key-scoped
     # resolution crosses batch boundaries. D-02 is proven by the fact
@@ -603,7 +737,7 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
     to REDRIVEN too, IF their business_key happened to appear in `published_business_keys` --
     but it structurally never can: a row this run rejects was never staged (`CompletenessRule`
     rejects it BEFORE staging), so its business_key was never published this run and the
-    `SELECT DISTINCT` over the staging table can never surface it. Also proves cross-batch
+    `SELECT DISTINCT` over the source table can never surface it. Also proves cross-batch
     resolution still works here too: the prior run's seeded reject, under a SEPARATE batch_id
     but sharing a business_key that IS one of the backfill file's own published customer_ids,
     still resolves -- distinguished from the run's OWN fresh reject (a business_key that was
@@ -660,7 +794,7 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
     # The "backfill" run: a NEW, SEPARATE batch_id from the original --
     # publishes customer_ids 9404001-9404009 and ALSO rejects one row of
     # its own (customer_id 9404010, empty name -- under threshold, so it
-    # still SUCCEEDS) -- the exact scenario CR-01 flags.
+    # still reaches STAGED), the exact scenario CR-01 flags.
     backfill_batch_id = env.metadata.create_batch(
         dataset_id=dataset_id,
         batch_key="wiring_backfill_own_rejects:backfill:1",
@@ -688,9 +822,21 @@ def test_backfill_run_never_resolves_its_own_fresh_rejects(env: _Env) -> None:
         rejection_rate_threshold=0.5,
     )
 
-    receipt = run_ingest(ctx)
+    stage_receipt = stage_ingest(ctx)
+    assert stage_receipt.status == "STAGED"
 
-    assert receipt.status == "SUCCEEDED"
+    _seed_silver_rows(
+        env,
+        run_id=backfill_run_id,
+        file_id=file_id,
+        batch_id=backfill_batch_id,
+        start_id=9_404_001,
+        count=9,
+    )
+
+    publish_result = publish_ingest(ctx)
+    assert publish_result["status"] == "SUCCEEDED"
+    assert backfill_run_id in publish_result["runs_finalized"]
 
     # The PRIOR run's row, under the ORIGINAL, DIFFERENT batch: resolved by
     # the backfill run -- cross-batch resolution still holds here too.
@@ -724,21 +870,22 @@ def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env)
     under an ORIGINAL batch for an unrelated reason, `PENDING`, with `business_key="9405001"`.
     Independently, a *different*, legitimately-newer row for the SAME `customer_id`
     (`event_ts=T3`) is ALREADY published (seeded directly, exactly as if an entirely separate
-    prior run had legitimately published it -- deliberately NOT run through `run_ingest`
-    itself here, since that run's own resolve call would -- correctly, by D-23's own
-    business-key-scoped design -- resolve the seeded PENDING reject the moment it actually
-    publishes, before this test even reaches its own CR-01 scenario). An operator then uploads
-    a "corrected" file that fixes the original violation for the *original*, OLDER `event_ts=T2`
-    row -- it now survives streaming validation and stages. `MergePublisher`'s own
-    `WHERE ... AND EXCLUDED.event_ts >= normalized.customers.event_ts` conflict guard evaluates
-    `false` (`T2 < T3`): the row is "locked but unchanged", nothing is written to
-    `normalized.customers`. Before CR-01's fix, `published_business_keys` was read from the
-    staging table itself, so `"9405001"` appeared in it regardless -- the original `PENDING`
-    reject flipped to `REDRIVEN` even though the target row was never actually corrected. After
-    the fix, `published_business_keys` comes from `MergePublisher`'s own `RETURNING customer_id`
-    -- populated ONLY by rows the `INSERT ... ON CONFLICT` statement actually affected -- so the
-    conflict-guard-blocked row's business key never reaches the resolution call at all, and the
-    original reject must still show `PENDING`.
+    prior run had legitimately published it -- deliberately NOT run through `stage_ingest`/
+    `publish_ingest` themselves here, since that run's own resolve call would -- correctly, by
+    D-23's own business-key-scoped design -- resolve the seeded PENDING reject the moment it
+    actually publishes, before this test even reaches its own CR-01 scenario). An operator then
+    uploads a "corrected" file that fixes the original violation for the *original*, OLDER
+    `event_ts=T2` row -- it now survives streaming validation and stages. Its silver row (seeded
+    directly, mirroring what a real `dbt build` would have produced) still carries that OLDER
+    `event_ts`, so `MergePublisher`'s own `WHERE ... AND EXCLUDED.event_ts >=
+    normalized.customers.event_ts` conflict guard evaluates `false` (`T2 < T3`): the row is
+    "locked but unchanged", nothing is written to `normalized.customers`. Before CR-01's fix,
+    `published_business_keys` was read from the staging table itself, so `"9405001"` appeared
+    in it regardless -- the original `PENDING` reject flipped to `REDRIVEN` even though the
+    target row was never actually corrected. After the fix, `published_business_keys` comes from
+    `MergePublisher`'s own `RETURNING customer_id` -- populated ONLY by rows the `INSERT ... ON
+    CONFLICT` statement actually affected -- so the conflict-guard-blocked row's business key
+    never reaches the resolution call at all, and the original reject must still show `PENDING`.
     """
     dataset_id = env.metadata.get_or_create_dataset("customers")
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
@@ -782,10 +929,11 @@ def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env)
     # Step 1: a DIFFERENT, unrelated, legitimately-newer row for the SAME
     # customer_id (event_ts=T3) is ALREADY published -- seeded directly via
     # SQL (see docstring for why this is deliberately NOT a real
-    # `run_ingest` call), reusing `prior_run_id`/`file_id`/`original_batch_id`
-    # as its lineage FKs purely because they are already valid rows this
-    # test seeded -- their identity is otherwise irrelevant here, this row's
-    # `event_ts` is the only thing this test's assertion depends on.
+    # stage_ingest/publish_ingest call), reusing `prior_run_id`/`file_id`/
+    # `original_batch_id` as its lineage FKs purely because they are already
+    # valid rows this test seeded -- their identity is otherwise irrelevant
+    # here, this row's `event_ts` is the only thing this test's assertion
+    # depends on.
     with psycopg.connect(env.migrated_dsn) as conn:
         conn.execute(
             """
@@ -809,17 +957,17 @@ def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env)
 
     # Step 2: the "corrected" file -- fixing the ORIGINAL violation -- stages
     # an OLDER event_ts (T2 < T3) for the SAME customer_id. It survives
-    # streaming validation (no completeness violation this time) and lands
-    # in staging, but MergePublisher's conflict guard must leave the
-    # existing (newer) target row untouched.
+    # streaming validation (no completeness violation this time) and reaches
+    # STAGED; its silver row (seeded below, mirroring a real `dbt build`'s
+    # own output) still carries that older event_ts, so MergePublisher's
+    # conflict guard must leave the existing (newer) target row untouched.
     backfill_batch_id = env.metadata.create_batch(
         dataset_id=dataset_id,
         batch_key="wiring_conflict_guard_blocked:backfill:1",
         status="OPEN",
     )
-    older_csv = (_CSV_HEADER + _row_with_event_ts(9_405_001, "2025-01-01T00:00:00+00:00")).encode(
-        "utf-8"
-    )
+    older_event_ts = "2025-01-01T00:00:00+00:00"
+    older_csv = (_CSV_HEADER + _row_with_event_ts(9_405_001, older_event_ts)).encode("utf-8")
     backfill_object_key = "customers/conflict_guard_blocked_backfill.csv"
     env.s3_client.put_object(
         Bucket=env.scratch_bucket,
@@ -844,8 +992,24 @@ def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env)
         idempotency_key="wiring_conflict_guard_blocked:backfill",
         rejection_rate_threshold=0.5,
     )
-    backfill_receipt = run_ingest(backfill_ctx)
-    assert backfill_receipt.status == "SUCCEEDED"
+    backfill_stage_receipt = stage_ingest(backfill_ctx)
+    assert backfill_stage_receipt.status == "STAGED"
+
+    with psycopg.connect(env.migrated_dsn) as conn:
+        _insert_silver_row(
+            conn,
+            customer_id="9405001",
+            name="Name9405001",
+            event_ts=older_event_ts,
+            run_id=backfill_run_id,
+            file_id=file_id,
+            batch_id=backfill_batch_id,
+            source_row_number=1,
+        )
+        conn.commit()
+
+    backfill_publish_result = publish_ingest(backfill_ctx)
+    assert backfill_publish_result["status"] == "SUCCEEDED"
 
     # The publish itself was correctly a no-op: the conflict guard left the
     # newer row in place, nothing written by the backfill run.
@@ -865,7 +1029,12 @@ def test_staged_but_conflict_guard_blocked_business_key_stays_pending(env: _Env)
 
 
 def test_report_artifact_matches_persisted_postgres_rows(env: _Env) -> None:
-    """A SUCCEEDED run's report.json (at its own report_uri) mirrors its persisted meta rows."""
+    """A STAGED run's report.json (at its own report_uri) mirrors its persisted meta rows.
+
+    The report artifact is written entirely inside `stage_ingest`
+    (`_apply_staging_quality_gate_and_persist`, called before durable-bronze
+    promotion) -- this test never needs `publish_ingest`.
+    """
     csv_bytes = _csv_bytes(good_count=9, bad_count=1, start_id=9_403_001)
     dataset_id, run_id, file_id, batch_id, object_key = _seed_pending_run(
         env,
@@ -883,9 +1052,9 @@ def test_report_artifact_matches_persisted_postgres_rows(env: _Env) -> None:
         rejection_rate_threshold=0.5,
     )
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
+    assert receipt.status == "STAGED"
     assert receipt.report_uri is not None
     expected_uri = f"s3://validated/customers/{run_id}/report.json"
     assert receipt.report_uri == expected_uri

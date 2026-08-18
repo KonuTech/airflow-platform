@@ -1,16 +1,41 @@
-"""Integration tests for ``dataplat.pipeline.run.run_ingest`` (plan 04-05 Task 1).
+"""Integration tests for ``dataplat.pipeline.run.stage_ingest``/``publish_ingest``.
 
-Every test drives a real ``run_ingest`` against real testcontainers
-PostgreSQL + MinIO -- the exact claim/stage/publish/receipt orchestration a
-real ``ingest`` pod executes, using a real ``csv_processor.source.CsvSource``
-(never a fake/in-memory source): this file's whole point is proving the
-FULL, source-to-database path, not merely a mocked slice of it.
+Originally written for the single ``run_ingest`` function (plan 04-05 Task
+1); migrated here after plan 08.1-10 split it into ``stage_ingest`` (claim,
+stream through ``StagingLoader``, quality-gate, promote to durable bronze,
+mark ``STAGED``) and ``publish_ingest`` (claim every currently-``STAGED``
+run for one dataset, publish ``silver.<dataset>`` into ``normalized.
+<dataset>``, finalize). A real ``dbt build`` normally bridges the two in
+production; these tests seed ``silver.customers`` directly via SQL instead
+(mirroring ``test_publish_ingest.py``'s own convention) wherever a test
+needs the full stage-then-publish path, keeping this file's own proofs
+isolated from the separately-tested dbt hop (plan 08.1-08). A test whose own
+point is purely about staging (schema-version resolution, claim-refusal
+skip logic, the in-flight heartbeat, trace-context propagation at claim
+time) calls ``stage_ingest`` alone and never touches ``publish_ingest``.
+
+Every test drives real functions against real testcontainers PostgreSQL +
+MinIO -- the exact claim/stage/publish/receipt orchestration a real
+``stage``/``publish`` pod pair executes, using a real
+``csv_processor.source.CsvSource`` (never a fake/in-memory source): this
+file's whole point is proving the FULL, source-to-database path, not merely
+a mocked slice of it.
 
 ``_seed_pending_run`` mirrors the real discovery-time flow
 (``get_or_create_dataset`` -> a synthetic config version ->
 ``create_file``/``create_batch`` -> ``get_or_create_ingestion_run``) closely
-enough that every FK ``run_ingest`` touches is real, matching
-``test_publish_merge.py``'s own ``_seed_run`` precedent.
+enough that every FK ``stage_ingest``/``publish_ingest`` touch is real,
+matching ``test_publish_merge.py``'s own ``_seed_run`` precedent. It accepts
+an optional ``dataset_name`` override, defaulting to a per-test-unique name
+(``run_ingest_<key_suffix>``): a test that never calls ``publish_ingest``
+keeps that isolation, but any test that DOES call ``publish_ingest`` must
+pass ``dataset_name="customers"`` -- ``publish_ingest`` resolves
+``ctx.config.dataset`` ("customers", ``_make_config``'s own hardcoded
+value) to a ``dataset_id`` and looks up currently-``STAGED`` runs by THAT
+id (``list_staged_run_ids``), so a run created under any other dataset name
+would never be found as staged for "customers", even though staging itself
+(which only needs ``ctx.config.dataset`` to resolve target columns, a
+string lookup) would have succeeded either way.
 
 Every test uses its own, widely-separated ``customer_id`` range
 (9_100_0xx and up) -- ``normalized.customers.customer_id`` is unique across
@@ -59,7 +84,7 @@ from dataplat.models.identity import RunContext
 from dataplat.observability import tracing
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.pipeline.run import run_ingest
+from dataplat.pipeline.run import publish_ingest, stage_ingest
 from dataplat.storage.db import create_pool
 from dataplat.storage.objectstore import S3ObjectStore
 
@@ -68,7 +93,7 @@ if TYPE_CHECKING:
 
 _BUCKET = "run-ingest-test"
 _CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
-# plan 08-11: every SUCCEEDED run now writes a report.json artifact to the
+# plan 08-11: every STAGED run now writes a report.json artifact to the
 # real "validated" bucket (VALID-04's MinIO-artifact half) -- this file's
 # throwaway MinioContainer is a bare instance, not the Helm-provisioned
 # cluster, so the bucket must be created here too, mirroring
@@ -88,11 +113,11 @@ def _csv_bytes(rows: int, *, start_id: int) -> bytes:
 
 
 def _make_config() -> DatasetConfig:
-    """A `DatasetConfig` matching `run_ingest`'s own hardcoded customers assumptions.
+    """A `DatasetConfig` matching `stage_ingest`/`publish_ingest`'s own hardcoded customers assumptions.
 
     columns= is required (06-02 Task 1/3, D-18) -- added here purely to stay
-    constructible; run_ingest itself never reads DatasetConfig.columns.
-    """
+    constructible; neither function reads DatasetConfig.columns.
+    """  # noqa: E501, W505
     return DatasetConfig(
         dataset="customers",
         config_schema_version=1,
@@ -140,8 +165,28 @@ def _make_config() -> DatasetConfig:
 
 
 def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
-    """Insert a synthetic `meta.config_versions` row -- mirrors `test_metadata_repository.py`."""
+    """Get-or-insert a synthetic, CURRENT `meta.config_versions` row.
+
+    A per-test-unique dataset (the default in `_seed_pending_run`) never
+    has an existing CURRENT row, so this always falls through to the
+    `INSERT` below for those callers -- but tests that pass
+    `dataset_name="customers"` share that dataset's `dataset_id` across
+    this WHOLE file (and several sibling files), so a second call for it
+    must REUSE the first call's row rather than attempt a second CURRENT
+    insert (migration 0001's `uq_config_versions_current_per_dataset`
+    partial unique index) -- mirrors `test_publish_ingest.py`'s own helper.
+    """
     with psycopg.connect(dsn) as conn:
+        existing = conn.execute(
+            """
+            SELECT config_version_id
+              FROM meta.config_versions
+             WHERE dataset_id = %(dataset_id)s AND valid_to IS NULL
+            """,
+            {"dataset_id": dataset_id},
+        ).fetchone()
+        if existing is not None:
+            return int(existing[0])
         row = conn.execute(
             """
             INSERT INTO meta.config_versions (
@@ -234,16 +279,34 @@ def env(
     )
 
 
-def _seed_pending_run(env: _Env, *, key_suffix: str, csv_bytes: bytes) -> tuple[int, int, int, str]:
+def _seed_pending_run(
+    env: _Env,
+    *,
+    key_suffix: str,
+    csv_bytes: bytes,
+    dataset_name: str | None = None,
+) -> tuple[int, int, int, str]:
     """Seed dataset/config/file/batch/PENDING-run and upload `csv_bytes`.
 
     Mirrors the real discover_files flow closely enough that every FK
-    `run_ingest` touches (file_id, batch_id, config_version_id) is real.
+    `stage_ingest`/`publish_ingest` touch (file_id, batch_id,
+    config_version_id) is real.
+
+    Args:
+        env: This file's bundled fixtures.
+        key_suffix: Uniquifies this run's object key/batch key/idempotency
+            key.
+        csv_bytes: The file body to upload.
+        dataset_name: The `meta.datasets` row this run is created under.
+            Defaults to a per-test-unique name (`run_ingest_<key_suffix>`)
+            -- pass `"customers"` explicitly for any test that goes on to
+            call `publish_ingest` (see the module docstring for why).
 
     Returns:
         `(run_id, file_id, batch_id, object_key)`.
     """
-    dataset_id = env.metadata.get_or_create_dataset(f"run_ingest_{key_suffix}")
+    resolved_dataset_name = dataset_name if dataset_name is not None else f"run_ingest_{key_suffix}"
+    dataset_id = env.metadata.get_or_create_dataset(resolved_dataset_name)
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
     object_key = f"customers/{key_suffix}.csv"
     env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
@@ -304,12 +367,14 @@ def _seed_and_build_ctx(
     *,
     key_suffix: str,
     csv_bytes: bytes,
+    dataset_name: str | None = None,
 ) -> tuple[PipelineContext, int, int, int]:
     """`_seed_pending_run` + `_make_ctx` in one call -- every test's setup boils down to this."""
     run_id, file_id, batch_id, object_key = _seed_pending_run(
         env,
         key_suffix=key_suffix,
         csv_bytes=csv_bytes,
+        dataset_name=dataset_name,
     )
     ctx = _make_ctx(env, run_id=run_id, file_id=file_id, batch_id=batch_id, object_key=object_key)
     return ctx, run_id, file_id, batch_id
@@ -335,6 +400,17 @@ def _read_customers_count_for_run(migrated_dsn: str, run_id: int) -> int:
     return int(row[0])
 
 
+def _durable_bronze_count_for_run(migrated_dsn: str, run_id: int) -> int:
+    """Count `staging.customers` (the durable, cumulative bronze table, migration 0022) rows."""
+    with psycopg.connect(migrated_dsn) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM staging.customers WHERE _run_id = %s",
+            (run_id,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 def _staging_table_exists(migrated_dsn: str, run_id: int) -> bool:
     with psycopg.connect(migrated_dsn) as conn:
         row = conn.execute(
@@ -345,6 +421,69 @@ def _staging_table_exists(migrated_dsn: str, run_id: int) -> bool:
     return row[0] is not None
 
 
+def _insert_silver_row(  # noqa: PLR0913 -- one keyword per silver column, mirrors test_publish_ingest.py's own helper
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: str,
+    name: str,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    source_row_number: int,
+) -> None:
+    """Seed one `silver.customers` row directly via SQL -- never via a real `dbt build`.
+
+    Post-08.1-10, `publish_ingest` reads FROM `silver.<dataset>`, never
+    from the durable bronze table `stage_ingest` itself writes -- this
+    file's own tests seed silver directly (mirrors `test_publish_ingest.py`
+    's own convention) wherever a test needs a real publish, isolating
+    this file's proofs from the separately-tested dbt hop (plan 08.1-08).
+    """
+    conn.execute(
+        """
+        INSERT INTO silver.customers (
+            customer_id, name, country, birth_date, event_ts,
+            _run_id, _file_id, _batch_id, _source_row_number,
+            _record_hash, _record_hash_version
+        ) VALUES (%s, %s, 'US', '1990-01-01', '2026-01-01T00:00:00+00:00', %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            customer_id,
+            name,
+            run_id,
+            file_id,
+            batch_id,
+            source_row_number,
+            hashlib.sha256(f"{customer_id}:{name}".encode()).digest(),
+        ),
+    )
+
+
+def _seed_silver_rows_matching_csv(  # noqa: PLR0913 -- one keyword per silver-seed identity/range value
+    env: _Env,
+    *,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    start_id: int,
+    count: int,
+) -> None:
+    """Seed `count` `silver.customers` rows mirroring `_csv_bytes`'s own row shape."""
+    with psycopg.connect(env.migrated_dsn) as conn:
+        for offset in range(count):
+            customer_id = start_id + offset
+            _insert_silver_row(
+                conn,
+                customer_id=str(customer_id),
+                name=f"Name{customer_id}",
+                run_id=run_id,
+                file_id=file_id,
+                batch_id=batch_id,
+                source_row_number=offset + 1,
+            )
+        conn.commit()
+
+
 # --- Behavior 1: the full success path -------------------------------------
 
 
@@ -353,15 +492,34 @@ def test_successful_run_publishes_and_marks_everything_succeeded(env: _Env) -> N
         env,
         key_suffix="happy",
         csv_bytes=_csv_bytes(3, start_id=9_100_001),
+        dataset_name="customers",
     )
 
-    receipt = run_ingest(ctx)
+    stage_receipt = stage_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
-    assert receipt.run_id == run_id
-    assert receipt.rows_read == 3
-    assert receipt.rows_loaded == 3
-    assert receipt.rows_invalid == 0
+    assert stage_receipt.status == "STAGED"
+    assert stage_receipt.run_id == run_id
+    assert stage_receipt.rows_read == 3
+    assert stage_receipt.rows_loaded == 0  # staging never writes to gold
+    assert stage_receipt.rows_invalid == 0
+
+    # A real `dbt build` normally bridges bronze -> silver between the two
+    # calls; seeded directly here (module docstring) so `publish_ingest`
+    # has something to actually publish.
+    _seed_silver_rows_matching_csv(
+        env,
+        run_id=run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        start_id=9_100_001,
+        count=3,
+    )
+
+    publish_result = publish_ingest(ctx)
+
+    assert publish_result["status"] == "SUCCEEDED"
+    assert run_id in publish_result["runs_finalized"]
+    assert publish_result["rows_loaded"] >= 3  # aggregate, per-pass count -- see run.py's own note
 
     with psycopg.connect(env.migrated_dsn) as conn:
         file_status = conn.execute(
@@ -377,18 +535,22 @@ def test_successful_run_publishes_and_marks_everything_succeeded(env: _Env) -> N
     assert file_status[0] == "PROCESSED"
     assert batch_status is not None
     assert batch_status[0] == "PUBLISHED"
-    assert not _staging_table_exists(env.migrated_dsn, run_id)  # dropped after publish (Pitfall 2)
+    # dropped after promotion to durable bronze, inside stage_ingest itself
+    assert not _staging_table_exists(env.migrated_dsn, run_id)
 
 
-def test_successful_run_records_its_resolved_schema_version_on_the_run(env: _Env) -> None:
+def test_staged_run_records_its_resolved_schema_version_on_the_run(env: _Env) -> None:
     """Post-wave-5 code review verification Gap 1: ``meta.ingestion_runs.schema_version_id``
-    must actually be populated by a real ``run_ingest()`` call, not just resolved and
+    must actually be populated by a real ``stage_ingest()`` call, not just resolved and
     discarded inside ``CsvSource.open()``.
 
-    Mirrors ``_seed_pending_run``/``_make_ctx`` but wires ``CsvSource(dataset_id=...)`` --
-    the existing shared helpers deliberately omit ``dataset_id`` (skips schema resolution
-    entirely), so this test builds its own context rather than changing behavior every
-    other test in this file relies on.
+    A pure staging concern (``stage_ingest``'s own ``STAGED`` status update sets
+    ``schema_version_id`` -- see ``run.py``'s own ``update_ingestion_run_status`` call);
+    this test never needs ``publish_ingest`` at all. Mirrors ``_seed_pending_run``/
+    ``_make_ctx`` but wires ``CsvSource(dataset_id=...)`` -- the existing shared helpers
+    deliberately omit ``dataset_id`` (skips schema resolution entirely), so this test
+    builds its own context rather than changing behavior every other test in this file
+    relies on.
     """
     dataset_id = env.metadata.get_or_create_dataset("run_ingest_schema_version_proof")
     config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
@@ -433,9 +595,9 @@ def test_successful_run_records_its_resolved_schema_version_on_the_run(env: _Env
         source=CsvSource(bucket=env.scratch_bucket, key=object_key, dataset_id=dataset_id),
     )
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
+    assert receipt.status == "STAGED"
     with psycopg.connect(env.migrated_dsn) as conn:
         row = conn.execute(
             "SELECT schema_version_id FROM meta.ingestion_runs WHERE run_id = %s",
@@ -451,7 +613,7 @@ def test_successful_run_records_its_resolved_schema_version_on_the_run(env: _Env
     assert version_row[0] == dataset_id  # points at THIS run's own dataset's schema history
 
 
-# --- Behavior 2: already-SUCCEEDED -> SKIPPED_DUPLICATE --------------------
+# --- Behavior 2: already-terminal -> SKIPPED_DUPLICATE ---------------------
 
 
 def test_already_succeeded_run_returns_skipped_duplicate_and_touches_no_staging_table(
@@ -464,13 +626,14 @@ def test_already_succeeded_run_returns_skipped_duplicate_and_touches_no_staging_
     )
     env.metadata.update_ingestion_run_status(run_id=run_id, status="SUCCEEDED")
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
     assert receipt.status == "SKIPPED_DUPLICATE"
     assert receipt.run_id == run_id
     assert receipt.rows_loaded == 0
     assert not _staging_table_exists(env.migrated_dsn, run_id)
     assert _read_customers_count_for_run(env.migrated_dsn, run_id) == 0
+    assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 0
 
 
 # --- Behavior 3: RUNNING + live lease -> SKIPPED_CONCURRENT -----------------
@@ -490,12 +653,13 @@ def test_running_run_with_a_live_lease_returns_skipped_concurrent(env: _Env) -> 
         k8s_pod_name="other-pod-holding-the-lease",
     )
 
-    receipt = run_ingest(ctx)
+    receipt = stage_ingest(ctx)
 
     assert receipt.status == "SKIPPED_CONCURRENT"
     assert receipt.run_id == run_id
     assert receipt.rows_loaded == 0
     assert not _staging_table_exists(env.migrated_dsn, run_id)
+    assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 0
 
 
 # --- Behavior 4: crash between staging and publish, then a clean retry -----
@@ -505,10 +669,35 @@ def test_crash_between_staging_and_publish_leaves_no_partial_state_and_retry_suc
     env: _Env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
+    """``resolve_publisher`` lives inside ``publish_ingest`` only, post-08.1-10 -- the
+    "crash between staging and publish" fault this test injects is now literally the
+    boundary between the two calls: ``stage_ingest`` (real, unpatched) completes and
+    reaches ``STAGED`` before the patch is even installed, then ``publish_ingest`` raises
+    before its transaction opens.
+
+    Unlike the pre-split version, no lease-expiry simulation is needed for the retry: a
+    failed ``publish_ingest`` call's own ``claim_run_stage`` INSERT lives inside the SAME
+    transaction as the fault (never committed), so a second ``publish_ingest`` call finds
+    the run still cleanly ``STAGED`` and claims its ``PUBLISH`` stage fresh -- there is no
+    lease to have gone stale.
+    """
+    ctx, run_id, file_id, batch_id = _seed_and_build_ctx(
         env,
         key_suffix="crash",
         csv_bytes=_csv_bytes(2, start_id=9_100_301),
+        dataset_name="customers",
+    )
+
+    stage_receipt = stage_ingest(ctx)
+    assert stage_receipt.status == "STAGED"
+
+    _seed_silver_rows_matching_csv(
+        env,
+        run_id=run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        start_id=9_100_301,
+        count=2,
     )
 
     def _simulate_crash_before_publish_begins(strategy: str) -> Any:
@@ -519,34 +708,22 @@ def test_crash_between_staging_and_publish_leaves_no_partial_state_and_retry_suc
     monkeypatch.setattr(run_module, "resolve_publisher", _simulate_crash_before_publish_begins)
 
     with pytest.raises(RuntimeError, match="simulated crash"):
-        run_ingest(ctx)
+        publish_ingest(ctx)
 
-    # Staging succeeded (it ran before the injected fault); publish never
-    # began -- normalized.customers must be untouched and the run must NOT
-    # be SUCCEEDED.
+    # Publish never began -- normalized.customers must be untouched and the
+    # run must still be STAGED, never SUCCEEDED.
     assert _read_customers_count_for_run(env.migrated_dsn, run_id) == 0
-    assert _read_run_status(env.migrated_dsn, run_id) != "SUCCEEDED"
-
-    # Simulate real time having passed (this test cannot wait out the real
-    # 5-minute lease): force it into an expired state directly, exactly as
-    # a genuinely crashed pod's lease would eventually look to a retrier.
-    expired = datetime.now(tz=UTC) - timedelta(minutes=1)
-    env.metadata.update_ingestion_run_status(
-        run_id=run_id,
-        status="RUNNING",
-        lease_expires_at=expired,
-    )
+    assert _read_run_status(env.migrated_dsn, run_id) == "STAGED"
 
     monkeypatch.undo()  # restore the real resolve_publisher for the retry
 
-    receipt = run_ingest(ctx)
+    publish_result = publish_ingest(ctx)
 
-    assert receipt.status == "SUCCEEDED"
-    assert receipt.rows_loaded == 2
-    # Proves staging.py's own DROP-IF-EXISTS-first behavior composed
-    # correctly with this retry: exactly 2 rows land, never 4.
+    assert publish_result["status"] == "SUCCEEDED"
+    assert run_id in publish_result["runs_finalized"]
+    # Exactly 2 rows land, never 4 -- the retry re-publishes, it never re-stages.
     assert _read_customers_count_for_run(env.migrated_dsn, run_id) == 2
-    assert not _staging_table_exists(env.migrated_dsn, run_id)
+    assert _read_run_status(env.migrated_dsn, run_id) == "SUCCEEDED"
 
 
 # --- Behavior 5: the heartbeat keeps rows_read/rows_parsed genuinely live --
@@ -556,6 +733,9 @@ def test_heartbeat_writes_a_live_nonzero_rows_read_while_running_before_return(
     env: _Env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Heartbeat behavior during staging is purely a ``stage_ingest`` concern
+    (D-11) -- this test never needs ``publish_ingest``.
+    """
     ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
         env,
         key_suffix="heartbeat",
@@ -571,8 +751,9 @@ def test_heartbeat_writes_a_live_nonzero_rows_read_while_running_before_return(
         The real load() has already fired on_progress with the true,
         final counts by the time this blocks -- the heartbeat thread (a
         short, test-only interval) gets a deterministic window to observe
-        and persist them while run_ingest is provably still RUNNING,
-        before run_ingest can proceed to publish and return.
+        and persist them while stage_ingest is provably still RUNNING,
+        before stage_ingest can proceed to promote-to-durable-bronze and
+        return.
         """
 
         def __init__(self, *, target_columns: tuple[str, ...]) -> None:
@@ -583,6 +764,9 @@ def test_heartbeat_writes_a_live_nonzero_rows_read_while_running_before_return(
             resume_staging.wait(timeout=10)
             return result
 
+        def promote_to_durable_bronze(self, ctx: Any, conn: Any, staging_result: Any) -> Any:
+            return self._inner.promote_to_durable_bronze(ctx, conn, staging_result)
+
     monkeypatch.setattr(run_module, "StagingLoader", _PausesAfterStagingLoader)
 
     result_holder: list[Any] = []
@@ -590,7 +774,7 @@ def test_heartbeat_writes_a_live_nonzero_rows_read_while_running_before_return(
 
     def _run_in_background() -> None:
         try:
-            result_holder.append(run_ingest(ctx, heartbeat_interval_seconds=0.05))
+            result_holder.append(stage_ingest(ctx, heartbeat_interval_seconds=0.05))
         except Exception as exc:  # noqa: BLE001 -- captured so the main thread can assert on it
             error_holder.append(exc)
 
@@ -613,11 +797,13 @@ def test_heartbeat_writes_a_live_nonzero_rows_read_while_running_before_return(
         resume_staging.set()
         thread.join(timeout=10)
 
-    assert not error_holder, f"run_ingest raised on the background thread: {error_holder}"
+    assert not error_holder, f"stage_ingest raised on the background thread: {error_holder}"
     assert observed_live_progress, "heartbeat never wrote a live rows_read while status=RUNNING"
     assert len(result_holder) == 1
-    assert result_holder[0].status == "SUCCEEDED"
-    assert result_holder[0].rows_loaded == 1
+    assert result_holder[0].status == "STAGED"
+    assert result_holder[0].rows_read == 1
+    assert result_holder[0].rows_loaded == 0  # staging never writes to gold
+    assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 1
 
 
 # --- The publish transaction's four effects are invisible until commit -----
@@ -631,6 +817,19 @@ def test_publish_transaction_effects_are_invisible_to_another_connection_until_c
         env,
         key_suffix="atomic",
         csv_bytes=_csv_bytes(2, start_id=9_100_501),
+        dataset_name="customers",
+    )
+
+    stage_receipt = stage_ingest(ctx)
+    assert stage_receipt.status == "STAGED"
+
+    _seed_silver_rows_matching_csv(
+        env,
+        run_id=run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        start_id=9_100_501,
+        count=2,
     )
 
     ready = threading.Event()
@@ -665,7 +864,7 @@ def test_publish_transaction_effects_are_invisible_to_another_connection_until_c
     result_holder: list[Any] = []
 
     def _run_in_background() -> None:
-        result_holder.append(run_ingest(ctx))
+        result_holder.append(publish_ingest(ctx))
 
     thread = threading.Thread(target=_run_in_background)
     thread.start()
@@ -687,7 +886,10 @@ def test_publish_transaction_effects_are_invisible_to_another_connection_until_c
             ).fetchone()
         assert customers_count is not None
         assert customers_count[0] == 0
-        assert _read_run_status(env.migrated_dsn, run_id) == "RUNNING"
+        # STAGED, not RUNNING -- publish_ingest never touches
+        # meta.ingestion_runs.status until finalize_publication, which has
+        # not run yet at this pause point.
+        assert _read_run_status(env.migrated_dsn, run_id) == "STAGED"
         assert file_status is not None
         assert file_status[0] == "DISCOVERED"
         assert batch_status is not None
@@ -697,7 +899,8 @@ def test_publish_transaction_effects_are_invisible_to_another_connection_until_c
         thread.join(timeout=10)
 
     assert len(result_holder) == 1
-    assert result_holder[0].status == "SUCCEEDED"
+    assert result_holder[0]["status"] == "SUCCEEDED"
+    assert run_id in result_holder[0]["runs_finalized"]
     assert _read_customers_count_for_run(env.migrated_dsn, run_id) == 2
     assert _read_run_status(env.migrated_dsn, run_id) == "SUCCEEDED"
 
@@ -755,7 +958,7 @@ def test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status(
     """CR-01: a stray heartbeat tick against an already-terminal run must never regress it.
 
     Targets `_heartbeat_loop` directly on its own thread (not through
-    `run_ingest`) against a run already marked SUCCEEDED -- the exact
+    `stage_ingest`) against a run already marked SUCCEEDED -- the exact
     post-publish-commit race window CR-01 closes. See `_HeartbeatCallSpy`'s
     own docstring for why "the loop genuinely ticked" is proven via a call
     spy rather than a `rows_read` value becoming visible in the database.
@@ -777,7 +980,7 @@ def test_heartbeat_loop_tick_against_a_terminal_run_never_regresses_status(
 
     # Deliberately targets the module's own private implementation details
     # (this plan's own Task 1 spec): a thread-level test of the heartbeat
-    # loop itself, not merely its public entry point via run_ingest.
+    # loop itself, not merely its public entry point via stage_ingest.
     progress = run_module._Progress()  # noqa: SLF001
     progress.rows_read = 777
     progress.rows_parsed = 777
@@ -835,7 +1038,12 @@ def _read_run_trace_columns(migrated_dsn: str, run_id: int) -> tuple[str | None,
 
 
 def test_traceparent_round_trips_into_meta_ingestion_runs_via_a_real_claim(env: _Env) -> None:
-    """OBS-10: an incoming TRACEPARENT survives claim -> stage -> publish, unmodified in trace_id.
+    """OBS-10: an incoming TRACEPARENT survives claim -> stage, unmodified in trace_id.
+
+    The claim itself (and the trace_id/span_id write into
+    `meta.ingestion_runs`) happens entirely inside `stage_ingest` (module
+    docstring: "Read BEFORE the claim below, so the SAME trace_id/span_id
+    land on the claimed row") -- this test never needs `publish_ingest`.
 
     Extracts a known-valid, hand-constructed W3C ``traceparent`` into the
     active OTel context the same way ``dataplat.cli``'s own
@@ -847,8 +1055,9 @@ def test_traceparent_round_trips_into_meta_ingestion_runs_via_a_real_claim(env: 
     public ``configure(otlp_endpoint=...)``, which always builds a real
     network-bound ``OTLPSpanExporter`` -- mirrors ``tests/unit/observability/
     test_tracing.py``'s own sanctioned direct-poke-at-``tracing._provider``
-    pattern) so ``run_ingest()``'s own ``pipeline.run_ingest`` span is
-    genuinely recording and genuinely nests under the extracted parent.
+    pattern) so ``stage_ingest()``'s own ``pipeline.stage_ingest`` span
+    (renamed from ``pipeline.run_ingest``, OBS-10) is genuinely recording
+    and genuinely nests under the extracted parent.
 
     Proves, via a direct SQL read of ``meta.ingestion_runs`` (never trusting
     the in-process ``Receipt`` alone): ``trace_id`` equals the trace ID
@@ -871,20 +1080,20 @@ def test_traceparent_round_trips_into_meta_ingestion_runs_via_a_real_claim(env: 
     parent_ctx = propagate.extract({"traceparent": _TRACE_ROUNDTRIP_TRACEPARENT})
     token = otel_context.attach(parent_ctx)
     try:
-        receipt = run_ingest(ctx)
+        receipt = stage_ingest(ctx)
     finally:
         otel_context.detach(token)
         tracing.configure(otlp_endpoint=None)  # restore a genuine no-op for later tests
 
-    assert receipt.status == "SUCCEEDED"
+    assert receipt.status == "STAGED"
 
     db_trace_id, db_span_id = _read_run_trace_columns(env.migrated_dsn, run_id)
     assert db_trace_id == _TRACE_ROUNDTRIP_TRACE_ID_HEX  # SAME trace: cross-process continuity
     assert db_span_id is not None
     assert len(db_span_id) == 16
-    assert db_span_id != _TRACE_ROUNDTRIP_PARENT_SPAN_ID_HEX  # NEW span: run_ingest's own child
+    assert db_span_id != _TRACE_ROUNDTRIP_PARENT_SPAN_ID_HEX  # NEW span: stage_ingest's own child
 
-    # Bonus rigor: a "pipeline.run_ingest" span was genuinely recorded --
+    # Bonus rigor: a "pipeline.stage_ingest" span was genuinely recorded --
     # catches a silent tracing-setup mistake that the two DB assertions
     # above alone could not distinguish from "tracing never actually ran."
-    assert any(span.name == "pipeline.run_ingest" for span in exporter.get_finished_spans())
+    assert any(span.name == "pipeline.stage_ingest" for span in exporter.get_finished_spans())

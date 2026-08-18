@@ -4,7 +4,27 @@ Proves the view answers OBS-07's literal wording: a platform operator can
 run one SQL query and get a row's source file, object path, checksum,
 batch, ingestion timestamp, DAG/run/task ID, processor version, schema
 version and config version -- for a row genuinely published by
-`dataplat.pipeline.run.run_ingest()`, not a hand-seeded row.
+`dataplat.pipeline.run.stage_ingest()` + `publish_ingest()`, not a
+hand-seeded row.
+
+Originally written against the single `run_ingest` function; migrated here
+after plan 08.1-10 split it into `stage_ingest` (claim, stage, quality-gate,
+promote to durable bronze, mark `STAGED`) and `publish_ingest` (claim every
+currently-`STAGED` run for one dataset, publish `silver.<dataset>` into
+`normalized.<dataset>`, finalize). `publish_ingest` reads FROM
+`silver.<dataset>`, never from bronze directly, so a genuine publish now
+needs a `silver.customers` row to exist first -- this file already seeded
+`silver.customers` directly via SQL (D-12, never via a real `dbt build`;
+this test proves the view-SQL bridge, dbt's own execution is proven
+separately, plan 08.1-08), so that seed now runs BEFORE `publish_ingest`
+rather than after, and carries the row's own real lineage FKs directly
+instead of copying them from an already-published `normalized.customers`
+row (there is none yet at that point). Both `stage_ingest`/`publish_ingest`
+calls use the shared "customers" dataset (`_make_config`'s own hardcoded
+`ctx.config.dataset`) for the seeded run's own `meta.datasets` FK too --
+`publish_ingest` resolves `ctx.config.dataset` to a `dataset_id` and looks
+up currently-`STAGED` runs by THAT id (`list_staged_run_ids`), so a run
+created under any other dataset name would never be found as staged.
 
 Reuses `test_run_ingest.py`'s own `env`/`_seed_pending_run` fixture chain
 (imported, not reimplemented) rather than hand-writing raw INSERT statements
@@ -13,7 +33,7 @@ published `normalized.customers` row with every lineage column
 (`_run_id`/`_file_id`/`_batch_id`) populated exactly as production code
 populates them, a stronger and lower-drift-risk proof than a hand-seeded
 row. The context is built with `CsvSource(..., dataset_id=...)` -- mirroring
-`test_run_ingest.py::test_successful_run_records_its_resolved_schema_version_on_the_run`'s
+`test_run_ingest.py::test_staged_run_records_its_resolved_schema_version_on_the_run`'s
 own precedent, not the shared `_make_ctx` helper, which deliberately omits
 `dataset_id` and therefore skips schema resolution -- because this test
 needs `schema_version_id` genuinely populated to prove the view's
@@ -23,6 +43,7 @@ needs `schema_version_id` genuinely populated to prove the view's
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 
 import psycopg
 import pytest
@@ -32,7 +53,7 @@ from csv_processor.source import CsvSource
 from dataplat.models.identity import RunContext
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.pipeline.run import run_ingest
+from dataplat.pipeline.run import publish_ingest, stage_ingest
 from tests.integration.test_run_ingest import (  # noqa: F401 -- re-exported as pytest fixtures
     _csv_bytes,
     _Env,
@@ -52,36 +73,48 @@ from tests.integration.test_run_ingest import (  # noqa: F401 -- re-exported as 
 pytestmark = pytest.mark.integration
 
 
-def _seed_silver_customer_and_dedup_audit(
+def _seed_silver_customer_row(  # noqa: PLR0913 -- one keyword per silver/lineage identity value
     dsn: str,
     *,
     customer_id: int,
     run_id: int,
-    dataset_id: int,
+    file_id: int,
+    batch_id: int,
+    dbt_loaded: bool,
 ) -> None:
-    """Seed one `silver.customers` row + a covering `meta.dedup_audit` row (raw SQL).
+    """Seed one `silver.customers` row directly via raw SQL -- never via a real `dbt build`.
 
-    Mirrors this file's own convention of seeding directly against the
-    migrated schema rather than going through dbt (D-12's own bridge is
-    proven at the view-SQL level here; dbt's own execution is proven
-    elsewhere, plan 08.1-08).
+    Post-08.1-10, this row is no longer purely a lineage-enrichment side seed: it is what
+    `publish_ingest` itself reads to actually publish this `customer_id` into
+    `normalized.customers` (D-12's own bridge is proven at the view-SQL level here; dbt's
+    own execution is proven elsewhere, plan 08.1-08). `dbt_loaded=False` leaves
+    `_dbt_loaded_at` NULL -- a silver row must structurally exist for a real publish to
+    happen, but this represents "this row's own silver history was never actually
+    dbt-processed", for the no-dbt-hop-data test below.
     """
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             """
-            INSERT INTO silver.customers
-                (customer_id, name, country, birth_date, event_ts,
-                 _run_id, _file_id, _batch_id, _source_row_number, _record_hash,
-                 _dbt_loaded_at)
-            SELECT %s, 'Ada Lovelace', 'GB', NULL, NULL,
-                   c._run_id, c._file_id, c._batch_id, c._source_row_number,
-                   c._record_hash, now()
-              FROM normalized.customers c
-             WHERE c.customer_id = %s
-             LIMIT 1
+            INSERT INTO silver.customers (
+                customer_id, name, country, birth_date, event_ts,
+                _run_id, _file_id, _batch_id, _source_row_number, _record_hash,
+                _dbt_loaded_at
+            ) VALUES (%s, 'Ada Lovelace', 'GB', NULL, NULL, %s, %s, %s, 1, %s, %s)
             """,
-            (str(customer_id), customer_id),
+            (
+                str(customer_id),
+                run_id,
+                file_id,
+                batch_id,
+                hashlib.sha256(f"lineage-silver-{customer_id}".encode()).digest(),
+                datetime.now(UTC) if dbt_loaded else None,
+            ),
         )
+
+
+def _seed_dedup_audit(dsn: str, *, dataset_id: int, run_id: int) -> None:
+    """Seed one covering `meta.dedup_audit` row directly via raw SQL."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             """
             INSERT INTO meta.dedup_audit
@@ -104,12 +137,14 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
         env,
         key_suffix="lineage",
         csv_bytes=csv_bytes,
+        dataset_name="customers",
     )
-    # `_seed_pending_run` created the dataset under this name -- re-resolving
-    # it is idempotent (INSERT ... ON CONFLICT DO UPDATE) and returns the
-    # same `dataset_id`, needed here (unlike `_make_ctx`) so `CsvSource`
-    # actually runs schema resolution.
-    dataset_id = env.metadata.get_or_create_dataset("run_ingest_lineage")
+    # `_seed_pending_run` created the run's FK dataset as "customers" above
+    # (needed for `publish_ingest` to find this run as staged) --
+    # re-resolving it is idempotent (INSERT ... ON CONFLICT DO UPDATE) and
+    # returns the same `dataset_id`, needed here (unlike `_make_ctx`) so
+    # `CsvSource` actually runs schema resolution.
+    dataset_id = env.metadata.get_or_create_dataset("customers")
     ctx = PipelineContext(
         run=RunContext(
             run_id=run_id,
@@ -136,19 +171,26 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
         source=CsvSource(bucket=env.scratch_bucket, key=object_key, dataset_id=dataset_id),
     )
 
-    receipt = run_ingest(ctx)
-    assert receipt.status == "SUCCEEDED"
+    stage_receipt = stage_ingest(ctx)
+    assert stage_receipt.status == "STAGED"
 
-    # D-12: seed a corresponding silver row + covering dedup_audit row
-    # directly via raw SQL (mirroring this file's own established seeding
-    # convention) so the view's new LEFT JOINs resolve to real, non-NULL
-    # data for this customer_id.
-    _seed_silver_customer_and_dedup_audit(
+    # D-12: seed a corresponding silver row (this run's real publish source,
+    # post-08.1-10) + a covering dedup_audit row directly via raw SQL, so
+    # both `publish_ingest` has something to publish AND the view's dbt-hop
+    # LEFT JOINs resolve to real, non-NULL data for this customer_id.
+    _seed_silver_customer_row(
         env.migrated_dsn,
         customer_id=customer_id,
         run_id=run_id,
-        dataset_id=dataset_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        dbt_loaded=True,
     )
+    _seed_dedup_audit(env.migrated_dsn, dataset_id=dataset_id, run_id=run_id)
+
+    publish_result = publish_ingest(ctx)
+    assert publish_result["status"] == "SUCCEEDED"
+    assert run_id in publish_result["runs_finalized"]
 
     expected_content_sha256 = hashlib.sha256(csv_bytes).digest()
 
@@ -174,7 +216,14 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
     assert row["processor_version"] == "0.1.0"
     assert row["processor_image_digest"] == "sha256:testdigest"
     assert row["config_version"] is not None
-    assert row["config_hash"] == "synthetic-hash-for-test"
+    # A literal expected value isn't safe here anymore: "customers" is now a
+    # SHARED, session-wide dataset (needed for `publish_ingest` to find this
+    # run as staged -- module docstring), so `meta.config_versions`'s CURRENT
+    # row for it may already have been created by an earlier-running test
+    # (`_insert_config_version`'s own get-or-reuse pattern) with a different
+    # hash. OBS-07's own requirement is only that the view SURFACES a
+    # config_hash, not any particular literal value.
+    assert row["config_hash"] is not None
     assert row["schema_version"] is not None
     assert row["schema_hash"] is not None
     # OBS-07 gap closure (07-09): these are now populated because RunContext
@@ -203,10 +252,14 @@ def test_lineage_view_returns_every_obs_07_named_column_for_a_published_row(
 def test_lineage_view_returns_null_dbt_hop_columns_when_no_silver_data_exists(
     env: _Env,  # noqa: F811 -- pytest fixture-injection param name, not a real redefinition
 ) -> None:
-    """A gold row with no corresponding silver/dedup_audit data still returns a row.
+    """A gold row whose own silver history was never dbt-processed still returns a row.
 
     Proves the `LEFT JOIN` contract: never an error, never a dropped row --
-    the four new dbt/silver-hop columns simply come back `NULL`.
+    the four new dbt/silver-hop columns simply come back `NULL`. Post-08.1-10, a silver
+    row must structurally exist for `publish_ingest` to publish this customer_id at all
+    (unlike the pre-split flow, where silver was a purely optional lineage-enrichment
+    seed) -- so "no silver data" is now represented as a silver row with `_dbt_loaded_at
+    IS NULL` and no covering `meta.dedup_audit` row, rather than no silver row at all.
     """
     customer_id = 9_300_002
     csv_bytes = _csv_bytes(1, start_id=customer_id)
@@ -216,8 +269,9 @@ def test_lineage_view_returns_null_dbt_hop_columns_when_no_silver_data_exists(
         env,
         key_suffix=key_suffix,
         csv_bytes=csv_bytes,
+        dataset_name="customers",
     )
-    dataset_id = env.metadata.get_or_create_dataset(f"run_ingest_{key_suffix}")
+    dataset_id = env.metadata.get_or_create_dataset("customers")
     ctx = PipelineContext(
         run=RunContext(
             run_id=run_id,
@@ -233,11 +287,26 @@ def test_lineage_view_returns_null_dbt_hop_columns_when_no_silver_data_exists(
         source=CsvSource(bucket=env.scratch_bucket, key=object_key, dataset_id=dataset_id),
     )
 
-    receipt = run_ingest(ctx)
-    assert receipt.status == "SUCCEEDED"
+    stage_receipt = stage_ingest(ctx)
+    assert stage_receipt.status == "STAGED"
 
-    # Deliberately no silver.customers/meta.dedup_audit seeding -- this
-    # customer_id has no corresponding silver history.
+    # A silver row must exist for publish_ingest to publish anything at all
+    # (see module/function docstrings) -- seeded here with `_dbt_loaded_at`
+    # left NULL and deliberately no meta.dedup_audit row, so the view's
+    # dbt-hop columns still resolve to NULL for this customer_id.
+    _seed_silver_customer_row(
+        env.migrated_dsn,
+        customer_id=customer_id,
+        run_id=run_id,
+        file_id=file_id,
+        batch_id=batch_id,
+        dbt_loaded=False,
+    )
+
+    publish_result = publish_ingest(ctx)
+    assert publish_result["status"] == "SUCCEEDED"
+    assert run_id in publish_result["runs_finalized"]
+
     with psycopg.connect(env.migrated_dsn, row_factory=dict_row) as conn:
         row = conn.execute(
             "SELECT * FROM meta.v_customers_lineage WHERE customer_id = %s",
