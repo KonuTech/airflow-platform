@@ -1010,6 +1010,12 @@ A CSV may represent a batch for a particular timestamp or processing window.
 
 Operational issues may cause records to appear in multiple batches.
 
+Cross-file, cross-batch and cross-run deduplication (the strategies enumerated below) is
+implemented as dbt (Postgres adapter) models operating on the persisted staging/bronze schema and
+landing in silver -- not as an in-memory Python step before the transactional load (see section
+36). Within-single-CSV structural checks may still happen in the Python CSV processor ahead of the
+load.
+
 Deduplication must therefore work:
 
 * inside a single CSV
@@ -1043,7 +1049,8 @@ Prefer one source over another.
 
 Use batch metadata and processing windows.
 
-The strategy must be dataset-specific.
+The strategy must be dataset-specific -- it remains dataset-specific and is expressed as dbt model
+configuration.
 
 Never assume `DISTINCT` is sufficient.
 
@@ -1062,6 +1069,10 @@ Track:
 * records deduplicated
 * deduplication strategy
 * duplicate count
+
+Deduplication auditability for the dbt-owned silver stage is tracked the same way as for the
+Python-owned bronze and gold stages -- via the `meta.dedup_audit` table (already designed, section
+65) -- so lineage does not stop at dbt's boundary (see section 83, Data Lineage).
 
 Where practical, retain enough information to determine why a record was removed.
 
@@ -1197,6 +1208,12 @@ Also handle records arriving in a different order from their event timestamps.
 
 Do not automatically discard late or out-of-order records.
 
+Bronze ingestion (file discovery, validation, transactional load into staging) treats every
+arriving file the same regardless of its event timestamp -- late/out-of-order records are never
+rejected at this layer. Resolution of late-arriving and out-of-order events into correct
+historical state happens in the dbt bronze-to-silver stage (section 36), using the record's
+event/business timestamp, not ingestion time.
+
 ---
 
 # 33. Backfilling
@@ -1276,6 +1293,13 @@ Consider:
 
 A failed load must not leave an ambiguous partially committed dataset.
 
+The atomic silver-to-gold publish (section 36) never uses SQL `MERGE` -- including dbt-postgres's
+`merge` incremental strategy -- because of a documented, verified PostgreSQL concurrency bug
+(BUG #18279) where two concurrent `MERGE` transactions can each decide independently that no
+matching row exists and both attempt an insert. The existing Python MergePublisher uses
+`pg_advisory_xact_lock` + `INSERT ... ON CONFLICT` instead, inside the single transaction that
+also advances the watermark and run status (section 28).
+
 ---
 
 # 36. Staging and Atomic Publication
@@ -1283,24 +1307,25 @@ A failed load must not leave an ambiguous partially committed dataset.
 For important loads:
 
 ```text
-MinIO
+MinIO (raw/bronze, immutable)
   ↓
-staging
+CSV Processor: discovery, validation, normalization
   ↓
-validation
+PostgreSQL staging table (bronze)
   ↓
-transformation
+dbt (Postgres adapter): bronze -> silver -- cleaning, deduplication, late-arriving-event
+resolution
   ↓
-PostgreSQL staging table
+PostgreSQL silver schema (persisted)
   ↓
-validation
+Python MergePublisher: silver -> gold -- atomic publication (pg_advisory_xact_lock + INSERT ...
+ON CONFLICT, single transaction with watermark + run-status)
   ↓
-atomic publication
-  ↓
-warehouse/target table
+warehouse/target table (gold)
 ```
 
-Consumers should not see partially loaded datasets.
+Consumers should not see partially loaded datasets -- true at every layer boundary: bronze/staging,
+silver, and warehouse/gold.
 
 ---
 
@@ -1687,6 +1712,15 @@ customer_id | country | valid_from | valid_to   | is_current
 123         | DE      | 2026-08-11 | NULL       | true
 ```
 
+**Implementation note:** SCD Type 2 (and Types 0/1) remain entirely Python-owned, even though dbt
+(Postgres adapter) owns bronze-to-silver transformation elsewhere in this pipeline (section 36).
+`dbt snapshot` was evaluated for SCD Type 2 and explicitly rejected: dbt's own documentation states
+snapshots are not a replacement for CDC or event streaming -- they re-diff a source table's current
+state rather than consuming an ordered CDC event stream with explicit operation/sequence/
+transaction-ID semantics (sections 29, 30), which is what late-arriving SCD corrections (section
+58) require. SCD2's historized dimension tables also carry the same single-transaction requirement
+as gold publish (sections 35, 36, META-03) that keeps dbt out of the gold layer generally.
+
 ---
 
 # 55. SCD Change Detection
@@ -1770,6 +1804,9 @@ Aug 15 → late record says PL from Aug 5
 
 The system must support correcting historical validity intervals according to dataset policy.
 
+See the implementation note in section 54 -- historical corrections here are Python-owned; `dbt
+snapshot` was evaluated and rejected for this exact scenario.
+
 ---
 
 # 59. SCD + CDC
@@ -1844,17 +1881,17 @@ Raw source data should remain immutable where practical.
 Prefer:
 
 ```text
-RAW
+RAW (MinIO, immutable)
  │
  │ immutable
  ▼
-STAGING
+STAGING (PostgreSQL, bronze -- CSV Processor)
  │
  ▼
-NORMALIZED
+SILVER (PostgreSQL, dbt -- cleaning, dedup, late-arriving resolution)
  │
  ▼
-WAREHOUSE
+WAREHOUSE (PostgreSQL, gold -- Python MergePublisher)
 ```
 
 Do not overwrite original source files because of processing failures.
