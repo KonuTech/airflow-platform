@@ -429,6 +429,132 @@ class PostgresMetadataRepository(MetadataRepository):
             ).fetchone()
             return None if row is None else str(row[0])
 
+    def claim_run_stage(
+        self,
+        *,
+        run_id: int,
+        stage_name: str,
+        try_number: int,
+        pod_name: str,
+    ) -> int | None:
+        """See `MetadataRepository.claim_run_stage`.
+
+        The `INSERT`'s own `WHERE EXISTS (... meta.ingestion_runs ... status
+        = 'STAGED')` clause governs the source `SELECT`'s row set, so it
+        applies even on a first-ever claim (no pre-existing `run_stages` row
+        to gate against yet) -- this is the cross-table guard (T-08.1-15).
+        The `ON CONFLICT ... DO UPDATE ... WHERE` clause then governs
+        whether an EXISTING `run_stages` row is claimable, mirroring
+        `claim_ingestion_run`'s own claimability predicate. Both checks
+        evaluate inside this single statement -- no read-then-write race
+        window.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO meta.run_stages (
+                    run_id, stage_name, status, lease_expires_at, pod_name,
+                    try_number, started_at
+                )
+                SELECT %(run_id)s, %(stage_name)s, 'RUNNING',
+                       now() + interval '5 minutes', %(pod_name)s,
+                       %(try_number)s, now()
+                 WHERE EXISTS (
+                    SELECT 1 FROM meta.ingestion_runs
+                     WHERE run_id = %(run_id)s AND status = 'STAGED'
+                 )
+                ON CONFLICT (run_id, stage_name) DO UPDATE
+                    SET status = 'RUNNING',
+                        lease_expires_at = EXCLUDED.lease_expires_at,
+                        pod_name = EXCLUDED.pod_name,
+                        try_number = EXCLUDED.try_number
+                 WHERE meta.run_stages.status IN ('PENDING', 'FAILED')
+                    OR (meta.run_stages.status = 'RUNNING'
+                        AND meta.run_stages.lease_expires_at < now())
+                RETURNING run_stage_id
+                """,
+                {
+                    "run_id": run_id,
+                    "stage_name": stage_name,
+                    "pod_name": pod_name,
+                    "try_number": try_number,
+                },
+            ).fetchone()
+            # A None row here is an EXPECTED outcome (mirrors
+            # claim_ingestion_run's own documented contract), not an
+            # invariant violation: either the owning run is not yet STAGED,
+            # or the run_stages row (if any) is not currently claimable.
+            return None if row is None else int(row[0])
+
+    def heartbeat_run_stage(
+        self,
+        *,
+        run_id: int,
+        stage_name: str,
+        lease_expires_at: datetime,
+    ) -> None:
+        """See `MetadataRepository.heartbeat_run_stage`.
+
+        The `WHERE run_id = %s AND stage_name = %s AND status = 'RUNNING'`
+        guard mirrors `heartbeat_ingestion_run`'s own CR-01 self-guard: a
+        stray heartbeat tick landing after `complete_run_stage` has already
+        committed a terminal status is a genuine, silent no-op.
+        """
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE meta.run_stages
+                   SET lease_expires_at = %s
+                 WHERE run_id = %s AND stage_name = %s AND status = 'RUNNING'
+                """,
+                (lease_expires_at, run_id, stage_name),
+            )
+
+    def complete_run_stage(
+        self,
+        *,
+        run_id: int,
+        stage_name: str,
+        status: str,
+        finished_at: datetime,
+    ) -> None:
+        """See `MetadataRepository.complete_run_stage`."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE meta.run_stages
+                   SET status = %s, finished_at = %s
+                 WHERE run_id = %s AND stage_name = %s
+                """,
+                (status, finished_at, run_id, stage_name),
+            )
+
+    def get_run_stage_status(self, *, run_id: int, stage_name: str) -> str | None:
+        """See `MetadataRepository.get_run_stage_status`."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM meta.run_stages WHERE run_id = %s AND stage_name = %s",
+                (run_id, stage_name),
+            ).fetchone()
+            return None if row is None else str(row[0])
+
+    def list_staged_run_ids(self, *, dataset_id: int) -> list[tuple[int, int, int, str | None]]:
+        """See `MetadataRepository.list_staged_run_ids`."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, file_id, batch_id, report_uri
+                  FROM meta.ingestion_runs
+                 WHERE dataset_id = %s AND status = 'STAGED'
+                 ORDER BY run_id ASC
+                """,
+                (dataset_id,),
+            ).fetchall()
+            return [
+                (int(row[0]), int(row[1]), int(row[2]), None if row[3] is None else str(row[3]))
+                for row in rows
+            ]
+
     def finalize_publication(  # noqa: PLR0913 -- matches the files/batches/ingestion_runs field set this updates
         self,
         *,
