@@ -52,7 +52,7 @@ FILE ?=
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
-        image-airflow ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail
+        image-airflow image-dbt ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -264,6 +264,32 @@ image-csv-processor:            ## INFRA-08/U1: build, tag, push to the local re
 	    airflow variables set csv_processor_image "localhost:5001/csv-processor:$(GIT_SHA)"; \
 	else \
 	  echo "WARNING: no live cluster — image pushed but csv_processor_image Variable NOT set; run this target again once the cluster is up, or set it manually" >&2; \
+	fi
+
+image-dbt:                       ## DEDUP-03: build, tag, push the dbt image to the local registry, register it for the dbt build DAG task [plan 08.1-02]
+	# Mirrors image-csv-processor's exact shape above: GIT_SHA computed
+	# inline, TWICE -- once for the build arg (this image's own
+	# org.opencontainers.image.revision/.version labels), once for the tag
+	# -- never a literal, never a floating tag.
+	docker build \
+	  --build-arg GIT_SHA=$$(git rev-parse --short HEAD) \
+	  -t dbt:$$(git rev-parse --short HEAD) \
+	  -f docker/dbt/Dockerfile .
+	docker tag dbt:$(GIT_SHA) localhost:5001/dbt:$(GIT_SHA)
+	docker push localhost:5001/dbt:$(GIT_SHA)
+	# plan 08.1-12's `dbt build` KPO task resolves its image dynamically via
+	# Variable.get("dbt_image"), the SAME way ingest/discover resolve
+	# csv_processor_image -- register a NEW Airflow Variable here (dbt_image,
+	# never csv_processor_image), unlike image-airflow below which is
+	# referenced statically via Helm values instead.
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	if $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
+	  echo "==> registering dbt_image=localhost:5001/dbt:$(GIT_SHA)"; \
+	  $(KUBECTL) --context "$$ctx" exec -n airflow deploy/airflow-api-server -- \
+	    airflow variables set dbt_image "localhost:5001/dbt:$(GIT_SHA)"; \
+	else \
+	  echo "WARNING: no live cluster — image pushed but dbt_image Variable NOT set; run this target again once the cluster is up, or set it manually" >&2; \
 	fi
 
 image-airflow:                  ## OBS-10: build, tag, push the custom Airflow[otel] image to the local registry [plan 07-04]
