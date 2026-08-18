@@ -623,6 +623,64 @@ def test_run_stages_enforces_unique_run_id_stage_name(migrated_dsn: str) -> None
         conn.rollback()
 
 
+_GOLD_INDEXES = (
+    ("normalized", "orders", "ix_orders_order_date"),
+    # Pre-existing (migration 0016), not created by 0027 -- see 0027's own
+    # module docstring. Still part of the five named physical-modeling
+    # indexes D-13 asks for, so it belongs in this completeness check.
+    ("normalized", "orders", "ix_orders_customer_id"),
+    ("normalized", "orders", "ix_orders_order_date_customer_id"),
+    ("normalized", "customers", "ix_customers_event_ts"),
+    ("normalized", "customers", "ix_customers_country"),
+)
+
+
+def test_gold_indexes_exist_and_business_key_uniqueness_is_unchanged(migrated_dsn: str) -> None:
+    """D-13: all five gold physical-modeling indexes exist, uniqueness guarantees are untouched.
+
+    Two independent properties: (1) `pg_indexes` shows all five named
+    indexes after `alembic upgrade head`; (2) the pre-existing
+    `uq_customers_customer_id`/`uq_orders_order_id` `UNIQUE` constraints
+    (migrations 0006/0017) still reject a duplicate business key -- proving
+    migration 0027 (indexes only, per its own module docstring) did not
+    weaken `MergePublisher`/`OrdersMergePublisher`'s `ON CONFLICT` targets.
+    """
+    for schema, _table, index_name in _GOLD_INDEXES:
+        assert _index_exists(migrated_dsn, schema=schema, index_name=index_name), (
+            f"missing index {schema}.{index_name}"
+        )
+
+    assert _customers_customer_id_constraint_types(migrated_dsn) == ("UNIQUE",)
+
+    run_id, file_id, batch_id = _seed_minimal_lineage_row(
+        migrated_dsn,
+        dataset_name="test_migrations_gold_indexes_orders_unique",
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO normalized.orders
+                (order_id, customer_id, order_date, amount,
+                 _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+            VALUES (%s, %s, NULL, NULL, %s, %s, %s, 1, %s)
+            """,
+            (777_001, 1, run_id, file_id, batch_id, b"gold-idx-hash-1"),
+        )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                """
+                INSERT INTO normalized.orders
+                    (order_id, customer_id, order_date, amount,
+                     _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+                VALUES (%s, %s, NULL, NULL, %s, %s, %s, 2, %s)
+                """,
+                (777_001, 1, run_id, file_id, batch_id, b"gold-idx-hash-2"),
+            )
+        conn.rollback()
+
+
 def test_dbt_app_has_no_grant_on_run_stages(migrated_dsn: str) -> None:
     """D-02: `etl_app` claims/heartbeats `meta.run_stages`; `dbt_app` never touches it."""
     with psycopg.connect(migrated_dsn) as conn:
