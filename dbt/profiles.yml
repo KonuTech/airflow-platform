@@ -1,0 +1,27 @@
+# dbt/profiles.yml -- one target, five env_var() reads, zero literal secrets
+# (safe to bake into the dbt image, same convention `configs/` follows in
+# `docker/csv-processor/Dockerfile` -- 08.1-RESEARCH.md Architecture
+# Pattern 4).
+#
+# `DBT_PG_HOST`/`DBT_PG_PORT`/`DBT_PG_USER`/`DBT_PG_PASSWORD`/`DBT_PG_DBNAME`
+# are populated by `docker/dbt/resolve_secrets.py` (this image's own
+# ENTRYPOINT) BEFORE `dbt` itself starts -- these `env_var()` calls read
+# process environment only, they never resolve a `vault://` reference
+# themselves (dbt has no concept of that scheme).
+#
+# `schema: silver` is set exactly ONCE, here -- the sole schema declaration
+# in the whole project (Pitfall 3; see `dbt_project.yml`'s and
+# `macros/generate_schema_name.sql`'s own header comments for the other two
+# thirds of this same guard).
+airflow_platform:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: "{{ env_var('DBT_PG_HOST') }}"
+      port: "{{ env_var('DBT_PG_PORT') | int }}"
+      user: "{{ env_var('DBT_PG_USER') }}"
+      password: "{{ env_var('DBT_PG_PASSWORD') }}"
+      dbname: "{{ env_var('DBT_PG_DBNAME') }}"
+      schema: silver
+      threads: 4

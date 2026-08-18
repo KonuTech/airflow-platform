@@ -27,6 +27,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import boto3
 import psycopg
@@ -181,3 +182,80 @@ def s3_client(minio_config: dict[str, str]) -> Any:
         aws_secret_access_key=minio_config["secret_key"],
         config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
+
+
+# plan 08.1-08: shared `dbt build` invocation helper for tests/integration/
+# test_dbt_*.py (`-m dbt`, registered in pyproject.toml). Needs BOTH a local
+# Docker daemon (already covered by `_require_docker` above, autouse for the
+# whole directory) AND a local `dbt` binary on PATH — checked here, narrowly,
+# only when a `dbt`-marked test actually requests `run_dbt_build`, rather
+# than as a second directory-wide autouse fixture every non-dbt integration
+# test would otherwise pay the `shutil.which` cost for.
+DBT_PROJECT_DIR = REPO_ROOT / "dbt"
+
+
+def _dsn_to_dbt_env_vars(dsn: str) -> dict[str, str]:
+    """Parse a `postgresql://user:pass@host:port/dbname` DSN into `DBT_PG_*` env vars.
+
+    Matches `dbt/profiles.yml`'s five `env_var('DBT_PG_*')` calls exactly —
+    the same env vars `docker/dbt/resolve_secrets.py` populates from Vault
+    in a real deployment, populated here directly from the testcontainers
+    DSN instead.
+    """
+    parsed = urlsplit(dsn)
+    return {
+        "DBT_PG_HOST": parsed.hostname or "",
+        "DBT_PG_PORT": str(parsed.port or 5432),
+        "DBT_PG_USER": parsed.username or "",
+        "DBT_PG_PASSWORD": parsed.password or "",
+        "DBT_PG_DBNAME": (parsed.path or "/").lstrip("/"),
+    }
+
+
+@pytest.fixture(scope="session")
+def run_dbt_build() -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A session-scoped `run_dbt_build(dsn, *, select=None)` callable: a real `dbt build`.
+
+    Skips the whole `dbt`-marked suite, with a named reason, when no `dbt`
+    binary is on `PATH` — the same reasoning as `_require_docker` above.
+    Asserts `returncode == 0` itself (surfacing `stdout`/`stderr` in the
+    assertion message) rather than leaving each call site to repeat that
+    check — a failed `dbt build` with no visible output is undebuggable.
+
+    Returns:
+        A callable that runs `dbt build --project-dir dbt --profiles-dir
+        dbt` (optionally `--select <select>`) against whatever DSN it is
+        given, and returns the completed process on success.
+    """
+    dbt_bin = shutil.which("dbt")
+    if dbt_bin is None:
+        pytest.skip(
+            "dbt not found on PATH — tests/integration/test_dbt_*.py needs a local dbt binary"
+        )
+
+    def _run(dsn: str, *, select: str | None = None) -> subprocess.CompletedProcess[str]:
+        args = [
+            dbt_bin,
+            "build",
+            "--project-dir",
+            str(DBT_PROJECT_DIR),
+            "--profiles-dir",
+            str(DBT_PROJECT_DIR),
+        ]
+        if select is not None:
+            args += ["--select", select]
+        proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell, no user input
+            args,
+            env={**os.environ, **_dsn_to_dbt_env_vars(dsn)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert proc.returncode == 0, (
+            f"dbt build failed (exit {proc.returncode}):\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+        return proc
+
+    return _run

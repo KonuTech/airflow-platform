@@ -1,0 +1,18 @@
+# dbt/models/staging/_sources.yml -- read-only source declarations only
+# (08.1-PATTERNS.md's own File Classification note repurposes this folder's
+# conventional dbt meaning: no staging *models* live here, only the
+# `sources:` block naming the durable bronze tables migration 0022 created).
+#
+# Bare table declarations, no `columns:` list -- `dbt_app`'s own grant
+# (migration 0021: `GRANT SELECT ON ALL TABLES IN SCHEMA staging TO
+# dbt_app` + `ALTER DEFAULT PRIVILEGES`) is what actually governs access;
+# this file only tells dbt where `source('bronze', 'customers'/'orders')`
+# resolves.
+version: 2
+
+sources:
+  - name: bronze
+    schema: staging
+    tables:
+      - name: customers
+      - name: orders

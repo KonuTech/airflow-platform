@@ -1,0 +1,57 @@
+# dbt/models/silver/silver_orders.yml -- D-15's identical contract
+# treatment as silver_customers.yml, substituted for orders. `data_type`
+# values match migration 0023's real `silver.orders` DDL exactly. See
+# silver_customers.yml's own header comment for the full contract/
+# data_tests-vs-real-constraint rationale (identical here, dataset-
+# substituted only).
+version: 2
+
+models:
+  - name: silver_orders
+    config:
+      contract:
+        enforced: true
+      on_schema_change: fail
+    columns:
+      - name: order_id
+        data_type: text
+        constraints:
+          - type: not_null
+          - type: unique
+        data_tests:
+          - not_null
+          - unique
+      - name: customer_id
+        data_type: text
+        constraints:
+          - type: not_null
+      - name: order_date
+        data_type: text
+      - name: amount
+        data_type: text
+      - name: _run_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _file_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _batch_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _source_row_number
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: _record_hash
+        data_type: bytea
+        constraints:
+          - type: not_null
+      - name: _record_hash_version
+        data_type: smallint
+        constraints:
+          - type: not_null
+      - name: _dbt_loaded_at
+        data_type: timestamp with time zone
