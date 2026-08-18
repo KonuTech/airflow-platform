@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: planning
-stopped_at: "Completed quick task 260817-mvp: capped integrity_gate concurrency, root-caused and fixed the "discover reliability" misdiagnosis"
-last_updated: "2026-08-18T08:44:03.200Z"
+stopped_at: Phase 08.1 context gathered
+last_updated: "2026-08-18T12:43:03.196Z"
 last_activity: 2026-08-17
 progress:
   total_phases: 12
@@ -138,7 +138,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-18T08:49:04Z
-Stopped at: Completed quick task 260818-f0w: updated README.md in place for the dbt bronze-to-silver medallion architecture decision
-Resume file: .planning/phases/08-validation-quarantine-metadata-control-plane-completion/.continue-here.md
+Last session: 2026-08-18T12:43:03.180Z
+Stopped at: Phase 08.1 context gathered
+Resume file: .planning/phases/08.1-dbt-silver-transformation-layer-dbt-postgres-adapter-owns-br/08.1-CONTEXT.md
 None
