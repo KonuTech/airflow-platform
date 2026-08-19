@@ -1,6 +1,6 @@
 # Executive Summary
 
-<details open>
+<details>
 <summary><strong>🇬🇧 English</strong></summary>
 
 This repository is a local, production-like ETL/data platform -- Apache Airflow orchestrating
@@ -307,7 +307,7 @@ flowchart TD
 
 </details>
 
-<details>
+<details open>
 <summary><strong>🇵🇱 Polski</strong></summary>
 
 To repozytorium to lokalna, zbliżona do produkcyjnej platforma ETL/danych -- Apache Airflow
