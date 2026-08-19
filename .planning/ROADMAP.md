@@ -588,7 +588,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 09-09-PLAN.md — Recovery DAG wiring: DBT_BUILD tracking + Grafana alert (D-14 wiring, D-19)
+- [x] 09-09-PLAN.md — Recovery DAG wiring: DBT_BUILD tracking + Grafana alert (D-14 wiring, D-19)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
