@@ -578,7 +578,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion — 09-02 needs 09-01's ReconciliationConfig)*
 
-- [ ] 09-02-PLAN.md — Watermarks + reconciliation foundation + silver->gold hop (D-01..D-04, D-20..D-24)
+- [x] 09-02-PLAN.md — Watermarks + reconciliation foundation + silver->gold hop (D-01..D-04, D-20..D-24)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
