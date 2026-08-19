@@ -73,6 +73,13 @@
     source_identifier='customers',
     target_schema=target.schema,
     target_identifier='customers'
+) }};
+{{ reconciliation_post_hook(
+    dataset_name='customers',
+    source_schema='staging',
+    source_identifier='customers',
+    target_schema=target.schema,
+    target_identifier='customers'
 ) }}
 {% endset %}
 
