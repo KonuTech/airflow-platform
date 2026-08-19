@@ -139,3 +139,11 @@ None - no external service configuration required.
 ---
 *Phase: 09-etl-correctness-dedup-incremental-backfill-recovery*
 *Completed: 2026-08-19*
+
+## Self-Check: PASSED
+
+All claimed files verified present (`airflow/dags/csv_ingest_customers.py`,
+`airflow/dags/csv_ingest_orders.py`, `airflow/dags/_common/run_stage_recorder.py`,
+`helm/values/local/monitoring.yaml`, `helm/values/ci/monitoring.yaml`, this
+SUMMARY.md). All claimed commit hashes verified present in `git log`
+(`0ae89b5`, `bd4efcf`, `7ced421`, `435af23`).
