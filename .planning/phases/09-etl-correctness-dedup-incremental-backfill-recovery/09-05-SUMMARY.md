@@ -92,3 +92,11 @@ None - no external service configuration required.
 ---
 *Phase: 09-etl-correctness-dedup-incremental-backfill-recovery*
 *Completed: 2026-08-19*
+
+## Self-Check: PASSED
+
+- FOUND: tools/corpus/dated_series.py
+- FOUND: tests/unit/test_dated_series.py
+- FOUND: .planning/phases/09-etl-correctness-dedup-incremental-backfill-recovery/09-05-SUMMARY.md
+- FOUND commit 13d0c13 (Task 1: feat(09-05))
+- FOUND commit 74012e5 (docs(09-05): complete plan)
