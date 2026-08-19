@@ -109,7 +109,7 @@ def _unique_marked_csv_bytes(base_bytes: bytes, *, offset: int) -> bytes:
     return "\n".join([header, new_first_row, *rest]).encode("utf-8")
 
 
-def test_fresh_customers_file_flows_through_stage_dbt_build_publish(
+def test_fresh_customers_file_flows_through_stage_dbt_build_publish(  # noqa: PLR0915
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     slice_fixtures_dir: Path,

@@ -47,14 +47,16 @@ def upgrade() -> None:
     op.execute("GRANT USAGE ON SCHEMA silver TO etl_app")
     op.execute("GRANT SELECT ON silver.customers, silver.orders TO etl_app")
     op.execute(
-        "ALTER DEFAULT PRIVILEGES FOR ROLE dbt_app IN SCHEMA silver GRANT SELECT ON TABLES TO etl_app"
+        "ALTER DEFAULT PRIVILEGES FOR ROLE dbt_app IN SCHEMA silver "
+        "GRANT SELECT ON TABLES TO etl_app"
     )
 
 
 def downgrade() -> None:
     """Reverse of upgrade(): default privileges rule, then table grants, then schema USAGE."""
     op.execute(
-        "ALTER DEFAULT PRIVILEGES FOR ROLE dbt_app IN SCHEMA silver REVOKE SELECT ON TABLES FROM etl_app"
+        "ALTER DEFAULT PRIVILEGES FOR ROLE dbt_app IN SCHEMA silver "
+        "REVOKE SELECT ON TABLES FROM etl_app"
     )
     op.execute("REVOKE SELECT ON silver.customers, silver.orders FROM etl_app")
     op.execute("REVOKE USAGE ON SCHEMA silver FROM etl_app")
