@@ -49,6 +49,7 @@ def test_backfill_dagrun_customers_succeeds_and_is_structurally_stable(
     load_dag: Callable[[str], Any],
     mock_kpo_execute: list[dict[str, Any]],
     mock_s3_infrastructure: None,  # noqa: ARG001 -- fixture used for its patching side effect only
+    mock_run_stage_recorder_db: None,  # noqa: ARG001 -- fixture used for its patching side effect only
 ) -> None:
     """`dag.test()` against `csv_ingest_customers` proves backfill-DagRun mechanics (VALID-08).
 
@@ -60,6 +61,9 @@ def test_backfill_dagrun_customers_succeeds_and_is_structurally_stable(
             upstream failure.
         mock_s3_infrastructure: Doubles every S3/`boto3` touchpoint the DAG's
             sensor/gate/list tasks use (no return value needed by this test).
+        mock_run_stage_recorder_db: Doubles `list_run_ids_pending_dbt_build`/
+            `record_dbt_build_stage`'s own DB touchpoints (plan 09-09) -- this
+            tier stands up no analytical PostgreSQL container.
     """
     dag = load_dag("csv_ingest_customers")
 
@@ -108,6 +112,7 @@ def test_backfill_dagrun_orders_succeeds(
     load_dag: Callable[[str], Any],
     mock_kpo_execute: list[dict[str, Any]],
     mock_s3_infrastructure: None,  # noqa: ARG001 -- fixture used for its patching side effect only
+    mock_run_stage_recorder_db: None,  # noqa: ARG001 -- fixture used for its patching side effect only
 ) -> None:
     """A parallel, smaller proof for `csv_ingest_orders` (Pitfall 3's own scope limit).
 

@@ -28,6 +28,7 @@ from kubernetes.client import models as k8s
 
 from _common.integrity_gate import integrity_gate, list_matched_keys
 from _common.kpo import common_kpo_kwargs
+from _common.run_stage_recorder import list_run_ids_pending_dbt_build, record_dbt_build_stage
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,24 @@ def aggregate_receipts(receipts: list[dict]) -> None:
         len(receipts),
         total_rows_loaded,
     )
+
+
+@task(trigger_rule="all_done")
+def resolve_dbt_build_status(dag_run=None, ti=None) -> str:  # noqa: ANN001 -- Airflow-injected context params, untyped upstream too
+    """`dbt_build`'s own terminal state, for `mark_dbt_build_done` (LOAD-06, D-14/D-17).
+
+    Deviation from 09-09-PLAN.md's originally-assumed
+    ``{{ dag_run.get_task_instance('dbt_build').state }}`` Jinja mechanism:
+    verified live against the installed ``apache-airflow==3.3.0`` that the
+    Task Execution API's ``DagRun`` model (``airflow.sdk.api.datamodels.
+    _generated.DagRun``) is a plain Pydantic data object with no
+    ``get_task_instance`` method -- Airflow 3's Task-SDK DB isolation means
+    task code can never read sibling task-instance state directly from the
+    metadata DB. ``ti.get_task_states`` is the Task SDK's own remote-API
+    equivalent, resolved through the supervisor process instead.
+    """
+    states = ti.get_task_states(dag_id=dag_run.dag_id, run_ids=[dag_run.run_id], task_ids=["dbt_build"])
+    return "SUCCEEDED" if states.get("dbt_build") == "success" else "FAILED"
 
 
 # schedule=[customers_asset] (D-15): this DAG only runs after customers' own publish lands GOLD.
@@ -120,6 +139,13 @@ def csv_ingest_orders() -> None:
         max_active_tis_per_dag=1,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
+    # LOAD-06 (D-14, D-17, D-19): DBT_BUILD's own meta.run_stages row, recorded
+    # Airflow-side around the existing dbt_build pod -- see run_stage_recorder.py's
+    # module docstring for why this is a status-only recorder, not a claim/lease.
+    pending_run_ids = list_run_ids_pending_dbt_build(dataset_name="orders")
+    mark_dbt_build_running = record_dbt_build_stage.override(task_id="mark_dbt_build_running")(
+        run_ids=pending_run_ids, status="RUNNING"
+    )
     # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
     dbt_build = KubernetesPodOperator(
         task_id="dbt_build",
@@ -134,6 +160,11 @@ def csv_ingest_orders() -> None:
             include_dataplat_credentials=False,
         ),
     )
+    dbt_build_status = resolve_dbt_build_status()
+    # trigger_rule="all_done": must record FAILED too (LOAD-06), never skipped.
+    mark_dbt_build_done = record_dbt_build_stage.override(
+        task_id="mark_dbt_build_done", trigger_rule="all_done"
+    )(run_ids=pending_run_ids, status=dbt_build_status)
     publish = KubernetesPodOperator(
         task_id="publish",
         cmds=["dataplat"],
@@ -142,7 +173,7 @@ def csv_ingest_orders() -> None:
         retry_exponential_backoff=True,
         **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
     )
-    stage >> dbt_build >> publish
+    stage >> mark_dbt_build_running >> dbt_build >> dbt_build_status >> mark_dbt_build_done >> publish
     aggregate_receipts(stage.output)
 
 
