@@ -38,24 +38,36 @@ DAGS_DIR = REPO_ROOT / "airflow" / "dags"
 # `_common/integrity_gate.py` (plan 08-02) is ALSO exempt here: it
 # legitimately imports `psycopg`/`hashlib` for the narrow D-20/D-22
 # rejection-bookkeeping work (LOAD-10's pre-pod-launch integrity gate).
+#
+# `_common/run_stage_recorder.py` (plan 09-04) is the THIRD such exemption:
+# it legitimately imports `psycopg` for the narrow D-14 DBT_BUILD
+# `meta.run_stages` status-recording work (LOAD-06's whole-pipeline
+# recovery-visibility gap), the same ADR-0004-exception shape as
+# `integrity_gate.py`, never a `dataplat` import.
 _EXEMPT_FROM_IMPORT_CHECK = frozenset(
     {
         "airflow/dags/_common/kpo.py",
         "airflow/dags/_common/tracing_kpo.py",
         "airflow/dags/_common/integrity_gate.py",
+        "airflow/dags/_common/run_stage_recorder.py",
     },
 )
 
-# `_common/integrity_gate.py` is the ONE sanctioned exception to ADR-0004's
-# "Airflow never writes to the analytical database directly" rule (D-20's
-# rejection-bookkeeping INSERT, documented at length in the module's own
-# docstring) -- a raw SQL literal is structurally unavoidable in the one
-# function that performs it. This exemption is scoped narrowly and
-# INDEPENDENTLY of `_EXEMPT_FROM_IMPORT_CHECK` above: a future file that also
-# imports psycopg/hashlib does not silently inherit an SQL exemption it was
-# never granted just by being added to that other frozenset.
+# `_common/integrity_gate.py` and `_common/run_stage_recorder.py` are the
+# TWO sanctioned exceptions to ADR-0004's "Airflow never writes to the
+# analytical database directly" rule (D-20's rejection-bookkeeping INSERT
+# and D-14's DBT_BUILD status-recording INSERT/UPDATE respectively, both
+# documented at length in their own module docstrings) -- a raw SQL literal
+# is structurally unavoidable in the functions that perform them. This
+# exemption is scoped narrowly and INDEPENDENTLY of `_EXEMPT_FROM_IMPORT_CHECK`
+# above: a future file that also imports psycopg/hashlib does not silently
+# inherit an SQL exemption it was never granted just by being added to that
+# other frozenset.
 _EXEMPT_FROM_SQL_CHECK = frozenset(
-    {"airflow/dags/_common/integrity_gate.py"},
+    {
+        "airflow/dags/_common/integrity_gate.py",
+        "airflow/dags/_common/run_stage_recorder.py",
+    },
 )
 
 FORBIDDEN_IMPORTS = re.compile(r"^\s*(?:import|from)\s+(csv|psycopg|boto3|pydantic)\b")
