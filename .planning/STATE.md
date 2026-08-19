@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
-status: completed
-stopped_at: Phase 08.1 context gathered
-last_updated: "2026-08-19T10:10:25.771Z"
+status: ready_to_plan
+stopped_at: Phase 08.1 complete (13/13) — ready to discuss Phase 09
+last_updated: 2026-08-19T10:37:31.404Z
 last_activity: 2026-08-19 -- Phase 08.1 marked complete
 progress:
   total_phases: 12
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** Every file, batch and record that enters the platform can be traced, explained, reprocessed and trusted.
-**Current focus:** Phase 08.1 — dbt-silver-transformation-layer-dbt-postgres-adapter-owns-br
+**Current focus:** Phase 09 — etl correctness dedup incremental backfill recovery
 
 ## Current Position
 
-Phase: 08.1 — COMPLETE
-Plan: 1 of 13
-Status: Phase 08.1 complete
-Last activity: 2026-08-19 -- Phase 08.1 marked complete
+Phase: 09
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-19
 
 Progress: [██████████] 100%
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100%
 
 **Velocity:**
 
-- Total plans completed: 87
+- Total plans completed: 100
 - Average duration: —
 - Total execution time: 0.0 hours
 
@@ -52,6 +52,7 @@ Progress: [██████████] 100%
 | 06 | 18 | - | - |
 | 07 | 9 | - | - |
 | 08 | 18 | - | - |
+| 08.1 | 13 | - | - |
 
 **Recent Trend:**
 
