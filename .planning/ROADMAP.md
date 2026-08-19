@@ -592,7 +592,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 09-10-PLAN.md — Backfill gap-recording wiring + live dbt_build pod-kill proof (D-06, D-18)
+- [x] 09-10-PLAN.md — Backfill gap-recording wiring + live dbt_build pod-kill proof (D-06, D-18)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
