@@ -98,6 +98,20 @@ class RunContext:
         batch_id: The batch this run processes, when applicable. Populated
             and consumed the same way as ``file_id``, from
             ``AssignmentDocument.batch.batch_id``. Defaults to ``None``.
+        batch_expected_row_count: This batch's claimed control-total row
+            count (D-23, VALID-06, plan 09-03), when its triggering
+            ``AssignmentDocument`` carried a parsed ``_BATCH_COMPLETE``
+            manifest. Populated by the ``stage`` CLI command from
+            ``doc.batch_complete_manifest.expected_row_count``, ready for a
+            later plan (09-07) to compare against what actually got staged
+            -- never trusted as ground truth on its own. Defaults to
+            ``None`` (no marker configured, or the marker carried no
+            manifest).
+        batch_expected_checksum: This batch's claimed control checksum
+            (D-23, VALID-06, plan 09-03), populated and consumed the same
+            way as ``batch_expected_row_count``, from
+            ``doc.batch_complete_manifest.expected_checksum``. Defaults to
+            ``None``.
         map_index: This run's Airflow Dynamic Task Mapping index (0-based),
             when triggered by Airflow's mapped ``ingest`` task instance.
             ``None`` when not applicable.
@@ -116,5 +130,7 @@ class RunContext:
     span_id: str | None = None
     file_id: int | None = None
     batch_id: int | None = None
+    batch_expected_row_count: int | None = None
+    batch_expected_checksum: str | None = None
     map_index: int | None = None
     k8s_namespace: str | None = None

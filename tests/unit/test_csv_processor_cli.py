@@ -205,6 +205,33 @@ _VALID_ASSIGNMENT_JSON = json.dumps(
     },
 )
 
+# 09-03-PLAN.md Task 3's own acceptance criterion: a `stage --assignment`
+# invocation against a `_BATCH_COMPLETE`-gated fixture produces a
+# `RunContext` with `batch_expected_row_count`/`batch_expected_checksum` set
+# to the manifest's values. Sibling to `_VALID_ASSIGNMENT_JSON` above, adding
+# only `batch_complete_manifest` -- every other field identical.
+_MANIFEST_BEARING_ASSIGNMENT_JSON = json.dumps(
+    {
+        "assignment_version": 1,
+        "run_id": 42,
+        "idempotency_key": "customers:test:1",
+        "dataset": "customers",
+        "config_version_id": 1,
+        "config_hash": "test-hash",
+        "file": {
+            "file_id": 1,
+            "object_uri": "s3://raw/customers/f.csv",
+            "content_sha256": "ab" * 32,
+            "size_bytes": 10,
+        },
+        "batch": {"batch_key": "customers:2026-01-01:1", "batch_id": 1},
+        "batch_complete_manifest": {
+            "expected_row_count": 1200,
+            "expected_checksum": "abc123",
+        },
+    },
+)
+
 
 def _make_dataset_config() -> DatasetConfig:
     """A minimal, valid `DatasetConfig` -- mirrors `test_run_ingest_trace.py::_make_config`."""
@@ -262,6 +289,18 @@ class _FakeIngestObjectStore:
         return _FakeAssignmentStream(_VALID_ASSIGNMENT_JSON)
 
 
+class _FakeManifestBearingIngestObjectStore:
+    """Serves `_MANIFEST_BEARING_ASSIGNMENT_JSON` for any `get_object()` call.
+
+    Sibling to `_FakeIngestObjectStore` above -- Task 3's own manifest-bearing
+    fixture case.
+    """
+
+    def get_object(self, bucket: str, key: str) -> _FakeAssignmentStream:
+        del bucket, key
+        return _FakeAssignmentStream(_MANIFEST_BEARING_ASSIGNMENT_JSON)
+
+
 class _FakeIngestMetadata:
     """Only `get_or_create_dataset` is exercised on this path before `stage_ingest` is faked out."""
 
@@ -309,6 +348,12 @@ class _FakePublishConfigRegistry:
 
 def _fake_build_common() -> tuple[_FakeIngestPool, _FakeIngestMetadata, _FakeIngestObjectStore]:
     return _FakeIngestPool(), _FakeIngestMetadata(), _FakeIngestObjectStore()
+
+
+def _fake_build_common_with_manifest() -> (
+    tuple[_FakeIngestPool, _FakeIngestMetadata, _FakeManifestBearingIngestObjectStore]
+):
+    return _FakeIngestPool(), _FakeIngestMetadata(), _FakeManifestBearingIngestObjectStore()
 
 
 def _fake_load_config(path: object, *, defaults_path: object) -> DatasetConfig:
@@ -409,6 +454,57 @@ def test_stage_leaves_map_index_none_when_airflow_ctx_map_index_is_unset(
     assert exit_code == 0
     ctx = captured["ctx"]
     assert ctx.run.map_index is None
+
+
+def test_stage_populates_batch_expected_fields_from_the_assignment_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """09-03-PLAN.md Task 3: a `stage --assignment` invocation against a
+
+    `_BATCH_COMPLETE`-gated fixture (`doc.batch_complete_manifest` present) produces a
+    `RunContext` with `batch_expected_row_count`/`batch_expected_checksum` set to the
+    manifest's own values.
+    """
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common_with_manifest)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakeConfigRegistry)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(csv_processor_cli, "stage_ingest", _make_fake_stage_ingest(captured))
+
+    exit_code = main(["stage", "--assignment", "s3://metadata/assignments/customers/42.json"])
+
+    assert exit_code == 0
+    ctx = captured["ctx"]
+    assert ctx.run.batch_expected_row_count == 1200
+    assert ctx.run.batch_expected_checksum == "abc123"
+
+
+def test_stage_leaves_batch_expected_fields_none_without_a_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The pre-existing `_VALID_ASSIGNMENT_JSON` fixture (no `batch_complete_manifest`
+
+    key at all) must leave both new `RunContext` fields `None`, byte-for-byte identical
+    to before this plan.
+    """
+    xcom_path = tmp_path / "xcom" / "return.json"
+    monkeypatch.setenv("DATAPLAT_XCOM_PATH", str(xcom_path))
+
+    monkeypatch.setattr(csv_processor_cli, "_build_common", _fake_build_common)
+    monkeypatch.setattr(csv_processor_cli, "ConfigRegistry", _FakeConfigRegistry)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(csv_processor_cli, "stage_ingest", _make_fake_stage_ingest(captured))
+
+    exit_code = main(["stage", "--assignment", "s3://metadata/assignments/customers/42.json"])
+
+    assert exit_code == 0
+    ctx = captured["ctx"]
+    assert ctx.run.batch_expected_row_count is None
+    assert ctx.run.batch_expected_checksum is None
 
 
 # --- publish() (plan 08.1-11): new, lighter than stage() -- no assignment ---
