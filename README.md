@@ -1,4 +1,4 @@
-## Executive Summary
+# Executive Summary
 
 <details open>
 <summary><strong>🇬🇧 English</strong></summary>
