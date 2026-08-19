@@ -300,6 +300,66 @@ def mock_kpo_execute(airflow_env: None) -> Iterator[list[dict[str, Any]]]:  # no
         yield calls
 
 
+@pytest.fixture
+def mock_run_stage_recorder_db(airflow_env: None) -> Iterator[None]:  # noqa: ARG001 -- ordering dependency, see load_dag above
+    """Double `run_stage_recorder.py`'s own DB-touching tasks (plan 09-09's DAG wiring).
+
+    This tier stands up only the Airflow *metadata* PostgreSQL (module
+    docstring's T-08-22 precedent, mirroring `mock_s3_infrastructure`'s own
+    "no second container" discipline) -- never a second analytical PostgreSQL
+    container `list_run_ids_pending_dbt_build`/`record_dbt_build_stage`
+    (`airflow/dags/_common/run_stage_recorder.py`) would otherwise need a real
+    `analytics_db_default` Airflow Connection and a live `meta.run_stages`
+    table for.
+
+    Deliberately does NOT patch `psycopg.connect` (an earlier version of this
+    fixture did, and it broke both tests non-deterministically): `psycopg` is
+    a single process-wide module object, and Airflow's OWN `postgresql+psycopg`
+    SQLAlchemy dialect (`airflow_env`'s `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`)
+    calls the SAME `psycopg.connect` under the hood to open ITS OWN metadata-DB
+    connections -- patching it here would silently intercept the metadata DB's
+    real connections too, not just `run_stage_recorder.py`'s, producing the
+    exact "IndexError: tuple index out of range" from a mocked
+    `pg_catalog.version()` this fixture was rewritten to stop causing.
+
+    Instead, `list_run_ids_pending_dbt_build`/`record_dbt_build_stage`
+    themselves are replaced with `@task`-decorated no-DB-touching fakes on
+    the `_common.run_stage_recorder` module object, BEFORE `load_dag()` (a
+    later fixture/call) re-imports `airflow/dags/csv_ingest_customers.py`/
+    `csv_ingest_orders.py` -- both DAG files bind these names via `from
+    _common.run_stage_recorder import ...` at DAG-parse time, so they pick up
+    these fakes instead of the real DB-touching originals. The fakes are
+    themselves real `@task` objects (not plain functions) so `.override(...)`
+    -- used by both DAG files for `mark_dbt_build_running`/`mark_dbt_build_done`
+    -- still works identically. The fake list always returns `[]` (no run
+    currently eligible for `dbt_build`), so `record_dbt_build_stage`'s own
+    no-op empty-`run_ids` short-circuit is exercised for real by the fake too
+    -- `dbt_build` itself still runs (mocked via `mock_kpo_execute`), and
+    `resolve_dbt_build_status` reports its real terminal state via
+    `ti.get_task_states`, a genuine Task-SDK API this fixture does not touch.
+    """
+    from airflow.sdk import task  # noqa: PLC0415 -- deferred import, see module docstring
+
+    from _common import run_stage_recorder  # noqa: PLC0415 -- deferred import, see module docstring
+
+    @task
+    def list_run_ids_pending_dbt_build(dataset_name: str) -> list[int]:
+        del dataset_name
+        return []
+
+    @task
+    def record_dbt_build_stage(run_ids: list[int], status: str) -> None:
+        del run_ids, status
+
+    with (
+        patch.object(
+            run_stage_recorder, "list_run_ids_pending_dbt_build", list_run_ids_pending_dbt_build
+        ),
+        patch.object(run_stage_recorder, "record_dbt_build_stage", record_dbt_build_stage),
+    ):
+        yield
+
+
 class _FakeS3Client:
     """A minimal stand-in for `boto3`'s S3 client, covering `integrity_gate`'s exact call shape.
 

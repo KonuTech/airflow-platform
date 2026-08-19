@@ -179,12 +179,36 @@ def test_customers_publish_declares_outlets(dagbag: DagBag) -> None:
 
 
 def test_dbt_build_runs_between_stage_and_publish(dagbag: DagBag) -> None:
-    """08.1-12: `stage -> dbt_build -> publish` holds in both DAGs."""
+    """08.1-12/09-09: `stage -> mark_dbt_build_running -> dbt_build -> resolve_dbt_build_status ->
+    mark_dbt_build_done -> publish` holds in both DAGs (LOAD-06's DBT_BUILD run_stages tracking,
+    D-14/D-17), wired via `_common.run_stage_recorder.wire_dbt_build_tracking` (a single call
+    per DAG, kept out of the DAG files themselves per ORCH-06's line budget -- see that
+    function's own docstring). `resolve_dbt_build_status` resolves `dbt_build`'s own terminal
+    state via `ti.get_task_states` -- Airflow 3.3.0's Task SDK has no
+    `dag_run.get_task_instance(...)`, a deviation from 09-09-PLAN.md's originally-assumed Jinja
+    mechanism.
+    """
     for dag_id in ("csv_ingest_customers", "csv_ingest_orders"):
         dag = dagbag.dags[dag_id]
-        assert "stage" in dag.task_dict["dbt_build"].upstream_task_ids, (
-            f"{dag_id}: dbt_build is not gated by stage"
+        assert "stage" in dag.task_dict["mark_dbt_build_running"].upstream_task_ids, (
+            f"{dag_id}: mark_dbt_build_running is not gated by stage"
         )
-        assert "dbt_build" in dag.task_dict["publish"].upstream_task_ids, (
-            f"{dag_id}: publish is not gated by dbt_build"
+        assert "mark_dbt_build_running" in dag.task_dict["dbt_build"].upstream_task_ids, (
+            f"{dag_id}: dbt_build is not gated by mark_dbt_build_running"
+        )
+        assert "dbt_build" in dag.task_dict["resolve_dbt_build_status"].upstream_task_ids, (
+            f"{dag_id}: resolve_dbt_build_status is not gated by dbt_build"
+        )
+        assert dag.task_dict["resolve_dbt_build_status"].trigger_rule == "all_done", (
+            f"{dag_id}: resolve_dbt_build_status must use trigger_rule=all_done to see FAILED too"
+        )
+        mark_done_upstream = dag.task_dict["mark_dbt_build_done"].upstream_task_ids
+        assert "resolve_dbt_build_status" in mark_done_upstream, (
+            f"{dag_id}: mark_dbt_build_done is not gated by resolve_dbt_build_status"
+        )
+        assert dag.task_dict["mark_dbt_build_done"].trigger_rule == "all_done", (
+            f"{dag_id}: mark_dbt_build_done must use trigger_rule=all_done to record FAILED too"
+        )
+        assert "mark_dbt_build_done" in dag.task_dict["publish"].upstream_task_ids, (
+            f"{dag_id}: publish is not gated by mark_dbt_build_done"
         )

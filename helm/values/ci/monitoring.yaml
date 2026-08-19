@@ -622,6 +622,52 @@ grafana:
                 severity: warning
               annotations:
                 summary: "Row-level reject rate exceeded 10% for 5m."
+            # D-19: the ONE alerting engine this project uses (Phase 7 D-07) --
+            # a genuinely stuck run/stage pages through the existing Grafana
+            # webhook, no second alerting mechanism. Same A (SQL, analytics-
+            # postgres, format: table) -> B (reduce/count) -> C (threshold)
+            # shape as freshness-warn/freshness-fail above, since this is also
+            # SQL-backed (meta.v_run_recovery, plan 09-06), not the simpler
+            # Prometheus-only gauge-* shape above.
+            - uid: alert-run-recovery-exhausted
+              title: "A run/stage has exhausted retries and needs manual retry"
+              condition: C
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: analytics-postgres
+                  model:
+                    refId: A
+                    format: table
+                    rawSql: |
+                      SELECT * FROM meta.v_run_recovery
+                       WHERE next_action LIKE 'retry stage%' AND run_status != 'SUCCEEDED';
+                - refId: B
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: reduce
+                    expression: A
+                    reducer: count
+                - refId: C
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: __expr__
+                  model:
+                    refId: C
+                    type: threshold
+                    expression: B
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: NoData
+              execErrState: Error
+              # Pitfall 6: a FAILED row does not by itself mean retries are
+              # exhausted -- gate on 5m persistence, not raw status.
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "meta.v_run_recovery reports a stage stuck in retry-needed state for 5m+."
 
 kube-state-metrics:
   resources:

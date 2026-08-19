@@ -27,6 +27,7 @@ from kubernetes.client import models as k8s
 
 from _common.integrity_gate import integrity_gate, list_matched_keys
 from _common.kpo import common_kpo_kwargs
+from _common.run_stage_recorder import wire_dbt_build_tracking
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
 log = logging.getLogger(__name__)
@@ -142,7 +143,7 @@ def csv_ingest_customers() -> None:
         outlets=[customers_asset],
         **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
     )
-    stage >> dbt_build >> publish
+    wire_dbt_build_tracking("customers", stage, dbt_build, publish)  # LOAD-06 (D-14/D-17/D-19)
     aggregate_receipts(stage.output)
 
 
