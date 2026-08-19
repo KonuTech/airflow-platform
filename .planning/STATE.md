@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
-status: ready_to_plan
-stopped_at: Phase 08.1 complete (13/13) — ready to discuss Phase 09
-last_updated: 2026-08-19T10:37:31.404Z
-last_activity: 2026-08-19 -- Phase 08.1 marked complete
+status: planning
+stopped_at: Phase 9 context gathered
+last_updated: "2026-08-19T13:01:43.629Z"
+last_activity: "2026-08-19 - Completed quick task 260819-jal: Swap default-open language tab in README.md Executive Summary: Polski open, English collapsed"
 progress:
   total_phases: 12
   completed_phases: 9
@@ -142,7 +142,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-18T12:43:03.180Z
-Stopped at: Phase 08.1 context gathered
-Resume file: .planning/phases/08.1-dbt-silver-transformation-layer-dbt-postgres-adapter-owns-br/08.1-CONTEXT.md
+Last session: 2026-08-19T13:01:43.612Z
+Stopped at: Phase 9 context gathered
+Resume file: .planning/phases/09-etl-correctness-dedup-incremental-backfill-recovery/09-CONTEXT.md
 None
