@@ -26,6 +26,7 @@ from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperato
 from airflow.sdk import Asset, dag, task
 from kubernetes.client import models as k8s
 
+from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
 from _common.kpo import common_kpo_kwargs
 from _common.run_stage_recorder import wire_dbt_build_tracking
@@ -97,6 +98,7 @@ def csv_ingest_orders() -> None:
     )
     resolve_window()
     matched_keys = list_matched_keys(bucket="raw", prefix="orders/*.csv")  # D-18
+    record_processing_gap_if_empty(matched_keys, dataset_name="orders")  # D-06
     # Cap at 3 pods (kind CPU headroom); .override(), not .partial() (validates fn signature).
     gate = (
         integrity_gate.override(max_active_tis_per_dag=3)
