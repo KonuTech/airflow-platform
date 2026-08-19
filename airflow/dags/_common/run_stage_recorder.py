@@ -35,6 +35,20 @@ here.
 shapes duplicate ``claim_run_stage``/``complete_run_stage``'s own SQL
 vocabulary (`packages/dataplat/src/dataplat/metadata/postgres.py`, lines
 ~458-556) as raw SQL here -- never imported, per ADR-0004.
+
+``resolve_dbt_build_status``/``wire_dbt_build_tracking`` (plan 09-09) are
+the DAG-wiring half this module's own docstring above forward-referenced.
+Both live HERE, not inlined into ``csv_ingest_customers.py``/
+``csv_ingest_orders.py``, for a second, distinct reason beyond the
+ADR-0004 "DB-touching code stays out of the DAG folder proper" pattern
+already established above: `tests/policy/test_dag_line_budget.py`
+mechanically enforces a <150-line budget per DAG file (ORCH-06), and both
+files were ALREADY at the 149-line ceiling before this plan touched them --
+a real, live-discovered constraint 09-09-PLAN.md's own per-file snippets
+did not account for. Collapsing the whole `mark_dbt_build_running ->
+dbt_build -> resolve_dbt_build_status -> mark_dbt_build_done` sub-chain
+into one `wire_dbt_build_tracking(...)` call keeps each DAG file's own
+addition to a single import line plus a single call site.
 """
 
 from __future__ import annotations
@@ -135,3 +149,49 @@ def record_dbt_build_stage(run_ids: list[int], status: str) -> None:
                 """,
                 {"run_id": run_id, "stage_name": _STAGE_NAME, "status": status},
             )
+
+
+@task(trigger_rule="all_done")
+def resolve_dbt_build_status(dag_run=None, ti=None) -> str:  # noqa: ANN001 -- Airflow-injected context params, untyped upstream too
+    """`dbt_build`'s own terminal state, for `mark_dbt_build_done` below.
+
+    Deviation from 09-09-PLAN.md's originally-assumed
+    ``{{ dag_run.get_task_instance('dbt_build').state }}`` Jinja mechanism:
+    verified live against the installed ``apache-airflow==3.3.0`` that the
+    Task Execution API's ``DagRun`` model (``airflow.sdk.api.datamodels.
+    _generated.DagRun``) is a plain Pydantic data object with no
+    ``get_task_instance`` method -- Airflow 3's Task-SDK DB isolation means
+    task code can never read sibling task-instance state directly from the
+    metadata DB. ``ti.get_task_states`` is the Task SDK's own remote-API
+    equivalent, resolved through the supervisor process instead.
+    """
+    states = ti.get_task_states(
+        dag_id=dag_run.dag_id, run_ids=[dag_run.run_id], task_ids=["dbt_build"]
+    )
+    return "SUCCEEDED" if states.get("dbt_build") == "success" else "FAILED"
+
+
+def wire_dbt_build_tracking(
+    dataset_name: str, stage: object, dbt_build: object, publish: object
+) -> None:
+    """Wire the whole `DBT_BUILD` `run_stages` sub-chain around an existing `dbt_build` KPO task.
+
+    A single call from each DAG file's own `@dag`-decorated body (module
+    docstring's "why here, not inlined" note) replaces the old
+    `stage >> dbt_build >> publish` edge with `stage >> mark_dbt_build_running
+    >> dbt_build >> resolve_dbt_build_status >> mark_dbt_build_done >>
+    publish` -- D-11: still an additive insertion into the existing graph,
+    only wired here instead of inline. `stage`/`dbt_build`/`publish` are the
+    caller's own already-built operator instances (accepted, not
+    reconstructed) so this function stays a pure wiring helper, never a
+    second definition of any of the three.
+    """
+    pending_run_ids = list_run_ids_pending_dbt_build(dataset_name=dataset_name)
+    mark_running = record_dbt_build_stage.override(task_id="mark_dbt_build_running")(
+        run_ids=pending_run_ids, status="RUNNING"
+    )
+    status = resolve_dbt_build_status()
+    mark_done = record_dbt_build_stage.override(
+        task_id="mark_dbt_build_done", trigger_rule="all_done"
+    )(run_ids=pending_run_ids, status=status)
+    stage >> mark_running >> dbt_build >> status >> mark_done >> publish

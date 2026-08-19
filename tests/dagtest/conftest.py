@@ -339,6 +339,7 @@ def mock_run_stage_recorder_db(airflow_env: None) -> Iterator[None]:  # noqa: AR
     `ti.get_task_states`, a genuine Task-SDK API this fixture does not touch.
     """
     from airflow.sdk import task  # noqa: PLC0415 -- deferred import, see module docstring
+
     from _common import run_stage_recorder  # noqa: PLC0415 -- deferred import, see module docstring
 
     @task
