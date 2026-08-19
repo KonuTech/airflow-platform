@@ -1,44 +1,47 @@
 {
   "version": "1.0",
-  "timestamp": "2026-08-17T13:43:01.371Z",
-  "phase": "08",
-  "phase_name": "validation-quarantine-metadata-control-plane-completion",
-  "phase_dir": ".planning/phases/08-validation-quarantine-metadata-control-plane-completion",
-  "plan": 14,
-  "task": null,
-  "total_tasks": 14,
+  "timestamp": "2026-08-19T17:21:30.845Z",
+  "phase": "09",
+  "phase_name": "etl-correctness-dedup-incremental-backfill-recovery",
+  "phase_dir": ".planning/phases/09-etl-correctness-dedup-incremental-backfill-recovery",
+  "plan": 11,
+  "task": 0,
+  "total_tasks": 3,
   "status": "paused",
   "completed_tasks": [
-    {"id": "phase-08-execution", "name": "Execute all 14 plans across 7 waves", "status": "done", "commit": "41994b7"},
-    {"id": "code-review-gate", "name": "Code review gate: CR-01 blocker + WR-04 fixed", "status": "done", "commit": "9731192, e7bf450"},
-    {"id": "phase-08-verification", "name": "gsd-verifier run", "status": "done", "progress": "status: human_needed, 4/5 roadmap criteria verified"},
-    {"id": "live-deploy-psycopg-fix", "name": "Fix missing psycopg in Airflow image", "status": "done", "commit": "020d0c2"},
-    {"id": "live-deploy-grants-fix", "name": "Fix missing analytics_owner GRANTs", "status": "done", "commit": "1cdcb48, f6e7c95"},
-    {"id": "live-deploy-mount-fix", "name": "Fix stale kind DAGs hostPath mount", "status": "done", "progress": "docker restart on 3 kind nodes, not a code change"}
+    {"id": "09-01", "name": "Remove vestigial deduplication config block", "status": "done", "commit": "e8d094d"},
+    {"id": "09-02", "name": "Watermark advance + reconciliation_results in publish_ingest", "status": "done", "commit": "01c0a8d"},
+    {"id": "09-03", "name": "Read and thread BATCH_COMPLETE manifest", "status": "done", "commit": "863a120"},
+    {"id": "09-04", "name": "run_stage_recorder.py (3rd ADR-0004 exception, DBT_BUILD)", "status": "done", "commit": "2ee0c1c"},
+    {"id": "09-05", "name": "Dated backfill corpus generator", "status": "done", "commit": "13d0c13"},
+    {"id": "09-06", "name": "meta.v_run_recovery view", "status": "done", "commit": "7b662e7"},
+    {"id": "09-07", "name": "Raw-to-bronze reconciliation + control-total comparison", "status": "done", "commit": "efa6001"},
+    {"id": "09-08", "name": "Bronze-to-silver reconciliation dbt post-hook", "status": "done", "commit": "4d6a99a"},
+    {"id": "09-09", "name": "Wire run_stage_recorder into both DAGs' dbt_build tasks", "status": "done", "commit": "0ae89b5"},
+    {"id": "09-10", "name": "Processing-gap recording (D-06) + live dbt_build pod-kill proof (D-18)", "status": "done", "commit": "8092bc0"}
   ],
   "remaining_tasks": [
-    {"id": "diagnose-discover-reliability", "name": "Root-cause discover task intermittently registering zero meta.files rows for a genuinely-present file", "status": "not_started"},
-    {"id": "clean-e2e-pass", "name": "Get a clean unattended pytest tests/e2e/slice -m cluster pass", "status": "not_started"},
-    {"id": "resolve-human-uat", "name": "Update 08-HUMAN-UAT.md both items to pass/resolved", "status": "not_started"},
-    {"id": "reverify-phase-08", "name": "Re-run gsd-verifier to get status: passed", "status": "not_started"},
-    {"id": "complete-phase-08", "name": "update_roadmap step: gsd-sdk query phase.complete 08", "status": "not_started"}
+    {"id": "09-11.1", "name": "Corpus upload + dry-run sizing + pilot window", "status": "not_started"},
+    {"id": "09-11.2", "name": "Full 2-year sweep — both datasets, all correctness properties", "status": "not_started"},
+    {"id": "09-11.3", "name": "Idempotency re-run + live+backfill concurrency proof", "status": "not_started"}
   ],
   "blockers": [
     {
-      "description": "csv_ingest_customers/csv_ingest_orders' discover KubernetesPodOperator task intermittently succeeds but registers zero new meta.files rows for a file confirmed present in MinIO. Happened 3/4 full attempts this session including one on a fully idle cluster (ruling out simple max_active_runs=1 contention as sole cause). 2 attempts succeeded cleanly end-to-end, proving the mechanism can work.",
-      "type": "technical",
-      "workaround": "Not found. Next session should capture the discover pod's live logs during a FAILING attempt (never done yet — the two captured logs were both from successful runs) using the technique in .continue-here.md's next_action."
+      "description": "Windows host C: drive was down to 343MB-1.1GB free during this session. Docker Desktop's docker_data.vhdx (dynamically-expanding, 88GB on disk) does not shrink when Docker-internal data (images/volumes/build cache/per-node containerd caches) is deleted — internal cleanup does not free host disk. User is running wsl --shutdown + Optimize-VHD/diskpart compact from an admin Windows PowerShell to reclaim real host space before resuming.",
+      "type": "external",
+      "workaround": "Verify `df -h /mnt/c` (or Windows drive free space) shows meaningful headroom (several GB+) BEFORE dispatching wave 6 (09-11) — do not trust `docker system df` alone, it only reports Docker-internal usage, not host disk."
     }
   ],
-  "human_actions_pending": [],
+  "human_actions_pending": [
+    {"action": "Run wsl --shutdown then Optimize-VHD (or diskpart compact vdisk) on docker_data.vhdx from an admin Windows PowerShell", "context": "Reclaim real C: drive space before wave 6's heavy live 2-year backfill sweep runs, to avoid ENOSPC failures mid-test", "blocking": true}
+  ],
   "decisions": [
-    {"decision": "Fixed CR-01 (quarantine self-resolution bug) and WR-04 (NULL order_date blocking corrections) directly during the code-review gate rather than only documenting them", "rationale": "Both were provable, low-risk, in-scope correctness bugs directly threatening the platform's core value; each has a regression test proven to fail pre-fix via git stash", "phase": "08"},
-    {"decision": "Deferred WR-01/02/03 (metrics conflation, dormant strategy gap, fragile int-cast pattern) to deferred-items.md instead of fixing", "rationale": "Each requires a real design decision (schema-type policy, metric semantics) not exercised by any live config today", "phase": "08"},
-    {"decision": "Performed the actual live-cluster deployment (migrations, image rebuild, DAG mount fix, Vault unseal) rather than just reporting what was needed", "rationale": "User explicitly asked \"Run this UAT for me\"", "phase": "08"},
-    {"decision": "Used Airflow REST API PATCH /dagRuns/{id} with bearer token auth to force-fail two stuck dag_runs, after a raw psql UPDATE on dag_run/task_instance was correctly blocked by the permission classifier", "rationale": "REST API is the sanctioned, consistency-preserving way to change a dag_run's state; raw DB mutation bypasses executor/XCom state", "phase": "08"},
-    {"decision": "Stopped after 4 full E2E attempts (~1.5h live-cluster time) and paused for next session rather than continuing to retry blind", "rationale": "Context budget; user agreed — next session should capture logs from a FAILING discover run instead of repeating the same retry-and-hope pattern", "phase": "08"}
+    {"decision": "Removed the entire unrelated 'Divio' Docker project (15 containers, 4 images, 7 volumes, 1 network) from this host", "rationale": "User explicitly requested removal; confirmed unrelated to airflow-platform and volumes held only ~187MB of real data", "phase": "09"},
+    {"decision": "Pruned stale csv-processor/dbt/airflow git-sha-tagged images from local Docker cache, the local registry mirror, and both kind worker nodes' containerd caches, keeping only the currently-deployed tags (csv-processor:ee240ba, dbt:faa7533, airflow:cd0d2aa)", "rationale": "Project's Makefile image-* targets intentionally never prune old immutable git-sha tags (by design, for traceability per CLAUDE.md §77/§62) but nothing else does either, so ~19 stale csv-processor builds had accumulated across 3 storage locations", "phase": "09"},
+    {"decision": "Did NOT enable delete+GC on the local kind-registry container in this session", "rationale": "Requires a container restart (REGISTRY_STORAGE_DELETE_ENABLED=true) which was deprioritized once it became clear internal Docker cleanup wasn't fixing the actual host-disk blocker", "phase": "09"},
+    {"decision": "LOAD-06 requirement is NOT marked complete for this phase", "rationale": "09-10's Task 2 discovered a genuine, pre-existing production gap while attempting live verification: dataplat's stage_ingest never calls claim_run_stage/complete_run_stage for STAGE_LOAD, so meta.run_stages has zero STAGE_LOAD rows ever, meta.v_run_recovery.stage_load_status is permanently NULL, and list_run_ids_pending_dbt_build (plan 09-04) is silently broken. Documented in deferred-items.md as a Rule 4 architectural decision requiring a new claim mechanism in MetadataRepository + image rebuild/redeploy, out of 09-10's file scope.", "phase": "09"}
   ],
   "uncommitted_files": [],
-  "next_action": "Trigger ONE e2e test (test_referential_orphan.py only, not both) via nohup, immediately poll `kubectl get pods -n airflow --sort-by=.metadata.creationTimestamp` every 2-3s watching for a csv-ingest-orders-discover-* pod, and the instant it appears run `kubectl logs -n airflow <pod> -f > /tmp/discover-live.log &` before Airflow/KPO deletes it (happens within seconds of completion). Read the log's `discovery.object_evaluated` line to see what decision dataplat discover actually made.",
-  "context_notes": "Four genuine, provable deployment gaps were found and fixed this session (all committed, all verified applied live) — see .continue-here.md for full detail. The underlying phase-8 code mechanism was proven correct via direct server-side task-state tracing on 2 successful full runs. The remaining discover-reliability issue is intermittent and doesn't correlate with contention/backlog/permissions (all checked and ruled out) — it needs its own targeted log-capture investigation, not another blind retry."
+  "next_action": "Once host disk headroom is confirmed real (not just Docker-internal), run /gsd:execute-phase 09 — it will detect the 10 completed plans (09-01 through 09-10, all merged to main with passing post-merge test gates) via their SUMMARY.md files and dispatch Wave 6 (09-11), the live 2-year backfill sweep capstone test.",
+  "context_notes": "Phase 09 wave-based execution (6 waves, 11 plans) was proceeding cleanly through Wave 5 when the host Windows C: drive hit critical disk pressure (Docker daemon actually went down once mid-session from disk exhaustion, recovered after user restarted Docker Desktop). Extensive investigation confirmed the root cause is Docker Desktop's dynamically-expanding docker_data.vhdx never shrinking on internal deletion — only a host-side VHDX compact (wsl --shutdown + Optimize-VHD) actually returns space to C:. Real waste was found and removed (~45GB: an unrelated Divio project stack, stale build history, unused build cache) but ~30-35GB of remaining Docker usage is legitimate infrastructure for the mandated 3-node kind cluster (each worker node independently caches every workload image via containerd, no cross-node dedup) plus live CNPG/MinIO/Vault volumes. Wave 6 (09-11) was deliberately NOT dispatched given the disk risk — it's the heaviest remaining plan (live 2-year corpus, concurrent DagRuns, real MinIO uploads) and a mid-run ENOSPC failure would be both misleading and expensive to diagnose. Do not re-run the Docker-internal cleanup steps expecting further host-disk gains — that lever is exhausted; only the VHDX compact moves the needle further."
 }
