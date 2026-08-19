@@ -365,3 +365,68 @@ def test_silver_orders_deduplicates_within_file_and_cross_batch(
         ).fetchall()
     assert len(rows) == 1, f"expected exactly one silver row per business key, got {rows}"
     assert rows[0] == ("20.00", "2026-02-03")
+
+
+def test_silver_orders_null_order_date_never_outranks_a_dated_row(
+    repository: PostgresMetadataRepository,
+    migrated_dsn: str,
+    run_dbt_build: Callable[..., object],
+) -> None:
+    """A bronze row with a NULL `order_date` must lose the dedup tie-break to a dated row.
+
+    Regression test for CR-01 (08.1-REVIEW.md): PostgreSQL's default NULL
+    ordering sorts NULLs FIRST in a bare `ORDER BY ... DESC`, so without an
+    explicit `NULLS LAST`, a NULL `order_date` row silently won `rn = 1`
+    over a row with a real, later date -- `orders.order_date` is legitimately
+    nullable (`configs/datasets/orders.yaml`), so this was a reachable,
+    silent-corruption bug, not a hypothetical one.
+    """
+    _dataset_id, run1_id, file1_id, batch1_id = _seed_ingestion_run(
+        repository,
+        migrated_dsn,
+        dataset_name="orders",
+        key_suffix="null-order-date",
+        run_number=1,
+    )
+
+    with psycopg.connect(migrated_dsn, autocommit=True) as conn:
+        # NULL order_date, inserted FIRST (lower _source_row_number) -- under
+        # the pre-fix bare `ORDER BY order_date DESC`, PostgreSQL's default
+        # NULLS FIRST would rank this row ahead of the dated row below
+        # regardless of _source_row_number, reproducing CR-01.
+        _insert_bronze_order(
+            conn,
+            order_id="OD-NULL",
+            customer_id="D1",
+            order_date=None,  # type: ignore[arg-type]  -- a legitimate NULL, per orders.yaml
+            amount="99.99",
+            run_id=run1_id,
+            file_id=file1_id,
+            batch_id=batch1_id,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"od-null-order-date").digest(),
+        )
+        _insert_bronze_order(
+            conn,
+            order_id="OD-NULL",
+            customer_id="D1",
+            order_date="2026-02-01",
+            amount="10.00",
+            run_id=run1_id,
+            file_id=file1_id,
+            batch_id=batch1_id,
+            source_row_number=2,
+            record_hash=hashlib.sha256(b"od-dated").digest(),
+        )
+
+    run_dbt_build(migrated_dsn, select="silver_orders")
+
+    with psycopg.connect(migrated_dsn) as verify_conn:
+        rows = verify_conn.execute(
+            "SELECT amount, order_date FROM silver.orders WHERE order_id = %s",
+            ("OD-NULL",),
+        ).fetchall()
+    assert len(rows) == 1, f"expected exactly one silver row per business key, got {rows}"
+    assert rows[0] == ("10.00", "2026-02-01"), (
+        f"the dated row must win over a NULL order_date row, got {rows[0]}"
+    )

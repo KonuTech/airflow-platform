@@ -127,7 +127,7 @@ business_key_ranked as (
         *,
         row_number() over (
             partition by customer_id
-            order by event_ts::timestamptz desc, _source_row_number desc
+            order by event_ts::timestamptz desc nulls last, _source_row_number desc, _file_id desc
         ) as rn
     from all_contenders
 )
