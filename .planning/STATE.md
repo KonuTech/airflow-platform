@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 Phase: 09
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-08-19
+Last activity: 2026-08-19 - Completed quick task 260819-hsw: Add Executive Summary with row-journey example and interactive architecture diagrams to README.md
 
 Progress: [██████████] 100%
 
@@ -136,6 +136,7 @@ None yet.
 | 260817-rvq | Trim monitoring stack (grafana/tempo/otel-collector/prometheus/kube-state-metrics/prometheusOperator) Helm values CPU requests to match the already-vetted ci profile; deployed live same session | 2026-08-17 | 0404941 | [260817-rvq-trim-monitoring-stack-helm-values-cpu-re](./quick/260817-rvq-trim-monitoring-stack-helm-values-cpu-re/) |
 | 260817-umv | Fix retry-timing race in test_backfill_reentry.py's backfill retry logic (plan 08-15): gate the settle loop on backfill.completed_at, not just row-appearance, closing an AlreadyRunningBackfill collision found via live cluster re-testing | 2026-08-17 | 441a51a | [260817-umv-fix-retry-timing-race-in-test-backfill-r](./quick/260817-umv-fix-retry-timing-race-in-test-backfill-r/) |
 | 260818-f0w | Update README.md in place (not appended) to reflect the dbt bronze-to-silver medallion architecture decision: architecture diagrams/data-flow, dedup/staging/SCD sections, repo structure, roadmap and Definition of Done | 2026-08-18 | 7d32c71 | [260818-f0w-update-readme-md-to-reflect-dbt-bronze-t](./quick/260818-f0w-update-readme-md-to-reflect-dbt-bronze-t/) |
+| 260819-hsw | Add Executive Summary with a real row-journey example (raw -> bronze -> quarantine -> silver -> gold -> lineage) and two collapsible Mermaid architecture diagrams to README.md | 2026-08-19 | 8114d69 | [260819-hsw-add-executive-summary-with-row-journey-e](./quick/260819-hsw-add-executive-summary-with-row-journey-e/) |
 
 ## Session Continuity
 
