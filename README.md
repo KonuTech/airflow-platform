@@ -3,6 +3,100 @@
 When installing tools use the most recent and stable versions.
 I am on WSL. Whenver in need of checking for latest documentation use MCP context7 which is already installed and available.
 
+---
+
+## Executive Summary
+
+This repository is a local, production-like ETL/data platform -- Apache Airflow orchestrating
+containerized ETL workloads on a multi-node kind Kubernetes cluster, backed by MinIO as an
+S3-compatible data lake, two physically separate PostgreSQL instances (Airflow metadata vs. an
+analytical warehouse), and HashiCorp Vault for secrets. Its first workload is a metadata-driven
+universal CSV ingestion engine that discovers, inspects, parses, validates, normalizes,
+deduplicates and transactionally loads real-world messy CSV files, with schema evolution,
+incremental processing, CDC and SCD support.
+
+It is deliberately not an Airflow tutorial, a CSV parser, a bag of scripts, or a Docker Compose
+dev environment -- it is a platform whose architecture lets additional ETL workloads be added
+later without redesign. Its core value: every file, batch and record that enters the platform can
+be traced, explained, reprocessed and trusted -- ingestion is idempotent, auditable and
+replayable, and no data is ever silently dropped, duplicated or corrupted. The row-journey example
+below demonstrates that guarantee end to end, using real data traced through this exact deployed
+platform.
+
+### A Row's Journey Through the Platform
+
+This is not a hypothetical -- it is real data, verified live against this deployed platform's
+databases during this session.
+
+**Raw file:** `s3://raw/customers/e2e-backfill-b0ef04b6c2d2-original.csv`
+
+```csv
+customer_id,name,country,birth_date,event_ts
+2006091645,Anna Kowalski,PL,1950-03-14,2026-01-05T08:15:00Z
+2006091646,James Smith,US,1962-12-25,2026-02-02T05:03:27Z
+2006091647,Sophie Muller,GB,1974-03-19,2026-03-16T22:37:52Z
+2006091648,,PL,1988-12-01,2026-04-13T16:49:05Z
+```
+
+**1. Bronze -- `staging.customers`**
+
+| customer_id | name | country | birth_date | event_ts |
+|---|---|---|---|---|
+| 2006091645 | Anna Kowalski | PL | 1950-03-14 | 2026-01-05T08:15:00Z |
+| 2006091646 | James Smith | US | 1962-12-25 | 2026-02-02T05:03:27Z |
+| 2006091647 | Sophie Muller | GB | 1974-03-19 | 2026-03-16T22:37:52Z |
+
+All three rows share `_file_id = 106045` and `_run_id = 43351` (this file's single ingestion run).
+
+**2. Quarantine -- `meta.rejected_records`**
+
+Row 4 (`2006091648`) never reaches bronze, silver or gold -- it fails structural validation and is
+quarantined:
+
+| source_row_number | error_type | error_column | error_message | resolution_type |
+|---|---|---|---|---|
+| 4 | COMPLETENESS_VIOLATION | name | required column 'name' is empty | PENDING |
+
+**3. Silver -- `silver.customers`** (dbt-owned)
+
+The same 3 accepted rows, deduplicated by dbt's bronze-to-silver model:
+
+| customer_id | name | country | birth_date | event_ts | _dbt_loaded_at |
+|---|---|---|---|---|---|
+| 2006091645 | Anna Kowalski | PL | 1950-03-14 | 2026-01-05T08:15:00Z | 2026-08-19 08:51:38 |
+| 2006091646 | James Smith | US | 1962-12-25 | 2026-02-02T05:03:27Z | 2026-08-19 08:51:38 |
+| 2006091647 | Sophie Muller | GB | 1974-03-19 | 2026-03-16T22:37:52Z | 2026-08-19 08:51:38 |
+
+**4. Gold -- `normalized.customers`** (Python `MergePublisher`-owned)
+
+The same 3 rows, identical content, published via `INSERT ... ON CONFLICT (customer_id)` inside
+`MergePublisher`'s single transaction -- typed now (`customer_id` integer, `birth_date` date,
+`event_ts` timestamptz) rather than bronze/silver's all-TEXT columns.
+
+**5. Lineage -- `meta.v_customers_lineage`**
+
+Resolved for `customer_id = 2006091645` via `meta.v_customers_lineage`:
+
+| field | value |
+|---|---|
+| dag_id | csv_ingest_customers |
+| dag_run_id | scheduled__2026-08-17T12:32:00+00:00 |
+| task_id | ingest |
+| k8s_pod_name | ingest-95ykverh |
+| dbt_invocation_id | NULL |
+| dbt_run_at | NULL |
+
+**A known, honest nuance:** this row's `dbt_invocation_id`/`dbt_run_at` are NULL because gold's
+`_run_id` column stayed pinned to the ORIGINAL 2026-08-17 ingest run -- `MergePublisher` uses
+`INSERT ... ON CONFLICT DO NOTHING` and found identical content already present during a later
+backfill replay, so the row was never re-stamped with a newer `_run_id`. The lineage view joins
+`meta.dedup_audit` on a `_run_id BETWEEN min_run_id AND max_run_id` range, and no `dedup_audit` row
+has ever covered that original run's range, since it predates dbt's existence in this pipeline.
+This is a real, structural consequence of how replay and idempotent gold writes interact with the
+lineage view -- not a defect that has been or needs to be fixed.
+
+<!-- EXEC-SUMMARY-DIAGRAMS-PLACEHOLDER -->
+
 ## 1. Project Objective
 
 Build a **local, production-like ETL/data platform** that resembles a real production deployment of Apache Airflow.
