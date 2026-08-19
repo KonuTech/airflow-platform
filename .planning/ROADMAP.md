@@ -548,7 +548,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 08.1-13-PLAN.md — Live-cluster proof: infrastructure activation, fresh-file E2E, D-16 backfill verification
+- [x] 08.1-13-PLAN.md — Live-cluster proof: infrastructure activation, fresh-file E2E, D-16 backfill verification
 
 **Context:** Emerged from a `/gsd-explore` session (2026-08-18) that reopened PROJECT.md's original "dbt excluded" Key Decision after a medallion-architecture (bronze/silver/gold) proposal surfaced mid-discussion of Phase 9. Full reasoning: `.planning/notes/dbt-silver-layer-architecture-decision.md`. Deliberately narrow scope: dbt does NOT touch bronze ingestion (stays Python/`csv_processor`, Phases 1–8 unchanged) and does NOT touch gold publish (stays the existing `MergePublisher`, avoiding the PG `MERGE` concurrency bug — BUG #18279 — and preserving META-03's single-transaction guarantee). Phase 9's paused dedup-strategy discussion (`.planning/phases/09-.../09-DISCUSS-CHECKPOINT.json`) needs to be revisited against this phase's real silver-schema shape once planned — dedup may move fully into dbt models, or the earlier-locked Python `DeduplicationStage` may become a secondary safety net on top of dbt's output.
 
