@@ -799,7 +799,7 @@ class PostgresMetadataRepository(MetadataRepository):
             f"""
             INSERT INTO meta.watermarks (dataset_id, target_key, cursor_value)
             VALUES (%(dataset_id)s, %(target_key)s,
-                    (SELECT max({watermark_column}) FROM {source_table}))
+                    (SELECT max({watermark_column}::timestamptz) FROM {source_table}))
             ON CONFLICT (dataset_id, target_key) DO UPDATE
                 SET cursor_value = GREATEST(meta.watermarks.cursor_value, EXCLUDED.cursor_value)
             RETURNING cursor_value
@@ -878,16 +878,19 @@ class PostgresMetadataRepository(MetadataRepository):
                 key_count_input, key_count_output, expected_row_count,
                 expected_checksum, control_total_discrepancy
             ) VALUES (
-                %(dataset_id)s, %(file_id)s, %(hop)s, %(input_count)s, %(output_count)s,
-                %(rejected_count)s, %(dedup_count)s,
-                %(input_count)s - (%(output_count)s + %(rejected_count)s + %(dedup_count)s),
+                %(dataset_id)s, %(file_id)s, %(hop)s,
+                %(input_count)s::bigint, %(output_count)s::bigint,
+                %(rejected_count)s::bigint, %(dedup_count)s::bigint,
+                %(input_count)s::bigint
+                    - (%(output_count)s::bigint + %(rejected_count)s::bigint
+                       + %(dedup_count)s::bigint),
                 %(sum_column)s, %(sum_input)s, %(sum_output)s,
                 %(checksum_input)s, %(checksum_output)s,
                 %(min_input)s, %(max_input)s, %(min_output)s, %(max_output)s,
-                %(key_count_input)s, %(key_count_output)s, %(expected_row_count)s,
+                %(key_count_input)s, %(key_count_output)s, %(expected_row_count)s::bigint,
                 %(expected_checksum)s,
-                CASE WHEN %(expected_row_count)s IS NOT NULL
-                     THEN %(expected_row_count)s - %(output_count)s END
+                CASE WHEN %(expected_row_count)s::bigint IS NOT NULL
+                     THEN %(expected_row_count)s::bigint - %(output_count)s::bigint END
             )
             RETURNING reconciliation_id
             """,

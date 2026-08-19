@@ -887,12 +887,13 @@ class MetadataRepository(Protocol):
         """Advance `meta.watermarks` using `GREATEST()`; always logs to `meta.watermark_history`.
 
         Maps to ``INSERT INTO meta.watermarks (dataset_id, target_key,
-        cursor_value) VALUES (%s, %s, (SELECT max({watermark_column}) FROM
-        {source_table})) ON CONFLICT (dataset_id, target_key) DO UPDATE SET
-        cursor_value = GREATEST(meta.watermarks.cursor_value,
-        EXCLUDED.cursor_value) RETURNING cursor_value``, followed by an
-        unconditional ``INSERT INTO meta.watermark_history (dataset_id,
-        target_key, old_value, new_value, run_id)`` using the pre-update
+        cursor_value) VALUES (%s, %s, (SELECT max({watermark_column}
+        ::timestamptz) FROM {source_table})) ON CONFLICT (dataset_id,
+        target_key) DO UPDATE SET cursor_value =
+        GREATEST(meta.watermarks.cursor_value, EXCLUDED.cursor_value)
+        RETURNING cursor_value``, followed by an unconditional ``INSERT
+        INTO meta.watermark_history (dataset_id, target_key, old_value,
+        new_value, run_id)`` using the pre-update
         value (read via a preceding ``SELECT cursor_value FROM
         meta.watermarks WHERE dataset_id = %s AND target_key = %s`` — `None`
         when no row exists yet) and the just-returned new value.
