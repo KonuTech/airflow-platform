@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 Phase: 09
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-08-19 - Completed quick task 260819-inq: Restructure README.md top: remove title/operational-note, wrap Executive Summary in EN/PL details tabs with full Polish translation
+Last activity: 2026-08-19 - Completed quick task 260819-jal: Swap default-open language tab in README.md Executive Summary: Polski open, English collapsed
 
 Progress: [██████████] 100%
 
@@ -138,6 +138,7 @@ None yet.
 | 260818-f0w | Update README.md in place (not appended) to reflect the dbt bronze-to-silver medallion architecture decision: architecture diagrams/data-flow, dedup/staging/SCD sections, repo structure, roadmap and Definition of Done | 2026-08-18 | 7d32c71 | [260818-f0w-update-readme-md-to-reflect-dbt-bronze-t](./quick/260818-f0w-update-readme-md-to-reflect-dbt-bronze-t/) |
 | 260819-hsw | Add Executive Summary with a real row-journey example (raw -> bronze -> quarantine -> silver -> gold -> lineage) and two collapsible Mermaid architecture diagrams to README.md | 2026-08-19 | 8114d69 | [260819-hsw-add-executive-summary-with-row-journey-e](./quick/260819-hsw-add-executive-summary-with-row-journey-e/) |
 | 260819-inq | Remove README.md title/operational-note block; wrap Executive Summary in English/Polski `<details>` tabs with a full Polish translation (prose translated, identifiers/data/proper nouns preserved, both Mermaid diagrams duplicated) | 2026-08-19 | 6438520 | [260819-inq-restructure-readme-md-top-remove-title-o](./quick/260819-inq-restructure-readme-md-top-remove-title-o/) |
+| 260819-jal | Swap default-open language tab in README.md Executive Summary: Polski now open by default, English collapsed | 2026-08-19 | f5fdf82 | [260819-jal-swap-default-open-language-tab-in-readme](./quick/260819-jal-swap-default-open-language-tab-in-readme/) |
 
 ## Session Continuity
 
