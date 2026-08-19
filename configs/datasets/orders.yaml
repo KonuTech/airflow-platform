@@ -39,10 +39,6 @@ source:
   path: orders/
   change_semantics: snapshot
   duplicate_policy: skip
-deduplication:
-  strategy: business_key_latest
-  keys: [order_id]
-  order_by: [order_date desc]
 load:
   # NOTE the deliberate divergence from customers.yaml's `strategy: merge`:
   # `merge_orders` is a DIFFERENT registry key resolving to a DIFFERENT
@@ -55,6 +51,14 @@ load:
   target: normalized.orders
 batching:
   max_units_per_run: 100
+
+# reconciliation: is D-25's dataset-conditional reconciliation sum-check
+# (VALID-05) -- orders has a natural numeric column (amount) to sum and
+# compare source-vs-target on; customers.yaml declares no reconciliation:
+# block since it has no natural numeric column (event_ts/birth_date are
+# dates, not summable amounts).
+reconciliation:
+  sum_columns: [amount]
 
 quality:
   rules:

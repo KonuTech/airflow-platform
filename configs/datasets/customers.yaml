@@ -28,10 +28,6 @@ source:
   path: customers/
   change_semantics: snapshot
   duplicate_policy: skip
-deduplication:
-  strategy: business_key_latest
-  keys: [customer_id]
-  order_by: [event_ts desc]
 load:
   strategy: merge
   target: normalized.customers
