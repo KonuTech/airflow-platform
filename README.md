@@ -1,11 +1,7 @@
-# Production-Like Local Kubernetes Airflow ETL Platform
-
-When installing tools use the most recent and stable versions.
-I am on WSL. Whenver in need of checking for latest documentation use MCP context7 which is already installed and available.
-
----
-
 ## Executive Summary
+
+<details open>
+<summary><strong>🇬🇧 English</strong></summary>
 
 This repository is a local, production-like ETL/data platform -- Apache Airflow orchestrating
 containerized ETL workloads on a multi-node kind Kubernetes cluster, backed by MinIO as an
@@ -306,6 +302,8 @@ flowchart TD
 - Bronze (`staging.customers`) is append-only with no UNIQUE constraint on `customer_id` -- cross-run duplicates are allowed by design; deduplication is silver/dbt's job
 - `silver.customers` and `normalized.customers` each carry a real UNIQUE constraint on their business key (`customer_id`), supporting dbt's incremental model and MergePublisher's `ON CONFLICT (customer_id)` target respectively
 - `meta.v_customers_lineage` joins `meta.dedup_audit` via a `_run_id BETWEEN min_run_id AND max_run_id` RANGE, not an equality join -- which is why some gold rows can show a NULL `dbt_invocation_id` even though the row itself is fully traceable end to end (see the row-journey example above)
+
+</details>
 
 </details>
 
