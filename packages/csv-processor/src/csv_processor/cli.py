@@ -326,6 +326,22 @@ def stage(assignment: str) -> None:
             attempt=int(os.environ.get("AIRFLOW_TASK_TRY_NUMBER", "1")),
             file_id=doc.file.file_id,
             batch_id=doc.batch.batch_id,
+            # D-23/VALID-06 (plan 09-03): ready for a later plan (09-07) to
+            # compare against what actually got staged -- None when this
+            # dataset has no batch_complete_marker configured, or the
+            # marker's body failed to parse (dataplat.discovery already
+            # withholds the whole batch in that case, so this pod never
+            # runs at all).
+            batch_expected_row_count=(
+                doc.batch_complete_manifest.expected_row_count
+                if doc.batch_complete_manifest
+                else None
+            ),
+            batch_expected_checksum=(
+                doc.batch_complete_manifest.expected_checksum
+                if doc.batch_complete_manifest
+                else None
+            ),
             dag_id=os.environ.get("AIRFLOW_CTX_DAG_ID"),
             dag_run_id=os.environ.get("AIRFLOW_CTX_DAG_RUN_ID"),
             task_id=os.environ.get("AIRFLOW_CTX_TASK_ID"),
