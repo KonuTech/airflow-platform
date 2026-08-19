@@ -535,7 +535,10 @@ def _raw_bronze_row(customer_id: int) -> str:
 
 
 def _raw_bronze_csv_bytes(rows: int, *, start_id: int) -> bytes:
-    lines = [_RAW_BRONZE_CSV_HEADER, *(_raw_bronze_row(start_id + offset) for offset in range(rows))]
+    lines = [
+        _RAW_BRONZE_CSV_HEADER,
+        *(_raw_bronze_row(start_id + offset) for offset in range(rows)),
+    ]
     return "".join(lines).encode("utf-8")
 
 
