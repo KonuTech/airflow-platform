@@ -154,13 +154,41 @@ def test_etl_app_can_actually_use_the_schemas_it_has_table_grants_in(migrated_ds
     actually proves the schema is usable, not merely that a grant row exists.
     """
     with psycopg.connect(migrated_dsn) as conn:
-        for schema in ("meta", "normalized", "staging"):
+        for schema in ("meta", "normalized", "staging", "silver"):
             usable = conn.execute(
                 "SELECT has_schema_privilege('etl_app', %s, 'USAGE')",
                 (schema,),
             ).fetchone()
             assert usable is not None
             assert usable[0] is True, f"etl_app lacks USAGE on schema {schema!r}"
+
+
+def test_etl_app_can_read_silver_for_publish(migrated_dsn: str) -> None:
+    """08.1-13/migration 0029: `publish` (running as `etl_app`) reads FROM `silver.*`.
+
+    Discovered live (not merely in testcontainers): a real, Vault-
+    authenticated `etl_app` run of `dataplat publish --dataset customers`
+    failed with `psycopg.errors.InsufficientPrivilege: permission denied
+    for schema silver` -- migration 0021 made `dbt_app` the sole owner of
+    `silver`, and no earlier migration ever granted `etl_app` anything on
+    it. `etl_app` gets `SELECT` only, mirroring `dbt_app`'s own
+    staging-read boundary (migration 0021) -- never `INSERT`/`UPDATE`/
+    `DELETE`, since D-08 keeps `silver` writable by `dbt_app` alone.
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        for table in ("customers", "orders"):
+            rows = conn.execute(
+                """
+                SELECT privilege_type
+                  FROM information_schema.role_table_grants
+                 WHERE grantee = 'etl_app' AND table_schema = 'silver' AND table_name = %s
+                """,
+                (table,),
+            ).fetchall()
+            privileges = {row[0] for row in rows}
+            assert privileges == {"SELECT"}, (
+                f"silver.{table}: expected etl_app to hold exactly SELECT, got {privileges}"
+            )
 
 
 def test_ingestion_runs_schema_version_id_has_an_fk_after_0009(migrated_dsn: str) -> None:
