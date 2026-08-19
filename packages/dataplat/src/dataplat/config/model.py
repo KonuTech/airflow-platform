@@ -124,6 +124,28 @@ class DeduplicationConfig(BaseModel):
     order_by: list[str]
 
 
+class ReconciliationConfig(BaseModel):
+    """A dataset's opt-in reconciliation sum-check declaration (D-25, VALID-05).
+
+    Absent entirely when a dataset has no natural numeric column to sum and
+    compare source-vs-target on (``customers.yaml`` — ``event_ts``/
+    ``birth_date`` are dates, not summable amounts) — mirrors
+    ``FreshnessConfig``/``QualityConfig``'s own opt-in precedent on
+    ``DatasetConfig``. ``orders.yaml`` declares ``sum_columns: [amount]``,
+    since D-25's dataset-conditional reconciliation pass needs each
+    dataset to name its own numeric column(s) to sum, rather than assuming
+    one exists universally.
+
+    Attributes:
+        sum_columns: Numeric column name(s) this dataset's reconciliation
+            pass sums and compares source-vs-target on.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sum_columns: list[str]
+
+
 class LoadConfig(BaseModel):
     """How a dataset's records are published to their target table.
 
@@ -481,7 +503,10 @@ class DatasetConfig(BaseModel):
             ``loader.py`` migrate an older document into a newer model when
             replaying a historical run (ARCHITECTURE.md Q5.2).
         source: Where and how source files arrive.
-        deduplication: How duplicate records are collapsed.
+        deduplication: How duplicate records are collapsed, or ``None`` --
+            deduplication is entirely dbt-owned since Phase 08.1 (D-07 in
+            ``08.1-CONTEXT.md``), so this field is now vestigial-but-optional
+            (D-28); no committed dataset YAML populates it any longer.
         load: How records are published to their target table.
         batching: The cap on how many units one ``discover_files`` call may
             hand to Dynamic Task Mapping in a single run (ORCH-03).
@@ -501,6 +526,10 @@ class DatasetConfig(BaseModel):
             circuit breaker, or ``None`` when this dataset declares no
             quality rules — ``customers.yaml`` populates this for real
             (08-CONTEXT.md D-09).
+        reconciliation: The dataset's opt-in reconciliation sum-check
+            declaration (D-25, VALID-05), or ``None`` when this dataset has
+            no natural numeric column to sum — ``orders.yaml`` declares
+            ``sum_columns: [amount]``; ``customers.yaml`` declares none.
         csv: Structural CSV-parsing overrides. Defaults to "detect
             everything" (``CsvParsingConfig``'s own field defaults).
         schema_evolution_on_new_column: Policy applied when a file
@@ -518,7 +547,7 @@ class DatasetConfig(BaseModel):
     dataset: str
     config_schema_version: int
     source: SourceConfig
-    deduplication: DeduplicationConfig
+    deduplication: DeduplicationConfig | None = None
     load: LoadConfig
     batching: BatchingConfig
     columns: list[ColumnContract]
@@ -526,6 +555,7 @@ class DatasetConfig(BaseModel):
     normalization: NormalizationConfig | None = None
     freshness: FreshnessConfig | None = None
     quality: QualityConfig | None = None
+    reconciliation: ReconciliationConfig | None = None
     csv: CsvParsingConfig = Field(default_factory=CsvParsingConfig)
     schema_evolution_on_new_column: str = "evolve"
     schema_evolution_on_missing_or_retyped_column: str = "freeze"
@@ -560,8 +590,12 @@ class DatasetConfig(BaseModel):
 
         ``deduplication.keys`` and ``columns[].business_key`` are two
         independent declarations; this validator is what keeps them from
-        silently disagreeing.
+        silently disagreeing. Absent entirely (D-28: deduplication is now
+        optional, and no committed dataset YAML populates it) short-circuits
+        with nothing to check.
         """
+        if self.deduplication is None:
+            return self
         columns_by_name = {column.name: column for column in self.columns}
         for key in self.deduplication.keys:
             column = columns_by_name.get(key)
