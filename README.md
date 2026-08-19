@@ -1,11 +1,7 @@
-# Production-Like Local Kubernetes Airflow ETL Platform
-
-When installing tools use the most recent and stable versions.
-I am on WSL. Whenver in need of checking for latest documentation use MCP context7 which is already installed and available.
-
----
-
 ## Executive Summary
+
+<details open>
+<summary><strong>🇬🇧 English</strong></summary>
 
 This repository is a local, production-like ETL/data platform -- Apache Airflow orchestrating
 containerized ETL workloads on a multi-node kind Kubernetes cluster, backed by MinIO as an
@@ -306,6 +302,320 @@ flowchart TD
 - Bronze (`staging.customers`) is append-only with no UNIQUE constraint on `customer_id` -- cross-run duplicates are allowed by design; deduplication is silver/dbt's job
 - `silver.customers` and `normalized.customers` each carry a real UNIQUE constraint on their business key (`customer_id`), supporting dbt's incremental model and MergePublisher's `ON CONFLICT (customer_id)` target respectively
 - `meta.v_customers_lineage` joins `meta.dedup_audit` via a `_run_id BETWEEN min_run_id AND max_run_id` RANGE, not an equality join -- which is why some gold rows can show a NULL `dbt_invocation_id` even though the row itself is fully traceable end to end (see the row-journey example above)
+
+</details>
+
+</details>
+
+<details>
+<summary><strong>🇵🇱 Polski</strong></summary>
+
+To repozytorium to lokalna, zbliżona do produkcyjnej platforma ETL/danych -- Apache Airflow
+orkiestrujący konteneryzowane obciążenia ETL na wielowęzłowym klastrze Kubernetes kind, wspierany
+przez MinIO jako magazyn danych kompatybilny z S3, dwie fizycznie oddzielone instancje PostgreSQL
+(metadane Airflow vs. analityczna hurtownia danych) oraz HashiCorp Vault do zarządzania sekretami.
+Jej pierwszym obciążeniem jest sterowany metadanymi, uniwersalny silnik ingestii plików CSV, który
+odkrywa, inspekcjonuje, parsuje, waliduje, normalizuje, deduplikuje i transakcyjnie ładuje
+rzeczywiste, "brudne" pliki CSV, z obsługą ewolucji schematu, przetwarzania przyrostowego, CDC i
+SCD.
+
+To celowo nie jest samouczek Airflow, parser CSV, zbiór luźnych skryptów ani środowisko
+deweloperskie oparte na Docker Compose -- to platforma, której architektura pozwala na dodawanie
+kolejnych obciążeń ETL w przyszłości bez przeprojektowywania. Jej kluczowa wartość: każdy plik,
+batch i rekord, który trafia do platformy, może zostać prześledzony, wyjaśniony, ponownie
+przetworzony i można mu zaufać -- ingestia jest idempotentna, audytowalna i powtarzalna
+(replayable), a żadne dane nigdy nie są po cichu odrzucane, duplikowane ani uszkadzane. Poniższy
+przykład podróży wiersza (row-journey) demonstruje tę gwarancję od początku do końca, wykorzystując
+rzeczywiste dane prześledzone przez tę dokładnie wdrożoną platformę.
+
+### Podróż wiersza przez platformę
+
+To nie jest hipotetyczny przykład -- to rzeczywiste dane, zweryfikowane na żywo względem baz danych
+tej wdrożonej platformy w trakcie tej sesji.
+
+**Plik surowy (raw):** `s3://raw/customers/e2e-backfill-b0ef04b6c2d2-original.csv`
+
+```csv
+customer_id,name,country,birth_date,event_ts
+2006091645,Anna Kowalski,PL,1950-03-14,2026-01-05T08:15:00Z
+2006091646,James Smith,US,1962-12-25,2026-02-02T05:03:27Z
+2006091647,Sophie Muller,GB,1974-03-19,2026-03-16T22:37:52Z
+2006091648,,PL,1988-12-01,2026-04-13T16:49:05Z
+```
+
+**1. Bronze -- `staging.customers`**
+
+| customer_id | name | country | birth_date | event_ts |
+|---|---|---|---|---|
+| 2006091645 | Anna Kowalski | PL | 1950-03-14 | 2026-01-05T08:15:00Z |
+| 2006091646 | James Smith | US | 1962-12-25 | 2026-02-02T05:03:27Z |
+| 2006091647 | Sophie Muller | GB | 1974-03-19 | 2026-03-16T22:37:52Z |
+
+Wszystkie trzy wiersze mają wspólne `_file_id = 106045` oraz `_run_id = 43351` (pojedynczy run
+ingestii tego pliku).
+
+**2. Kwarantanna -- `meta.rejected_records`**
+
+Wiersz 4 (`2006091648`) nigdy nie dociera do bronze, silver ani gold -- nie przechodzi walidacji
+strukturalnej i trafia do kwarantanny:
+
+| source_row_number | error_type | error_column | error_message | resolution_type |
+|---|---|---|---|---|
+| 4 | COMPLETENESS_VIOLATION | name | required column 'name' is empty | PENDING |
+
+**3. Silver -- `silver.customers`** (własność dbt)
+
+Te same 3 zaakceptowane wiersze, zdeduplikowane przez model dbt bronze-to-silver:
+
+| customer_id | name | country | birth_date | event_ts | _dbt_loaded_at |
+|---|---|---|---|---|---|
+| 2006091645 | Anna Kowalski | PL | 1950-03-14 | 2026-01-05T08:15:00Z | 2026-08-19 08:51:38 |
+| 2006091646 | James Smith | US | 1962-12-25 | 2026-02-02T05:03:27Z | 2026-08-19 08:51:38 |
+| 2006091647 | Sophie Muller | GB | 1974-03-19 | 2026-03-16T22:37:52Z | 2026-08-19 08:51:38 |
+
+**4. Gold -- `normalized.customers`** (własność Python `MergePublisher`)
+
+Te same 3 wiersze, o identycznej zawartości, opublikowane za pomocą `INSERT ... ON CONFLICT
+(customer_id)` w ramach pojedynczej transakcji `MergePublisher` -- tym razem otypowane
+(`customer_id` integer, `birth_date` date, `event_ts` timestamptz), a nie jak w bronze/silver,
+gdzie wszystkie kolumny są typu TEXT.
+
+**5. Lineage -- `meta.v_customers_lineage`**
+
+Rozwiązane dla `customer_id = 2006091645` za pomocą `meta.v_customers_lineage`:
+
+| field | value |
+|---|---|
+| dag_id | csv_ingest_customers |
+| dag_run_id | scheduled__2026-08-17T12:32:00+00:00 |
+| task_id | ingest |
+| k8s_pod_name | ingest-95ykverh |
+| dbt_invocation_id | NULL |
+| dbt_run_at | NULL |
+
+**Znany, uczciwie opisany niuans:** `dbt_invocation_id`/`dbt_run_at` tego wiersza mają wartość
+NULL, ponieważ kolumna `_run_id` w gold pozostała przypięta do ORYGINALNEGO runu ingestii z
+2026-08-17 -- `MergePublisher` używa `INSERT ... ON CONFLICT DO NOTHING` i podczas późniejszego
+replayu backfillu znalazł już obecną identyczną zawartość, więc wiersz nigdy nie został ponownie
+oznaczony nowszym `_run_id`. Widok lineage łączy się z `meta.dedup_audit` po zakresie `_run_id
+BETWEEN min_run_id AND max_run_id`, a żaden wiersz `dedup_audit` nigdy nie obejmował zakresu tego
+oryginalnego runu, ponieważ poprzedza on istnienie dbt w tym pipeline. Jest to realna, strukturalna
+konsekwencja tego, jak replay i idempotentne zapisy do gold wchodzą w interakcję z widokiem
+lineage -- a nie defekt, który został lub musi zostać naprawiony.
+
+### Architektura platformy / środowiska
+
+<details>
+<summary><strong>Kliknij, aby rozwinąć</strong></summary>
+
+```mermaid
+flowchart TD
+    GH["GitHub"] --> GHA["GitHub Actions"]
+    GHA --> IMG["Obrazy kontenerów"]
+    IMG --> KIND["kind cluster
+    control-plane + worker-01 + worker-02"]
+
+    KIND --> CP["control-plane"]
+    KIND --> W1["worker-01"]
+    KIND --> W2["worker-02"]
+
+    KIND --> API["Airflow API Server"]
+    KIND --> SCHED["Airflow Scheduler"]
+    KIND --> DAGP["Airflow DAG Processor"]
+    KIND --> TRIG["Airflow Triggerer"]
+    KIND --> MINIO[("MinIO
+    Data Lake kompatybilny z S3")]
+    KIND --> APG[("Airflow PostgreSQL
+    tylko metadane")]
+    KIND --> ANPG[("Analytical PostgreSQL")]
+
+    SCHED -->|"KubernetesExecutor, dynamiczne mapowanie zadań"| POD["Pod zadania CSV Processor"]
+    POD -->|"odczytuje bucket raw/"| MINIO
+    POD -->|"zapisuje do staging/bronze"| ANPG
+
+    VAULT["HashiCorp Vault"] -.->|"dostęp do sekretów w czasie działania"| API
+    VAULT -.->|"dostęp do sekretów w czasie działania"| SCHED
+    VAULT -.->|"dostęp do sekretów w czasie działania"| TRIG
+    VAULT -.->|"dostęp do sekretów w czasie działania"| POD
+
+    ANPG -.-> ANPGDETAIL["Analytical PostgreSQL -- Warstwy schematu
+    ---
+    staging / bronze -- własność CSV Processor
+    silver -- własność dbt (adapter Postgres)
+    warehouse / gold -- własność Python MergePublisher"]
+
+    classDef ci fill:#e1f5fe,stroke:#0288d1
+    classDef k8s fill:#ede7f6,stroke:#5e35b1
+    classDef airflow fill:#e8f5e9,stroke:#43a047
+    classDef compute fill:#fff3e0,stroke:#fb8c00
+    classDef storage fill:#fce4ec,stroke:#d81b60
+    classDef secrets fill:#fffde7,stroke:#f9a825
+    classDef details fill:#f5f5f5,stroke:#999,stroke-dasharray: 5 5
+
+    class GH,GHA,IMG ci
+    class KIND,CP,W1,W2 k8s
+    class API,SCHED,DAGP,TRIG airflow
+    class POD compute
+    class MINIO,APG,ANPG storage
+    class VAULT secrets
+    class ANPGDETAIL details
+```
+
+### Legenda przepływu danych
+- **(niebieski) CI/CD**: GitHub, GitHub Actions oraz obrazy kontenerów zasilające klaster
+- **(fioletowy) Kubernetes**: klaster kind oraz jego węzły control-plane/worker-01/worker-02
+- **(zielony) Airflow**: cztery wymagane komponenty Airflow 3 (API Server, Scheduler, DAG Processor, Triggerer)
+- **(pomarańczowy) Compute**: efemeryczny Pod zadania CSV Processor uruchamiany przez KubernetesExecutor
+- **(różowy) Storage**: MinIO (Data Lake kompatybilny z S3) oraz dwie instancje PostgreSQL
+- **(żółty) Secrets**: HashiCorp Vault
+- **Linie ciągłe**: przepływ budowania CI/CD, rozgałęzienie Kubernetes oraz przepływ danych/sterowania między komponentami
+- **Linie kropkowane**: relacje dostępu do sekretów w czasie działania Vault oraz adnotacja ze szczegółami warstw schematu Analytical PostgreSQL
+
+### Kluczowe relacje
+- KubernetesExecutor (działający wewnątrz procesu Scheduler) uruchamia każde zadanie CSV Processor jako osobny, efemeryczny pod Kubernetes za pomocą dynamicznego mapowania zadań -- bez długo działających workerów Celery
+- Vault dostarcza sekrety w czasie działania bezpośrednio do API Server, Schedulera, Triggerera oraz Poda zadania CSV Processor poprzez logowanie SA-token z uwierzytelnianiem Kubernetes -- żaden długo istniejący Kubernetes Secret nigdy nie przechowuje poświadczeń
+- Airflow PostgreSQL i Analytical PostgreSQL to fizycznie oddzielone wdrożenia -- metadane Airflow nigdy nie mieszają się z danymi analitycznymi, mimo że oba działają wewnątrz tego samego klastra kind
+- Wewnątrz Analytical PostgreSQL trzy warstwy schematu mają odrębnych właścicieli: staging/bronze (CSV Processor), silver (adapter Postgres dbt), warehouse/gold (Python MergePublisher)
+
+</details>
+
+### Architektura pipeline'u danych / warstw danych
+
+<details>
+<summary><strong>Kliknij, aby rozwinąć</strong></summary>
+
+```mermaid
+flowchart TD
+    RAW["s3://raw/customers/*.csv
+    niemutowalny, tylko dopisywanie (append-only)"] --> DISCOVER["discover"]
+    DISCOVER --> STAGE["stage"]
+    STAGE --> DBTBUILD["dbt_build"]
+    DBTBUILD --> PUBLISH["publish"]
+
+    STAGE -->|"poprawne wiersze"| BRONZE["staging.customers / staging.orders"]
+    STAGE -->|"niepoprawne wiersze"| QUARANTINE["meta.rejected_records"]
+    BRONZE --> DBTBUILD
+
+    DBTBUILD -->|"czyszczenie, deduplikacja, obsługa spóźnionych zdarzeń (late-arriving)"| SILVER["silver.customers / silver.orders"]
+    DBTBUILD -->|"ślad audytowy dla każdego wywołania (per-invocation)"| DEDUPAUDIT["meta.dedup_audit"]
+    SILVER --> PUBLISH
+
+    PUBLISH -->|"MergePublisher: INSERT ... ON CONFLICT"| GOLD["normalized.customers / normalized.orders"]
+
+    GOLD -.-> LINEAGE["meta.v_customers_lineage"]
+    DEDUPAUDIT -.-> LINEAGE
+    BRONZE -.-> LINEAGE
+
+    BRONZE -.-> BRONZEDETAIL["staging.customers
+    ---
+    id PK
+    customer_id TEXT
+    name TEXT
+    country TEXT
+    birth_date TEXT
+    event_ts TEXT
+    _run_id BIGINT FK
+    _file_id BIGINT FK
+    _batch_id BIGINT FK
+    _record_hash BYTEA"]
+
+    QUARANTINE -.-> QUARANTINEDETAIL["meta.rejected_records
+    ---
+    rejected_record_id PK
+    run_id FK
+    file_id FK
+    batch_id FK
+    source_row_number
+    error_type
+    error_column
+    error_message
+    resolution_type (PENDING/REDRIVEN/DISCARDED)
+    business_key TEXT"]
+
+    SILVER -.-> SILVERDETAIL["silver.customers
+    ---
+    customer_id TEXT UNIQUE
+    name TEXT
+    country TEXT
+    birth_date TEXT
+    event_ts TEXT
+    _dbt_loaded_at TIMESTAMPTZ
+    _run_id BIGINT FK"]
+
+    DEDUPAUDIT -.-> DEDUPAUDITDETAIL["meta.dedup_audit
+    ---
+    dedup_audit_id PK
+    dataset_id FK
+    dbt_invocation_id TEXT
+    model_name
+    min_run_id BIGINT
+    max_run_id BIGINT
+    records_received
+    records_accepted
+    records_rejected
+    records_deduplicated
+    run_at"]
+
+    GOLD -.-> GOLDDETAIL["normalized.customers
+    ---
+    id PK
+    customer_id INTEGER UNIQUE
+    name TEXT
+    country TEXT
+    birth_date DATE
+    event_ts TIMESTAMPTZ
+    _run_id BIGINT FK
+    _record_hash BYTEA"]
+
+    LINEAGE -.-> LINEAGEDETAIL["meta.v_customers_lineage
+    ---
+    customer_id
+    dag_id
+    dag_run_id
+    task_id
+    k8s_pod_name
+    trace_id
+    span_id
+    dbt_invocation_id (nullable)
+    dbt_run_at (nullable)"]
+
+    classDef raw fill:#cfd8dc,stroke:#455a64
+    classDef task fill:#bbdefb,stroke:#1565c0
+    classDef bronze fill:#d7ccc8,stroke:#4e342e
+    classDef quarantine fill:#ffcdd2,stroke:#b71c1c
+    classDef silver fill:#e0e0e0,stroke:#616161
+    classDef gold fill:#fff59d,stroke:#f57f17
+    classDef meta fill:#c5cae9,stroke:#283593
+    classDef details fill:#f5f5f5,stroke:#999,stroke-dasharray: 5 5
+
+    class RAW raw
+    class DISCOVER,STAGE,DBTBUILD,PUBLISH task
+    class BRONZE bronze
+    class QUARANTINE quarantine
+    class SILVER silver
+    class GOLD gold
+    class DEDUPAUDIT,LINEAGE meta
+    class BRONZEDETAIL,QUARANTINEDETAIL,SILVERDETAIL,DEDUPAUDITDETAIL,GOLDDETAIL,LINEAGEDETAIL details
+```
+
+### Legenda przepływu danych
+- **(niebiesko-szary) Raw Storage**: niemutowalny bucket `s3://raw/` z zasadą append-only -- jedyny punkt wejścia dla nowych plików
+- **(niebieski) Zadania Airflow**: cztery sekwencyjne zadania DAG (`discover`, `stage`, `dbt_build`, `publish`) orkiestrujące pipeline
+- **(brązowy) Bronze**: `staging.customers`/`staging.orders`, tabele lądowania danych surowych typu append-only
+- **(czerwony) Kwarantanna**: `meta.rejected_records`, wiersze, które nie przeszły walidacji strukturalnej
+- **(szary) Silver**: `silver.customers`/`silver.orders`, oczyszczone i zdeduplikowane tabele dbt
+- **(żółty) Gold**: `normalized.customers`/`normalized.orders`, gotowe biznesowo tabele hurtowni danych
+- **(indygo) Metadane / Lineage**: `meta.dedup_audit` oraz `meta.v_customers_lineage`
+- **Linie ciągłe**: przepływ danych między warstwami (stage -> bronze/kwarantanna, bronze -> dbt_build, dbt_build -> silver/dedup_audit, silver -> publish, publish -> gold)
+- **Linie kropkowane**: szczegóły schematu tabel (adnotacje PK/FK) oraz złączenia rozwiązujące lineage, zbiegające się w `meta.v_customers_lineage`
+
+### Kluczowe relacje
+- Wiersze w kwarantannie nigdy nie docierają do bronze, silver ani gold -- walidacja strukturalna odbywa się w `stage`, przed jakimkolwiek ładowaniem transakcyjnym, więc wiersz jest albo w pełni zaakceptowany do bronze, albo w pełni odrzucony do `meta.rejected_records`
+- Bronze (`staging.customers`) działa w trybie append-only bez ograniczenia UNIQUE na `customer_id` -- duplikaty między runami są dopuszczone celowo; deduplikacja to zadanie silver/dbt
+- `silver.customers` oraz `normalized.customers` mają rzeczywiste ograniczenie UNIQUE na swoim kluczu biznesowym (`customer_id`), wspierające odpowiednio model przyrostowy dbt oraz cel `ON CONFLICT (customer_id)` dla MergePublisher
+- `meta.v_customers_lineage` łączy się z `meta.dedup_audit` za pomocą ZAKRESU `_run_id BETWEEN min_run_id AND max_run_id`, a nie złączenia po równości -- dlatego niektóre wiersze gold mogą pokazywać NULL w `dbt_invocation_id`, mimo że sam wiersz jest w pełni identyfikowalny od początku do końca (zob. przykład podróży wiersza powyżej)
+
+</details>
 
 </details>
 
