@@ -104,6 +104,8 @@ from dataplat.validate.referential import ReferentialIntegrityBarrier
 from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
+    from decimal import Decimal
+
     from psycopg import Connection
 
     from dataplat.config.model import QualityRuleConfig
@@ -166,6 +168,232 @@ def _target_columns_for_dataset(dataset: str) -> tuple[str, ...]:
             msg,
             context={"dataset": dataset, "known_datasets": sorted(_TARGET_COLUMNS_BY_DATASET)},
         ) from None
+
+
+# D-02's exact `order_by` columns (each dataset's own `DeduplicationConfig.
+# order_by`, e.g. `"event_ts desc"`/`"order_date desc"`): the column
+# `record_watermark`'s own `SELECT max(...)` advances the observational
+# watermark by. A dataset-keyed lookup, mirroring `_TARGET_COLUMNS_BY_DATASET`
+# above and `resolve_publisher`'s own "small module-level dict keyed by a
+# config value" convention (`load/publish/registry.py`) -- `DatasetConfig`
+# carries no canonical "the one column that orders this dataset" field yet, so
+# this stays a small, explicit table rather than a generic derivation.
+_WATERMARK_COLUMN_BY_DATASET: dict[str, str] = {
+    "customers": "event_ts",
+    "orders": "order_date",
+}
+
+
+def _watermark_column_for_dataset(dataset: str) -> str:
+    """Resolve ``dataset`` through ``_WATERMARK_COLUMN_BY_DATASET``, or fail loudly.
+
+    Mirrors ``_target_columns_for_dataset``'s own split-out-for-PLR0915
+    reasoning and ``resolve_publisher``'s own ``KeyError``-to-
+    ``ConfigurationError`` translation (this is a config-shape problem, not a
+    run-fatal data problem, so it raises the same error class
+    ``resolve_publisher`` does, not ``DataPlatformError``).
+
+    Args:
+        dataset: ``ctx.config.dataset``, e.g. ``"customers"``/``"orders"``.
+
+    Returns:
+        That dataset's watermark column, e.g. ``"event_ts"``/``"order_date"``.
+
+    Raises:
+        ConfigurationError: ``dataset`` has no entry.
+    """
+    try:
+        return _WATERMARK_COLUMN_BY_DATASET[dataset]
+    except KeyError:
+        msg = f"publish_ingest has no _WATERMARK_COLUMN_BY_DATASET entry for dataset {dataset!r}"
+        raise ConfigurationError(
+            msg,
+            context={"dataset": dataset, "known_datasets": sorted(_WATERMARK_COLUMN_BY_DATASET)},
+        ) from None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class _ReconciliationAggregates:
+    """This pass's silver->gold reconciliation figures (D-20/D-21/D-22).
+
+    Computed ONCE, against the WHOLE cumulative ``source_table`` (silver)
+    and ``ctx.config.load.target`` (gold) tables -- never a per-run slice,
+    the same Pitfall-2 whole-table-read constraint ``publisher.publish()``
+    is already subject to (RESEARCH.md) -- then attributed identically to
+    every file finalized this pass, mirroring ``rows_loaded``'s own
+    aggregate-attribution precedent (see ``publish_ingest``'s own
+    ``finalize_publication`` call site).
+    """
+
+    input_count: int
+    output_count: int
+    sum_column: str | None
+    sum_input: Decimal | None
+    sum_output: Decimal | None
+    checksum_input: str | None
+    checksum_output: str | None
+    min_input: datetime | None
+    max_input: datetime | None
+    min_output: datetime | None
+    max_output: datetime | None
+    key_count_input: int | None
+    key_count_output: int | None
+
+
+def _scalar(conn: Connection[Any], query: str) -> Any:
+    """Run one aggregate ``SELECT`` (no ``GROUP BY``) and return its single column-0 value.
+
+    Every call site in this module passes a literal aggregate expression
+    (``count``/``sum``/``min``/``max``) with no ``GROUP BY`` -- PostgreSQL
+    always returns exactly one row for that shape, even against an empty
+    table (``count`` = 0, ``sum``/``min``/``max`` = ``NULL``), so the
+    defensive ``None`` branch below documents that invariant rather than
+    silently swallowing a genuinely unexpected shape.
+
+    Args:
+        conn: An already-open connection, inside the caller's own
+            transaction.
+        query: A complete, caller-built SQL statement. May embed
+            config-resolved identifiers (T-09-03) -- never row content or
+            user input; every genuine value in a query built by this
+            module's own callers still crosses via `%s`/`%()s` placeholders
+            where one is needed.
+
+    Returns:
+        The single row's column-0 value.
+    """
+    row = conn.execute(query).fetchone()
+    # An aggregate SELECT with no GROUP BY always returns exactly one row,
+    # even against an empty table (count=0, sum/min/max=NULL) -- this
+    # documents that invariant rather than silently swallowing a genuinely
+    # unexpected shape.
+    if row is None:  # pragma: no cover
+        msg = f"aggregate query returned no row: {query!r}"
+        raise RuntimeError(msg)
+    return row[0]
+
+
+def _table_checksum(conn: Connection[Any], table: str) -> str | None:
+    """Compute an order-independent aggregate hash over every row of ``table`` (D-21).
+
+    ``bit_xor`` is commutative -- the result does not depend on row order,
+    so two tables holding the SAME rows in a DIFFERENT physical order
+    produce the SAME checksum. `table` is a config-resolved identifier
+    (T-09-03), interpolated as an identifier only.
+    """
+    # `table` is a config-resolved identifier (T-09-03), never row content.
+    query = (
+        f"SELECT to_hex(bit_xor(('x' || substr(md5(t::text), 1, 16))::bit(64)::bigint)) "  # noqa: S608
+        f"FROM {table} t"
+    )
+    result = _scalar(conn, query)
+    return None if result is None else str(result)
+
+
+def _compute_silver_gold_reconciliation(
+    ctx: PipelineContext,
+    conn: Connection[Any],
+    *,
+    source_table: str,
+    watermark_column: str,
+) -> _ReconciliationAggregates:
+    """Compute this pass's silver->gold reconciliation figures (D-20/D-21/D-22).
+
+    Reads the ENTIRE cumulative ``source_table`` (silver) and
+    ``ctx.config.load.target`` (gold) tables, an apples-to-apples full-table
+    row-count comparison (D-20's "source-to-target" fidelity) -- deliberately
+    NOT ``result.rows_affected`` (the ``MERGE``'s own affected-row count,
+    which ``finalize_publication``'s pre-existing ``rows_loaded`` reporting
+    already uses unchanged, a DIFFERENT metric with a different meaning:
+    reconciliation counts total rows, publish reporting counts rows touched
+    by this pass).
+
+    ``source_table``/``ctx.config.load.target``/``watermark_column``/the
+    resolved sum/business-key column names are all config-resolved
+    identifiers (T-09-03), interpolated as identifiers only, never row
+    content.
+
+    Args:
+        ctx: The current pipeline context. ``ctx.config.load.target``,
+            ``ctx.config.columns`` and ``ctx.config.reconciliation`` are
+            read.
+        conn: An already-open connection, inside the caller's own open
+            transaction.
+        source_table: The silver table this pass published from, e.g.
+            ``"silver.customers"``.
+        watermark_column: This dataset's watermark column (D-02), reused
+            here for ``min``/``max`` -- the SAME column
+            ``_watermark_column_for_dataset`` resolved for the watermark
+            advance above.
+
+    Returns:
+        This pass's reconciliation figures.
+    """
+    target_table = ctx.config.load.target
+    business_key_column = next((c for c in ctx.config.columns if c.business_key), None)
+    sum_column = ctx.config.reconciliation.sum_columns[0] if ctx.config.reconciliation else None
+
+    input_count = int(_scalar(conn, f"SELECT count(*) FROM {source_table}"))  # noqa: S608
+    output_count = int(_scalar(conn, f"SELECT count(*) FROM {target_table}"))  # noqa: S608
+
+    sum_input: Decimal | None = None
+    sum_output: Decimal | None = None
+    if sum_column is not None:
+        sum_input = _scalar(conn, f"SELECT sum({sum_column}::numeric) FROM {source_table}")  # noqa: S608
+        sum_output = _scalar(conn, f"SELECT sum({sum_column}::numeric) FROM {target_table}")  # noqa: S608
+
+    # Both sides cast to `::timestamptz`: silver's own watermark column is
+    # always TEXT (unparsed CSV content, D-02), while gold's is already
+    # typed (timestamptz for `event_ts`, date for `order_date`) -- casting
+    # both sides identically keeps this one query shape correct for either.
+    min_input = _scalar(
+        conn,
+        f"SELECT min({watermark_column}::timestamptz) FROM {source_table}",  # noqa: S608
+    )
+    max_input = _scalar(
+        conn,
+        f"SELECT max({watermark_column}::timestamptz) FROM {source_table}",  # noqa: S608
+    )
+    min_output = _scalar(
+        conn,
+        f"SELECT min({watermark_column}::timestamptz) FROM {target_table}",  # noqa: S608
+    )
+    max_output = _scalar(
+        conn,
+        f"SELECT max({watermark_column}::timestamptz) FROM {target_table}",  # noqa: S608
+    )
+
+    key_count_input: int | None = None
+    key_count_output: int | None = None
+    if business_key_column is not None:
+        key_count_input = int(
+            _scalar(
+                conn,
+                f"SELECT count(DISTINCT {business_key_column.name}) FROM {source_table}",  # noqa: S608
+            ),
+        )
+        key_count_output = int(
+            _scalar(
+                conn,
+                f"SELECT count(DISTINCT {business_key_column.name}) FROM {target_table}",  # noqa: S608
+            ),
+        )
+
+    return _ReconciliationAggregates(
+        input_count=input_count,
+        output_count=output_count,
+        sum_column=sum_column,
+        sum_input=sum_input,
+        sum_output=sum_output,
+        checksum_input=_table_checksum(conn, source_table),
+        checksum_output=_table_checksum(conn, target_table),
+        min_input=min_input,
+        max_input=max_input,
+        min_output=min_output,
+        max_output=max_output,
+        key_count_input=key_count_input,
+        key_count_output=key_count_output,
+    )
 
 
 class _Progress:
@@ -845,6 +1073,37 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
             source_table = f"silver.{ctx.config.dataset}"
             result = publisher.publish(ctx, source_table, conn)
 
+            # D-01/D-02/D-04: advance this dataset's observational watermark
+            # inside the SAME transaction as the merge upsert above -- never
+            # a separate transaction, which could observe a partial publish
+            # (AP4 avoidance, ARCHITECTURE.md line 1333). GREATEST() inside
+            # `record_watermark`'s own SQL enforces INCR-02's "`>=`, never
+            # `>`" rule structurally; `meta.watermark_history` is appended
+            # unconditionally either way (D-04).
+            watermark_column = _watermark_column_for_dataset(ctx.config.dataset)
+            ctx.metadata.record_watermark(
+                conn=conn,
+                dataset_id=dataset_id,
+                target_key="default",
+                source_table=source_table,
+                watermark_column=watermark_column,
+                run_id=max(run_id for run_id, _, _, _ in staged),
+            )
+
+            # D-20/D-21/D-22: this pass's silver->gold reconciliation
+            # figures, computed ONCE against the whole cumulative
+            # silver/gold tables (never a per-run slice -- the same
+            # Pitfall-2 whole-table-read constraint `publisher.publish()`
+            # above is already subject to) and attributed identically to
+            # every file finalized this pass below, mirroring
+            # `rows_loaded`'s own aggregate-attribution precedent.
+            reconciliation = _compute_silver_gold_reconciliation(
+                ctx,
+                conn,
+                source_table=source_table,
+                watermark_column=watermark_column,
+            )
+
             finished_at = datetime.now(tz=UTC)
             duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -900,6 +1159,29 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
                     stage_name="PUBLISH",
                     status="SUCCEEDED",
                     finished_at=finished_at,
+                )
+                # D-21/D-24: one silver->gold reconciliation row per
+                # finalized file -- reusing the SAME pass-level aggregate
+                # values computed above for every file in this pass (same
+                # aggregate-attribution reasoning as `rows_loaded` above).
+                ctx.metadata.record_reconciliation(
+                    conn=conn,
+                    dataset_id=dataset_id,
+                    file_id=file_id,
+                    hop="silver_gold",
+                    input_count=reconciliation.input_count,
+                    output_count=reconciliation.output_count,
+                    sum_column=reconciliation.sum_column,
+                    sum_input=reconciliation.sum_input,
+                    sum_output=reconciliation.sum_output,
+                    checksum_input=reconciliation.checksum_input,
+                    checksum_output=reconciliation.checksum_output,
+                    min_input=reconciliation.min_input,
+                    max_input=reconciliation.max_input,
+                    min_output=reconciliation.min_output,
+                    max_output=reconciliation.max_output,
+                    key_count_input=reconciliation.key_count_input,
+                    key_count_output=reconciliation.key_count_output,
                 )
                 finalized_run_ids.append(run_id)
 

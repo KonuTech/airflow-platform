@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
+    from decimal import Decimal
 
     from psycopg import Connection
 
@@ -870,5 +871,189 @@ class MetadataRepository(Protocol):
             matching PENDING rejects (including when `business_keys=[]`) —
             a legitimate, non-error outcome (e.g. a second resolution
             attempt against an already-resolved set).
+        """
+        ...
+
+    def record_watermark(  # noqa: PLR0913 -- one keyword per record_watermark Protocol argument
+        self,
+        *,
+        conn: Connection[Any],
+        dataset_id: int,
+        target_key: str,
+        source_table: str,
+        watermark_column: str,
+        run_id: int,
+    ) -> None:
+        """Advance `meta.watermarks` using `GREATEST()`; always logs to `meta.watermark_history`.
+
+        Maps to ``INSERT INTO meta.watermarks (dataset_id, target_key,
+        cursor_value) VALUES (%s, %s, (SELECT max({watermark_column}
+        ::timestamptz) FROM {source_table})) ON CONFLICT (dataset_id,
+        target_key) DO UPDATE SET cursor_value =
+        GREATEST(meta.watermarks.cursor_value, EXCLUDED.cursor_value)
+        RETURNING cursor_value``, followed by an unconditional ``INSERT
+        INTO meta.watermark_history (dataset_id, target_key, old_value,
+        new_value, run_id)`` using the pre-update
+        value (read via a preceding ``SELECT cursor_value FROM
+        meta.watermarks WHERE dataset_id = %s AND target_key = %s`` — `None`
+        when no row exists yet) and the just-returned new value.
+
+        INCR-02's "`>=`, never `>`" rule is enforced structurally by
+        `GREATEST()` in the SQL text itself, never a conditional branch in
+        Python — a publish carrying an OLDER `max({watermark_column})` than
+        the currently-stored cursor can never regress `cursor_value`. D-04's
+        "logs every write, moved or not" rule is enforced by the SECOND
+        `INSERT` above being unconditional — it always runs, whether
+        `cursor_value` actually moved or not.
+
+        `source_table`/`watermark_column` are config-resolved identifiers
+        (`_WATERMARK_COLUMN_BY_DATASET` and `f"silver.{ctx.config.dataset}"`
+        in `pipeline/run.py`), never row content — the same trust boundary
+        `merge.py`'s own `source_table` interpolation already accepts
+        (T-09-03).
+
+        MUST be called on the SAME `conn`/transaction `publish_ingest`
+        already holds `pg_advisory_xact_lock` on (INCR-02, AP4 avoidance) —
+        like `finalize_publication`, this method never opens its own
+        connection and never commits or rolls back `conn` itself.
+
+        Args:
+            conn: An already-open connection, inside an already-open
+                transaction — the same one `Publisher.publish` and
+                `finalize_publication` run against.
+            dataset_id: The dataset whose watermark is advancing.
+            target_key: The watermark's target-key grain (D-03) — this
+                phase's only caller always passes the literal `"default"`.
+            source_table: The fully-qualified table to compute
+                `max({watermark_column})` over, e.g. `"silver.customers"`.
+                Interpolated as an identifier only, never a value.
+            watermark_column: The column to take the max of, e.g.
+                `"event_ts"`/`"order_date"` (D-02). Interpolated as an
+                identifier only, never a value.
+            run_id: The run attributed to this watermark write, recorded on
+                the `meta.watermark_history` row.
+        """
+        ...
+
+    def get_current_watermark(self, *, dataset_id: int, target_key: str) -> datetime | None:
+        """Read one `meta.watermarks` row's current `cursor_value`, without writing.
+
+        Maps to ``SELECT cursor_value FROM meta.watermarks WHERE dataset_id
+        = %s AND target_key = %s``. A pure read, opening its own connection
+        from the pool — mirrors `get_run_stage_status`'s own read-only
+        contract exactly, never writes.
+
+        Args:
+            dataset_id: The dataset to read.
+            target_key: The watermark's target-key grain to read.
+
+        Returns:
+            The row's current `cursor_value`, or `None` when no watermark
+            row exists yet for this `(dataset_id, target_key)` pair, or when
+            one exists but `cursor_value` itself is still `NULL`.
+        """
+        ...
+
+    def record_reconciliation(  # noqa: PLR0913 -- one keyword per meta.reconciliation_results column this writes
+        self,
+        *,
+        conn: Connection[Any],
+        dataset_id: int,
+        file_id: int | None,
+        hop: str,
+        input_count: int,
+        output_count: int,
+        rejected_count: int = 0,
+        dedup_count: int = 0,
+        sum_column: str | None = None,
+        sum_input: Decimal | None = None,
+        sum_output: Decimal | None = None,
+        checksum_input: str | None = None,
+        checksum_output: str | None = None,
+        min_input: datetime | None = None,
+        max_input: datetime | None = None,
+        min_output: datetime | None = None,
+        max_output: datetime | None = None,
+        key_count_input: int | None = None,
+        key_count_output: int | None = None,
+        expected_row_count: int | None = None,
+        expected_checksum: str | None = None,
+    ) -> int:
+        """Insert one `meta.reconciliation_results` row, inside the caller's own open transaction.
+
+        Maps to a single parameterized ``INSERT INTO
+        meta.reconciliation_results (dataset_id, file_id, hop, input_count,
+        output_count, rejected_count, dedup_count, discrepancy, sum_column,
+        sum_input, sum_output, checksum_input, checksum_output, min_input,
+        max_input, min_output, max_output, key_count_input,
+        key_count_output, expected_row_count, expected_checksum,
+        control_total_discrepancy) VALUES (..., %(input_count)s -
+        (%(output_count)s + %(rejected_count)s + %(dedup_count)s), ...,
+        CASE WHEN %(expected_row_count)s IS NOT NULL THEN
+        %(expected_row_count)s - %(output_count)s END) RETURNING
+        reconciliation_id``.
+
+        D-22's exact accounting formula (`discrepancy = input_count -
+        (output_count + rejected_count + dedup_count)`) is computed as a SQL
+        expression AT WRITE TIME, inside the `INSERT` statement's own
+        `VALUES` clause — the formula lives in the SQL text itself, visible
+        and grep-able, never hidden in Python arithmetic upstream of this
+        call. `control_total_discrepancy` (VALID-06, D-23) is computed the
+        same way: `NULL` unless `expected_row_count` is supplied (i.e. a
+        `_BATCH_COMPLETE` manifest applied to this file), in which case it is
+        `expected_row_count - output_count`.
+
+        Like `finalize_publication`/`record_watermark`, `conn` is
+        caller-supplied and never committed or rolled back here — this
+        method MUST run inside the caller's already-open transaction.
+
+        Args:
+            conn: An already-open connection, inside an already-open
+                transaction.
+            dataset_id: The dataset this reconciliation row belongs to.
+            file_id: The file this row belongs to (D-24's per-file-per-hop
+                grain). `None` only defensively — every hop this phase
+                writes populates it for real.
+            hop: The pipeline hop this row reconciles — `"raw_bronze"`,
+                `"bronze_silver"` or `"silver_gold"` (app-validated
+                vocabulary, migration 0032).
+            input_count: The row count on this hop's input side.
+            output_count: The row count on this hop's output side.
+            rejected_count: Rows quarantined between input and output on
+                this hop. Defaults to `0`.
+            dedup_count: Rows deduplicated away between input and output on
+                this hop. Defaults to `0`.
+            sum_column: The numeric column this dataset's reconciliation sum
+                check compares, or `None` when the dataset declares no
+                `reconciliation.sum_columns` (D-25).
+            sum_input: The sum of `sum_column` on the input side, or `None`
+                when `sum_column` is `None`.
+            sum_output: The sum of `sum_column` on the output side, or
+                `None` when `sum_column` is `None`.
+            checksum_input: An order-independent aggregate hash of the input
+                side's rows, or `None` when not computed for this hop.
+            checksum_output: An order-independent aggregate hash of the
+                output side's rows, or `None` when not computed for this
+                hop.
+            min_input: The minimum watermark-column value on the input side,
+                or `None` when not computed for this hop.
+            max_input: The maximum watermark-column value on the input side,
+                or `None` when not computed for this hop.
+            min_output: The minimum watermark-column value on the output
+                side, or `None` when not computed for this hop.
+            max_output: The maximum watermark-column value on the output
+                side, or `None` when not computed for this hop.
+            key_count_input: The distinct business-key count on the input
+                side, or `None` when not computed for this hop.
+            key_count_output: The distinct business-key count on the output
+                side, or `None` when not computed for this hop.
+            expected_row_count: The `_BATCH_COMPLETE` manifest's declared row
+                count (VALID-06, D-23), or `None` when no manifest applied to
+                this file. Only ever populated at the `raw_bronze` hop.
+            expected_checksum: The `_BATCH_COMPLETE` manifest's declared
+                checksum, or `None` when no manifest applied to this file.
+
+        Returns:
+            The new row's `reconciliation_id`.
         """
         ...

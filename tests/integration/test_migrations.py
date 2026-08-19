@@ -52,6 +52,11 @@ EXPECTED_TABLES = {
     ("meta", "dedup_decisions"),
     # Plan 08.1-05, migration 0025 (D-17's two-phase claim state machine).
     ("meta", "run_stages"),
+    # Plan 09-02, migration 0031 (D-01..D-04's observational watermark).
+    ("meta", "watermarks"),
+    ("meta", "watermark_history"),
+    # Plan 09-02, migration 0032 (D-20..D-24's per-file-per-hop reconciliation).
+    ("meta", "reconciliation_results"),
     ("normalized", "customers"),
     ("normalized", "orders"),
 }
@@ -60,9 +65,20 @@ EXPECTED_TABLES = {
 # UPDATE on — deliberately NOT EXPECTED_TABLES itself: meta.dedup_audit and
 # meta.dedup_decisions (migration 0024) are etl_app SELECT-only (dbt_app owns
 # the INSERT path there), so they are excluded from this narrower set even
-# though they belong in EXPECTED_TABLES. A future table added to one without
-# the other is a visible diff, not a coincidence of reuse.
-GRANTED_TABLES = sorted(EXPECTED_TABLES - {("meta", "dedup_audit"), ("meta", "dedup_decisions")})
+# though they belong in EXPECTED_TABLES. meta.watermark_history (migration
+# 0031) and meta.reconciliation_results (migration 0032) are etl_app
+# SELECT/INSERT-only (append-only tables, never UPDATE'd in place), so they
+# are excluded here too. A future table added to one without the other is a
+# visible diff, not a coincidence of reuse.
+GRANTED_TABLES = sorted(
+    EXPECTED_TABLES
+    - {
+        ("meta", "dedup_audit"),
+        ("meta", "dedup_decisions"),
+        ("meta", "watermark_history"),
+        ("meta", "reconciliation_results"),
+    },
+)
 
 HASH_VERSION_COLUMNS = [
     ("meta", "files", "hash_version"),
@@ -303,14 +319,13 @@ def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_cons
 
 
 def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> None:
-    """T-07-02 mitigation: `grafana_reader` is SELECT-only, scoped to exactly four objects.
+    """T-07-02 mitigation: `grafana_reader` is SELECT-only, scoped to `expected_objects` below.
 
     Queries `pg_roles` (existence, LOGIN, no superuser/createrole) and
     `information_schema.role_table_grants` (no `INSERT`/`UPDATE`/`DELETE`
-    anywhere; `SELECT` on exactly `meta.datasets`/`meta.files`/
-    `meta.ingestion_runs`/`meta.v_customers_lineage` -- never a direct table
-    grant on `normalized.customers`, whose data the lineage view surfaces
-    under its own owner's privileges instead).
+    anywhere; `SELECT` on exactly the objects `expected_objects` names --
+    never a direct table grant on `normalized.customers`, whose data the
+    lineage view surfaces under its own owner's privileges instead).
     """
     with psycopg.connect(migrated_dsn) as conn:
         role_row = conn.execute(
@@ -346,6 +361,10 @@ def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> Non
         # Migration 0024 (plan 08.1-05): read access for dashboards, never write.
         ("meta", "dedup_audit"),
         ("meta", "dedup_decisions"),
+        # Migrations 0031/0032 (plan 09-02): read access for dashboards, never write.
+        ("meta", "watermarks"),
+        ("meta", "watermark_history"),
+        ("meta", "reconciliation_results"),
     }
     assert set(granted.keys()) == expected_objects, (
         f"grafana_reader must hold grants on exactly {expected_objects}, got {set(granted.keys())}"
@@ -578,7 +597,9 @@ def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
 
         # Negative: D-08's hard boundary — zero grants on normalized, and on
         # meta except the narrow meta.dedup_audit/meta.dedup_decisions slice
-        # migration 0024 (plan 08.1-05) carves out.
+        # migration 0024 (plan 08.1-05) carves out, plus
+        # meta.reconciliation_results (migration 0032, plan 09-02) -- its own
+        # INSERT-only bronze_silver-hop post-hook write path.
         forbidden_grants = conn.execute(
             """
             SELECT table_schema, table_name
@@ -587,13 +608,15 @@ def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
                AND (
                    table_schema = 'normalized'
                    OR (table_schema = 'meta'
-                       AND table_name NOT IN ('dedup_audit', 'dedup_decisions'))
+                       AND table_name NOT IN (
+                           'dedup_audit', 'dedup_decisions', 'reconciliation_results'
+                       ))
                )
             """,
         ).fetchall()
         assert forbidden_grants == [], (
             f"dbt_app must never be granted on normalized/meta "
-            f"(beyond dedup_audit/dedup_decisions), found: {forbidden_grants}"
+            f"(beyond dedup_audit/dedup_decisions/reconciliation_results), found: {forbidden_grants}"
         )
 
 

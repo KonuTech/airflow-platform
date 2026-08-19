@@ -23,6 +23,7 @@ from dataplat.metadata.repository import MetadataRepository
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
+    from decimal import Decimal
 
     from psycopg import Connection
     from psycopg_pool import ConnectionPool
@@ -765,6 +766,164 @@ class PostgresMetadataRepository(MetadataRepository):
             (resolution_type, resolved_by_run_id, dataset_id, list(business_keys)),
         )
         return int(cursor.rowcount)
+
+    def record_watermark(  # noqa: PLR0913 -- one keyword per record_watermark Protocol argument
+        self,
+        *,
+        conn: Connection[Any],
+        dataset_id: int,
+        target_key: str,
+        source_table: str,
+        watermark_column: str,
+        run_id: int,
+    ) -> None:
+        """See `MetadataRepository.record_watermark`.
+
+        Same `conn`-never-opened-here, never-committed-here shape as
+        `finalize_publication`/`resolve_rejected_records_for_business_keys`
+        above -- MUST run inside `publish_ingest`'s already-open, advisory-
+        locked transaction. `source_table`/`watermark_column` are
+        interpolated as SQL IDENTIFIERS via an f-string, never a value
+        (T-09-03) -- both are config-resolved (`pipeline/run.py`'s
+        `_WATERMARK_COLUMN_BY_DATASET` dict and `f"silver.{dataset}"`),
+        never row content. Every genuine VALUE (`dataset_id`/`target_key`)
+        still crosses via `%()s` placeholders.
+        """
+        old_row = conn.execute(
+            "SELECT cursor_value FROM meta.watermarks WHERE dataset_id = %s AND target_key = %s",
+            (dataset_id, target_key),
+        ).fetchone()
+        old_value = None if old_row is None else old_row[0]
+
+        new_row = conn.execute(
+            f"""
+            INSERT INTO meta.watermarks (dataset_id, target_key, cursor_value)
+            VALUES (%(dataset_id)s, %(target_key)s,
+                    (SELECT max({watermark_column}::timestamptz) FROM {source_table}))
+            ON CONFLICT (dataset_id, target_key) DO UPDATE
+                SET cursor_value = GREATEST(meta.watermarks.cursor_value, EXCLUDED.cursor_value)
+            RETURNING cursor_value
+            """,  # noqa: S608 -- source_table/watermark_column are config-resolved identifiers (T-09-03, see this method's own docstring), never row content or user input
+            {"dataset_id": dataset_id, "target_key": target_key},
+        ).fetchone()
+        if new_row is None:  # pragma: no cover - ON CONFLICT DO UPDATE always yields a row here
+            msg = "INSERT ... ON CONFLICT ... RETURNING cursor_value returned no row"
+            raise RuntimeError(msg)
+        new_value = new_row[0]
+
+        # Unconditional -- D-04: logs every write, moved or not.
+        conn.execute(
+            """
+            INSERT INTO meta.watermark_history (
+                dataset_id, target_key, old_value, new_value, run_id
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (dataset_id, target_key, old_value, new_value, run_id),
+        )
+
+    def get_current_watermark(self, *, dataset_id: int, target_key: str) -> datetime | None:
+        """See `MetadataRepository.get_current_watermark`."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT cursor_value FROM meta.watermarks"
+                " WHERE dataset_id = %s AND target_key = %s",
+                (dataset_id, target_key),
+            ).fetchone()
+            return None if row is None else row[0]
+
+    def record_reconciliation(  # noqa: PLR0913 -- one keyword per meta.reconciliation_results column this writes
+        self,
+        *,
+        conn: Connection[Any],
+        dataset_id: int,
+        file_id: int | None,
+        hop: str,
+        input_count: int,
+        output_count: int,
+        rejected_count: int = 0,
+        dedup_count: int = 0,
+        sum_column: str | None = None,
+        sum_input: Decimal | None = None,
+        sum_output: Decimal | None = None,
+        checksum_input: str | None = None,
+        checksum_output: str | None = None,
+        min_input: datetime | None = None,
+        max_input: datetime | None = None,
+        min_output: datetime | None = None,
+        max_output: datetime | None = None,
+        key_count_input: int | None = None,
+        key_count_output: int | None = None,
+        expected_row_count: int | None = None,
+        expected_checksum: str | None = None,
+    ) -> int:
+        """See `MetadataRepository.record_reconciliation`.
+
+        D-22's exact accounting formula (`discrepancy = input_count -
+        (output_count + rejected_count + dedup_count)`) and VALID-06/D-23's
+        `control_total_discrepancy` (`expected_row_count - output_count`,
+        `NULL` unless `expected_row_count` is supplied) are both computed as
+        SQL expressions inside this single `INSERT`'s own `VALUES` clause --
+        visible and grep-able in the SQL text itself, never hidden in Python
+        arithmetic upstream of this call. Same `conn`-never-opened-here,
+        never-committed-here shape as `record_watermark` above.
+        """
+        row = conn.execute(
+            """
+            INSERT INTO meta.reconciliation_results (
+                dataset_id, file_id, hop, input_count, output_count,
+                rejected_count, dedup_count, discrepancy, sum_column,
+                sum_input, sum_output, checksum_input, checksum_output,
+                min_input, max_input, min_output, max_output,
+                key_count_input, key_count_output, expected_row_count,
+                expected_checksum, control_total_discrepancy
+            ) VALUES (
+                %(dataset_id)s, %(file_id)s, %(hop)s,
+                %(input_count)s::bigint, %(output_count)s::bigint,
+                %(rejected_count)s::bigint, %(dedup_count)s::bigint,
+                %(input_count)s::bigint
+                    - (%(output_count)s::bigint + %(rejected_count)s::bigint
+                       + %(dedup_count)s::bigint),
+                %(sum_column)s, %(sum_input)s, %(sum_output)s,
+                %(checksum_input)s, %(checksum_output)s,
+                %(min_input)s, %(max_input)s, %(min_output)s, %(max_output)s,
+                %(key_count_input)s, %(key_count_output)s, %(expected_row_count)s::bigint,
+                %(expected_checksum)s,
+                CASE WHEN %(expected_row_count)s::bigint IS NOT NULL
+                     THEN %(expected_row_count)s::bigint - %(output_count)s::bigint END
+            )
+            RETURNING reconciliation_id
+            """,
+            {
+                "dataset_id": dataset_id,
+                "file_id": file_id,
+                "hop": hop,
+                "input_count": input_count,
+                "output_count": output_count,
+                "rejected_count": rejected_count,
+                "dedup_count": dedup_count,
+                "sum_column": sum_column,
+                "sum_input": sum_input,
+                "sum_output": sum_output,
+                "checksum_input": checksum_input,
+                "checksum_output": checksum_output,
+                "min_input": min_input,
+                "max_input": max_input,
+                "min_output": min_output,
+                "max_output": max_output,
+                "key_count_input": key_count_input,
+                "key_count_output": key_count_output,
+                "expected_row_count": expected_row_count,
+                "expected_checksum": expected_checksum,
+            },
+        ).fetchone()
+        if row is None:  # pragma: no cover - RETURNING always yields a row on a successful INSERT
+            msg = (
+                "INSERT INTO meta.reconciliation_results ... "
+                "RETURNING reconciliation_id returned no row"
+            )
+            raise RuntimeError(msg)
+        return int(row[0])
 
     def update_ingestion_run_status(self, *, run_id: int, status: str, **fields: object) -> None:
         """See `MetadataRepository.update_ingestion_run_status`.
