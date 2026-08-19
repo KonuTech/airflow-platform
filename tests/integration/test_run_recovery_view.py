@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -35,7 +34,7 @@ pytestmark = pytest.mark.integration
 
 
 def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
-    """Get-or-insert a synthetic, CURRENT `meta.config_versions` row (mirrors test_watermarks.py)."""
+    """Get-or-insert a synthetic, CURRENT `meta.config_versions` row (mirrors test_watermarks.py)."""  # noqa: E501, W505
     with psycopg.connect(dsn) as conn:
         existing = conn.execute(
             """
@@ -186,16 +185,31 @@ def test_failed_publish_reports_retry_publish(env: _Env) -> None:
 
 
 def test_next_action_never_implies_rollback(env: _Env) -> None:
+    all_succeeded = [
+        ("STAGE_LOAD", "SUCCEEDED"),
+        ("DBT_BUILD", "SUCCEEDED"),
+        ("PUBLISH", "SUCCEEDED"),
+    ]
+    load_then_dbt_succeeded_publish_failed = [
+        ("STAGE_LOAD", "SUCCEEDED"),
+        ("DBT_BUILD", "SUCCEEDED"),
+        ("PUBLISH", "FAILED"),
+    ]
     scenarios: list[tuple[str, str, list[tuple[str, str]]]] = [
-        ("rollback-check-complete", "SUCCEEDED", [("STAGE_LOAD", "SUCCEEDED"), ("DBT_BUILD", "SUCCEEDED"), ("PUBLISH", "SUCCEEDED")]),
+        ("rollback-check-complete", "SUCCEEDED", all_succeeded),
         ("rollback-check-missing-dbt", "RUNNING", [("STAGE_LOAD", "SUCCEEDED")]),
         ("rollback-check-no-stages", "RUNNING", []),
-        ("rollback-check-failed-publish", "RUNNING", [("STAGE_LOAD", "SUCCEEDED"), ("DBT_BUILD", "SUCCEEDED"), ("PUBLISH", "FAILED")]),
+        ("rollback-check-failed-publish", "RUNNING", load_then_dbt_succeeded_publish_failed),
     ]
     for key_suffix, run_status, stages in scenarios:
         _, run_id = _seed_run(env, key_suffix=key_suffix, run_status=run_status)
         for stage_name, stage_status in stages:
-            _seed_run_stage(env.migrated_dsn, run_id=run_id, stage_name=stage_name, status=stage_status)
+            _seed_run_stage(
+                env.migrated_dsn,
+                run_id=run_id,
+                stage_name=stage_name,
+                status=stage_status,
+            )
 
         status = env.metadata.get_run_recovery_status(run_id=run_id)
         assert status is not None
