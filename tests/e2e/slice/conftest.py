@@ -719,6 +719,56 @@ def poll_file_discovered(
     raise AssertionError(msg)
 
 
+def _poll_dbt_build_running_signal(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    *,
+    timeout: float,
+) -> str:
+    """Poll `meta.run_stages` for D-18's `dbt_build` mid-flight signal: `stage_name='DBT_BUILD'`
+    reaching `status='RUNNING'`.
+
+    Same `deadline = time.monotonic() + timeout` / `while ... time.sleep(0.5)` loop shape as
+    `test_pod_kill_retry.py`'s own `_poll_mid_load_signal`. Unlike `STAGE_LOAD`'s own
+    `rows_read`-style heartbeat, `dbt_build` has no progress signal of its own — this is plan
+    09-04's `mark_dbt_build_running` write (`_common/run_stage_recorder.py`), which lands
+    BEFORE the `dbt_build` KPO pod itself is even launched (`stage >> mark_running >>
+    dbt_build`), so a caller polling for the real pod afterward must still tolerate the pod not
+    existing yet.
+
+    Args:
+        conn: An open connection to the analytical database.
+        run_id: The `meta.ingestion_runs.run_id` to watch.
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        The last-observed status once it equals `"RUNNING"`.
+
+    Raises:
+        AssertionError: `timeout` elapses first — names the last-observed status (or "no row
+            yet" if `DBT_BUILD` was never even written for this `run_id`).
+    """
+    deadline = time.monotonic() + timeout
+    last_status: str | None = None
+    while time.monotonic() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM meta.run_stages WHERE run_id = %s AND stage_name = 'DBT_BUILD'",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            last_status = row[0]
+            if last_status == "RUNNING":
+                return last_status
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    msg = (
+        f"meta.run_stages[run_id={run_id!r}, stage_name='DBT_BUILD'] never reached "
+        f"status='RUNNING' within {timeout}s (last observed: {last_status!r})"
+    )
+    raise AssertionError(msg)
+
+
 def poll_run_for_file(
     conn: psycopg.Connection[Any],
     *,
