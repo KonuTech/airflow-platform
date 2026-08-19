@@ -566,29 +566,35 @@ Plans:
   4. A record arriving three months late lands in its correct historical partition rather than today's, and out-of-event-time-order records produce the correct final state.
   5. After a deliberately interrupted load, one query reports what succeeded, what remains and whether retry or rollback is required — and reconciliation reports source-vs-target record counts, sums, checksums, min/max and key counts, flagging a deliberately corrupted control total as a discrepancy.
 
-**Plans**: 11 plans in 4 waves
+**Plans**: 11 plans in 6 waves
 
 Plans:
 **Wave 1**
 
 - [ ] 09-01-PLAN.md — Config cleanup: ReconciliationConfig + deduplication Optional (D-25, D-28)
-- [ ] 09-02-PLAN.md — Watermarks + reconciliation foundation + silver->gold hop (D-01..D-04, D-20..D-24)
 - [ ] 09-03-PLAN.md — Control-total manifest plumbing: _BATCH_COMPLETE body read/parse (D-23 pt.1)
 - [ ] 09-04-PLAN.md — run_stage_recorder.py module: DBT_BUILD status recording (D-14)
 - [ ] 09-05-PLAN.md — 2-year backfill fixture corpus generator (D-09, D-10)
 
-**Wave 2** *(blocked on Wave 1 completion)*
+**Wave 2** *(blocked on Wave 1 completion — 09-02 needs 09-01's ReconciliationConfig)*
 
-- [ ] 09-06-PLAN.md — meta.v_run_recovery migration + read helper (D-15, D-16)
-- [ ] 09-07-PLAN.md — Reconciliation raw->bronze hop + control-total comparison (D-21, D-22, D-23 pt.2)
-- [ ] 09-08-PLAN.md — dbt bronze->silver reconciliation macro + warn test (D-26)
-- [ ] 09-09-PLAN.md — Recovery DAG wiring: DBT_BUILD tracking + Grafana alert (D-14 wiring, D-19)
+- [ ] 09-02-PLAN.md — Watermarks + reconciliation foundation + silver->gold hop (D-01..D-04, D-20..D-24)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 09-10-PLAN.md — Backfill gap-recording wiring + live dbt_build pod-kill proof (D-06, D-18)
+- [ ] 09-06-PLAN.md — meta.v_run_recovery migration + read helper (D-15, D-16)
+- [ ] 09-07-PLAN.md — Reconciliation raw->bronze hop + control-total comparison (D-21, D-22, D-23 pt.2)
+- [ ] 09-08-PLAN.md — dbt bronze->silver reconciliation macro + warn test, per-file grain (D-24, D-26)
 
 **Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 09-09-PLAN.md — Recovery DAG wiring: DBT_BUILD tracking + Grafana alert (D-14 wiring, D-19)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 09-10-PLAN.md — Backfill gap-recording wiring + live dbt_build pod-kill proof (D-06, D-18)
+
+**Wave 6** *(blocked on Wave 5 completion)*
 
 - [ ] 09-11-PLAN.md — Live 2-year backfill sweep: sizing, full sweep, idempotency, concurrency (D-05, D-07, D-08, D-09..D-13, D-27)
 
