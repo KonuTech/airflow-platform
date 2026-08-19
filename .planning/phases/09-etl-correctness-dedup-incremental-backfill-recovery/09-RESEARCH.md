@@ -421,6 +421,44 @@ Source: this session's own `python3 -m airflow backfill create --help` invocatio
    - What's unclear: whether a NEW manifest (e.g. `tests/fixtures/backfill-corpus.yaml`) needs to be authored for the 2-year, schema-change/gap/late-event combination D-10 requires, or whether `tools/corpus/generators.py` needs new generator functions to express a "daily cadence over N days with an injected schema-version boundary and an injected gap" shape it may not currently support.
    - Recommendation: read `tools/corpus/generators.py`'s available generator functions during planning (not fully audited this research pass) before assuming the existing tool can express D-10's combined requirements without new generator code.
 
+## Validation Architecture
+
+### Test Framework
+| Property | Value |
+|----------|-------|
+| Framework | pytest `9.1.1` (config: `pyproject.toml` `[tool.pytest.ini_options]`), plus `testcontainers[postgres,minio] 4.15.0` for the `integration`/`dbt` marker tiers and a live kind cluster (`kubectl`/`psycopg` against the real deployed stack) for the `cluster` marker tier — three tiers already established in this repo, not new for this phase |
+| Config file | `pyproject.toml` (`markers = ["slow", "regression", "cluster", "manifests", "integration", "dagtest", "dbt"]`, `addopts = "-ra --strict-markers --strict-config"`) |
+| Quick run command | `pytest tests/unit tests/regression -q --cov --cov-report=term-missing` (Makefile `test` target — no Docker, no cluster, fast feedback per task commit) |
+| Full suite command | `pytest tests/integration -q` (Makefile `test-integration`, testcontainers tier) **followed by** `pytest tests/e2e/cluster tests/e2e/slice tests/e2e/observability -q` (Makefile line 258, live-cluster tier, `-m cluster`) — Phase 9's "full suite" spans both tiers per D-27's live-first/testcontainers-fallback split |
+
+### Phase Requirements → Test Map
+
+| Req ID | Behavior | Test Type | Automated Command | File Exists? |
+|--------|----------|-----------|-------------------|-------------|
+| INCR-01 | `meta.watermarks` records `max(event_ts)`/`max(order_date)` per dataset (D-01/D-02), observational only — never filters file selection | integration | `pytest tests/integration/test_watermarks.py -q` | ❌ Wave 0 |
+| INCR-02 | Watermark advances only from committed values, inside the publish transaction, `GREATEST()`/`>=` never bare `>` (D-01..D-04); a killed/failed publish leaves the watermark unchanged | integration (transactional proof) + live (kill proof) | `pytest tests/integration/test_watermarks.py -q -k transaction`; live: extend `tests/e2e/slice/test_pod_kill_retry.py` with a watermark-unchanged-after-kill assertion | ❌ Wave 0 (both) |
+| INCR-05 | Backfill runs through the identical `discover → stage → dbt_build → publish` graph, no bypass path, for both `customers` and `orders` (closing the D-08 `silver.orders` 0-rows gap) | live (cluster) | `pytest tests/e2e/slice/test_backfill_reentry.py -q -m cluster` (extend for `orders`) | ✅ exists, extend |
+| INCR-06 | Backfill is idempotent, resolves historical schema versions (D-07), and records an explicit gap for a missing file (D-06) — proven together over the real 2-year fixture corpus | live (cluster), testcontainers fallback (D-27) | live: `pytest tests/e2e/slice/test_backfill_2year_sweep.py -q -m cluster`; fallback: `pytest tests/integration/test_backfill_idempotency.py tests/integration/test_schema_resolution.py -q` | ❌ new live file (Wave 0); ✅ existing integration files to extend |
+| LOAD-06 | `meta.v_run_recovery` (D-16) answers "what succeeded/remains, retry stage X" in one query across all 3 stages (D-14 `DBT_BUILD` entry included); `dbt_build` proven recoverable from a real pod kill (D-18) | integration (view correctness) + live (pod-kill) | integration: `pytest tests/integration/test_run_recovery_view.py -q`; live: extend `pytest tests/e2e/slice/test_pod_kill_retry.py -q -m cluster -k dbt_build` | ❌ new integration file (Wave 0); ✅ existing live file to extend |
+| VALID-05 | `meta.reconciliation_results` populated at all 3 hops (raw→bronze in `stage`, bronze→silver via the dbt macro+`severity: warn` test in `dbt_build`, silver→gold in `publish`), quarantine-aware per D-22 (nets out `meta.rejected_records`/`meta.dedup_audit`) | integration (`dbt` marker for the bronze→silver hop) | Python hops: `pytest tests/integration/test_reconciliation.py -q`; dbt hop: `pytest tests/integration/test_dbt_reconciliation.py -q -m dbt` (mirrors existing `tests/integration/test_dbt_dedup_audit.py`) | ❌ Wave 0 (both new; `test_dbt_dedup_audit.py` is the direct structural template) |
+| VALID-06 | `_BATCH_COMPLETE` manifest body carries `expected_row_count`/`expected_checksum` (D-23) and is compared against the loaded target, discrepancy recorded not blocked (D-22) | integration | `pytest tests/integration/test_batch_complete_control_totals.py -q` (extends the existing presence-only precedent in `tests/unit/validate/test_batch_complete_marker.py`) | ❌ Wave 0 (new; existing unit test is the presence-check precedent, not sufficient alone) |
+| QUAL-11 | Re-running the full 2-year backfill sweep produces zero additional rows (idempotency); an old fixture file parses under its own historical schema version, not the current one | live (cluster) primary, testcontainers fallback (D-27) | live: `pytest tests/e2e/slice/test_backfill_2year_sweep.py -q -m cluster -k idempotent` (same file as INCR-06); fallback: `pytest tests/integration/test_backfill_idempotency.py -q` | ❌ new live file (Wave 0, shared with INCR-06); ✅ existing integration file to extend |
+
+### Sampling Rate
+- **Per task commit:** `pytest tests/unit tests/regression -q --cov --cov-report=term-missing`
+- **Per wave merge:** `pytest tests/integration -q -m "not dbt"` then `pytest tests/integration -q -m dbt` then, for waves touching live-cluster proof (10b/10c per ROADMAP's Wave F ordering), `pytest tests/e2e/slice -q -m cluster`
+- **Phase gate:** Full suite green (`tests/integration` + `tests/e2e/slice` + `tests/e2e/cluster` + `tests/e2e/observability`, all `-m cluster` tiers included) before `/gsd:verify-work`, per D-27's live-first target
+
+### Wave 0 Gaps
+- [ ] `tests/integration/test_watermarks.py` — covers INCR-01/INCR-02 (watermark advance, `GREATEST()`/`>=` semantics, same-transaction placement)
+- [ ] `tests/integration/test_run_recovery_view.py` — covers LOAD-06 (`meta.v_run_recovery` next-action logic across all 3 `run_stages` values)
+- [ ] `tests/integration/test_reconciliation.py` — covers VALID-05's raw→bronze and silver→gold Python-side hops
+- [ ] `tests/integration/test_dbt_reconciliation.py` — covers VALID-05's bronze→silver dbt-macro hop and D-26's `severity: warn` test; mirror `tests/integration/test_dbt_dedup_audit.py`'s existing structure directly (same `-m dbt` tier, same testcontainers-Postgres-plus-real-`dbt build` shape)
+- [ ] `tests/integration/test_batch_complete_control_totals.py` — covers VALID-06 (manifest body read/parse/compare); extends `tests/unit/validate/test_batch_complete_marker.py`'s existing presence-only coverage
+- [ ] `tests/e2e/slice/test_backfill_2year_sweep.py` — covers INCR-06/QUAL-11's live 2-year proof (schema-version boundary, gap, late/out-of-order event, idempotent re-run); shares fixtures/polling helpers with `tests/e2e/slice/test_backfill_reentry.py`
+- [ ] 2-year fixture corpus generator/manifest work (Open Question 2) — before `test_backfill_2year_sweep.py` can run at all, either confirm `tools/corpus/generators.py` already expresses "daily cadence over N days with an injected schema-version boundary + gap + late event" or add the missing generator function(s), plus a new `tests/fixtures/backfill-corpus.yaml` manifest (mirroring `tests/fixtures/slice-corpus.yaml`'s existing shape)
+- [ ] `tests/e2e/slice/conftest.py` polling-helper addition for D-18's `dbt_build` pod-kill test — `dbt_build` has no `rows_read`-style heartbeat (Code Examples section), so a new poll helper keyed on `meta.run_stages` reaching `stage_name='DBT_BUILD', status='RUNNING'` (once D-14 lands) is needed before the pod-kill test itself can be written, mirroring `_poll_mid_load_signal`'s existing shape in `test_pod_kill_retry.py`
+
 ## Security Domain
 
 ### Applicable ASVS Categories
