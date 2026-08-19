@@ -571,10 +571,10 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 09-01-PLAN.md — Config cleanup: ReconciliationConfig + deduplication Optional (D-25, D-28)
-- [ ] 09-03-PLAN.md — Control-total manifest plumbing: _BATCH_COMPLETE body read/parse (D-23 pt.1)
-- [ ] 09-04-PLAN.md — run_stage_recorder.py module: DBT_BUILD status recording (D-14)
-- [ ] 09-05-PLAN.md — 2-year backfill fixture corpus generator (D-09, D-10)
+- [x] 09-01-PLAN.md — Config cleanup: ReconciliationConfig + deduplication Optional (D-25, D-28)
+- [x] 09-03-PLAN.md — Control-total manifest plumbing: _BATCH_COMPLETE body read/parse (D-23 pt.1)
+- [x] 09-04-PLAN.md — run_stage_recorder.py module: DBT_BUILD status recording (D-14)
+- [x] 09-05-PLAN.md — 2-year backfill fixture corpus generator (D-09, D-10)
 
 **Wave 2** *(blocked on Wave 1 completion — 09-02 needs 09-01's ReconciliationConfig)*
 
