@@ -80,3 +80,64 @@ def test_airflow_scheduler_service_account_is_also_denied(
         client.auth.kubernetes.login(role="csv-processor", jwt=scheduler_jwt)
 
     assert client.token is None, "a client token was issued despite the denied login"
+
+
+def test_default_service_account_is_denied_the_dbt_role(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+    vault_addr: str,
+) -> None:
+    """08.1-13/T-08.1-32: `default`'s login against the `dbt` role fails closed the same
+    way it does against `csv-processor` above -- Vault's role config binds
+    `bound_service_account_names=["dbt"]`, so a mismatched identity's login attempt
+    itself must fail, no client token ever issued.
+    """
+    default_jwt = _kubectl_create_token(kubectl, service_account="default", namespace="etl")
+
+    client = hvac.Client(url=vault_addr)
+    with pytest.raises(hvac.exceptions.VaultError):
+        client.auth.kubernetes.login(role="dbt", jwt=default_jwt)
+
+    assert client.token is None, "a client token was issued despite the denied login"
+
+
+def test_csv_processor_is_denied_the_dbt_role(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+    vault_addr: str,
+) -> None:
+    """08.1-13/T-08.1-32: a REAL two-way least-privilege proof, not only "some other SA
+    is denied" -- the `csv-processor` ServiceAccount (a real, bootstrapped Vault
+    identity with its own role) is denied the `dbt` role, and (the sibling test in
+    test_positive_auth.py / the mirror below) `dbt` never gets `csv-processor`'s own
+    paths either. Vault's role config binds `bound_service_account_names=["dbt"]`
+    only -- `csv-processor` is a real identity, not a placeholder like `default`, so
+    this proves the boundary holds even against another genuinely-provisioned
+    workload identity, not just an unprivileged one.
+    """
+    csv_processor_jwt = _kubectl_create_token(
+        kubectl,
+        service_account="csv-processor",
+        namespace="etl",
+    )
+
+    client = hvac.Client(url=vault_addr)
+    with pytest.raises(hvac.exceptions.VaultError):
+        client.auth.kubernetes.login(role="dbt", jwt=csv_processor_jwt)
+
+    assert client.token is None, "a client token was issued despite the denied login"
+
+
+def test_dbt_service_account_is_denied_the_csv_processor_role(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+    vault_addr: str,
+) -> None:
+    """08.1-13/T-08.1-32: the other direction of the same two-way proof -- `dbt` is
+    denied the `csv-processor` role, completing the mutual boundary
+    `test_csv_processor_is_denied_the_dbt_role` above only proves one side of.
+    """
+    dbt_jwt = _kubectl_create_token(kubectl, service_account="dbt", namespace="etl")
+
+    client = hvac.Client(url=vault_addr)
+    with pytest.raises(hvac.exceptions.VaultError):
+        client.auth.kubernetes.login(role="csv-processor", jwt=dbt_jwt)
+
+    assert client.token is None, "a client token was issued despite the denied login"

@@ -113,7 +113,21 @@ def _seed_silver_customer_row(  # noqa: PLR0913 -- one keyword per silver/lineag
 
 
 def _seed_dedup_audit(dsn: str, *, dataset_id: int, run_id: int) -> None:
-    """Seed one covering `meta.dedup_audit` row directly via raw SQL."""
+    """Seed one covering `meta.dedup_audit` row directly via raw SQL.
+
+    `model_name = 'customers'` (not `'silver_customers'`, the dbt *model
+    file's* name): `dedup_audit_post_hook`'s own docstring
+    (`dbt/macros/dedup_audit_post_hook.sql` lines 96-97) documents that
+    `model_name` is populated from `target_identifier`, the calling model's
+    *configured alias* -- `dbt/models/silver/silver_customers.sql` calls the
+    macro with `target_identifier='customers'`. migration 0026 originally
+    joined on the wrong literal (`'silver_customers'`), and this fixture
+    originally seeded that same wrong literal, so the mismatch was
+    self-consistent and never caught here — found live instead, via
+    08.1-13's own `tests/e2e/slice/test_dbt_silver_pipeline.py`, and fixed by
+    migration 0030 plus this seed correction (Rule 1: the fixture encoded
+    the same bug the view had).
+    """
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             """
@@ -121,7 +135,7 @@ def _seed_dedup_audit(dsn: str, *, dataset_id: int, run_id: int) -> None:
                 (dataset_id, dbt_invocation_id, model_name,
                  min_run_id, max_run_id, records_received, records_accepted,
                  records_deduplicated)
-            VALUES (%s, %s, 'silver_customers', %s, %s, 5, 3, 2)
+            VALUES (%s, %s, 'customers', %s, %s, 5, 3, 2)
             """,
             (dataset_id, "22222222-2222-2222-2222-222222222222", run_id, run_id),
         )

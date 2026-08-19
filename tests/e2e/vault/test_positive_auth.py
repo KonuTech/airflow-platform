@@ -89,3 +89,34 @@ def test_csv_processor_reads_its_own_two_vault_paths(
     assert access_key == "etl-app"
     assert isinstance(secret_key, str)
     assert secret_key
+
+
+def test_dbt_reads_its_own_vault_path(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+    vault_addr: str,
+) -> None:
+    """08.1-13/T-08.1-32: `dbt` authenticates via its own role and reads exactly its own
+    KV path (`etl/dbt-db`), each returning a well-formed, non-empty value -- mirrors
+    `test_csv_processor_reads_its_own_two_vault_paths` above, targeting the `dbt`
+    ServiceAccount (namespace `etl`) and the five discrete connection fields
+    `scripts/vault-bootstrap.py`'s own `_ensure_dbt_secret` writes (host/port/user/
+    password/dbname -- never one `dsn` string, since dbt-postgres needs discrete
+    connection parameters).
+    """
+    dbt_jwt = _kubectl_create_token(
+        kubectl,
+        service_account="dbt",
+        namespace="etl",
+    )
+
+    client = hvac.Client(url=vault_addr)
+    client.auth.kubernetes.login(role="dbt", jwt=dbt_jwt)
+
+    dbt_secret = client.secrets.kv.v2.read_secret_version(mount_point="etl", path="dbt-db")
+    fields = dbt_secret["data"]["data"]
+    assert fields["host"] == "analytics-db-rw.data"
+    assert fields["port"] == "5432"
+    assert fields["user"] == "dbt_app"
+    assert isinstance(fields["password"], str)
+    assert fields["password"]
+    assert fields["dbname"] == "analytics"

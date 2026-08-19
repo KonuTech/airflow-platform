@@ -52,7 +52,8 @@ FILE ?=
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
-        image-airflow image-dbt ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail
+        image-airflow image-dbt ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
+        migrate-analytics
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -180,6 +181,61 @@ vault-audit-tail:                ## D-04: human-readable tail of Vault's persist
 	# sourcing one here would be dead configuration matching nothing the
 	# script actually consumes.
 	$(RUN_CLUSTER) python scripts/vault-audit-tail.py
+
+migrate-analytics:               ## 08.1-13: alembic upgrade head against the LIVE analytical PostgreSQL, via a port-forward [plan 08.1-13]
+	# Mirrors scripts/vault-bootstrap.py's own _port_forwarded_vault shape
+	# (port-forward svc/<X> to a free local port, poll until it accepts a
+	# connection, run the real work, always tear the tunnel down) as a plain
+	# shell recipe rather than a new Python script -- this target's own work
+	# (env var + one `alembic upgrade head` invocation) is small enough not
+	# to warrant a fourth sibling script.
+	#
+	# T-08.1-31: the discovered superuser credential is read ONLY into shell
+	# variables, used ONLY to build ALEMBIC_DSN (an environment variable
+	# migrations/env.py's own _sqlalchemy_url() already expects -- never a
+	# CLI argument, never `set -x`'d, never echoed) -- mirrors
+	# _kubectl_get_secret_field's own established no-print discipline.
+	#
+	# `db_name` is a literal, not read from the Secret: CNPG's own
+	# superuser Secret's `dbname` field is literally the wildcard `"*"` (a
+	# superuser is not scoped to one database) -- `analytics` matches
+	# migrations/env.py's own EXPECTED_DATABASE guard, which fails loudly
+	# (INFRA-04) if this ever pointed elsewhere.
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	ns="data"; \
+	cluster="analytics-db"; \
+	secret_name="$${cluster}-superuser"; \
+	echo "==> discovering $$secret_name (namespace $$ns) credentials"; \
+	db_user=$$($(KUBECTL) --context "$$ctx" get secret "$$secret_name" -n "$$ns" -o jsonpath='{.data.username}' | base64 -d); \
+	db_pass=$$($(KUBECTL) --context "$$ctx" get secret "$$secret_name" -n "$$ns" -o jsonpath='{.data.password}' | base64 -d); \
+	db_name="analytics"; \
+	local_port=$$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1]); s.close()"); \
+	echo "==> port-forwarding svc/$${cluster}-rw ($$ns) to localhost:$$local_port"; \
+	$(KUBECTL) --context "$$ctx" -n "$$ns" port-forward "svc/$${cluster}-rw" "$${local_port}:5432" >/tmp/migrate-analytics-portforward.log 2>&1 & \
+	pf_pid=$$!; \
+	trap 'kill $$pf_pid >/dev/null 2>&1 || true' EXIT; \
+	connected=0; \
+	for _ in $$(seq 1 30); do \
+	  if ! kill -0 $$pf_pid 2>/dev/null; then \
+	    echo "ERROR: kubectl port-forward for svc/$${cluster}-rw exited early:" >&2; \
+	    cat /tmp/migrate-analytics-portforward.log >&2; \
+	    exit 1; \
+	  fi; \
+	  if python3 -c "import socket, sys; s = socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(('127.0.0.1', $$local_port)) == 0 else 1)"; then \
+	    connected=1; \
+	    break; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	if [ "$$connected" != "1" ]; then \
+	  echo "ERROR: kubectl port-forward for svc/$${cluster}-rw never accepted a connection within 30s" >&2; \
+	  exit 1; \
+	fi; \
+	encoded_pass=$$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$$db_pass"); \
+	echo "==> running alembic upgrade head against $$db_name"; \
+	ALEMBIC_DSN="postgresql://$${db_user}:$${encoded_pass}@localhost:$${local_port}/$${db_name}" \
+	  $(RUN) alembic -c migrations/alembic.ini upgrade head
 
 cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice and tests/e2e/observability against the live cluster [plan 02-02, extended 04-09, 07-07]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
