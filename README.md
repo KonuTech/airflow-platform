@@ -311,7 +311,7 @@ flowchart TD
 
 ---
 
-## 1. Project Objective
+# 1. Project Objective
 
 Build a **local, production-like ETL/data platform** that resembles a real production deployment of Apache Airflow.
 
