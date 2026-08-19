@@ -582,9 +582,9 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 09-06-PLAN.md — meta.v_run_recovery migration + read helper (D-15, D-16)
-- [ ] 09-07-PLAN.md — Reconciliation raw->bronze hop + control-total comparison (D-21, D-22, D-23 pt.2)
-- [ ] 09-08-PLAN.md — dbt bronze->silver reconciliation macro + warn test, per-file grain (D-24, D-26)
+- [x] 09-06-PLAN.md — meta.v_run_recovery migration + read helper (D-15, D-16)
+- [x] 09-07-PLAN.md — Reconciliation raw->bronze hop + control-total comparison (D-21, D-22, D-23 pt.2)
+- [x] 09-08-PLAN.md — dbt bronze->silver reconciliation macro + warn test, per-file grain (D-24, D-26)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
