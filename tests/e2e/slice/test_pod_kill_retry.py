@@ -40,6 +40,7 @@ import pytest
 
 from tests.e2e.slice.conftest import (
     LARGE_FIXTURE_ROWS,
+    _poll_dbt_build_running_signal,
     large_csv_with_offset_customer_ids,
     poll_file_discovered,
     poll_ingestion_run,
@@ -259,6 +260,206 @@ def test_pod_kill_mid_load_produces_no_duplicates(
             f"a value below the fixture's row count means rows went missing after the kill; "
             f"a value above is impossible under migration 0006's UNIQUE(customer_id) but "
             f"would mean the constraint itself regressed"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            admin.delete_object(Bucket="raw", Key=key)
+
+
+_DBT_BUILD_LABEL_SELECTOR = "dag_id=csv_ingest_customers,task_id=dbt_build"
+
+# max_active_runs=1 (csv_ingest_customers.py) + max_active_tis_per_dag=1 (dbt_build itself)
+# together guarantee at most one dbt_build pod for THIS dag_id is ever in flight at a time
+# (T-09-18's accepted mitigation for the label selector's own imprecision -- see 09-10-PLAN.md's
+# threat model) -- polling for the pod to APPEAR is still needed because mark_dbt_build_running
+# (meta.run_stages.status='RUNNING') lands before the KPO pod itself is scheduled.
+_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS = 120
+
+# Same generous ceiling as _RETRY_TIMEOUT_SECONDS -- a killed dbt_build pod's retry (Airflow's
+# own retries=2 on that task) must be requeued, scheduled, image-pulled, and re-run `dbt build`
+# to completion (dbt's own idempotent re-run, D-18) before meta.v_run_recovery reports 'complete'.
+_DBT_BUILD_RECOVERY_TIMEOUT_SECONDS = 600
+
+
+def _poll_dbt_build_pod_name(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    timeout: float,
+) -> str:
+    """Poll for the real `dbt_build` pod's name via Airflow's own `dag_id`/`task_id` pod labels.
+
+    Airflow's KPO auto-labels every launched pod with `dag_id`/`task_id`/`try_number` --
+    `_DBT_BUILD_LABEL_SELECTOR`'s own comment explains why this selector is precise enough on
+    this cluster without needing `meta.run_stages.pod_name` populated (09-10-PLAN.md's own
+    Interfaces section).
+
+    Args:
+        kubectl_fn: The `kubectl` fixture callable.
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        The real pod's name.
+
+    Raises:
+        AssertionError: `timeout` elapses with no matching pod found.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        proc = kubectl_fn(
+            "-n",
+            "etl",
+            "get",
+            "pods",
+            "-l",
+            _DBT_BUILD_LABEL_SELECTOR,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+        time.sleep(0.5)
+    msg = (
+        f"no pod matching -l {_DBT_BUILD_LABEL_SELECTOR} appeared in namespace etl within "
+        f"{timeout}s"
+    )
+    raise AssertionError(msg)
+
+
+def _poll_run_recovery_complete(
+    conn: psycopg.Connection[Any],
+    run_id: int,
+    *,
+    timeout: float,
+) -> str:
+    """Poll `meta.v_run_recovery` for `run_id` until `next_action = 'complete'` (D-18).
+
+    Same `deadline`/`time.sleep(0.5)` loop shape as this module's other pollers.
+
+    Args:
+        conn: An open connection to the analytical database.
+        run_id: The `meta.ingestion_runs.run_id` to watch.
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        `"complete"`, once observed.
+
+    Raises:
+        AssertionError: `timeout` elapses first -- names the last-observed `next_action`.
+    """
+    deadline = time.monotonic() + timeout
+    last_next_action: str | None = None
+    while time.monotonic() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT next_action FROM meta.v_run_recovery WHERE run_id = %s", (run_id,)
+            )
+            row = cur.fetchone()
+        if row is not None:
+            last_next_action = row[0]
+            if last_next_action == "complete":
+                return last_next_action
+        time.sleep(0.5)
+    msg = (
+        f"meta.v_run_recovery[run_id={run_id!r}] never reached next_action='complete' within "
+        f"{timeout}s (last observed: {last_next_action!r})"
+    )
+    raise AssertionError(msg)
+
+
+def test_pod_kill_mid_dbt_build_produces_no_duplicates(
+    s3_client: Callable[[str], Any],
+    analytics_connection: psycopg.Connection[Any],
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+    slice_fixtures_dir: Path,
+) -> None:
+    """D-18: a REAL `kubectl delete pod` mid-`dbt_build` recovers with no duplicate or missing rows.
+
+    `dbt_build` is the one stage Phase 4/8's pod-kill proofs never covered (new in Phase 08.1,
+    with no `rows_read`-style heartbeat of its own) -- this extends the SAME live-kill mechanism
+    `test_pod_kill_mid_load_produces_no_duplicates` already proved for `stage`/`publish` to the
+    third pipeline stage. The mid-flight signal is plan 09-04's own `mark_dbt_build_running`
+    write (`meta.run_stages.status='RUNNING'` for `stage_name='DBT_BUILD'`), and recovery is
+    confirmed via `meta.v_run_recovery` (plan 09-06) reporting `next_action='complete'` --
+    D-15's own single-query recovery answer, never a hand-rolled 3-way join in this test.
+    """
+    app = s3_client("app")
+    admin = s3_client("admin")
+
+    offset = random.SystemRandom().randint(2_000_000, 1_000_000_000)
+    base_bytes = (slice_fixtures_dir / "customers_small.csv").read_bytes()
+    payload = large_csv_with_offset_customer_ids(base_bytes, offset=offset)
+    marker = uuid.uuid4().hex[:12]
+    key = f"customers/e2e-dbtkill-{marker}.csv"
+    object_uri = f"s3://raw/{key}"
+
+    try:
+        app.put_object(Bucket="raw", Key=key, Body=payload)
+
+        file_row = poll_file_discovered(
+            analytics_connection,
+            dataset=_CUSTOMERS_DATASET,
+            object_uri=object_uri,
+            timeout=180,
+        )
+        assert file_row["duplicate_of_file_id"] is None, (
+            f"the freshly-offset small fixture was marked a duplicate of file_id="
+            f"{file_row['duplicate_of_file_id']!r} -- the customer_id offset did not make "
+            f"this content genuinely new"
+        )
+
+        run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
+        run_id = run_row["run_id"]
+
+        _poll_dbt_build_running_signal(analytics_connection, run_id, timeout=300)
+        pod_name = _poll_dbt_build_pod_name(
+            kubectl, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS
+        )
+
+        delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")
+        assert delete.returncode == 0, (
+            f"kubectl delete pod {pod_name!r} -n etl failed (exit {delete.returncode}):\n"
+            f"{delete.stderr}"
+        )
+
+        _poll_run_recovery_complete(
+            analytics_connection, run_id, timeout=_DBT_BUILD_RECOVERY_TIMEOUT_SECONDS
+        )
+
+        outcome = poll_ingestion_run(analytics_connection, run_row["idempotency_key"], timeout=60)
+        assert outcome["status"] == "SUCCEEDED", (
+            f"after killing dbt_build pod {pod_name!r}, run {run_id!r} finished "
+            f"{outcome['status']!r}, not SUCCEEDED"
+        )
+
+        with analytics_connection.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM normalized.customers WHERE customer_id BETWEEN %s AND %s",
+                (offset + 1, offset + 120),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            normalized_total = row[0]
+        assert normalized_total == 120, (
+            f"expected exactly 120 rows in normalized.customers for this run's own "
+            f"customer_id window [{offset + 1}, {offset + 120}], found {normalized_total} -- "
+            f"a value below means rows went missing after the dbt_build kill; a value above "
+            f"means duplication"
+        )
+
+        with analytics_connection.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM silver.customers "
+                "WHERE customer_id::int BETWEEN %s AND %s",
+                (offset + 1, offset + 120),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            silver_total = row[0]
+        assert silver_total == 120, (
+            f"expected exactly 120 rows in silver.customers for this run's own customer_id "
+            f"window [{offset + 1}, {offset + 120}], found {silver_total} -- dbt's own "
+            f"idempotent re-run (plus Airflow's retries=2 on dbt_build) should have produced "
+            f"exactly one row per business key, not fewer or more"
         )
     finally:
         with contextlib.suppress(Exception):
