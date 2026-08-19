@@ -603,6 +603,24 @@ class MetadataRepository(Protocol):
         """
         ...
 
+    def get_run_recovery_status(self, *, run_id: int) -> dict[str, object] | None:
+        """Read one `meta.v_run_recovery` row for `run_id`, without claiming or writing anything.
+
+        Maps to ``SELECT * FROM meta.v_run_recovery WHERE run_id = %s``. A pure read,
+        mirroring `get_run_stage_status`'s own read-only contract -- never writes. LOAD-06's
+        single-query recovery answer (D-16): the returned dict's `next_action` key always
+        reads `'retry stage <NAME>'` or `'complete'`, never implying a rollback path exists
+        (D-15: recovery is retry-only, rollback structurally cannot apply).
+
+        Args:
+            run_id: The run to read.
+
+        Returns:
+            A dict keyed by `meta.v_run_recovery` column name, or `None` if no
+            `meta.ingestion_runs` row exists for `run_id`.
+        """
+        ...
+
     def list_staged_run_ids(self, *, dataset_id: int) -> list[tuple[int, int, int, str | None]]:
         """List every run currently ready for `publish_ingest` to claim.
 

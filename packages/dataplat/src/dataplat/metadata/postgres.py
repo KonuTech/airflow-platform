@@ -565,6 +565,20 @@ class PostgresMetadataRepository(MetadataRepository):
             ).fetchone()
             return None if row is None else str(row[0])
 
+    def get_run_recovery_status(self, *, run_id: int) -> dict[str, object] | None:
+        """See `MetadataRepository.get_run_recovery_status`."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM meta.v_run_recovery WHERE run_id = %s",
+                (run_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            assert cursor.description is not None  # noqa: S101 -- a fetched row implies a description
+            columns = [desc.name for desc in cursor.description]
+            return dict(zip(columns, row, strict=True))
+
     def list_staged_run_ids(self, *, dataset_id: int) -> list[tuple[int, int, int, str | None]]:
         """See `MetadataRepository.list_staged_run_ids`."""
         with self._pool.connection() as conn:
