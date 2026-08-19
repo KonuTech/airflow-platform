@@ -4,6 +4,11 @@
 # silver_customers.yml's own header comment for the full contract/
 # data_tests-vs-real-constraint rationale (identical here, dataset-
 # substituted only).
+#
+# `dbt/tests/reconciliation_orders.sql` -- D-26's second, complementary
+# signal, identical mechanism to silver_customers.yml's own
+# `reconciliation_customers.sql` reference (see that file's header comment
+# for the full rationale), dataset-substituted only.
 version: 2
 
 models:

@@ -103,7 +103,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **VALID-02**: Data-quality validation covers completeness, uniqueness, validity ranges, patterns and referential integrity, with configurable thresholds producing PASS / PASS_WITH_WARNING / FAIL / QUARANTINE — *(DoD 31)*
 - [x] **VALID-03**: Invalid data is quarantined per configurable strategy (`FAIL_FILE`, `REJECT_RECORD`, `QUARANTINE_FILE`, `QUARANTINE_RECORD`, `WARN_AND_CONTINUE`), retaining source file, row number, error, run and timestamp — and never silently discarded — *(DoD 32)*
 - [x] **VALID-04**: Machine-readable validation reports are produced and persisted as rows in PostgreSQL as well as artifacts in MinIO — *(DoD 33)*
-- [ ] **VALID-05**: Source-to-target reconciliation compares record counts, sums, checksums, min/max and key counts, reporting discrepancies explicitly — *(DoD 55)*
+- [x] **VALID-05**: Source-to-target reconciliation compares record counts, sums, checksums, min/max and key counts, reporting discrepancies explicitly — *(DoD 55)*
 - [ ] **VALID-06**: Source-provided control totals are validated against the loaded target — *(DoD 56)*
 - [x] **VALID-07**: Referential integrity between datasets is validated, with configurable `fail` / `quarantine` / `warn` behaviour on orphan records — *(DoD 57)*
 - [x] **VALID-08**: Quarantined data has a documented re-drive path back into the pipeline after correction — quarantine without an exit is a data graveyard — *(Gap 7)*
@@ -338,7 +338,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | VALID-02 | Phase 8 | Complete |
 | VALID-03 | Phase 8 | Complete |
 | VALID-04 | Phase 8 | Complete |
-| VALID-05 | Phase 9 | Pending |
+| VALID-05 | Phase 9 | Complete |
 | VALID-06 | Phase 9 | Pending |
 | VALID-07 | Phase 8 | Complete |
 | VALID-08 | Phase 8 | Complete |

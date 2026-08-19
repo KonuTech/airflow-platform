@@ -18,6 +18,18 @@
 # committed by the time a `unique`/`not_null` *test* would report failure.
 # `tests/integration/test_silver_constraints.py` proves the REAL constraint
 # is what's load-bearing, bypassing dbt entirely.
+#
+# `dbt/tests/reconciliation_customers.sql` -- D-26's second, complementary
+# signal alongside `reconciliation_post_hook.sql`'s durable
+# `meta.reconciliation_results` write (Task 1): a native, non-blocking
+# `severity: warn` singular dbt test asserting the bronze/silver/dedup
+# three-way relationship (`input_count = output_count + dedup_count`) holds
+# for this model's most recent `bronze_silver` reconciliation row. Not
+# referenced here via `tests:`/`data_tests:` -- those YAML keys apply only
+# to GENERIC, parametrized tests; a standalone singular test file
+# configures its own severity via `{{ config(severity='warn') }}` instead
+# (dbt's own idiomatic mechanism for this case) and is auto-discovered from
+# `dbt/tests/` (this project's default `test-paths`).
 version: 2
 
 models:
