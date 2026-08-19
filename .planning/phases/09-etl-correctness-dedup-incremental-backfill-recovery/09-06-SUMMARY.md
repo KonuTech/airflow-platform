@@ -110,6 +110,17 @@ None - no external service configuration required.
 - `meta.v_run_recovery` and `get_run_recovery_status` are ready for plan 09-09's DAG-side recovery wiring and for a future Grafana panel (the view already grants `SELECT` to `grafana_reader`).
 - No blockers. The view is proven correct in isolation from any live DAG or dbt invocation, so 09-09 can wire real `STAGE_LOAD`/`DBT_BUILD`/`PUBLISH` transitions against it with confidence the read side already works.
 
+## Self-Check: PASSED
+
+- FOUND: migrations/versions/0033_meta_v_run_recovery.py
+- FOUND: tests/integration/test_run_recovery_view.py
+- FOUND: packages/dataplat/src/dataplat/metadata/repository.py
+- FOUND: packages/dataplat/src/dataplat/metadata/postgres.py
+- FOUND: .planning/phases/09-etl-correctness-dedup-incremental-backfill-recovery/09-06-SUMMARY.md
+- FOUND commit: 7b662e7
+- FOUND commit: 52875b3
+- FOUND commit: 7fa32f0
+
 ---
 *Phase: 09-etl-correctness-dedup-incremental-backfill-recovery*
 *Completed: 2026-08-19*
