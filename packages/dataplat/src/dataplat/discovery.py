@@ -67,9 +67,13 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from dataplat.errors import FileInspectionError
+from dataplat.errors import DataPlatformError, FileInspectionError
 from dataplat.models.assignment import AssignmentDocument, BatchAssignment, FileAssignment
 from dataplat.observability.logging import get_logger
+from dataplat.validate.batch_complete_manifest import (
+    BatchCompleteManifest,
+    parse_batch_complete_manifest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -270,6 +274,7 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
     schema_version_term: str,
     group: MultipartGroup,
     objects_by_key: Mapping[str, ObjectSummary],
+    batch_complete_manifest: BatchCompleteManifest | None,
     log: FilteringBoundLogger,
 ) -> DiscoveredUnit | None:
     """Discover one CSV-11 multipart group: hash/register every part, dedup-check, batch+run.
@@ -307,6 +312,10 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
         objects_by_key: Every listed object, keyed by its object key --
             resolves `group.ordered_object_uris` back to their
             `ObjectSummary`.
+        batch_complete_manifest: The parsed `_BATCH_COMPLETE` marker body
+            (D-23, plan 09-03) `discover_files` resolved once for this
+            whole call, or `None` when not applicable -- threaded onto
+            every `AssignmentDocument` this function constructs.
         log: The structured logger `discover_files` itself already holds.
 
     Returns:
@@ -443,6 +452,7 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
             for part in rest_parts
         ),
         batch=BatchAssignment(batch_key=batch_key, batch_id=batch_id),
+        batch_complete_manifest=batch_complete_manifest,
     )
     assignment_key = f"assignments/{dataset_name}/{run_id}.json"
     objects.put_object(
@@ -478,6 +488,7 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
     schema_version_term: str,
     obj: ObjectSummary,
     filename_facets_by_object: Mapping[str, Mapping[str, object]] | None,
+    batch_complete_manifest: BatchCompleteManifest | None,
     log: FilteringBoundLogger,
 ) -> DiscoveredUnit | None:
     """Discover one ungrouped object: hash/register, dedup-check, batch+run, freeze an assignment.
@@ -513,6 +524,10 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
         obj: The ungrouped object to discover.
         filename_facets_by_object: `discover_files`'s own parameter of the
             same name (D-11), passed straight through.
+        batch_complete_manifest: The parsed `_BATCH_COMPLETE` marker body
+            (D-23, plan 09-03) `discover_files` resolved once for this
+            whole call, or `None` when not applicable -- threaded onto the
+            `AssignmentDocument` this function constructs.
         log: The structured logger `discover_files` itself already holds.
 
     Returns:
@@ -619,6 +634,7 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
             size_bytes=obj.size_bytes,
         ),
         batch=BatchAssignment(batch_key=batch_key, batch_id=batch_id),
+        batch_complete_manifest=batch_complete_manifest,
     )
     assignment_key = f"assignments/{dataset_name}/{run_id}.json"
     objects.put_object(
@@ -645,11 +661,12 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
 def _apply_batch_complete_marker_gate(
     *,
     listed: Sequence[ObjectSummary],
+    objects: ObjectStore,
     config: DatasetConfig,
     dataset_name: str,
     log: FilteringBoundLogger,
-) -> tuple[list[ObjectSummary], bool]:
-    """Apply LOAD-11/D-19's opt-in ``_BATCH_COMPLETE`` marker gate (plan 08-06) to one listing.
+) -> tuple[list[ObjectSummary], bool, BatchCompleteManifest | None]:
+    """Apply LOAD-11/D-19/D-23's opt-in ``_BATCH_COMPLETE`` marker gate to one listing.
 
     Extracted from ``discover_files``'s own body purely to keep that
     function's cyclomatic complexity within this codebase's lint gate (ruff
@@ -659,8 +676,9 @@ def _apply_batch_complete_marker_gate(
 
     When ``config.source.batch_complete_marker`` is ``None`` (the default;
     ``customers``/``orders``, this phase), this is a no-op: ``listed`` comes
-    back unchanged and ``batch_withheld`` is always ``False`` -- byte-for-
-    byte identical to calling ``discover_files`` before this plan.
+    back unchanged, ``batch_withheld`` is always ``False``, and the returned
+    manifest is always ``None`` -- byte-for-byte identical to calling
+    ``discover_files`` before plan 09-03.
 
     When it is set, the object whose key equals
     ``config.source.path + config.source.batch_complete_marker`` must be
@@ -672,26 +690,42 @@ def _apply_batch_complete_marker_gate(
     precedent for filename masks: built, corpus/unit-tested, but neither
     live dataset's config sets this field this phase.
 
+    Plan 09-03 (D-23, VALID-06) extends this from a presence-only check to
+    actually reading and parsing the marker object's body once it is found:
+    ``objects.get_object(...)`` fetches the body, and
+    ``parse_batch_complete_manifest`` validates it into a
+    ``BatchCompleteManifest``. A present-but-unreadable body (malformed
+    JSON, a negative row count, an unrecognized key) is treated IDENTICALLY
+    to "marker absent" -- the whole batch is withheld -- rather than letting
+    a ``pydantic.ValidationError``-derived condition crash discovery or
+    silently accept an untrustworthy control total (T-09-06's Tampering
+    mitigation: flag/withhold, never silently accept).
+
     Args:
         listed: The already-sorted object listing ``discover_files`` just
             produced from ``objects.list_objects(...)``.
+        objects: Object-store read surface, used to fetch the marker
+            object's body once its presence is confirmed.
         config: The dataset's already-validated, resolved configuration.
         dataset_name: The dataset's unique name, for the withheld-batch log
             line.
         log: The structured logger ``discover_files`` itself already holds.
 
     Returns:
-        A ``(listed, batch_withheld)`` pair. When ``batch_withheld`` is
-        ``True``, ``listed`` is always ``[]`` and the caller MUST return
-        ``[]`` immediately without resolving schema version or entering the
+        A ``(listed, batch_withheld, manifest)`` triple. When
+        ``batch_withheld`` is ``True``, ``listed`` is always ``[]`` and
+        ``manifest`` is always ``None`` -- the caller MUST return ``[]``
+        immediately without resolving schema version or entering the
         multipart-partition/per-object loop. When ``False``, ``listed`` is
         either the original listing unchanged (marker not configured) or the
         original listing with the marker object itself removed (marker
         configured and found) -- the marker is never mistaken for a
-        candidate data file either way.
+        candidate data file either way. ``manifest`` is the parsed body when
+        the marker was found and parsed successfully, ``None`` otherwise
+        (marker not configured).
     """
     if config.source.batch_complete_marker is None:
-        return list(listed), False
+        return list(listed), False, None
 
     marker_key = config.source.path + config.source.batch_complete_marker
     if not any(obj.key == marker_key for obj in listed):
@@ -700,9 +734,24 @@ def _apply_batch_complete_marker_gate(
             dataset=dataset_name,
             marker_key=marker_key,
         )
-        return [], True
+        return [], True, None
 
-    return [obj for obj in listed if obj.key != marker_key], False
+    try:
+        with objects.get_object(config.source.bucket, marker_key) as stream:
+            marker_body = stream.read()
+        manifest = parse_batch_complete_manifest(marker_body, marker_key=marker_key)
+    except DataPlatformError:
+        # Never trust an unparseable control total (T-09-06): treated
+        # identically to "marker absent" -- withhold the whole batch, never
+        # crash discovery.
+        log.info(
+            "discovery.batch_complete_manifest_invalid",
+            dataset=dataset_name,
+            marker_key=marker_key,
+        )
+        return [], True, None
+
+    return [obj for obj in listed if obj.key != marker_key], False, manifest
 
 
 def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input; see module docstring
@@ -841,8 +890,9 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
     # extraction precedent below) purely to keep this function's cyclomatic
     # complexity within this codebase's lint gate (ruff C901/PLR0912) -- NO
     # behavior change from the inline version.
-    listed, batch_withheld = _apply_batch_complete_marker_gate(
+    listed, batch_withheld, batch_complete_manifest = _apply_batch_complete_marker_gate(
         listed=listed,
+        objects=objects,
         config=config,
         dataset_name=dataset_name,
         log=log,
@@ -902,6 +952,7 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
             schema_version_term=schema_version_term,
             group=group,
             objects_by_key=objects_by_key,
+            batch_complete_manifest=batch_complete_manifest,
             log=log,
         )
         if group_unit is not None:
@@ -921,6 +972,7 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
             schema_version_term=schema_version_term,
             obj=obj,
             filename_facets_by_object=filename_facets_by_object,
+            batch_complete_manifest=batch_complete_manifest,
             log=log,
         )
         if object_unit is not None:

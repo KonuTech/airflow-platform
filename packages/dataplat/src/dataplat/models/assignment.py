@@ -34,6 +34,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+# NOT a TYPE_CHECKING-only import (ruff TC001 does not apply): pydantic v2
+# resolves `AssignmentDocument`'s field annotations at class-creation time
+# (this module's own `from __future__ import annotations` makes every
+# annotation a string pydantic must resolve against real, imported names),
+# so `BatchCompleteManifest` must be a genuine runtime import here, not a
+# type-checker-only one.
+from dataplat.validate.batch_complete_manifest import BatchCompleteManifest  # noqa: TC001
+
 
 class FileAssignment(BaseModel):
     """The single source file one ingestion run processes.
@@ -104,6 +112,14 @@ class AssignmentDocument(BaseModel):
             construction of this model (04-03's ``discover_files``, 06-16's
             extensions to it) continues to work completely unchanged.
         batch: The single batch this run publishes into.
+        batch_complete_manifest: The parsed body of this batch's ``_BATCH_COMPLETE`` marker
+            object (D-23, VALID-06, this plan -- 09-03), when the dataset configures
+            ``source.batch_complete_marker`` AND the marker's body parsed successfully.
+            ``None`` for every dataset that does not configure the marker at all (the
+            ``customers``/``orders`` default, unaffected) -- an additive optional field,
+            mirroring ``additional_parts``'s own "default preserves every existing single-file
+            caller" precedent, so every pre-existing construction of this model continues to
+            work unchanged.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -117,3 +133,4 @@ class AssignmentDocument(BaseModel):
     file: FileAssignment
     additional_parts: tuple[FileAssignment, ...] = ()
     batch: BatchAssignment
+    batch_complete_manifest: BatchCompleteManifest | None = None

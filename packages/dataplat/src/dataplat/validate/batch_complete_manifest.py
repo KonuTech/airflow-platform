@@ -1,4 +1,4 @@
-"""``BatchCompleteManifest`` -- the ``_BATCH_COMPLETE`` marker object's parsed body (D-23, VALID-06).
+"""``BatchCompleteManifest`` -- the ``_BATCH_COMPLETE`` marker's parsed body (D-23, VALID-06).
 
 09-03-PLAN.md: extends the existing, presence-only ``_BATCH_COMPLETE`` marker gate
 (``dataplat.discovery._apply_batch_complete_marker_gate``, LOAD-11/D-19, opt-in) to actually

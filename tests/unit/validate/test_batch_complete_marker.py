@@ -16,6 +16,19 @@
    proves this by continuing to pass unmodified; this file adds one direct
    regression test of the same claim, scoped to this new fixture shape.
 
+09-03-PLAN.md Task 2 extends this fixture's own coverage (VALID-06, D-23) --
+the marker gate no longer merely checks presence, it reads and parses the
+marker object's body:
+
+4. Marker present with a VALID JSON body -> every ``AssignmentDocument``
+   this call produces carries the parsed ``BatchCompleteManifest``.
+5. Marker present with a MALFORMED body -> the whole batch is withheld
+   (``[]`` returned), identically to "marker absent" -- no exception
+   escapes ``discover_files``.
+6. Marker absent (behavior bullet 1, above) or not configured (behavior
+   bullet 3, above) -> ``batch_complete_manifest`` stays ``None`` on every
+   produced document, byte-for-byte identical to before this plan.
+
 Fixture-shape note (08-06-PLAN.md Task 1's own conditional guidance):
 ``tools/corpus/generators.py`` only has ``tabular``/``literal``/
 ``literal_unicode``/``wrapper``/``multipart`` generator kinds -- every one
@@ -47,6 +60,7 @@ from dataplat.config.model import (
 )
 from dataplat.discovery import DiscoveredUnit, discover_files
 from dataplat.metadata.repository import MetadataRepository
+from dataplat.models.assignment import AssignmentDocument
 from dataplat.storage.objectstore import ObjectStore, ObjectSummary, open_text_stream
 
 if TYPE_CHECKING:
@@ -64,6 +78,8 @@ _LAST_MODIFIED = datetime(2026, 8, 17, tzinfo=UTC)
 _MARKER_SUFFIX = "_BATCH_COMPLETE"
 _BATCH_PATH = "batch/"
 _MARKER_KEY = _BATCH_PATH + _MARKER_SUFFIX
+_VALID_MARKER_BODY = b'{"expected_row_count": 2, "expected_checksum": "abc123"}'
+_MALFORMED_MARKER_BODY = b'{"expected_row_count": -1}'
 
 
 @dataclass
@@ -327,15 +343,16 @@ def test_discover_files_withholds_the_whole_batch_when_marker_object_is_absent()
 
 
 def test_discover_files_discovers_normally_once_marker_object_is_present() -> None:
-    """Behavior bullet 2: with the marker object present, discovery proceeds exactly as if
+    """Behavior bullet 2/4: with a VALID marker body present, discovery proceeds exactly as if
 
     ``batch_complete_marker`` were ``None`` -- same discovered object set, same file/batch/
-    run bookkeeping -- and the marker object itself is never registered as a data file.
+    run bookkeeping -- the marker object itself is never registered as a data file, and every
+    produced ``AssignmentDocument`` carries the parsed manifest.
     """
     with_marker_objects = _FakeObjectStore()
     with_marker_objects.put("raw", _BATCH_PATH + "data1.csv", b"id,value\n1,a\n")
     with_marker_objects.put("raw", _BATCH_PATH + "data2.csv", b"id,value\n2,b\n")
-    with_marker_objects.put("raw", _MARKER_KEY, b"")
+    with_marker_objects.put("raw", _MARKER_KEY, _VALID_MARKER_BODY)
     with_marker_metadata = _FakeMetadataRepository()
 
     with_marker_units = discover_files(
@@ -390,6 +407,75 @@ def test_discover_files_discovers_normally_once_marker_object_is_present() -> No
     # never hashed, registered, batched or assigned as its own file.
     assert "s3://raw/" + _MARKER_KEY not in with_marker_metadata.files_by_uri
     assert len(with_marker_objects.written) == 2  # two assignment docs, not three
+
+    # Behavior bullet 4: every produced AssignmentDocument carries the SAME
+    # parsed manifest.
+    for body in with_marker_objects.written.values():
+        doc = AssignmentDocument.model_validate_json(body)
+        assert doc.batch_complete_manifest is not None
+        assert doc.batch_complete_manifest.expected_row_count == 2
+        assert doc.batch_complete_manifest.expected_checksum == "abc123"
+
+    # Behavior bullet 6: the marker=None baseline's documents carry no
+    # manifest at all.
+    for body in no_marker_objects.written.values():
+        doc = AssignmentDocument.model_validate_json(body)
+        assert doc.batch_complete_manifest is None
+
+
+def test_discover_files_withholds_the_whole_batch_when_marker_body_is_malformed() -> None:
+    """Behavior bullet 5: marker present but its body fails to parse -- the whole batch is
+
+    withheld (``[]``), identically to "marker absent", and no exception escapes
+    ``discover_files``.
+    """
+    objects = Mock(spec=ObjectStore)
+    objects.list_objects.return_value = iter(
+        [
+            ObjectSummary(
+                key=_BATCH_PATH + "data1.csv",
+                etag="e1",
+                size_bytes=10,
+                last_modified=_LAST_MODIFIED,
+            ),
+            ObjectSummary(
+                key=_MARKER_KEY,
+                etag="e2",
+                size_bytes=len(_MALFORMED_MARKER_BODY),
+                last_modified=_LAST_MODIFIED,
+            ),
+        ],
+    )
+    objects.get_object.return_value = open_text_stream(
+        io.BytesIO(_MALFORMED_MARKER_BODY),
+        encoding="utf-8",
+    )
+    metadata = Mock(spec=MetadataRepository)
+    schema = Mock()
+    schema.get_current = Mock(return_value=None)
+
+    units = discover_files(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=_DATASET_ID,
+        dataset_name=_DATASET_NAME,
+        config=_marker_config(batch_complete_marker=_MARKER_SUFFIX),
+        config_version_id=_CONFIG_VERSION_ID,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=cast("SchemaRepository", schema),
+    )
+
+    assert units == []
+    # No discovery bookkeeping happened -- the batch was withheld before the
+    # per-object loop, same as the marker-absent case.
+    objects.put_object.assert_not_called()
+    metadata.create_file.assert_not_called()
+    metadata.get_or_create_batch.assert_not_called()
+    metadata.link_batch_file.assert_not_called()
+    metadata.get_or_create_ingestion_run.assert_not_called()
+    schema.get_current.assert_not_called()
 
 
 def test_discover_files_with_no_batch_complete_marker_configured_is_unaffected() -> None:
