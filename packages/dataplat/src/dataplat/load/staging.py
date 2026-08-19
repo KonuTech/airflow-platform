@@ -767,4 +767,36 @@ class StagingLoader:
             f"INSERT INTO {durable_table} ({column_list}) "  # noqa: S608 -- durable_table/column_list/staging_result.staging_table are config/run-derived identifiers (T-08.1-13, this plan's threat model), never CSV content
             f"SELECT {column_list} FROM {staging_result.staging_table}",
         )
+
+        # D-21: the raw->bronze reconciliation hop belongs here -- the same
+        # transaction as this method's own INSERT/DROP TABLE, and the
+        # cheapest of the three hops since `StagingResult` already carries
+        # `rows_read`/`rows_parsed`/`rows_rejected` with zero new plumbing.
+        # D-22: `output_count`/`rejected_count` are exactly what
+        # `RaggedRowGuard` already parsed/rejected -- no re-derivation, and
+        # `record_reconciliation`'s own SQL computes
+        # `input_count - (output_count + rejected_count + dedup_count)`,
+        # which is `0` by construction here since every read row is either
+        # parsed or rejected. D-23/VALID-06: `ctx.run.batch_expected_row_count`/
+        # `batch_expected_checksum` are `None` unless the triggering batch
+        # carried a parsed `_BATCH_COMPLETE` manifest (plan 09-03) -- passed
+        # straight through, and `record_reconciliation` computes
+        # `control_total_discrepancy` in SQL only when `expected_row_count`
+        # is not `None`. This call never raises on a mismatch -- it only
+        # persists one; a discrepancy is recorded and the run continues
+        # (D-22's "record and continue" rule, matching VALID-09's
+        # flag-don't-block precedent), never blocking staging.
+        dataset_id = ctx.metadata.get_or_create_dataset(ctx.config.dataset)
+        ctx.metadata.record_reconciliation(
+            conn=conn,
+            dataset_id=dataset_id,
+            file_id=ctx.run.file_id,
+            hop="raw_bronze",
+            input_count=staging_result.rows_read,
+            output_count=staging_result.rows_parsed,
+            rejected_count=staging_result.rows_rejected,
+            expected_row_count=ctx.run.batch_expected_row_count,
+            expected_checksum=ctx.run.batch_expected_checksum,
+        )
+
         conn.execute(f"DROP TABLE IF EXISTS {staging_result.staging_table}")

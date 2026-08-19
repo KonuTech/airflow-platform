@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import pytest
 
+from csv_processor.source import CsvSource
 from dataplat.config.model import (
     BatchingConfig,
     ColumnContract,
@@ -45,8 +46,9 @@ from dataplat.metadata.postgres import PostgresMetadataRepository
 from dataplat.models.identity import RunContext
 from dataplat.observability.logging import get_logger
 from dataplat.pipeline.protocol import PipelineContext
-from dataplat.pipeline.run import publish_ingest
+from dataplat.pipeline.run import publish_ingest, stage_ingest
 from dataplat.storage.db import create_pool
+from dataplat.storage.objectstore import S3ObjectStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -344,6 +346,8 @@ _RECONCILIATION_COLUMNS = (
     "max_input",
     "key_count_input",
     "key_count_output",
+    "expected_row_count",
+    "control_total_discrepancy",
 )
 
 
@@ -507,3 +511,267 @@ def test_orders_reconciliation_populates_sums_customers_does_not(env: _Env) -> N
     assert customers_row["max_input"] is not None
     assert customers_row["key_count_input"] is not None
     assert customers_row["key_count_output"] is not None
+
+
+# --- raw_bronze hop: StagingLoader.promote_to_durable_bronze (plan 09-07) ----
+#
+# Every test below drives a real ``stage_ingest`` -- claim, stage, quality-
+# gate, promote-to-durable-bronze -- against real testcontainers PostgreSQL
+# AND MinIO, using a real ``csv_processor.source.CsvSource`` (never a fake/
+# in-memory source), mirroring ``test_stage_ingest.py``'s own fixture shape
+# (deliberately duplicated locally rather than imported, matching this test
+# suite's established per-file helper convention). Each test uses its own
+# widely-separated ``customer_id`` range (9_600_0xx) -- ``staging.customers``
+# is a shared, session-scoped table across the whole ``tests/integration/``
+# collection, and other files already occupy 9_100_0xx-9_502_0xx / 9994xxx.
+
+_RAW_BRONZE_BUCKET = "raw-bronze-reconciliation-test"
+_RAW_BRONZE_VALIDATED_BUCKET = "validated"
+_RAW_BRONZE_CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+
+
+def _raw_bronze_row(customer_id: int) -> str:
+    return f"{customer_id},Name{customer_id},US,1990-01-01,2026-01-01T00:00:00+00:00\n"
+
+
+def _raw_bronze_csv_bytes(rows: int, *, start_id: int) -> bytes:
+    lines = [
+        _RAW_BRONZE_CSV_HEADER,
+        *(_raw_bronze_row(start_id + offset) for offset in range(rows)),
+    ]
+    return "".join(lines).encode("utf-8")
+
+
+@dataclass
+class _RawBronzeEnv:
+    metadata: PostgresMetadataRepository
+    objects: S3ObjectStore
+    pool: Any
+    migrated_dsn: str
+    s3_client: Any
+    scratch_bucket: str
+
+
+@pytest.fixture
+def _raw_bronze_bucket(s3_client: Any) -> str:
+    existing = {bucket["Name"] for bucket in s3_client.list_buckets().get("Buckets", [])}
+    if _RAW_BRONZE_BUCKET not in existing:
+        s3_client.create_bucket(Bucket=_RAW_BRONZE_BUCKET)
+    return _RAW_BRONZE_BUCKET
+
+
+@pytest.fixture
+def _raw_bronze_validated_bucket(s3_client: Any) -> str:
+    """`_apply_staging_quality_gate_and_persist` writes its report to `s3://validated/...`
+    unconditionally -- this bucket must exist before `stage_ingest` runs, mirroring
+    `test_stage_ingest.py`'s own `_validated_bucket` fixture.
+    """
+    existing = {bucket["Name"] for bucket in s3_client.list_buckets().get("Buckets", [])}
+    if _RAW_BRONZE_VALIDATED_BUCKET not in existing:
+        s3_client.create_bucket(Bucket=_RAW_BRONZE_VALIDATED_BUCKET)
+    return _RAW_BRONZE_VALIDATED_BUCKET
+
+
+@pytest.fixture
+def raw_bronze_env(
+    _pool: Any,
+    migrated_dsn: str,
+    s3_client: Any,
+    minio_config: dict[str, str],
+    _raw_bronze_bucket: str,
+    _raw_bronze_validated_bucket: str,
+) -> _RawBronzeEnv:
+    return _RawBronzeEnv(
+        metadata=PostgresMetadataRepository(_pool),
+        objects=S3ObjectStore(
+            endpoint_url=f"http://{minio_config['endpoint']}",
+            access_key=minio_config["access_key"],
+            secret_key=minio_config["secret_key"],
+        ),
+        pool=_pool,
+        migrated_dsn=migrated_dsn,
+        s3_client=s3_client,
+        scratch_bucket=_raw_bronze_bucket,
+    )
+
+
+def _seed_and_build_raw_bronze_ctx(
+    env: _RawBronzeEnv,
+    *,
+    key_suffix: str,
+    csv_bytes: bytes,
+    batch_expected_row_count: int | None = None,
+    batch_expected_checksum: str | None = None,
+) -> tuple[PipelineContext, int, int, int]:
+    """Seed dataset/config/file/batch/PENDING-run, upload ``csv_bytes``, build a `PipelineContext`.
+
+    Returns:
+        `(ctx, run_id, file_id, batch_id)`.
+    """
+    dataset_id = env.metadata.get_or_create_dataset(f"raw_bronze_recon_{key_suffix}")
+    config_version_id = _insert_config_version(env.migrated_dsn, dataset_id=dataset_id)
+    object_key = f"customers/{key_suffix}.csv"
+    env.s3_client.put_object(Bucket=env.scratch_bucket, Key=object_key, Body=csv_bytes)
+    file_id = env.metadata.create_file(
+        dataset_id=dataset_id,
+        object_uri=f"s3://{env.scratch_bucket}/{object_key}",
+        content_sha256=hashlib.sha256(csv_bytes).digest(),
+        hash_version=1,
+        size_bytes=len(csv_bytes),
+        filename=f"{key_suffix}.csv",
+        status="DISCOVERED",
+    )
+    batch_id = env.metadata.create_batch(
+        dataset_id=dataset_id,
+        batch_key=f"{key_suffix}:2026-08-19:1",
+        status="OPEN",
+    )
+    run_id, _ = env.metadata.get_or_create_ingestion_run(
+        idempotency_key=f"raw_bronze_recon_{key_suffix}:1",
+        dataset_id=dataset_id,
+        config_version_id=config_version_id,
+        processor_version="0.1.0",
+        processor_image_digest="sha256:testdigest",
+        file_id=file_id,
+        batch_id=batch_id,
+    )
+    # `_make_customers_config()`'s `dataset` field is a fixed literal
+    # ("customers") -- `stage_ingest`'s own `_TARGET_COLUMNS_BY_DATASET`
+    # lookup (`dataplat.pipeline.run`) only knows `"customers"`/`"orders"`,
+    # so every raw_bronze test below reuses that dataset name for
+    # `ctx.config.dataset` while still registering its OWN, per-test
+    # `meta.datasets` row (`raw_bronze_recon_{key_suffix}`) via
+    # `get_or_create_dataset` above -- the config object itself is a fresh,
+    # locally-constructed test double, never the real `customers.yaml`.
+    config = _make_customers_config()
+    ctx = PipelineContext(
+        run=RunContext(
+            run_id=run_id,
+            idempotency_key=f"raw_bronze_recon_{key_suffix}:1",
+            file_id=file_id,
+            batch_id=batch_id,
+            batch_expected_row_count=batch_expected_row_count,
+            batch_expected_checksum=batch_expected_checksum,
+        ),
+        config=config,
+        metadata=env.metadata,
+        objects=env.objects,
+        db=env.pool,
+        log=get_logger(),
+        source=CsvSource(bucket=env.scratch_bucket, key=object_key),
+    )
+    return ctx, run_id, file_id, batch_id
+
+
+def _read_raw_bronze_row(
+    migrated_dsn: str,
+    *,
+    dataset_id: int,
+    file_id: int,
+) -> dict[str, Any]:
+    rows = _read_reconciliation_rows(
+        migrated_dsn,
+        dataset_id=dataset_id,
+        file_id=file_id,
+        hop="raw_bronze",
+    )
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_clean_staging_pass_writes_one_raw_bronze_row_with_zero_discrepancy(
+    raw_bronze_env: _RawBronzeEnv,
+) -> None:
+    """Test 1: nothing rejected -> `input_count == rows_read`, `output_count == rows_parsed`,
+    `rejected_count == rows_rejected == 0`, `discrepancy == 0` (D-22's formula holds by
+    construction: every read row is either parsed or rejected).
+    """
+    ctx, _run_id, file_id, _batch_id = _seed_and_build_raw_bronze_ctx(
+        raw_bronze_env,
+        key_suffix="raw_bronze_clean",
+        csv_bytes=_raw_bronze_csv_bytes(3, start_id=9_600_001),
+    )
+    # `record_reconciliation`'s own `dataset_id` comes from
+    # `ctx.metadata.get_or_create_dataset(ctx.config.dataset)` inside
+    # `promote_to_durable_bronze` -- `ctx.config.dataset` is always
+    # `"customers"` (`_make_customers_config()`'s fixed literal), never the
+    # per-test `raw_bronze_recon_{key_suffix}` name used only to seed this
+    # test's own file/batch/run rows above. `file_id` alone already scopes
+    # every assertion below to this one test.
+    dataset_id = raw_bronze_env.metadata.get_or_create_dataset(ctx.config.dataset)
+
+    receipt = stage_ingest(ctx)
+    assert receipt.status == "STAGED"
+
+    row = _read_raw_bronze_row(raw_bronze_env.migrated_dsn, dataset_id=dataset_id, file_id=file_id)
+    assert row["input_count"] == 3
+    assert row["output_count"] == 3
+    assert row["rejected_count"] == 0
+    assert row["discrepancy"] == 0
+
+
+def test_raw_bronze_no_batch_complete_marker_leaves_expected_row_count_and_discrepancy_null(
+    raw_bronze_env: _RawBronzeEnv,
+) -> None:
+    """Test 2: no `_BATCH_COMPLETE` manifest -> `expected_row_count`/`control_total_discrepancy`
+    stay `NULL` -- `ctx.run.batch_expected_row_count` defaults to `None` when nothing set it.
+    """
+    ctx, _run_id, file_id, _batch_id = _seed_and_build_raw_bronze_ctx(
+        raw_bronze_env,
+        key_suffix="raw_bronze_no_marker",
+        csv_bytes=_raw_bronze_csv_bytes(2, start_id=9_600_101),
+    )
+    dataset_id = raw_bronze_env.metadata.get_or_create_dataset(ctx.config.dataset)
+
+    receipt = stage_ingest(ctx)
+    assert receipt.status == "STAGED"
+
+    row = _read_raw_bronze_row(raw_bronze_env.migrated_dsn, dataset_id=dataset_id, file_id=file_id)
+    assert row["expected_row_count"] is None
+    assert row["control_total_discrepancy"] is None
+
+
+def test_raw_bronze_matching_batch_expected_row_count_writes_zero_control_total_discrepancy(
+    raw_bronze_env: _RawBronzeEnv,
+) -> None:
+    """Test 3: `ctx.run.batch_expected_row_count` matches `rows_parsed` exactly ->
+    `control_total_discrepancy == 0`.
+    """
+    ctx, _run_id, file_id, _batch_id = _seed_and_build_raw_bronze_ctx(
+        raw_bronze_env,
+        key_suffix="raw_bronze_match",
+        csv_bytes=_raw_bronze_csv_bytes(4, start_id=9_600_201),
+        batch_expected_row_count=4,
+    )
+    dataset_id = raw_bronze_env.metadata.get_or_create_dataset(ctx.config.dataset)
+
+    receipt = stage_ingest(ctx)
+    assert receipt.status == "STAGED"
+
+    row = _read_raw_bronze_row(raw_bronze_env.migrated_dsn, dataset_id=dataset_id, file_id=file_id)
+    assert row["expected_row_count"] == 4
+    assert row["control_total_discrepancy"] == 0
+
+
+def test_raw_bronze_mismatched_batch_expected_row_count_records_discrepancy_and_completes_normally(
+    raw_bronze_env: _RawBronzeEnv,
+) -> None:
+    """Test 4: `ctx.run.batch_expected_row_count` does NOT match `rows_parsed` ->
+    a non-zero `control_total_discrepancy` is recorded, AND the call still completes
+    normally -- no exception raised, the transaction still commits, staging is not
+    blocked (D-22's "record and continue" rule, proven directly here).
+    """
+    ctx, _run_id, file_id, _batch_id = _seed_and_build_raw_bronze_ctx(
+        raw_bronze_env,
+        key_suffix="raw_bronze_mismatch",
+        csv_bytes=_raw_bronze_csv_bytes(5, start_id=9_600_301),
+        batch_expected_row_count=8,  # claims 8, only 5 actually staged
+    )
+    dataset_id = raw_bronze_env.metadata.get_or_create_dataset(ctx.config.dataset)
+
+    receipt = stage_ingest(ctx)
+    assert receipt.status == "STAGED"
+
+    row = _read_raw_bronze_row(raw_bronze_env.migrated_dsn, dataset_id=dataset_id, file_id=file_id)
+    assert row["expected_row_count"] == 8
+    assert row["control_total_discrepancy"] == 3  # 8 - 5
