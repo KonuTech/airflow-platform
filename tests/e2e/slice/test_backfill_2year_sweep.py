@@ -132,7 +132,12 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from tools.corpus.dated_series import BackfillCorpusManifest, generate_dated_series
+from tools.corpus.dated_series import (
+    _ID_DAY_MULTIPLIER,
+    _ORDER_ID_BASE,
+    BackfillCorpusManifest,
+    generate_dated_series,
+)
 
 if TYPE_CHECKING:
     import subprocess
@@ -190,7 +195,14 @@ class _SweepState:
     verbatim by Task 3's idempotent-rerun test (QUAL-11 requires the IDENTICAL window).
     """
 
-    max_active_runs: int = 3
+    # Hardcoded to 1: this cluster has shown CPU starvation at max_active_runs=3 in every
+    # observed run this session (Task 1's pilot and Task 2's own first attempts) -- Task 1's
+    # pilot test still mutates this in-process on its own degrade logic, but Task 1/2/3 run as
+    # SEPARATE `pytest -k ...` invocations (separate processes) for iteration speed, so that
+    # mutation never actually carries forward; starting at the already-empirically-justified
+    # value avoids re-deriving the same conclusion (and re-inflicting the same contention) on
+    # every fresh invocation.
+    max_active_runs: int = 1
     full_sweep_from: datetime | None = None
     full_sweep_to: datetime | None = None
 
@@ -447,6 +459,16 @@ def _wait_for_dataset_files_terminal(
     Returns `{filename: {"status": ..., "run_id": ..., "schema_version_id": ..., "file_id": ...}}`.
     A single deadline loop over ALL filenames at once (not N separate per-file polls), matching
     this module's own scale (a handful of files, one discover call drains all of them together).
+
+    `DISTINCT ON (f.filename) ... ORDER BY f.filename, ir.run_id DESC NULLS LAST` -- a file CAN
+    have more than one `meta.ingestion_runs` row (a prior attempt that never reached a terminal
+    status, e.g. an infra-outage-interrupted run left permanently `RUNNING` with no
+    `finished_at`), and a plain `LEFT JOIN` with no ordering returns ALL of them, non-
+    deterministically overwriting this function's per-filename dict in whatever order Postgres
+    happens to return rows -- which could mean this loop keeps observing a stale, permanently-
+    `RUNNING` OLD row forever even after a genuinely NEWER attempt reaches `SUCCEEDED` (live-
+    discovered this session: see module docstring). Selecting the highest `run_id` per filename
+    is the fix -- the latest attempt is always the one that matters.
     """
     deadline = time.monotonic() + timeout
     results: dict[str, dict[str, Any]] = {}
@@ -454,11 +476,13 @@ def _wait_for_dataset_files_terminal(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT f.filename, f.file_id, ir.status, ir.run_id, ir.schema_version_id
+                SELECT DISTINCT ON (f.filename)
+                       f.filename, f.file_id, ir.status, ir.run_id, ir.schema_version_id
                   FROM meta.files f
                   JOIN meta.datasets d ON d.dataset_id = f.dataset_id
                   LEFT JOIN meta.ingestion_runs ir ON ir.file_id = f.file_id
                  WHERE d.dataset_name = %s AND f.filename = ANY(%s)
+                 ORDER BY f.filename, ir.run_id DESC NULLS LAST
                 """,
                 (dataset, list(filenames)),
             )
@@ -490,6 +514,32 @@ def _wait_for_dataset_files_terminal(
 def _table_row_count(conn: psycopg.Connection[Any], table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM {table}")  # noqa: S608 -- table is a fixed literal, never row content
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _scoped_row_count(
+    conn: psycopg.Connection[Any], table: str, id_column: str, lower: int, upper: int
+) -> int:
+    """Like `_table_row_count`, but scoped to `id_column IN [lower, upper)`.
+
+    `table` is a shared, cluster-wide table other live e2e suites also write to (each with
+    its own disjoint id range, per dated_series.py's module docstring) -- an unscoped count
+    over-counts by however many rows those OTHER suites left behind.
+
+    `id_column::bigint` -- live-discovered this session: `normalized.orders.order_id` is a
+    real `integer` column, but `silver.orders.order_id` (the dbt-managed intermediate layer)
+    is still `text`, matching STACK.md's own "business columns stay TEXT until the final
+    gold-layer INSERT casts" convention. The explicit cast makes this helper correct against
+    either shape; it is a no-op on the already-integer table.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM {table} "  # noqa: S608 -- table/id_column are fixed literals, never row content
+            f"WHERE {id_column}::bigint >= %s AND {id_column}::bigint < %s",
+            (lower, upper),
+        )
         row = cur.fetchone()
     assert row is not None
     return int(row[0])
@@ -679,11 +729,14 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
         to_iso=to_dt.isoformat(),
         max_active_runs=sweep_state.max_active_runs,
     )
+    # Sizing: at max_active_runs=1 (fully sequential, no concurrent pod-scheduling pressure),
+    # 3 sequential customers dag_runs at the observed ~20-25 min/run pace under this cluster's
+    # CPU contention could take up to ~75 min total -- 5400s (90 min) budgets that with headroom.
     _wait_for_new_backfill_completed(
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_backfill_id=since_id,
-        timeout=900,
+        timeout=5400,
     )
 
     customers_manifest = sweep_corpus.customers_manifest
@@ -693,7 +746,7 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
         analytics_connection,
         dataset=_CUSTOMERS_DATASET,
         filenames=customers_manifest.filenames,
-        timeout=900,
+        timeout=5400,
     )
     for filename, result in customers_results.items():
         assert result["status"] == "SUCCEEDED", (
@@ -702,11 +755,16 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
 
     # Deviation 1: orders drains via its OWN Asset-triggered cascade, never a direct backfill
     # CLI call -- poll for the SAME terminal-status guarantee regardless of trigger mechanism.
+    # Sizing: at max_active_runs=1, orders' own 13-file drain only starts once customers' full
+    # sequential 3-run backfill completes and fires the asset event, ON TOP OF its own
+    # observed ~1-2 min/file serialized cadence under CPU contention -- 5400s (90 min) budgets
+    # a full 13-file drain at that rate plus generous headroom (err generous rather than
+    # re-guessing a tighter number again).
     orders_results = _wait_for_dataset_files_terminal(
         analytics_connection,
         dataset=_ORDERS_DATASET,
         filenames=orders_manifest.filenames,
-        timeout=900,
+        timeout=5400,
     )
     for filename, result in orders_results.items():
         assert result["status"] == "SUCCEEDED", (
@@ -717,8 +775,25 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
 
     # --- (1) silver.orders/normalized.orders non-empty, consistent with the corpus minus the gap
     #     day (D-08: closes the silver.orders 0-rows gap). ---
-    silver_orders_count = _table_row_count(analytics_connection, "silver.orders")
-    normalized_orders_count = _table_row_count(analytics_connection, "normalized.orders")
+    # `normalized.orders`/`silver.orders` are shared, cluster-wide tables -- other live e2e
+    # suites (e.g. test_referential_orphan.py, its own disjoint order_id range per
+    # dated_series.py's module docstring) leave their own rows behind too, so an unscoped
+    # `count(*)` over-counts (live-discovered this session: got 656 against an expected 650,
+    # traced to exactly 6 rows outside this corpus' own order_id range). Scope both counts to
+    # THIS corpus' own order_id space (`_ORDER_ID_BASE` .. `+ _NUM_DAYS * _ID_DAY_MULTIPLIER`,
+    # generously wide -- `_ROWS_PER_DAY` rows/day never approaches the multiplier) so the
+    # assertion reflects only what this run itself produced.
+    order_id_upper_bound = _ORDER_ID_BASE + _NUM_DAYS * _ID_DAY_MULTIPLIER
+    silver_orders_count = _scoped_row_count(
+        analytics_connection, "silver.orders", "order_id", _ORDER_ID_BASE, order_id_upper_bound
+    )
+    normalized_orders_count = _scoped_row_count(
+        analytics_connection,
+        "normalized.orders",
+        "order_id",
+        _ORDER_ID_BASE,
+        order_id_upper_bound,
+    )
     assert silver_orders_count > 0, "silver.orders is empty -- D-08's 0-rows gap did not close"
     assert normalized_orders_count > 0, (
         "normalized.orders is empty -- D-08's 0-rows gap did not close"
