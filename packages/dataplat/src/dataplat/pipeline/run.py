@@ -584,7 +584,7 @@ def _apply_referential_barrier(
         strategy=rule.strategy,
         rule_id=rule.rule_id,
     )
-    barrier_result = barrier.apply(ctx)
+    barrier_result = barrier.apply(ctx, conn)
 
     for orphan in barrier_result.rejected:
         conn.execute(
