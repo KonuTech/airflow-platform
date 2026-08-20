@@ -790,6 +790,7 @@ class PostgresMetadataRepository(MetadataRepository):
         source_table: str,
         watermark_column: str,
         run_id: int,
+        run_ids: Sequence[int],
     ) -> None:
         """See `MetadataRepository.record_watermark`.
 
@@ -800,8 +801,11 @@ class PostgresMetadataRepository(MetadataRepository):
         interpolated as SQL IDENTIFIERS via an f-string, never a value
         (T-09-03) -- both are config-resolved (`pipeline/run.py`'s
         `_WATERMARK_COLUMN_BY_DATASET` dict and `f"silver.{dataset}"`),
-        never row content. Every genuine VALUE (`dataset_id`/`target_key`)
-        still crosses via `%()s` placeholders.
+        never row content. Every genuine VALUE (`dataset_id`/`target_key`/
+        `run_ids`) still crosses via `%()s` placeholders. The `MAX()`
+        subquery is scoped to `WHERE _run_id = ANY(%(run_ids)s)` so a stray
+        row from an unrelated run already sitting in the shared
+        `source_table` can never poison this dataset's watermark.
         """
         old_row = conn.execute(
             "SELECT cursor_value FROM meta.watermarks WHERE dataset_id = %s AND target_key = %s",
@@ -813,12 +817,13 @@ class PostgresMetadataRepository(MetadataRepository):
             f"""
             INSERT INTO meta.watermarks (dataset_id, target_key, cursor_value)
             VALUES (%(dataset_id)s, %(target_key)s,
-                    (SELECT max({watermark_column}::timestamptz) FROM {source_table}))
+                    (SELECT max({watermark_column}::timestamptz) FROM {source_table}
+                      WHERE _run_id = ANY(%(run_ids)s)))
             ON CONFLICT (dataset_id, target_key) DO UPDATE
                 SET cursor_value = GREATEST(meta.watermarks.cursor_value, EXCLUDED.cursor_value)
             RETURNING cursor_value
             """,  # noqa: S608 -- source_table/watermark_column are config-resolved identifiers (T-09-03, see this method's own docstring), never row content or user input
-            {"dataset_id": dataset_id, "target_key": target_key},
+            {"dataset_id": dataset_id, "target_key": target_key, "run_ids": list(run_ids)},
         ).fetchone()
         if new_row is None:  # pragma: no cover - ON CONFLICT DO UPDATE always yields a row here
             msg = "INSERT ... ON CONFLICT ... RETURNING cursor_value returned no row"
