@@ -151,6 +151,47 @@ def _insert_silver_customer(  # noqa: PLR0913 -- one keyword per column, mirrors
     )
 
 
+def _insert_staging_customer(  # noqa: PLR0913 -- one keyword per column, mirrors _insert_silver_customer's own shape
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: str,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    source_row_number: int,
+) -> None:
+    """Insert one ``staging.customers`` (bronze) row directly via SQL -- never via a real ``stage``.
+
+    10-07-PLAN.md Task 1 (Rule 4, user-approved live finding): ``find_vanished_customer_ids`` is
+    now scoped to ``customer_id``s that have EVER appeared in ``staging.customers`` -- every test
+    below asserting a customer_id vanishes (or does not) must seed a matching bronze row here, or
+    that key is correctly excluded from consideration entirely (see
+    ``test_pre_bronze_legacy_rows_are_never_reported_vanished`` for the dedicated regression proof
+    of that exclusion itself).
+    """
+    conn.execute(
+        """
+        INSERT INTO staging.customers (
+            customer_id, name, country, birth_date, event_ts,
+            _run_id, _file_id, _batch_id, _source_row_number,
+            _record_hash, _record_hash_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            customer_id,
+            f"bronze-customer-{customer_id}",
+            "US",
+            "1990-01-01",
+            "2026-08-21T00:00:00+00:00",
+            run_id,
+            file_id,
+            batch_id,
+            source_row_number,
+            hashlib.sha256(f"bronze:{customer_id}".encode()).digest(),
+        ),
+    )
+
+
 def _insert_normalized_customer(  # noqa: PLR0913 -- one keyword per column, mirrors test_referential_integrity.py's own helper
     conn: psycopg.Connection[Any],
     *,
@@ -233,7 +274,13 @@ def _make_context() -> PipelineContext:
 def test_a_real_vanished_customer_id_is_correctly_detected(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """3 gold-current customers, 2 confirmed by this pass's silver snapshot -> the 3rd vanished."""
+    """3 gold-current customers, 2 confirmed by this pass's silver snapshot -> the 3rd vanished.
+
+    All 3 also get a ``staging.customers`` (bronze) row -- 10-07-PLAN.md Task 1's own
+    ``bronze_known`` scoping fix means a customer_id with no bronze presence is excluded from
+    vanished-detection entirely, regardless of its silver/gold state (see
+    ``test_pre_bronze_legacy_rows_are_never_reported_vanished`` for that exclusion's own proof).
+    """
     run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="real_vanish")
 
     with psycopg.connect(migrated_dsn) as conn:
@@ -247,6 +294,18 @@ def test_a_real_vanished_customer_id_is_correctly_detected(
         )
         _insert_normalized_customer(
             conn, customer_id=900003, run_id=run_id, file_id=file_id, batch_id=batch_id,
+            source_row_number=3,
+        )
+        _insert_staging_customer(
+            conn, customer_id="900001", run_id=run_id, file_id=file_id, batch_id=batch_id,
+            source_row_number=1,
+        )
+        _insert_staging_customer(
+            conn, customer_id="900002", run_id=run_id, file_id=file_id, batch_id=batch_id,
+            source_row_number=2,
+        )
+        _insert_staging_customer(
+            conn, customer_id="900003", run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=3,
         )
         _insert_silver_customer(
@@ -275,7 +334,12 @@ def test_a_real_vanished_customer_id_is_correctly_detected(
 def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """F-2's regression guard: a silver row tagged with an OLDER, un-staged run still vanishes."""
+    """F-2's regression guard: a silver row tagged with an OLDER, un-staged run still vanishes.
+
+    All 3 also get a ``staging.customers`` (bronze) row -- 10-07-PLAN.md Task 1's own
+    ``bronze_known`` scoping fix means a customer_id with no bronze presence is excluded from
+    vanished-detection entirely (see ``test_pre_bronze_legacy_rows_are_never_reported_vanished``).
+    """
     old_run_id, old_file_id, old_batch_id = _seed_run(
         repository, migrated_dsn, key_suffix="unscoped_old"
     )
@@ -292,6 +356,18 @@ def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
         )
         _insert_normalized_customer(
             conn, customer_id=900013, run_id=run_id, file_id=file_id, batch_id=batch_id,
+            source_row_number=3,
+        )
+        _insert_staging_customer(
+            conn, customer_id="900011", run_id=run_id, file_id=file_id, batch_id=batch_id,
+            source_row_number=1,
+        )
+        _insert_staging_customer(
+            conn, customer_id="900012", run_id=run_id, file_id=file_id, batch_id=batch_id,
+            source_row_number=2,
+        )
+        _insert_staging_customer(
+            conn, customer_id="900013", run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=3,
         )
         _insert_silver_customer(
@@ -315,6 +391,54 @@ def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
     assert "900013" in vanished
     assert "900011" not in vanished
     assert "900012" not in vanished
+
+
+@pytest.mark.integration
+def test_pre_bronze_legacy_rows_are_never_reported_vanished(
+    repository: PostgresMetadataRepository, migrated_dsn: str
+) -> None:
+    """10-07-PLAN.md Task 1 (Rule 4, user-approved live finding).
+
+    Live-discovered against the real kind cluster: ``normalized.customers`` has accumulated
+    12,001,043 ``is_current=true`` rows, the overwhelming majority inserted by Phase 4's original
+    vertical-slice proof (``MergePublisher``, weeks before ``staging.customers``/``silver.
+    customers`` existed at all). Those rows can NEVER appear in ANY ``staged_snapshot`` (they never
+    went through the bronze pipeline), so an unscoped ``find_vanished_customer_ids`` reported ALL
+    of them vanished on every single call -- tripping ``MassDeleteCircuitBreaker`` permanently, not
+    because anything was mass-deleted, but because the denominator/numerator both included keys
+    this mechanism was never designed to reason about.
+
+    This customer_id (900041) is ``is_current=true`` in ``normalized.customers`` -- exactly like a
+    Phase-4-era legacy row -- but has NO corresponding ``staging.customers`` row at all (never
+    seeded here, deliberately). It must NEVER be reported vanished, for ANY ``staged_run_ids``,
+    since it was never observed by the bronze-fed SCD pipeline in the first place.
+    """
+    run_id, _file_id, _batch_id = _seed_run(repository, migrated_dsn, key_suffix="pre_bronze")
+
+    with psycopg.connect(migrated_dsn) as conn:
+        # Deliberately uses a DIFFERENT run's identity for this row's own lineage columns --
+        # mirrors a pre-bronze-era row's real shape (inserted by an entirely different,
+        # now-defunct write path) more faithfully than reusing `run_id`, and proves the
+        # exclusion holds regardless of which run_id the legacy row happens to carry.
+        legacy_run_id, legacy_file_id, legacy_batch_id = _seed_run(
+            repository, migrated_dsn, key_suffix="pre_bronze_legacy_writer"
+        )
+        _insert_normalized_customer(
+            conn, customer_id=900041, run_id=legacy_run_id, file_id=legacy_file_id,
+            batch_id=legacy_batch_id, source_row_number=1,
+        )
+        # No _insert_staging_customer call for 900041 -- this IS the scenario: a gold-current
+        # row with zero bronze presence, exactly like Phase 4's own legacy data.
+        conn.commit()
+
+        vanished = find_vanished_customer_ids(conn, staged_run_ids=[run_id])
+
+    assert "900041" not in vanished, (
+        "a normalized.customers row with NO corresponding staging.customers (bronze) row must "
+        "never be reported vanished -- it was never observed by the bronze-fed SCD pipeline at "
+        "all, exactly like Phase 4's own pre-bronze legacy data (the live-discovered bug this "
+        "test guards against)"
+    )
 
 
 @pytest.mark.integration
