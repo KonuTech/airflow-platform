@@ -105,3 +105,13 @@ An earlier working-tree accident during this session (a stray `git stash --inclu
 ---
 *Phase: 10-slowly-changing-dimensions*
 *Completed: 2026-08-21*
+
+## Self-Check: PASSED
+
+- FOUND: tools/corpus/dated_series.py
+- FOUND: tests/unit/test_dated_series.py
+- FOUND: .planning/phases/10-slowly-changing-dimensions/10-06-SUMMARY.md
+- FOUND commit: d51bb52 (Task 1)
+- FOUND commit: e81f48f (Task 2)
+- FOUND commit: dc2ae05 (Task 3)
+- FOUND commit: becbc94 (SUMMARY metadata)
