@@ -22,7 +22,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pytest
-from tools.corpus.dated_series import _CUSTOMER_ID_BASE, generate_dated_series
+from tools.corpus.dated_series import (
+    _CUSTOMER_ID_BASE,
+    BackfillCorpusManifest,
+    generate_dated_series,
+)
 
 _CUSTOMERS_COLUMNS = ("customer_id", "name", "country", "birth_date", "event_ts", "signup_country")
 _ORDERS_COLUMNS = ("order_id", "customer_id", "order_date", "amount")
@@ -462,3 +466,117 @@ def test_paired_anomaly_params_raise_when_only_one_is_set() -> None:
             **_ROSTER_KWARGS,  # type: ignore[arg-type]
             attribute_change_day_index=5,
         )
+
+
+# --------------------------------------------------------------------------
+# Task 3: D-06 mass-delete/circuit-breaker-trip fixture
+# --------------------------------------------------------------------------
+
+_MASS_DELETE_MEMBER_INDICES = tuple(range(30, 40))  # 10 members
+
+
+def test_mass_delete_removes_exactly_the_targeted_block() -> None:
+    """Test 1: mass deletion removes EXACTLY the targeted members on the targeted day."""
+    files, manifest = generate_dated_series(
+        "customers",
+        **_ROSTER_KWARGS,  # type: ignore[arg-type]
+        mass_delete_day_index=8,
+        mass_delete_member_indices=_MASS_DELETE_MEMBER_INDICES,
+    )
+
+    assert manifest.mass_delete_day_index == 8
+    assert manifest.mass_delete_member_indices == _MASS_DELETE_MEMBER_INDICES
+
+    removed_ids = {str(_CUSTOMER_ID_BASE + m) for m in _MASS_DELETE_MEMBER_INDICES}
+
+    hit_filename = manifest.filenames[8]
+    hit_rows = _data_rows(files, hit_filename)
+    assert len(hit_rows) == 50 - len(_MASS_DELETE_MEMBER_INDICES)
+    hit_ids = {row[0] for row in hit_rows}
+    assert removed_ids.isdisjoint(hit_ids)
+
+    # Present again, with normal baseline values, on every other non-gap day
+    # including the very next one.
+    next_filename = manifest.filenames[9]
+    next_rows = _data_rows(files, next_filename)
+    assert len(next_rows) == 50
+    next_ids = {row[0] for row in next_rows}
+    assert removed_ids <= next_ids
+
+
+def test_mass_delete_fraction_exceeds_configured_threshold() -> None:
+    """Test 2: the removed fraction comfortably exceeds the 0.10 threshold precedent."""
+    rows_per_day = 50
+    fraction = len(_MASS_DELETE_MEMBER_INDICES) / rows_per_day
+    assert fraction > 0.10
+
+
+def test_mass_delete_member_indices_never_collide_with_orders_pool() -> None:
+    """Test 3a: every mass-delete member index is 30 or greater."""
+    assert all(index >= 30 for index in _MASS_DELETE_MEMBER_INDICES)
+
+
+def test_mass_delete_colliding_with_task2_anomaly_raises() -> None:
+    """Test 3b: a mass-delete pair colliding with a Task-2 anomaly pair raises the collision."""
+    with pytest.raises(ValueError, match="ambiguous anomaly collision"):
+        generate_dated_series(
+            "customers",
+            **_ROSTER_KWARGS,  # type: ignore[arg-type]
+            missing_customer_day_index=8,
+            missing_customer_member_index=30,
+            mass_delete_day_index=8,
+            mass_delete_member_indices=_MASS_DELETE_MEMBER_INDICES,
+        )
+
+
+def test_mass_delete_raises_for_orders_dataset() -> None:
+    """Test 4: setting either mass-delete parameter while dataset == 'orders' raises ValueError."""
+    orders_kwargs: dict[str, object] = {
+        "master_seed": "x",
+        "start_date": _START,
+        "num_days": 10,
+        "gap_day_index": -1,
+        "schema_change_day_index": 999,
+        "late_event_day_index": 999,
+    }
+    with pytest.raises(ValueError, match="only meaningful for dataset='customers'"):
+        generate_dated_series(
+            "orders",
+            **orders_kwargs,  # type: ignore[arg-type]
+            mass_delete_day_index=8,
+            mass_delete_member_indices=_MASS_DELETE_MEMBER_INDICES,
+        )
+
+
+def test_mass_delete_raises_when_only_one_paired_param_is_set() -> None:
+    """Test 5: supplying only one of the paired mass-delete parameters raises ValueError."""
+    with pytest.raises(ValueError, match="must be supplied together"):
+        generate_dated_series(
+            "customers",
+            **_ROSTER_KWARGS,  # type: ignore[arg-type]
+            mass_delete_day_index=8,
+        )
+
+    with pytest.raises(ValueError, match="must be supplied together"):
+        generate_dated_series(
+            "customers",
+            **_ROSTER_KWARGS,  # type: ignore[arg-type]
+            mass_delete_member_indices=_MASS_DELETE_MEMBER_INDICES,
+        )
+
+
+def test_mass_delete_manifest_completeness() -> None:
+    """Test 6: manifest gains mass_delete_day_index/mass_delete_member_indices, None when unset."""
+    _, manifest_unset = generate_dated_series("customers", **_ROSTER_KWARGS)  # type: ignore[arg-type]
+    assert manifest_unset.mass_delete_day_index is None
+    assert manifest_unset.mass_delete_member_indices is None
+
+    _, manifest_set = generate_dated_series(
+        "customers",
+        **_ROSTER_KWARGS,  # type: ignore[arg-type]
+        mass_delete_day_index=8,
+        mass_delete_member_indices=_MASS_DELETE_MEMBER_INDICES,
+    )
+    assert manifest_set.mass_delete_day_index == 8
+    assert manifest_set.mass_delete_member_indices == _MASS_DELETE_MEMBER_INDICES
+    assert isinstance(manifest_set, BackfillCorpusManifest)
