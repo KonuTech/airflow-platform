@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from dataplat.scd.hashing import tracked_attribute_hash
@@ -61,15 +61,23 @@ def test_hash_determinism_and_distinctness_property(
     a: tuple[str | None, str | None],
     b: tuple[str | None, str | None],
 ) -> None:
-    """Equal inputs always hash equally; unequal (name, country) pairs (almost) never collide."""
+    """Equal inputs always hash equally; unequal (name, country) pairs (almost) never collide.
+
+    ``None`` and ``""`` are DELIBERATELY the same normalized representation
+    (matching staging.py's own ``"" if field is None else str(field)``
+    convention) -- that specific pair is excluded from the distinctness
+    check via ``assume()`` rather than treated as a collision bug.
+    """
+    normalized_a = tuple("" if v is None else v for v in a)
+    normalized_b = tuple("" if v is None else v for v in b)
+    assume(normalized_a != normalized_b)
+
     hash_a1 = tracked_attribute_hash(*a, hash_version=1)
     hash_a2 = tracked_attribute_hash(*a, hash_version=1)
     hash_b = tracked_attribute_hash(*b, hash_version=1)
 
     assert hash_a1 == hash_a2
-
-    if a != b:
-        assert hash_a1 != hash_b
+    assert hash_a1 != hash_b
 
 
 def test_already_normalized_nfc_and_nfd_strings_hash_identically() -> None:
@@ -103,12 +111,26 @@ def test_already_normalized_nfc_and_nfd_strings_hash_identically() -> None:
 
 
 def test_never_imports_or_calls_unicodedata_normalize() -> None:
-    """Structural guard: hashing.py must not import/call ``unicodedata.normalize``."""
+    """Structural guard: hashing.py must not import/call ``unicodedata.normalize``.
+
+    Checks actual import/call statements via the AST, not mere prose
+    mentions of the word "unicodedata" in comments/docstrings explaining
+    WHY the module doesn't do this (this docstring itself legitimately
+    discusses the topic).
+    """
+    import ast
+
     import dataplat.scd.hashing as hashing_module
 
     source = hashing_module.__file__
     assert source is not None
     with open(source, encoding="utf-8") as fh:
-        contents = fh.read()
+        tree = ast.parse(fh.read(), filename=source)
 
-    assert "unicodedata" not in contents
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert not any(alias.name == "unicodedata" for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "unicodedata"
+        if isinstance(node, ast.Attribute) and node.attr == "normalize":
+            assert not (isinstance(node.value, ast.Name) and node.value.id == "unicodedata")
