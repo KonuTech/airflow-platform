@@ -11,7 +11,7 @@ Requirements derive from three sources, all traceable:
 - **`Gap n`** — one of 16 capabilities the README specifies in prose but never made checkable (see `.planning/research/FEATURES.md`). These are additions, not inventions: §82 observability and §83 lineage have no DoD items at all, and compression appears nowhere in the 95 sections despite being ubiquitous in real feeds.
 - **`PITFALLS #n` / architecture decisions** — 12 requirements encoding constraints that are cheap to satisfy now and unrecoverable later. These exist because research identified them as the project's dominant rework and data-corruption risks, and a constraint that lives only in a research document does not get built. They are: `META-02`, `META-03`, `INFRA-09`, `INFRA-10`, `SEC-15`, `ORCH-08`, `CSV-13`, `LOAD-08`, `LOAD-12`, `INCR-08`, `SCD-12`, `OBS-10`.
 
-**Total: 142 v1 requirements** across 15 categories (114 DoD + 16 gaps + 12 research-derived constraints).
+**Total: 138 v1 requirements** across 14 categories (114 DoD + 16 gaps + 12 research-derived constraints, minus 4 DoD items moved to Out of Scope — see CDC below).
 
 Scope is the full platform — every DoD item is v1. The v2 section holds only capabilities that were never in the README, and Out of Scope holds explicit exclusions.
 
@@ -142,13 +142,9 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **INCR-07**: Analytical data can be rebuilt from the immutable raw layer — *(DoD 114)*
 - [ ] **INCR-08**: Business date is derived from the data, never from wall-clock or `logical_date`, so backfilled rows do not carry today's effective date — *(PITFALLS #8)*
 
-### CDC — Change Data Capture
-
-- [ ] **CDC-01**: A CDC event model supports INSERT/UPDATE/DELETE with operation, source timestamp, transaction ID, sequence/offset, source table, record key and after-image — added as a `Source` implementation, not a parallel pipeline — *(DoD 44)*
-- [ ] **CDC-02**: Event ordering is enforced using sequence numbers, offsets, transaction IDs, version numbers or source timestamps via an explicit ordering barrier — *(DoD 45)*
-- [ ] **CDC-03**: Delivery semantics are documented honestly per target — at-least-once source→platform, effectively-once into analytical targets under stated preconditions — with no unearned exactly-once claim — *(DoD 46)*
-
 ### SCD — Slowly Changing Dimensions
+
+> CDC (Change Data Capture) was dropped from v1 — see **Out of Scope** below for DoD 44/45/46/87 and reasoning. SCD 0/1/2 build entirely from CSV batches and do not depend on it.
 
 - [ ] **SCD-01**: SCD Type 0 retains original values — *(DoD 60)*
 - [ ] **SCD-02**: SCD Type 1 overwrites without history — *(DoD 61)*
@@ -157,7 +153,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [ ] **SCD-05**: Change detection is deterministic via a normalized hash of tracked attributes — normalization strictly precedes hashing — *(DoD 64)*
 - [ ] **SCD-06**: Effective dating distinguishes source effective time, business effective time, event time, ingestion time and processing time, and never defaults to ingestion time — *(DoD 65)*
 - [ ] **SCD-07**: Late-arriving changes correct historical validity intervals per dataset policy, by recomputing a key's history from an ordered event log rather than in-place interval surgery — *(DoD 66)*
-- [ ] **SCD-08**: CDC events feed SCD processing, with configurable DELETE semantics — *(DoD 67)*
+- [ ] **SCD-08**: Configurable DELETE semantics (`ignore | invalidate | new_record`) apply when a business key disappears from a full snapshot — *(DoD 67, re-scoped: source is full-snapshot CSV batches, not a CDC feed)*
 - [ ] **SCD-09**: Repeated or replayed identical events produce exactly one logical version — *(DoD 68)*
 - [ ] **SCD-10**: SCD processing is idempotent under re-application — *(DoD 69)*
 - [ ] **SCD-11**: SCD processing supports backfills without blindly overwriting current dimension state — *(DoD 70)*
@@ -190,9 +186,8 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **QUAL-10**: Deduplication is tested within files, across files and across batches — *(DoD 84)*
 - [ ] **QUAL-11**: Backfills are tested for idempotency and historical schema resolution — *(DoD 85)*
 - [x] **QUAL-12**: Schema evolution is tested for compatible and breaking changes — *(DoD 86)*
-- [ ] **QUAL-13**: CDC is tested including ordering and replayed events — *(DoD 87)*
 - [ ] **QUAL-14**: SCD is tested including late-arriving corrections and idempotent re-application — *(DoD 88)*
-- [ ] **QUAL-15**: Failure and recovery scenarios from §84 are tested — pod crash, database unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, CDC ordering, secret rotation, unauthorized secret access — *(DoD 89)*
+- [ ] **QUAL-15**: Failure and recovery scenarios from §84 are tested — pod crash, database unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, secret rotation, unauthorized secret access — *(DoD 89)*
 - [x] **QUAL-16**: A property test asserts determinism — identical source data, configuration and processor version produce an identical output hash — *(Gap 8)*
 - [x] **QUAL-17**: Timezone and DST correctness is tested as a property, including DST gap and overlap timestamps — *(Gap 14)*
 
@@ -223,10 +218,6 @@ Deferred. Not in the current roadmap — none of these appear in README §94.
 - **V2-CSV-01**: Byte-offset resume within a single file. Superseded for v1 by `last_committed_chunk_ordinal` on the batch ledger, which delivers §38 as a byproduct. Build only if a fixture demands it.
 - **V2-CSV-02**: Multi-row and hierarchical header flattening. v1 detects and rejects these with a clear diagnostic, since no canonical flattening exists.
 
-### CDC
-
-- **V2-CDC-01**: CDC before-images. v1 defines the event model and proves it with a CSV-delivered feed (operation column + sequence + key); before-images wait until a real source produces one.
-
 ### Deduplication
 
 - **V2-DEDUP-01**: The remaining four dedup strategies (key+timestamp, latest-wins, source-priority, batch-aware). v1 ships the strategy interface plus exact-row and business-key; the rest are implementations of a solved interface, not new architecture.
@@ -245,7 +236,8 @@ Explicitly excluded, with reasoning, to prevent scope creep.
 |---------|--------|
 | Cloud deployment (AWS/GCP/Azure) | Local kind is the target. Swap-out seams (MinIO→S3, Vault→cloud KMS) are preserved, but porting is not this milestone |
 | dbt as an end-to-end (bronze→gold) transformation framework | As of Phase 08.1 (ADR-0010), dbt owns bronze-to-silver transformation narrowly (DEDUP-01..04, INCR-03, INCR-04, QUAL-10 — see Traceability table's Phase 08.1 rows for those IDs); gold publish and SCD2 remain explicitly Python-owned, per PG BUG #18279 and META-03's single-transaction guarantee |
-| Streaming ingestion (Kafka, Kinesis, Debezium runtime) | CDC is supported *architecturally* as a pluggable `Source`; no broker is deployed. This is also why exactly-once cannot be claimed |
+| Streaming ingestion (Kafka, Kinesis, Debezium runtime) | No broker is deployed. This is also why exactly-once cannot be claimed |
+| CDC (Change Data Capture), including a CSV-delivered change feed — event model, ordering barrier, delivery-semantics documentation, and its test coverage | *(DoD 44, 45, 46, 87)*. No upstream system produces a change feed yet, and SCD 0/1/2 (Phase 10) build entirely from CSV batches without one — dropped 2026-08-21 rather than built for a format with no real producer. The `Source`/`Publisher` seam (Phase 3 ADR) still admits a CDC `Source` later without redesign |
 | Real production datasets or PII | Corpus is synthetic by construction, so fixtures are committable, reproducible and safe to scan |
 | Docker Compose as a workload platform | Forbidden by README §3.1. May appear only as a developer convenience for isolated unit-test dependencies |
 | ML-based anomaly detection | README §53 mandates simple configurable statistical thresholds first |
@@ -271,7 +263,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 - **Phase 7** — Observability, Metrics, Tracing & Lineage
 - **Phase 8** — Validation, Quarantine & Metadata Control-Plane Completion
 - **Phase 9** — ETL Correctness — Dedup, Incremental, Backfill & Recovery
-- **Phase 10** — CDC & Slowly Changing Dimensions
+- **Phase 10** — Slowly Changing Dimensions
 - **Phase 11** — CI/CD Completion & Operations
 
 | Requirement | Phase | Status |
@@ -367,9 +359,6 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INCR-06 | Phase 9 | Pending |
 | INCR-07 | Phase 11 | Pending |
 | INCR-08 | Phase 4 | Pending |
-| CDC-01 | Phase 10 | Pending |
-| CDC-02 | Phase 10 | Pending |
-| CDC-03 | Phase 10 | Pending |
 | SCD-01 | Phase 10 | Pending |
 | SCD-02 | Phase 10 | Pending |
 | SCD-03 | Phase 10 | Pending |
@@ -404,7 +393,6 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | QUAL-10 | Phase 08.1 | Complete |
 | QUAL-11 | Phase 9 | Pending |
 | QUAL-12 | Phase 6 | Complete |
-| QUAL-13 | Phase 10 | Pending |
 | QUAL-14 | Phase 10 | Pending |
 | QUAL-15 | Phase 11 | Pending |
 | QUAL-16 | Phase 6 | Complete |
@@ -425,7 +413,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 - Mapped to phases: 142 ✓
 - Unmapped: 0 ✓ — no orphans, no duplicates (validated during roadmap creation)
 
-**Per-category counts:** QUAL 17 · SEC 15 · CSV 13 · SCD 12 · LOAD 12 · INFRA 11 · OBS 10 · VALID 9 · ORCH 9 · CICD 9 · INCR 8 · SCHEMA 7 · DEDUP 4 · META 3 · CDC 3
+**Per-category counts:** QUAL 16 · SEC 15 · CSV 13 · SCD 12 · LOAD 12 · INFRA 11 · OBS 10 · VALID 9 · ORCH 9 · CICD 9 · INCR 8 · SCHEMA 7 · DEDUP 4 · META 3
 
 **Per-phase counts:** P1 12 · P2 9 · P3 10 · P4 22 · P5 12 · P6 23 · P7 5 · P8 9 · P9 15 · P10 17 · P11 8 = 142
 

@@ -13,7 +13,7 @@ hashing live *inside* that slice, not after it, because Airflow retries are on b
 phase built on a non-idempotent loader silently duplicates data. From there the platform widens on
 mostly-parallel tracks: Vault behind the `SecretsResolver` seam, the universal CSV engine, the
 observability stack, validation and quarantine, ETL correctness (dedup, watermarks, backfills,
-recovery, reconciliation), then CDC and SCD — the hardest correctness work, deliberately last but
+recovery, reconciliation), then SCD — the hardest correctness work, deliberately last but
 one. It finishes with an ephemeral-kind E2E pipeline proving the whole environment rebuilds from the
 repository, and runbooks written against failure modes that were actually observed.
 
@@ -41,7 +41,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking (completed 2026-08-16)
 - [x] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection (completed 2026-08-17)
 - [x] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation (completed 2026-08-21)
-- [ ] **Phase 10: CDC & Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history, late-arriving corrections by history recomputation, and a CDC `Source` with an ordering barrier
+- [ ] **Phase 10: Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history and late-arriving corrections repaired by history recomputation
 - [ ] **Phase 11: CI/CD Completion & Operations** - Ephemeral kind E2E in CI proving the environment rebuilds from the repo, plus runbooks, retention and rebuild-from-raw
 
 ## Phase Details
@@ -610,33 +610,30 @@ Plans:
 - Intra-file checkpointing is `last_committed_chunk_ordinal` on the batch ledger row — a byproduct of the ledger, not a new mechanism. Byte-offset resume within a file is v2; build it only if a fixture demands it.
 - Backfills use the *same* pipeline with no simplified bypass path — that is a correctness property, not a convenience.
 
-### Phase 10: CDC & Slowly Changing Dimensions
+### Phase 10: Slowly Changing Dimensions
 
-**Goal**: Historical truth is maintained correctly — non-overlapping validity intervals enforced by the database, late corrections repaired by recomputation, and CDC events feeding SCD without a parallel pipeline
+**Goal**: Historical truth is maintained correctly — non-overlapping validity intervals enforced by the database and late corrections repaired by recomputation
 **Mode:** mvp
 **Depends on**: Phase 9
-**Requirements**: SCD-01, SCD-02, SCD-03, SCD-04, SCD-05, SCD-06, SCD-07, SCD-08, SCD-09, SCD-10, SCD-11, SCD-12, CDC-01, CDC-02, CDC-03, QUAL-13, QUAL-14
+**Requirements**: SCD-01, SCD-02, SCD-03, SCD-04, SCD-05, SCD-06, SCD-07, SCD-08, SCD-09, SCD-10, SCD-11, SCD-12, QUAL-14
 **Success Criteria** (what must be TRUE):
 
-  1. A changed tracked attribute produces a new SCD2 version with correct `valid_from` / `valid_to` / `is_current`, while an unchanged re-delivery — or a replayed identical event — produces exactly one logical version and no new row.
+  1. A changed tracked attribute produces a new SCD2 version with correct `valid_from` / `valid_to` / `is_current`, while an unchanged re-delivery — or a replayed identical batch — produces exactly one logical version and no new row.
   2. Attempting to store an overlapping validity interval for a business key is rejected by the **database**, not by application code, and surrogate keys remain independent of the change hash.
-  3. A late-arriving correction dated between two existing versions rebuilds that key's history correctly from the ordered event log, and applying it twice yields the same result.
-  4. A CSV-delivered CDC feed with shuffled sequence numbers is reordered by the ordering barrier and yields the same dimension state as an in-order feed; a DELETE applies the dataset's configured semantics; and the documented delivery semantics claim at-least-once source→platform with no unearned exactly-once claim.
-  5. Effective dates come from source, business or event time as configured and never default to ingestion time — verified on a backfilled batch, where SCD Type 0 retains originals and Type 1 overwrites without history.
+  3. A late-arriving correction dated between two existing versions rebuilds that key's history correctly from the ordered batch history, and applying it twice yields the same result.
+  4. Effective dates come from source, business or event time as configured and never default to ingestion time — verified on a backfilled batch, where SCD Type 0 retains originals and Type 1 overwrites without history, and a business key absent from a full snapshot applies the dataset's configured DELETE semantics (`ignore | invalidate | new_record`).
 
 **Plans**: TBD
 
-**Research stage**: S12. **Use `/gsd-plan-phase --research-phase`** — this is the hardest correctness work in the project (SCD2 late-arriving corrections, CDC ordering, tombstones and resurrection). PITFALLS C7–C9 are dense but the design space is still open.
+**Research stage**: S12. **Use `/gsd-plan-phase --research-phase`** — this is the hardest correctness work in the project (SCD2 late-arriving corrections and idempotent re-application). PITFALLS C7–C9 are dense but the design space is still open.
 
 **Plan guidance**:
 
-- **Wave G: 12a (SCD) ‖ 12b (CDC) → 12c (CDC→SCD).** Publisher work versus Source work; they meet only at the end.
-- **CDC does NOT gate SCD.** SCD Types 0/1/2 build from CSV batches alone; only SCD-08 needs CDC. Do not let CDC block SCD — SUMMARY calls this out explicitly.
-- **Placement is `Source` / `Publisher`, not a new pipeline.** CDC is a `Source` implementation; SCD is a `Publisher`. If they become a parallel pipeline, README §29/§95 extensibility will not hold — which is exactly why the seam was established in Phase 3 and recorded as an ADR.
-- **Cheap-now decisions decided here**: PITFALLS #2 — every SCD2 dimension carries a `btree_gist` exclusion constraint on `(business_key, validity range)` **in its creating migration**. Once overlapping intervals exist the constraint can never be added and every as-of query is silently wrong. PITFALLS #6 — SCD corrections **recompute** a key's history from an ordered event log rather than performing in-place interval surgery; in-place surgery is not idempotent and, with at-least-once CDC, drifts permanently.
+- **CDC is explicitly out of scope for this phase** (see REQUIREMENTS.md Out of Scope) — there is no upstream system producing a change feed yet, and SCD 0/1/2 build entirely from CSV batches without one. The `Source`/`Publisher` seam from Phase 3 still leaves room for a CDC `Source` later without redesign, but nothing in this phase depends on it.
+- **Placement is a `Publisher`, not a new pipeline.** SCD reuses the seam established in Phase 3 and recorded as an ADR — no parallel pipeline.
+- **Cheap-now decisions decided here**: PITFALLS #2 — every SCD2 dimension carries a `btree_gist` exclusion constraint on `(business_key, validity range)` **in its creating migration**. Once overlapping intervals exist the constraint can never be added and every as-of query is silently wrong. PITFALLS #6 — SCD corrections **recompute** a key's history from an ordered batch history rather than performing in-place interval surgery; in-place surgery is not idempotent.
 - Change detection hashes **normalized** content (Phase 6) and every stored hash carries its `hash_version` (Phase 3) — so the recipe can change later without making every dimension appear to change at once.
 - Adopt dbt's SCD2 vocabulary: surrogate key **independent** of the change hash, both `timestamp` and `check` change-detection strategies, `hard_deletes = ignore | invalidate | new_record`, and a `valid_to_current` sentinel rather than NULL.
-- **Reduce ambition deliberately**: define the CDC event model and prove it with a CSV-delivered feed (operation column + sequence + key). Before-images wait until a real source produces one (v2). Exactly-once is a transport property and no broker is deployed — cite Debezium's at-least-once default, but **re-verify it first-hand** (the official docs page 403'd during research).
 
 ### Phase 11: CI/CD Completion & Operations
 
@@ -648,7 +645,7 @@ Plans:
 
   1. A pull request spins up an ephemeral kind cluster in GitHub Actions, deploys the stack from the repository using `values-ci.yaml`, and runs unit, integration and E2E suites green with coverage reported.
   2. Images build and publish tagged by git SHA on every merge, and trivy image and dependency scanning fails the build on a high-severity finding.
-  3. Every README §84 failure scenario — pod crash, PostgreSQL unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, CDC ordering, secret rotation, unauthorized secret access — has a passing test.
+  3. Every README §84 failure scenario — pod crash, PostgreSQL unavailable, MinIO unavailable, Vault unavailable, malformed CSV, invalid encoding, OOM, task timeout, duplicate batch, secret rotation, unauthorized secret access — has a passing test.
   4. The analytical warehouse is dropped and rebuilt from the immutable raw layer plus versioned configuration, and reconciles to its pre-drop state.
   5. Each runbook scenario can be followed by someone who did not build the platform to reach diagnosis, recovery and verification; retention policies prune raw files, processed files, quarantine, validation reports, ingestion metadata and logs independently of processing logic.
 
@@ -667,7 +664,7 @@ Plans:
 
 ## Requirement Coverage
 
-All **142** v1 requirements map to exactly one phase. No orphans, no duplicates.
+All **138** v1 requirements map to exactly one phase. No orphans, no duplicates.
 
 | Phase | Requirements | Count |
 |-------|--------------|-------|
@@ -680,9 +677,9 @@ All **142** v1 requirements map to exactly one phase. No orphans, no duplicates.
 | 7. Observability, Metrics, Tracing & Lineage | OBS-01, OBS-07, OBS-08, OBS-09, OBS-10 | 5 |
 | 8. Validation, Quarantine & Metadata Control-Plane Completion | VALID-01, VALID-02, VALID-03, VALID-04, VALID-07, VALID-08, VALID-09, LOAD-10, LOAD-11 | 9 |
 | 9. ETL Correctness — Dedup, Incremental, Backfill & Recovery | DEDUP-01…DEDUP-04, INCR-01…INCR-06, LOAD-06, VALID-05, VALID-06, QUAL-10, QUAL-11 | 15 |
-| 10. CDC & Slowly Changing Dimensions | SCD-01…SCD-12, CDC-01, CDC-02, CDC-03, QUAL-13, QUAL-14 | 17 |
+| 10. Slowly Changing Dimensions | SCD-01…SCD-12, QUAL-14 | 13 |
 | 11. CI/CD Completion & Operations | CICD-05, CICD-06, CICD-08, CICD-09, QUAL-15, OBS-06, INFRA-11, INCR-07 | 8 |
-| **Total** | | **142** |
+| **Total** | | **138** |
 
 ## Parallelization Map
 
@@ -696,7 +693,7 @@ All **142** v1 requirements map to exactly one phase. No orphans, no duplicates.
 | D | Within Phase 6: filename ‖ encoding ‖ dialect ‖ header/footer ‖ inference | Pure functions over a shared read-only fixture corpus — **the single best parallelization opportunity in the project** | (within C) |
 | E | Within Phase 8: validation ‖ metadata completion | Coordinate only on `meta.validation_results` DDL | ~10% |
 | F | Within Phase 9: dedup+watermarks ‖ reconciliation → backfill → recovery | Backfill needs watermarks | ~15% |
-| G | Within Phase 10: SCD ‖ CDC → CDC→SCD | Publisher work vs. Source work | ~10% |
+| G | Phase 10: SCD | Publisher work over the Phase 3 seam | ~10% |
 | H | Within Phase 11: CI/CD ‖ operations | Independent | ~5% |
 
 **Strictly sequential chains (cannot be parallelized):**
@@ -753,7 +750,7 @@ Eleven of the fifteen are *"make the bad state unrepresentable"* rather than *"r
 | 7. Observability, Metrics, Tracing & Lineage | 0/8 | Planned | - |
 | 8. Validation, Quarantine & Metadata Control-Plane Completion | 0/TBD | Not started | - |
 | 9. ETL Correctness — Dedup, Incremental, Backfill & Recovery | 0/TBD | Not started | - |
-| 10. CDC & Slowly Changing Dimensions | 0/TBD | Not started | - |
+| 10. Slowly Changing Dimensions | 0/TBD | Not started | - |
 | 11. CI/CD Completion & Operations | 0/TBD | Not started | - |
 
 ---
