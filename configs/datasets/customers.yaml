@@ -29,7 +29,7 @@ source:
   change_semantics: snapshot
   duplicate_policy: skip
 load:
-  strategy: merge
+  strategy: scd
   target: normalized.customers
 batching:
   max_units_per_run: 100
