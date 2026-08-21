@@ -171,6 +171,27 @@ seeding, so none of the below was exercised until this plan's own live run):
    `test_backfill_2year_sweep.py` only) — a future live run of that file may surface the same
    symptom finding 3 describes, and should be fixed the same way if so.
 
+4. **`stage` tasks near the tail of a mapped batch (map_index ~20-24) were failing after
+   exhausting retries, consistently, across many live-verification attempts.** Root-caused via
+   direct `task_instance` inspection, confirmed live twice, independently:
+   `tests/e2e/slice/conftest.py::_unpause_slice_dags` (session-scoped, autouse) keeps
+   `csv_ingest_customers` permanently unpaused for the WHOLE `tests/e2e/slice/` session (several
+   OTHER files in that directory genuinely need its live `*/1 * * * *` schedule/sensor running),
+   so this DAG's own regular, non-backfill DagRuns were competing with THIS module's own
+   backfill-created DagRuns for the SAME dag-wide `max_active_tis_per_dag=1` slot on `stage` (and
+   other capped tasks) — a concurrently-scheduled DagRun's own map_index 20/21 `stage` tasks were
+   observed succeeding at the exact moment a backfill's own map_index 20/21 were failing after
+   exhausting retries, both genuinely fighting over the identical global slot. This explains the
+   consistent "near the end of the batch" failure position: the longer a backfill's own tail-end
+   tasks sat queued, the more chances a competing scheduled run had to steal the slot first.
+   Fixed (Rule 1/2, scoped entirely to this file, `conftest.py`'s own session-wide guarantee left
+   untouched): a module-scoped autouse fixture (`_pause_customers_dag_for_backfill_only_tests`)
+   pauses the DAG for this module's 5 backfill-only tests, with
+   `test_live_run_concurrent_with_backfill_same_dataset` — the one test that genuinely needs the
+   live schedule running concurrently, by design — getting its own explicit, self-healing
+   unpause/re-pause fixture (`_live_concurrency_needs_dag_unpaused`). See both fixtures' own
+   docstrings, just above `_latest_backfill_id`, for the full mechanism.
+
 D-06's mass-delete circuit-breaker-trip fixture (Task 3) is a SEPARATE, single-day
 `generate_dated_series("customers", ...)` call — same `master_seed`/`rows_per_day` as
 `sweep_corpus`'s own call (so the roster is byte-identical), `start_date` set to the day
@@ -198,7 +219,7 @@ from tools.corpus.dated_series import (
 
 if TYPE_CHECKING:
     import subprocess
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     import psycopg
 
@@ -475,6 +496,98 @@ def _invoke_backfill_create(  # noqa: PLR0913 -- one keyword per D-11-locked CLI
         f"{last.stdout}\n{last.stderr}"
     )
     return last
+
+
+# ---------------------------------------------------------------------------
+# DAG-pause scoping (plan 10-07, live-tail-failure fix): keep this module's
+# own backfill-only tests from fighting `csv_ingest_customers`' live
+# `*/1 * * * *` schedule for the SAME global `max_active_tis_per_dag=1` slot
+# on `stage`/`dbt_build`/`publish`.
+#
+# Root cause, confirmed live twice this session (independently): a
+# concurrently-scheduled (non-backfill) DagRun's own map_index 20/21 `stage`
+# tasks succeeded at the EXACT moment a backfill's own map_index 20/21 were
+# failing after exhausting retries -- both genuinely fighting over the same
+# single slot. `tests/e2e/slice/conftest.py::_unpause_slice_dags`
+# (session-scoped, autouse) keeps this DAG permanently unpaused for the
+# WHOLE `tests/e2e/slice/` session because several OTHER files in that
+# directory (`test_idempotent_reupload`, both `test_pod_kill_retry` tests,
+# `test_concurrent_select_never_observes_partial_publish`) genuinely need
+# the live schedule/sensor running -- that guarantee is correct for them and
+# is NOT touched here. Of this module's own 6 tests, only
+# `test_live_run_concurrent_with_backfill_same_dataset` needs the live
+# schedule genuinely running concurrently with a backfill (that IS its own
+# D-12/D-13 proof); the other 5 only exercise explicitly-created backfills
+# and get nothing but self-inflicted queueing contention from the live
+# schedule's own regular DagRuns. Pausing the DAG for those 5 removes that
+# contention entirely.
+# ---------------------------------------------------------------------------
+
+
+def _set_customers_dag_paused(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    paused: bool,
+) -> None:
+    """Pause or unpause `csv_ingest_customers` via the same `kubectl exec ... airflow dags ...`
+    shape `tests/e2e/slice/conftest.py::_unpause_slice_dags` already uses (never a second,
+    divergent construction of the same command).
+    """
+    action = "pause" if paused else "unpause"
+    result = _kubectl_airflow(kubectl_fn, "dags", action, _CUSTOMERS_DAG_ID)
+    assert result.returncode == 0, (
+        f"airflow dags {action} {_CUSTOMERS_DAG_ID} failed (exit {result.returncode}):\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _pause_customers_dag_for_backfill_only_tests(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+) -> Iterator[None]:
+    """Pause `csv_ingest_customers` for this module's 5 backfill-only tests.
+
+    Runs once, before the first test in this module (module-scoped, autouse), and unpauses again
+    in a `finally` block so the DAG is left unpaused when this module's fixture teardown runs --
+    self-healing regardless of whether any test in this module passed, failed, or errored --
+    matching `_port_forwarded_analytics`/`_port_forwarded_airflow_db`'s own unconditional-teardown
+    discipline (`tests/e2e/slice/conftest.py`) rather than inventing a new pattern. This restores
+    exactly the guarantee `_unpause_slice_dags` originally promised for the whole
+    `tests/e2e/slice/` session, so whatever runs after this module (or, if pytest ever reorders,
+    a later test in this same file) still sees an unpaused DAG.
+
+    `test_live_run_concurrent_with_backfill_same_dataset` is the one exception: its own
+    `_live_concurrency_needs_dag_unpaused` fixture (below) unpauses for the duration of THAT one
+    test and re-pauses in its own `finally` block afterward, so this module-level pause is back
+    in effect for `test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state`,
+    the test immediately after it in this file's own established in-file collection order.
+    """
+    _set_customers_dag_paused(kubectl, paused=True)
+    try:
+        yield
+    finally:
+        _set_customers_dag_paused(kubectl, paused=False)
+
+
+@pytest.fixture
+def _live_concurrency_needs_dag_unpaused(
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+) -> Iterator[None]:
+    """Unpause `csv_ingest_customers` for `test_live_run_concurrent_with_backfill_same_dataset`.
+
+    The one test in this module whose whole point is proving live-schedule-concurrent backfill
+    correctness (D-12/D-13) -- exactly the behavior
+    `_pause_customers_dag_for_backfill_only_tests` (module-scoped, above) suppresses for every
+    OTHER test in this module. Re-pauses in a `finally` block on teardown, unconditionally, so the
+    module-level invariant (paused) is restored for
+    `test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state` regardless of
+    this test's own outcome.
+    """
+    _set_customers_dag_paused(kubectl, paused=False)
+    try:
+        yield
+    finally:
+        _set_customers_dag_paused(kubectl, paused=True)
 
 
 def _latest_backfill_id(conn: psycopg.Connection[Any], *, dag_id: str) -> int | None:
@@ -1475,6 +1588,7 @@ def test_idempotent_rerun_produces_zero_additional_rows(
     )
 
 
+@pytest.mark.usefixtures("_live_concurrency_needs_dag_unpaused")
 def test_live_run_concurrent_with_backfill_same_dataset(
     sweep_corpus: _Corpus,  # noqa: ARG001 -- ensures the corpus fixture stays alive
     sweep_state: _SweepState,
@@ -1484,10 +1598,12 @@ def test_live_run_concurrent_with_backfill_same_dataset(
 ) -> None:
     """D-12/D-13: a live customers DagRun runs CONCURRENTLY with an active backfill, no corruption.
 
-    `csv_ingest_customers` stays unpaused for this whole module (session-scoped, autouse
-    `_unpause_slice_dags` fixture, `tests/e2e/slice/conftest.py`) and every uploaded file
-    permanently matches its `wait_for_files` sensor, so the DAG's own `*/1 * * * *` live schedule
-    keeps producing ordinary `backfill_id IS NULL` DagRuns throughout this whole module's
+    `csv_ingest_customers` is unpaused for the duration of THIS test only (this module's own
+    `_live_concurrency_needs_dag_unpaused` fixture, applied above via `usefixtures` -- every
+    OTHER test in this module keeps it paused, see
+    `_pause_customers_dag_for_backfill_only_tests`'s own docstring for why) and every uploaded
+    file permanently matches its `wait_for_files` sensor, so the DAG's own `*/1 * * * *` live
+    schedule produces ordinary `backfill_id IS NULL` DagRuns throughout this one test's
     execution -- this test triggers a FRESH backfill window and polls for a live DagRun to be
     'running' at the SAME sampled instant, rather than assuming architecture guarantees it.
     """
