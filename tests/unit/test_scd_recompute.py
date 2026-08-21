@@ -8,9 +8,12 @@ pipeline around it. No database connection, no ``ctx``, no I/O.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 from datetime import UTC, datetime
+from pathlib import Path
 
+import dataplat.scd.recompute as _recompute_module
 from dataplat.scd.recompute import BronzeRecord, VersionRow, recompute_version_chain
 
 _SENTINEL = datetime(9999, 12, 31, tzinfo=UTC)
@@ -167,7 +170,7 @@ def test_type0_carries_earliest_value_on_every_version_and_ignores_later_rows() 
 
 
 def test_identical_event_ts_tie_break_by_source_row_number() -> None:
-    """Two rows sharing the exact same event_ts, different source_row_number -- no raise, no drop."""
+    """Two rows sharing the exact same event_ts, different source_row_number -- no raise/drop."""
     tied_ts = _ts(1)
     history = [
         BronzeRecord(
@@ -232,14 +235,14 @@ def test_null_safety_none_to_value_is_a_version_boundary() -> None:
 
 
 def test_version_row_has_no_surrogate_id_field() -> None:
-    """VersionRow carries NO surrogate/identity value -- assigned later by the DB Identity column."""
+    """VersionRow carries NO surrogate/identity value -- assigned later by the DB Identity col."""
     field_names = {f.name for f in dataclasses.fields(VersionRow)}
 
     assert "id" not in field_names
 
 
 def test_schema_evolution_on_untracked_column_never_triggers_a_new_version() -> None:
-    """BronzeRecord has no slot for an untracked column -- schema evolution can't spuriously version.
+    """BronzeRecord has no slot for an untracked column -- schema evolution can't add a version.
 
     Simulated by proving that two histories differing ONLY in an
     out-of-band property this function's BronzeRecord type doesn't even
@@ -281,14 +284,9 @@ def test_schema_evolution_on_untracked_column_never_triggers_a_new_version() -> 
 
 def test_recompute_module_has_no_db_or_io_imports() -> None:
     """Structural guard: recompute.py performs no I/O (no psycopg/Connection import)."""
-    import ast
-
-    import dataplat.scd.recompute as recompute_module
-
-    source = recompute_module.__file__
+    source = _recompute_module.__file__
     assert source is not None
-    with open(source, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read(), filename=source)
+    tree = ast.parse(Path(source).read_text(encoding="utf-8"), filename=source)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

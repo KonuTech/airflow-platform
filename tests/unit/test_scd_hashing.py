@@ -11,12 +11,15 @@ pipeline) -- this function must never re-normalize, only hash.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import unicodedata
+from pathlib import Path
 
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
+import dataplat.scd.hashing as _hashing_module
 from dataplat.scd.hashing import tracked_attribute_hash
 
 
@@ -118,14 +121,9 @@ def test_never_imports_or_calls_unicodedata_normalize() -> None:
     WHY the module doesn't do this (this docstring itself legitimately
     discusses the topic).
     """
-    import ast
-
-    import dataplat.scd.hashing as hashing_module
-
-    source = hashing_module.__file__
+    source = _hashing_module.__file__
     assert source is not None
-    with open(source, encoding="utf-8") as fh:
-        tree = ast.parse(fh.read(), filename=source)
+    tree = ast.parse(Path(source).read_text(encoding="utf-8"), filename=source)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

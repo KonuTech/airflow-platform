@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 
 
-def tracked_attribute_hash(*values: str | None, hash_version: int = 1) -> bytes:
+def tracked_attribute_hash(*values: str | None, hash_version: int = 1) -> bytes:  # noqa: ARG001
     """Deterministic SHA-256 digest over normalized, pipe-joined tracked values.
 
     Args:
