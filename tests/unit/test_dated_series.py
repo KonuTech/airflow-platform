@@ -275,3 +275,190 @@ def test_orders_generation_untouched_by_roster_redesign() -> None:
     day0_filename = manifest_a.filenames[0]
     row0 = _data_rows(files_a, day0_filename)[0]
     assert row0[0] == "2110000000"  # _ORDER_ID_BASE + 0*_ID_DAY_MULTIPLIER + 0
+
+
+# --------------------------------------------------------------------------
+# Task 2: D-11 anomaly injectors -- attribute change, late correction,
+# missing customer
+# --------------------------------------------------------------------------
+
+
+def test_attribute_change_applies_from_day_index_onward() -> None:
+    """Test 1: member M's name/country change starting at attribute_change_day_index."""
+    member_index = 30  # >= 30, never collides with orders' fixture pool
+    files, manifest = generate_dated_series(
+        "customers",
+        **_ROSTER_KWARGS,  # type: ignore[arg-type]
+        attribute_change_day_index=5,
+        attribute_change_member_index=member_index,
+    )
+
+    assert manifest.attribute_change_day_index == 5
+    assert manifest.attribute_change_member_index == member_index
+
+    baseline_name = baseline_country = None
+    changed_name = changed_country = None
+    for day_index, filename in enumerate(manifest.filenames):
+        rows = _data_rows(files, filename)
+        target_row = rows[member_index]
+        other_row = rows[member_index - 1]
+        if day_index < 5:
+            if baseline_name is None:
+                baseline_name, baseline_country = target_row[1], target_row[2]
+            assert target_row[1] == baseline_name
+            assert target_row[2] == baseline_country
+        else:
+            if changed_name is None:
+                changed_name, changed_country = target_row[1], target_row[2]
+            assert target_row[1] == changed_name
+            assert target_row[2] == changed_country
+        # Every other roster member is unaffected on every day.
+        assert other_row[1]
+        assert other_row[2]
+
+    assert baseline_name != changed_name or baseline_country != changed_country
+
+
+def test_late_correction_adds_an_extra_backdated_row() -> None:
+    """Test 2: member M2 gets an EXTRA row on arrival day A with a distinct backdated value."""
+    member_index = 31
+    offset_days = 20
+    files, manifest = generate_dated_series(
+        "customers",
+        **_ROSTER_KWARGS,  # type: ignore[arg-type]
+        late_correction_arrival_day_index=6,
+        late_correction_member_index=member_index,
+        late_correction_offset_days=offset_days,
+    )
+
+    assert manifest.late_correction_arrival_day_index == 6
+    assert manifest.late_correction_member_index == member_index
+
+    arrival_filename = manifest.filenames[6]
+    rows = _data_rows(files, arrival_filename)
+    assert len(rows) == 51  # 50 roster rows + 1 extra correction row
+
+    normal_row = rows[member_index]
+    correction_row = rows[-1]
+    assert correction_row[0] == normal_row[0]  # same customer_id
+    assert correction_row[1] != normal_row[1] or correction_row[2] != normal_row[2]
+
+    arrival_day = _START + timedelta(days=6)
+    expected_late_date = (arrival_day - timedelta(days=offset_days)).strftime("%Y-%m-%d")
+    assert correction_row[4].startswith(expected_late_date)
+    assert normal_row[4].startswith(arrival_day.strftime("%Y-%m-%d"))
+
+    for day_index, filename in enumerate(manifest.filenames):
+        if day_index == 6:
+            continue
+        rows = _data_rows(files, filename)
+        assert len(rows) == 50
+        day = _START + timedelta(days=day_index)
+        assert rows[member_index][4].startswith(day.strftime("%Y-%m-%d"))
+
+
+def test_missing_customer_absent_on_one_day_only() -> None:
+    """Test 3: member M3 absent from day G2's file, present with baseline value elsewhere."""
+    member_index = 32
+    files, manifest = generate_dated_series(
+        "customers",
+        **_ROSTER_KWARGS,  # type: ignore[arg-type]
+        missing_customer_day_index=7,
+        missing_customer_member_index=member_index,
+    )
+
+    assert manifest.missing_customer_day_index == 7
+    assert manifest.missing_customer_member_index == member_index
+
+    target_customer_id = str(_CUSTOMER_ID_BASE + member_index)
+
+    gap_filename = manifest.filenames[7]
+    gap_rows = _data_rows(files, gap_filename)
+    assert len(gap_rows) == 49
+    assert target_customer_id not in {row[0] for row in gap_rows}
+
+    next_filename = manifest.filenames[8]
+    next_rows = _data_rows(files, next_filename)
+    assert len(next_rows) == 50
+    assert target_customer_id in {row[0] for row in next_rows}
+
+
+def test_anomaly_member_indices_never_collide_with_orders_pool() -> None:
+    """Test 4: every example member index used above is 30 or greater."""
+    for member_index in (30, 31, 32):
+        assert member_index >= 30
+
+
+def test_manifest_records_none_when_anomaly_parameters_unset() -> None:
+    """Test 5: manifest completeness -- None for every anomaly field when unset."""
+    _, manifest = generate_dated_series("customers", **_ROSTER_KWARGS)  # type: ignore[arg-type]
+
+    assert manifest.attribute_change_day_index is None
+    assert manifest.attribute_change_member_index is None
+    assert manifest.late_correction_arrival_day_index is None
+    assert manifest.late_correction_member_index is None
+    assert manifest.missing_customer_day_index is None
+    assert manifest.missing_customer_member_index is None
+
+
+def test_manifest_records_anomaly_parameters_when_set() -> None:
+    """Test 5 (continued): manifest records the actual supplied anomaly values."""
+    _, manifest = generate_dated_series(
+        "customers",
+        **_ROSTER_KWARGS,  # type: ignore[arg-type]
+        attribute_change_day_index=5,
+        attribute_change_member_index=30,
+        late_correction_arrival_day_index=6,
+        late_correction_member_index=31,
+        missing_customer_day_index=7,
+        missing_customer_member_index=32,
+    )
+
+    assert manifest.attribute_change_day_index == 5
+    assert manifest.attribute_change_member_index == 30
+    assert manifest.late_correction_arrival_day_index == 6
+    assert manifest.late_correction_member_index == 31
+    assert manifest.missing_customer_day_index == 7
+    assert manifest.missing_customer_member_index == 32
+
+
+def test_new_anomaly_params_raise_for_orders_dataset() -> None:
+    """Setting any new customers-only parameter while dataset == 'orders' raises ValueError."""
+    orders_kwargs: dict[str, object] = {
+        "master_seed": "x",
+        "start_date": _START,
+        "num_days": 10,
+        "gap_day_index": -1,
+        "schema_change_day_index": 999,
+        "late_event_day_index": 999,
+    }
+    with pytest.raises(ValueError, match="only meaningful for dataset='customers'"):
+        generate_dated_series(
+            "orders",
+            **orders_kwargs,  # type: ignore[arg-type]
+            attribute_change_day_index=5,
+            attribute_change_member_index=0,
+        )
+
+
+def test_colliding_anomaly_day_member_pair_raises() -> None:
+    """Two anomalies targeting the identical (day, member) pair raise ValueError."""
+    with pytest.raises(ValueError, match="ambiguous anomaly collision"):
+        generate_dated_series(
+            "customers",
+            **_ROSTER_KWARGS,  # type: ignore[arg-type]
+            attribute_change_day_index=5,
+            attribute_change_member_index=30,
+            missing_customer_day_index=5,
+            missing_customer_member_index=30,
+        )
+
+
+def test_paired_anomaly_params_raise_when_only_one_is_set() -> None:
+    """Supplying only one half of an anomaly pair raises ValueError."""
+    with pytest.raises(ValueError, match="must be supplied together"):
+        generate_dated_series(
+            "customers",
+            **_ROSTER_KWARGS,  # type: ignore[arg-type]
+            attribute_change_day_index=5,
+        )
