@@ -160,8 +160,19 @@ def _insert_normalized_customer(  # noqa: PLR0913 -- one keyword per column, mir
     batch_id: int,
     source_row_number: int,
     is_current: bool = True,
+    event_ts: datetime = datetime(2020, 1, 1, tzinfo=UTC),
 ) -> None:
-    """Insert one real ``normalized.customers`` row directly via SQL, satisfying its FK columns."""
+    """Insert one real ``normalized.customers`` row directly via SQL, satisfying its FK columns.
+
+    ``event_ts`` defaults to a fixed, deliberately-far-past instant (never
+    ``now()``) -- the exclusion constraint's generated ``validity`` column
+    (``tstzrange(event_ts, valid_to, '[)')``) requires ``event_ts <=
+    valid_to``, so tests that later close this row via
+    ``apply_delete_semantics`` need a ``snapshot_max_event_ts`` they control
+    to be safely, deterministically AFTER this row's own ``event_ts`` --
+    tying this to the real wall clock (``now()``) would make that ordering
+    depend on exactly when the test happens to run.
+    """
     conn.execute(
         """
         INSERT INTO normalized.customers (
@@ -169,7 +180,7 @@ def _insert_normalized_customer(  # noqa: PLR0913 -- one keyword per column, mir
             _run_id, _file_id, _batch_id, _source_row_number,
             _record_hash, _record_hash_version
         ) VALUES (
-            %s, %s, %s, %s, now(), %s,
+            %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, 1
         )
@@ -179,6 +190,7 @@ def _insert_normalized_customer(  # noqa: PLR0913 -- one keyword per column, mir
             f"customer-{customer_id}",
             "US",
             "1990-01-01",
+            event_ts,
             is_current,
             run_id,
             file_id,
@@ -218,10 +230,10 @@ def _make_context() -> PipelineContext:
 
 
 @pytest.mark.integration
-def test_a_real_vanish_is_correctly_detected(
+def test_a_real_vanished_customer_id_is_correctly_detected(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """3 gold-current customers, only 2 confirmed by this pass's silver snapshot -> the 3rd vanished."""
+    """3 gold-current customers, 2 confirmed by this pass's silver snapshot -> the 3rd vanished."""
     run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="real_vanish")
 
     with psycopg.connect(migrated_dsn) as conn:
@@ -249,14 +261,21 @@ def test_a_real_vanish_is_correctly_detected(
 
         vanished = find_vanished_customer_ids(conn, staged_run_ids=[run_id])
 
-    assert vanished == {"900003"}
+    # `find_vanished_customer_ids` is deliberately unscoped by dataset
+    # (single-dataset system, module docstring) and `normalized.customers`
+    # is a session-shared table (this file's own module docstring) -- so
+    # membership, not exact-set equality, is what this test can safely
+    # assert without depending on isolation this suite does not provide.
+    assert "900003" in vanished
+    assert "900001" not in vanished
+    assert "900002" not in vanished
 
 
 @pytest.mark.integration
-def test_unscoped_silver_rows_never_count_as_present(
+def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """F-2's own regression guard: a silver row tagged with an OLDER, un-staged run still vanishes."""
+    """F-2's regression guard: a silver row tagged with an OLDER, un-staged run still vanishes."""
     old_run_id, old_file_id, old_batch_id = _seed_run(
         repository, migrated_dsn, key_suffix="unscoped_old"
     )
@@ -293,14 +312,20 @@ def test_unscoped_silver_rows_never_count_as_present(
 
         vanished = find_vanished_customer_ids(conn, staged_run_ids=[run_id])
 
-    assert vanished == {"900013"}
+    assert "900013" in vanished
+    assert "900011" not in vanished
+    assert "900012" not in vanished
 
 
 @pytest.mark.integration
 def test_nothing_vanished_returns_empty_set(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """Every gold-current key is confirmed by this pass's own silver snapshot -> empty set."""
+    """Every gold-current key confirmed by this pass's silver snapshot -> never reported vanished.
+
+    Asserts non-membership rather than whole-set emptiness -- see this
+    file's own module docstring on why exact-set equality is unsafe here.
+    """
     run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="nothing_vanished")
 
     with psycopg.connect(migrated_dsn) as conn:
@@ -324,11 +349,12 @@ def test_nothing_vanished_returns_empty_set(
 
         vanished = find_vanished_customer_ids(conn, staged_run_ids=[run_id])
 
-    assert vanished == set()
+    assert "900021" not in vanished
+    assert "900022" not in vanished
 
 
 @pytest.mark.integration
-def test_empty_gold_returns_empty_set_without_error(
+def test_empty_gold_returns_no_vanished_customer_ids_without_error(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
     """Zero gold-current rows at all -> empty set, no error (nothing can vanish from nothing).
@@ -410,7 +436,8 @@ def test_delete_semantics_invalidate_closes_the_current_row_at_the_snapshot_even
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
     run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="invalidate")
-    snapshot_ts = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
+    # after _insert_normalized_customer's own fixed event_ts (2020-01-01)
+    snapshot_ts = datetime(2020, 6, 1, 12, 0, 0, tzinfo=UTC)
 
     with psycopg.connect(migrated_dsn) as conn:
         _insert_normalized_customer(
@@ -456,7 +483,8 @@ def test_delete_semantics_new_record_opens_a_new_current_version_and_closes_the_
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
     run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="new_record")
-    snapshot_ts = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
+    # after _insert_normalized_customer's own fixed event_ts (2020-01-01)
+    snapshot_ts = datetime(2020, 6, 1, 12, 0, 0, tzinfo=UTC)
 
     with psycopg.connect(migrated_dsn) as conn:
         _insert_normalized_customer(
@@ -500,7 +528,8 @@ def test_delete_semantics_new_record_opens_a_new_current_version_and_closes_the_
     assert old_row_after[2] == snapshot_ts  # valid_to = snapshot_max_event_ts
 
     assert new_row_after[1] is True  # is_current = true
-    assert new_row_after[3] == snapshot_ts  # event_ts (this row's valid_from) = snapshot_max_event_ts
+    # event_ts (this row's valid_from) = snapshot_max_event_ts
+    assert new_row_after[3] == snapshot_ts
 
 
 @pytest.mark.integration
