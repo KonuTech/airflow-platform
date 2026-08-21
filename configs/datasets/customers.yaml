@@ -80,6 +80,16 @@ quality:
       column: customer_id
   rejection_rate_threshold: 0.5
 
+# scd: is D-05/D-06's SCD2 DELETE-semantics and mass-delete circuit-breaker
+# declaration (Phase 10, 10-CONTEXT.md). delete_semantics: invalidate means
+# a customer_id present historically but absent from this pass's snapshot
+# has its current version closed out, with no new version opened.
+# mass_delete_threshold: 0.10 reuses Phase 8's 10% starting reference value
+# as a first-pass, tunable circuit-breaker threshold.
+scd:
+  delete_semantics: invalidate
+  mass_delete_threshold: 0.10
+
 # columns: is D-18's source of truth for per-column type/nullable/required/
 # business_key/semantics, cross-validated against deduplication.keys above
 # (customer_id here is business_key: true, matching keys: [customer_id]).
@@ -91,6 +101,12 @@ quality:
 # deliberately absent from this file: customers has no filename-mask
 # delivery shape (D-10) and no numeric/currency columns needing a locale
 # profile (D-12's consequence) -- not an oversight.
+#
+# signup_country (D-13) is a new Type-0 dimension column: accepted from the
+# first bronze row seen for a customer_id and ignored on every later row --
+# required: false since files delivered before this column existed never
+# carried it, and D-13's own semantics is "accept on first insert, ignore
+# later," not "reject files missing it."
 columns:
   - name: customer_id
     type: string
@@ -102,17 +118,26 @@ columns:
     type: string
     nullable: false
     required: true
+    scd_type: type_2
   - name: country
     type: string
     nullable: false
     required: true
+    scd_type: type_2
   - name: birth_date
     type: date
     nullable: true
     required: true
     format: "%Y-%m-%d"
+    scd_type: type_1
   - name: event_ts
     type: timestamp
     nullable: false
     required: true
     format: "%Y-%m-%dT%H:%M:%S%z"
+  - name: signup_country
+    type: string
+    nullable: true
+    required: false
+    scd_type: type_0
+    description: "Country the customer originally signed up from (SCD Type 0, D-13)"

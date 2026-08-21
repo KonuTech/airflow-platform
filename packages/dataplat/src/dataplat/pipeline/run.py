@@ -1027,6 +1027,13 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
     # function exactly one read, never an advisory lock or a publish
     # statement.
     staged = ctx.metadata.list_staged_run_ids(dataset_id=dataset_id)
+    # Computed here, immediately after `staged` is first assigned (Phase 10,
+    # 10-01-PLAN.md Task 3): this is the exact list of run_ids this publish
+    # pass is finalizing, needed by `publisher.publish()` BEFORE any
+    # Publisher whose DELETE-detection/recompute logic must be scoped to
+    # "this pass's own files" runs (Finding F-2) -- reused unchanged at its
+    # original call sites below (record_watermark, the finalize loop).
+    staged_run_ids = [run_id for run_id, _, _, _ in staged]
     if not staged:
         duration_ms = int((time.monotonic() - start) * 1000)
         log.info("publish_ingest.no_op", dataset=ctx.config.dataset)
@@ -1071,7 +1078,9 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
             # plan (a per-run scratch table, then; the dbt-consolidated
             # silver table, now).
             source_table = f"silver.{ctx.config.dataset}"
-            result = publisher.publish(ctx, source_table, conn)
+            result = publisher.publish(
+                ctx, source_table, conn, staged_run_ids=staged_run_ids
+            )
 
             # D-01/D-02/D-04: advance this dataset's observational watermark
             # inside the SAME transaction as the merge upsert above -- never
@@ -1081,7 +1090,6 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
             # `>`" rule structurally; `meta.watermark_history` is appended
             # unconditionally either way (D-04).
             watermark_column = _watermark_column_for_dataset(ctx.config.dataset)
-            staged_run_ids = [run_id for run_id, _, _, _ in staged]
             ctx.metadata.record_watermark(
                 conn=conn,
                 dataset_id=dataset_id,

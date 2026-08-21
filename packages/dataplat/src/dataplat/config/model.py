@@ -45,6 +45,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # stated purpose one paragraph above.
 _COLUMN_TYPES = Literal["string", "integer", "decimal", "date", "timestamp", "boolean"]
 
+# ColumnContract.scd_type's closed set (Phase 10, D-02/D-05/D-06). Same
+# reasoning as _COLUMN_TYPES above: no Python dispatch registry exists for
+# this field, only the SCD Publisher's own hardcoded type_0/type_1/type_2
+# handling, so a closed Literal turns a typo into a validation-time error
+# instead of a column silently receiving no SCD treatment at all.
+_SCD_TYPES = Literal["type_0", "type_1", "type_2"]
+
 
 class SourceConfig(BaseModel):
     r"""Where a dataset's source files live and how change is signaled.
@@ -223,6 +230,20 @@ class ColumnContract(BaseModel):
             column rendered in scientific notation (e.g. a spreadsheet
             re-export of a long numeric ID) must be rejected as
             unrecoverable rather than silently accepted (corpus fixture 50).
+        scd_type: How the SCD Publisher (Phase 10) treats this column's
+            value across a business key's version history. ``None`` (the
+            default) for a column that is the business key itself, the
+            effective-date source, or otherwise not SCD-tracked at all —
+            ``customer_id`` and ``event_ts`` both stay ``None``. One of:
+
+            - ``"type_0"``: the value from the earliest bronze row for this
+              business key is kept forever; any later incoming value is
+              silently ignored (SCD-01).
+            - ``"type_1"``: the value from the latest bronze row for this
+              business key overwrites every version row, no history kept
+              (SCD-02).
+            - ``"type_2"``: a normalized-hash-detected change starts a new
+              validity-scoped version (SCD-03/SCD-05).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -236,6 +257,7 @@ class ColumnContract(BaseModel):
     format: str | None = None
     fixed_width: int | None = None
     reject_scientific_notation: bool = False
+    scd_type: _SCD_TYPES | None = None
 
 
 class FilenameMaskConfig(BaseModel):
@@ -488,6 +510,37 @@ class QualityConfig(BaseModel):
     rejection_rate_threshold: float | None = None
 
 
+class ScdConfig(BaseModel):
+    """A dataset's opt-in SCD2 DELETE-semantics and mass-delete circuit-breaker declaration.
+
+    Absent entirely when a dataset is not SCD-tracked -- mirrors
+    ``ReconciliationConfig``/``FreshnessConfig``/``QualityConfig``'s own
+    opt-in precedent. ``customers.yaml`` populates this for real (D-05/D-06,
+    10-CONTEXT.md); the SCD Publisher's DELETE-detection snapshot diff and
+    mass-delete circuit breaker are its two consumers.
+
+    Attributes:
+        delete_semantics: How the SCD Publisher treats a business key that
+            is present historically but absent from this pass's snapshot --
+            one of ``"ignore"`` (do nothing), ``"invalidate"`` (close out
+            the current version, no new version opened), ``"new_record"``
+            (SCD-08's closed vocabulary). A real ``Literal``, not the
+            plain-``str``-resolved-through-a-registry convention used
+            elsewhere in this module -- no Python dispatch registry exists
+            for this field, matching ``ColumnContract.type``'s own
+            precedent for the same reason.
+        mass_delete_threshold: The fraction of previously-current business
+            keys that may vanish from a single pass before the circuit
+            breaker trips and fails the run (D-06), e.g. ``0.10`` for 10% --
+            same shape as ``QualityConfig.rejection_rate_threshold``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    delete_semantics: Literal["ignore", "invalidate", "new_record"]
+    mass_delete_threshold: float
+
+
 class DatasetConfig(BaseModel):
     """The complete, validated configuration for one dataset.
 
@@ -530,6 +583,10 @@ class DatasetConfig(BaseModel):
             declaration (D-25, VALID-05), or ``None`` when this dataset has
             no natural numeric column to sum — ``orders.yaml`` declares
             ``sum_columns: [amount]``; ``customers.yaml`` declares none.
+        scd: The dataset's opt-in SCD2 DELETE-semantics and mass-delete
+            circuit-breaker declaration (D-05/D-06, 10-CONTEXT.md), or
+            ``None`` when this dataset is not SCD-tracked —
+            ``customers.yaml`` populates this for real.
         csv: Structural CSV-parsing overrides. Defaults to "detect
             everything" (``CsvParsingConfig``'s own field defaults).
         schema_evolution_on_new_column: Policy applied when a file
@@ -556,6 +613,7 @@ class DatasetConfig(BaseModel):
     freshness: FreshnessConfig | None = None
     quality: QualityConfig | None = None
     reconciliation: ReconciliationConfig | None = None
+    scd: ScdConfig | None = None
     csv: CsvParsingConfig = Field(default_factory=CsvParsingConfig)
     schema_evolution_on_new_column: str = "evolve"
     schema_evolution_on_missing_or_retyped_column: str = "freeze"
