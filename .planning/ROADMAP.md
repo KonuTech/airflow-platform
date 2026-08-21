@@ -40,7 +40,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Universal CSV Engine, Schema Contracts & Normalization** - Real-world messy CSVs parse correctly: encoding, dialect, header/footer, inference, contracts, versioning and locale-aware normalization (completed 2026-08-15)
 - [x] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking (completed 2026-08-16)
 - [x] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection (completed 2026-08-17)
-- [ ] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation
+- [x] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation (completed 2026-08-21)
 - [ ] **Phase 10: CDC & Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history, late-arriving corrections by history recomputation, and a CDC `Source` with an ordering barrier
 - [ ] **Phase 11: CI/CD Completion & Operations** - Ephemeral kind E2E in CI proving the environment rebuilds from the repo, plus runbooks, retention and rebuild-from-raw
 
@@ -596,7 +596,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 09-11-PLAN.md — Live 2-year backfill sweep: sizing, full sweep, idempotency, concurrency (D-05, D-07, D-08, D-09..D-13, D-27)
+- [x] 09-11-PLAN.md — Live 2-year backfill sweep: sizing, full sweep, idempotency, concurrency (D-05, D-07, D-08, D-09..D-13, D-27)
 
 **Research stage**: S10. **Use `/gsd-plan-phase --research-phase` for the recovery/checkpoint/lease work (10c)** — the interaction of checkpointing × transactions × concurrency (README §38 × §35 × §37 × §86/§87) is the least-settled area of ARCHITECTURE.
 
