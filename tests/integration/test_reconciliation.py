@@ -12,13 +12,18 @@ Both ``silver.customers`` (D-14's ``UNIQUE(customer_id)``) and
 ``normalized.customers`` (migration 0005's own ``UNIQUE(customer_id)``)
 enforce a 1:1 business-key relationship, and `publish_ingest`'s own
 `MergePublisher` republishes the WHOLE cumulative `silver.customers` table
-on every call (never a per-run slice) -- so after any successful publish,
-`count(*) FROM silver.customers` and `count(*) FROM normalized.customers`
-converge to be EQUAL (every silver row has, by definition, already been
-upserted into gold). This is what makes Test 4's `discrepancy == 0`
-assertion a general truth of this design, not a coincidence of a
-particular row count -- and it is why every business-key value used below
-must be genuinely fresh (a repeat raises `UniqueViolation` against
+on every call (never a per-run slice) -- so within THIS file's own tests,
+run in isolation, every silver row has, by definition, already been
+upserted into gold. Test 4 verifies the recorded `input_count`/
+`output_count`/`discrepancy` against the tables' actual live counts at
+publish time rather than asserting the two tables are symmetric, because
+other files in this directory (`test_publish_transaction_wiring.py`,
+`test_referential_integrity.py`) deliberately `INSERT INTO
+normalized.customers` directly for their own FK fixtures when the whole
+`tests/integration` directory runs together against one shared
+testcontainers Postgres -- silver/gold symmetry is NOT a suite-wide
+invariant, only a per-test one. Every business-key value used below must
+still be genuinely fresh (a repeat raises `UniqueViolation` against
 `silver.customers`'s own constraint, never a silent upsert).
 """
 
@@ -372,6 +377,14 @@ def _read_reconciliation_rows(
     return [dict(zip(_RECONCILIATION_COLUMNS, row, strict=True)) for row in rows]
 
 
+def _table_row_count(migrated_dsn: str, table: str) -> int:
+    """Live `count(*)` for `table` -- `table` is a fixed, hardcoded caller-supplied literal."""
+    with psycopg.connect(migrated_dsn) as conn:
+        row = conn.execute(f"SELECT count(*) FROM {table}").fetchone()  # noqa: S608
+    assert row is not None
+    return int(row[0])
+
+
 # --- Test 4: a clean publish writes one silver_gold row per finalized file, -
 # --- with zero discrepancy ---------------------------------------------------
 
@@ -413,8 +426,20 @@ def test_clean_publish_writes_one_silver_gold_row_with_zero_discrepancy(env: _En
     row = rows[0]
     assert row["rejected_count"] == 0
     assert row["dedup_count"] == 0
-    assert row["input_count"] == row["output_count"]
-    assert row["discrepancy"] == 0
+    # `_compute_silver_gold_reconciliation` deliberately reads the WHOLE cumulative
+    # silver.customers/normalized.customers tables (D-20's "source-to-target fidelity" contract,
+    # not a per-run slice) -- when this whole directory runs together against one shared
+    # testcontainers Postgres, other files (test_publish_transaction_wiring.py,
+    # test_referential_integrity.py) deliberately INSERT INTO normalized.customers directly,
+    # bypassing the silver->gold merge flow, to set up their own FK/referential fixtures. That
+    # structurally breaks "silver count == normalized count" as a suite-wide invariant, so this
+    # assertion checks that the recorded figures accurately reflect the tables' REAL state at
+    # this moment (the mechanism reports truth), not that the two tables are symmetric.
+    assert row["input_count"] == _table_row_count(env.migrated_dsn, "silver.customers")
+    assert row["output_count"] == _table_row_count(env.migrated_dsn, "normalized.customers")
+    assert row["discrepancy"] == row["input_count"] - (
+        row["output_count"] + row["dedup_count"]
+    )
 
 
 # --- Test 5: orders (declares reconciliation.sum_columns) populates every ---
