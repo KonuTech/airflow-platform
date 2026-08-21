@@ -837,9 +837,13 @@ def test_pilot_window_drains_without_cpu_starvation(  # noqa: PLR0913, PLR0917 -
 ) -> None:
     """A short, real backfill pilot: no FailedScheduling starvation, at least one file processed.
 
-    D-12's "try, then degrade": starts at `--max-active-runs 3`; if the live cluster shows a NEW
-    or recurring `FailedScheduling: Insufficient cpu` event in the `etl` namespace during the
-    pilot, `sweep_state.max_active_runs` degrades to `1` for Task 2/3 to reuse.
+    D-12's "try, then degrade": `sweep_state.max_active_runs` defaults to `1` (hardcoded, see
+    that dataclass field's own comment -- this cluster showed CPU starvation at
+    `max_active_runs=3` in every observed run across Phase 9/10 sessions, so re-deriving the
+    same conclusion via a live `3 -> 1` degrade on every fresh invocation was deliberately
+    dropped). This test's own degrade branch below is dead code for `max_active_runs` itself
+    under that hardcoded default, but is kept as a live, still-meaningful assertion that no NEW
+    `FailedScheduling` event appears during the pilot at the already-degraded value.
     """
     before = _failed_scheduling_event_snapshot(kubectl_json)
 
@@ -855,12 +859,24 @@ def test_pilot_window_drains_without_cpu_starvation(  # noqa: PLR0913, PLR0917 -
 
     # Poll for at least one customers file to have a real, terminal ingestion_runs row --
     # "confirm at least one file was discovered/staged" (Task 1's own acceptance criteria).
+    # Sizing (plan 10-07, live re-tuning): 600s (10 min) was too tight -- live-observed this
+    # session (via direct task_instance inspection, not guessed): the `raw` bucket's own
+    # `customers/` prefix currently holds MORE files than just this corpus's own ~19 real days
+    # (25 mapped `integrity_gate`/`stage` instances observed for a single DagRun -- historical
+    # accumulation across this phase's earlier live-sweep sessions, v1/v2/v3 seeds, since this
+    # shared bucket prefix is never cleaned between sessions; `discover` re-lists the WHOLE
+    # prefix every tick regardless), and `integrity_gate` (3 concurrent) + `stage` (fully
+    # serial, max_active_tis_per_dag=1, ~20-25s/instance observed) together already take
+    # ~13-15 min BEFORE `dbt_build`/`publish` even start for this ONE file's own DagRun --
+    # 1800s (30 min) matches this file's own already-established "single-dagrun-settle"
+    # precedent value used elsewhere (see e.g. the concurrency test's identical 1800s FailedScheduling-
+    # poll budget) rather than inventing a new number.
     first_filename = sweep_corpus.customers_manifest.filenames[0]
     results = _wait_for_dataset_files_terminal(
         analytics_connection,
         dataset=_CUSTOMERS_DATASET,
         filenames=[first_filename],
-        timeout=600,
+        timeout=1800,
     )
     assert results[first_filename]["status"] == "SUCCEEDED", (
         f"pilot window's own file {first_filename!r} finished "
@@ -868,12 +884,26 @@ def test_pilot_window_drains_without_cpu_starvation(  # noqa: PLR0913, PLR0917 -
     )
 
     # Airflow's own bookkeeping: the backfill itself reached completion.
-    # Observed real cluster throughput: ~5-10 min per 2-tick pilot window under CPU contention.
+    # Sizing (plan 10-07, live re-tuning): the original 900s (~15 min) estimate predates this
+    # corpus growing from 14 to 20 days (more mapped `stage`/`integrity_gate` task instances
+    # funneled through the SAME global max_active_tis_per_dag=1 slot every tick re-lists the
+    # whole bucket for, per this module's own "Window-sizing lesson" docstring) and, live-
+    # observed this session, is ALSO no longer big enough even independent of that: this DAG's
+    # own always-on `schedule="*/1 * * * *"` keeps enqueuing regular (non-backfill) DagRuns that
+    # compete for the identical `stage`/`dbt_build` global slot the whole time this backfill's
+    # own tasks are trying to run, since Airflow's `max_active_tis_per_dag` limit is shared
+    # across EVERY DagRun of a dag_id, backfill-created or not -- not a CPU-starvation problem
+    # (live-checked: `/proc/loadavg` and `docker stats` both showed healthy headroom throughout),
+    # a scheduler-level queuing one. A real backfill (id 42, this exact test, this exact corpus)
+    # was still only 52/78 task instances SUCCEEDED at the 900s mark. 2700s (45 min) matches this
+    # SAME file's own already-established "single-window backfill" sizing precedent (see
+    # test_live_run_concurrent_with_backfill_same_dataset's identical 2700s below) rather than
+    # inventing a new number.
     _wait_for_new_backfill_completed(
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_backfill_id=since_id,
-        timeout=900,
+        timeout=2700,
     )
 
     after = _failed_scheduling_event_snapshot(kubectl_json)
