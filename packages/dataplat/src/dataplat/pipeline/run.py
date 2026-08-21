@@ -584,7 +584,7 @@ def _apply_referential_barrier(
         strategy=rule.strategy,
         rule_id=rule.rule_id,
     )
-    barrier_result = barrier.apply(ctx)
+    barrier_result = barrier.apply(ctx, conn)
 
     for orphan in barrier_result.rejected:
         conn.execute(
@@ -1081,13 +1081,15 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
             # `>`" rule structurally; `meta.watermark_history` is appended
             # unconditionally either way (D-04).
             watermark_column = _watermark_column_for_dataset(ctx.config.dataset)
+            staged_run_ids = [run_id for run_id, _, _, _ in staged]
             ctx.metadata.record_watermark(
                 conn=conn,
                 dataset_id=dataset_id,
                 target_key="default",
                 source_table=source_table,
                 watermark_column=watermark_column,
-                run_id=max(run_id for run_id, _, _, _ in staged),
+                run_id=max(staged_run_ids),
+                run_ids=staged_run_ids,
             )
 
             # D-20/D-21/D-22: this pass's silver->gold reconciliation

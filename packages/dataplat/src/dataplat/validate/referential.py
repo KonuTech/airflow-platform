@@ -27,7 +27,8 @@ though the SELECT list does not.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
 
 from psycopg.rows import dict_row
 
@@ -36,6 +37,8 @@ from dataplat.models.report import ValidationResult
 from dataplat.pipeline.protocol import BarrierStage
 
 if TYPE_CHECKING:
+    from psycopg import Connection
+
     from dataplat.pipeline.protocol import PipelineContext
 
 # The four interpolated fragments below (`staging_table`, `target_table`,
@@ -111,14 +114,22 @@ class ReferentialIntegrityBarrier(BarrierStage):
         self._strategy = strategy
         self._rule_id = rule_id
 
-    def apply(self, ctx: PipelineContext) -> StageResult:
+    def apply(self, ctx: PipelineContext, conn: Connection[Any] | None = None) -> StageResult:
         """Anti-join this run's staged rows against ``target_table``, quarantining every orphan.
 
-        Opens a NEW connection from ``ctx.db`` -- deliberately separate from
-        the run's own staging connection, since a barrier reads live
-        target-table state. The caller decides whether this runs before or
-        after the publish transaction commits, per the wiring plan's own
-        ordering requirements (Pattern 2, 08-11).
+        Reuses ``conn`` when given -- ``stage_ingest``'s own ``staging_conn``
+        (08.1-10's ordering: this now runs BEFORE that connection's implicit
+        transaction ever commits, on the SAME connection ``StagingLoader.load()``
+        already used, per ``_apply_referential_barrier``'s own docstring in
+        ``pipeline/run.py``). The staging table this barrier reads is
+        ``CREATE UNLOGGED TABLE``d but never committed until the caller's own
+        ``with`` block exits, so a genuinely separate connection cannot see it
+        yet -- live-discovered this session as a `psycopg.errors.UndefinedTable`
+        on every run of a dataset with a ``REFERENTIAL`` rule configured (only
+        ``orders``), 100% reproducible, since this method used to always open
+        its own fresh connection (Pattern 2, 08-11's now-superseded ordering).
+        Opens a fresh ``ctx.db.connection()`` only when called with no ``conn``
+        (this test suite's own direct-call shape).
 
         Never raises for a row-level problem (QUAL-03): every orphan
         becomes a ``RejectedRecord`` instead of aborting the run -- this is
@@ -127,6 +138,8 @@ class ReferentialIntegrityBarrier(BarrierStage):
 
         Args:
             ctx: The current pipeline context.
+            conn: The caller's own open connection to reuse, or ``None`` to
+                open a fresh one from ``ctx.db``.
 
         Returns:
             A ``StageResult`` whose ``rejected`` names every orphan row
@@ -134,7 +147,8 @@ class ReferentialIntegrityBarrier(BarrierStage):
             ``findings`` entry records this barrier's own PASS/QUARANTINE
             outcome and counts.
         """
-        with ctx.db.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        conn_cm = nullcontext(conn) if conn is not None else ctx.db.connection()
+        with conn_cm as active_conn, active_conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 _ANTI_JOIN_SQL.format(
                     staging_table=self._staging_table,

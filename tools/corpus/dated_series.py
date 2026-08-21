@@ -89,12 +89,48 @@ _BIRTH_DATES: Final[tuple[str, ...]] = (
     "1976-07-08", "1982-04-30", "1988-12-01", "1994-10-19",
 )  # fmt: skip
 
-# A synthetic customer pool for `orders.customer_id` — this generator does not
-# also emit the matching `customers` series in the same call, so referential
-# integrity against a real customers file is out of scope here (no behavior
-# test in this plan asserts it); plan 09-11 is responsible for uploading
-# datasets whose customer_id values are mutually consistent if it needs that.
-_ORDER_CUSTOMER_IDS: Final[tuple[str, ...]] = tuple(f"CUST-{n:06d}" for n in range(1, 31))
+# Postgres-INTEGER-castable business keys (bugfix, discovered live during
+# plan 09-11 -- this generator's first real exercise against the deployed
+# schema). `normalized.customers.customer_id` and
+# `normalized.orders.{order_id,customer_id}` are all `sa.Integer()`
+# (migrations 0005/0016), cast via `::int` inside `MergePublisher`'s/
+# `OrdersMergePublisher`'s own `_PUBLISH_SQL` (`packages/dataplat/src/
+# dataplat/load/publish/merge.py`/`merge_orders.py`, verified this session).
+# The original alphanumeric business key (`"CUST-000010-0010"`) fails that
+# cast with `invalid input syntax for type integer`, aborting the WHOLE
+# publish transaction for the run (WR-04's documented "one bad value blocks
+# the whole publish" limitation) -- every dataset config still declares
+# these columns `type: string` (contract-level; only the FINAL gold-layer
+# INSERT casts), so a plain decimal-digit string satisfies both the
+# contract and the cast. Ranges are deliberately disjoint from every other
+# live e2e test's own customer_id space (`test_referential_orphan.py`'s
+# `[1_500_000_000, 1_999_000_000)`, `test_backfill_reentry.py`'s
+# `[2_000_000_000, 2_100_000_000)`, `test_pod_kill_retry.py`'s
+# `[2_000_000, 1_000_000_000)`) so a concurrently-running e2e test can never
+# collide with this generator's own IDs. The day-index multiplier
+# (`_ID_DAY_MULTIPLIER = 10_000`, not `1_000`) leaves headroom for any
+# realistic `rows_per_day` without two days' ID blocks colliding.
+_CUSTOMER_ID_BASE: Final = 2_100_100_000
+_ORDER_ID_BASE: Final = 2_110_000_000
+_ID_DAY_MULTIPLIER: Final = 10_000
+
+# `orders.customer_id` (D-17's one real referential relationship,
+# `ReferentialIntegrityBarrier` -> `normalized.customers`, `strategy:
+# QUARANTINE_RECORD`) must reference customer_id values the customers
+# series ITSELF will actually publish for the referenced rows to resolve as
+# genuine, non-orphaned matches -- day_index=0's own first 30 customer rows,
+# using the IDENTICAL formula `_render_row` below applies to customers. A
+# caller generating both series must keep the customers series'
+# `rows_per_day >= 30` (the module default, 50, already satisfies this) for
+# every one of these references to resolve; a caller using a smaller
+# `rows_per_day` intentionally exercises the barrier's QUARANTINE_RECORD
+# path for the remainder instead -- both are valid corpus shapes, D-22's
+# quarantine-aware reconciliation accounting nets out either way. This
+# generator does not also emit the matching `customers` series in the same
+# call, so the CALLER is responsible for uploading both series from a
+# mutually-consistent `rows_per_day` choice if it needs full referential
+# coverage.
+_ORDER_CUSTOMER_IDS: Final[tuple[str, ...]] = tuple(str(_CUSTOMER_ID_BASE + n) for n in range(30))
 
 _AMOUNT_MIN: Final = Decimal("1.00")
 _AMOUNT_MAX: Final = Decimal("9999.99")
@@ -254,22 +290,23 @@ def _render_row(  # noqa: PLR0913 -- one keyword per row-rendering context value
     late_event_offset_days: int,
 ) -> tuple[str, ...]:
     """Render one data row's fields, in the dataset's declared column order."""
-    business_key = f"{dataset[:4].upper()}-{day_index:06d}-{row_index:04d}"
     date_value = day - timedelta(days=late_event_offset_days) if is_late else day
 
     if dataset == "customers":
+        customer_id = str(_CUSTOMER_ID_BASE + day_index * _ID_DAY_MULTIPLIER + row_index)
         event_ts = f"{date_value.strftime('%Y-%m-%d')}T08:15:00Z"
         return (
-            business_key,
+            customer_id,
             _pick(rng, _NAMES),
             _pick(rng, _COUNTRIES),
             _pick(rng, _BIRTH_DATES),
             event_ts,
         )
 
+    order_id = str(_ORDER_ID_BASE + day_index * _ID_DAY_MULTIPLIER + row_index)
     order_date = date_value.strftime("%Y-%m-%d")
     return (
-        business_key,
+        order_id,
         _pick(rng, _ORDER_CUSTOMER_IDS),
         order_date,
         _decimal_value(rng, _AMOUNT_MIN, _AMOUNT_MAX, _AMOUNT_SCALE),

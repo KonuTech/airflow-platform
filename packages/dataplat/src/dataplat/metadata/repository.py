@@ -901,13 +901,14 @@ class MetadataRepository(Protocol):
         source_table: str,
         watermark_column: str,
         run_id: int,
+        run_ids: Sequence[int],
     ) -> None:
         """Advance `meta.watermarks` using `GREATEST()`; always logs to `meta.watermark_history`.
 
         Maps to ``INSERT INTO meta.watermarks (dataset_id, target_key,
         cursor_value) VALUES (%s, %s, (SELECT max({watermark_column}
-        ::timestamptz) FROM {source_table})) ON CONFLICT (dataset_id,
-        target_key) DO UPDATE SET cursor_value =
+        ::timestamptz) FROM {source_table} WHERE _run_id = ANY(%s)))
+        ON CONFLICT (dataset_id, target_key) DO UPDATE SET cursor_value =
         GREATEST(meta.watermarks.cursor_value, EXCLUDED.cursor_value)
         RETURNING cursor_value``, followed by an unconditional ``INSERT
         INTO meta.watermark_history (dataset_id, target_key, old_value,
@@ -915,6 +916,16 @@ class MetadataRepository(Protocol):
         value (read via a preceding ``SELECT cursor_value FROM
         meta.watermarks WHERE dataset_id = %s AND target_key = %s`` — `None`
         when no row exists yet) and the just-returned new value.
+
+        The `MAX()` subquery is scoped to `run_ids` (this publish pass's own
+        staged runs) rather than reading the whole cumulative `source_table`
+        — `source_table` is a shared, append-only table that other runs
+        (past or concurrent) also write into, so an unscoped `MAX()` can be
+        permanently poisoned by any stray/out-of-order row that was ever
+        loaded, even by a completely unrelated run (found live: a single
+        bad-dated `silver.customers` row froze that dataset's watermark
+        forever). `GREATEST()` still enforces INCR-02's "never regress"
+        rule against the previously-stored cursor across passes.
 
         INCR-02's "`>=`, never `>`" rule is enforced structurally by
         `GREATEST()` in the SQL text itself, never a conditional branch in
@@ -950,6 +961,10 @@ class MetadataRepository(Protocol):
                 identifier only, never a value.
             run_id: The run attributed to this watermark write, recorded on
                 the `meta.watermark_history` row.
+            run_ids: Every run_id being finalized this publish pass — scopes
+                the `MAX({watermark_column})` subquery to only the rows
+                THIS pass staged into `source_table`, never the whole
+                cumulative table.
         """
         ...
 
