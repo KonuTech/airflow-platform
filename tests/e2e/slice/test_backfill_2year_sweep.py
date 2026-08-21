@@ -212,7 +212,19 @@ _ETL_NAMESPACE = "etl"
 
 # D-27 fallback scale (module docstring): comfortably under discover_files'
 # max_units_per_run: 100 cap, so one discover call drains the whole corpus.
-_MASTER_SEED = "phase-09-plan-11-backfill-2year-sweep-v3"
+#
+# Bumped v3 -> v4 (plan 10-07's live 2-year sweep session): the -v3 corpus's
+# own idempotency keys were touched by this session's own documented
+# incidents (vault seal, missing migration, missing schema_versions row,
+# scheduler watch corruption, publish OOM, mass-delete-breaker false
+# positive) across many redundant backfill/clear attempts -- some files
+# reached a false SUCCEEDED status without genuinely completing SCD
+# publication, permanently ineligible for reprocessing under
+# `discover_files`' own idempotency (matching this module's own -v1 -> -v2
+# precedent above). -v4 guarantees every file this run's own assertions
+# depend on is genuinely fresh content, generated and uploaded AFTER every
+# fix landed, never touching any contaminated run_id from earlier today.
+_MASTER_SEED = "phase-09-plan-11-backfill-2year-sweep-v4"
 _START_DATE = date(2024, 1, 1)
 # Extended from 14 to 20 (plan 10-07) to comfortably fit D-11's three new
 # anomaly days (12/16/19 below) alongside the pre-existing gap(5)/schema-
