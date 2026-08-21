@@ -5,13 +5,12 @@ PostgreSQL -- no MinIO/CsvSource needed, since ``publish_ingest`` never reads
 ``ctx.source`` or ``ctx.objects`` at all (it operates purely on
 ``silver.<dataset>``, already resolved by ``ctx.config.dataset``).
 
-Behaviors 2 and 3 below (``silver.<dataset>`` seeding, one call finalizing
-both `STAGED` runs, a second call proving idempotency) are exercised as ONE
-test function rather than two, deliberately: both `MergePublisher`'s target
-(`normalized.customers`) and `publish_ingest`'s own source table
-(`silver.customers`) are hardcoded, session-shared tables across the WHOLE
-`tests/integration/` collection (mirrors `merge.py`'s own module docstring,
-"deliberately single-dataset for this phase") -- `publish_ingest`'s
+Behaviors 2 and 3 below (``silver.<dataset>``/``staging.<dataset>`` seeding,
+one call finalizing both `STAGED` runs, a second call proving idempotency)
+are exercised as ONE test function rather than two, deliberately: both the
+publish target (`normalized.customers`) and `publish_ingest`'s own source
+table (`silver.customers`) are hardcoded, session-shared tables across the
+WHOLE `tests/integration/` collection -- `publish_ingest`'s
 `ctx.config.dataset` must therefore be the literal string `"customers"` for
 these two tests, unlike Behavior 1's own isolated, never-touched-elsewhere
 dataset name. Combining Behaviors 2/3 into one continuous test function keeps
@@ -21,10 +20,31 @@ depending on pytest's file-definition-order execution (this suite runs
 sequentially, never under `-n auto`, but a single self-contained function is
 more robust than relying on that convention alone).
 
-``silver.<dataset>`` rows are seeded directly via raw SQL (never via a real
-`dbt build`), keeping this file Docker-only, not `dbt`-marked (registered in
-pyproject.toml) -- isolating `publish_ingest`'s own logic from plan 08.1-08's
-already-separately-tested dbt mechanism, per this plan's own action text.
+``silver.<dataset>``/``staging.<dataset>`` rows are seeded directly via raw
+SQL (never via a real `dbt build`), keeping this file Docker-only, not
+`dbt`-marked (registered in pyproject.toml) -- isolating `publish_ingest`'s
+own logic from plan 08.1-08's already-separately-tested dbt mechanism, per
+this plan's own action text.
+
+**[Rule 1 fix, plan 10-04]** ``_make_config``'s ``load.strategy`` was
+``"merge"`` (resolving to ``MergePublisher``), which is UNCONDITIONALLY
+broken against ``normalized.customers`` since migration 0035 (plan 10-01):
+PostgreSQL rejects ``ON CONFLICT DO UPDATE`` against an exclusion-constraint
+arbiter outright -- live-confirmed via `InvalidColumnReference` when this
+file's own Behavior 2/3 test ran against the pre-fix config. Switched to
+``"scd"`` (``SCDPublisher``, this plan's own Task 1), matching
+``customers.yaml``'s real, live production strategy (this plan's Task 2).
+``SCDPublisher``'s touched-key discovery/recompute read ``staging.customers``
+(bronze) directly, never the caller-supplied ``source_table`` -- so this
+file's own Behavior 2/3 test now ALSO seeds ``staging.customers`` (see
+``_insert_bronze_row``), matching what a real ``stage_ingest()`` call would
+have already promoted there. ``ScdConfig(delete_semantics="ignore",
+mass_delete_threshold=1.0)`` -- never ``customers.yaml``'s own real
+``"invalidate"``/``0.10`` -- for the identical session-shared-table reason
+``test_publish_scd.py``'s own module docstring documents: this file's
+``normalized.customers`` rows coexist with every OTHER test file's own rows
+in the same table, and a real DELETE-semantics dispatch would incorrectly
+act on keys this file never touched.
 """
 
 from __future__ import annotations
@@ -43,6 +63,7 @@ from dataplat.config.model import (
     DatasetConfig,
     DeduplicationConfig,
     LoadConfig,
+    ScdConfig,
     SourceConfig,
 )
 from dataplat.metadata.postgres import PostgresMetadataRepository
@@ -63,6 +84,10 @@ def _make_config(*, dataset: str) -> DatasetConfig:
     for real work, but `DatasetConfig.columns` is required (never defaulted), so this
     still needs a well-formed, if unused, column list -- mirrors `test_run_ingest.py`'s
     own `_make_config()` shape.
+
+    `load.strategy="scd"`/`scd=ScdConfig(...)` -- see this module's own
+    docstring (Rule 1 fix, plan 10-04) for why `"merge"` no longer works
+    here.
     """
     return DatasetConfig(
         dataset=dataset,
@@ -79,7 +104,7 @@ def _make_config(*, dataset: str) -> DatasetConfig:
             keys=["customer_id"],
             order_by=["event_ts desc"],
         ),
-        load=LoadConfig(strategy="merge", target="normalized.customers"),
+        load=LoadConfig(strategy="scd", target="normalized.customers"),
         batching=BatchingConfig(max_units_per_run=100),
         columns=[
             ColumnContract(
@@ -90,14 +115,19 @@ def _make_config(*, dataset: str) -> DatasetConfig:
                 business_key=True,
                 description="Natural business key for a customer record",
             ),
-            ColumnContract(name="name", type="string", nullable=False, required=True),
-            ColumnContract(name="country", type="string", nullable=False, required=True),
+            ColumnContract(
+                name="name", type="string", nullable=False, required=True, scd_type="type_2"
+            ),
+            ColumnContract(
+                name="country", type="string", nullable=False, required=True, scd_type="type_2"
+            ),
             ColumnContract(
                 name="birth_date",
                 type="date",
                 nullable=True,
                 required=True,
                 format="%Y-%m-%d",
+                scd_type="type_1",
             ),
             ColumnContract(
                 name="event_ts",
@@ -106,7 +136,15 @@ def _make_config(*, dataset: str) -> DatasetConfig:
                 required=True,
                 format="%Y-%m-%dT%H:%M:%S%z",
             ),
+            ColumnContract(
+                name="signup_country",
+                type="string",
+                nullable=True,
+                required=False,
+                scd_type="type_0",
+            ),
         ],
+        scd=ScdConfig(delete_semantics="ignore", mass_delete_threshold=1.0),
     )
 
 
@@ -198,7 +236,7 @@ def _seed_staged_run(
     return dataset_id, run_id, file_id, batch_id
 
 
-def _insert_silver_row(  # noqa: PLR0913 -- one keyword per silver column, mirrors test_publish_merge.py's `_insert_staging_row`
+def _insert_silver_row(  # noqa: PLR0913 -- one keyword per silver column, mirrors test_scd_delete_detection.py's helper shape
     conn: psycopg.Connection[Any],
     *,
     customer_id: str,
@@ -216,6 +254,51 @@ def _insert_silver_row(  # noqa: PLR0913 -- one keyword per silver column, mirro
     conn.execute(
         """
         INSERT INTO silver.customers (
+            customer_id, name, country, birth_date, event_ts,
+            _run_id, _file_id, _batch_id, _source_row_number,
+            _record_hash, _record_hash_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            customer_id,
+            name,
+            country,
+            birth_date,
+            event_ts,
+            run_id,
+            file_id,
+            batch_id,
+            source_row_number,
+            record_hash,
+        ),
+    )
+
+
+def _insert_bronze_row(  # noqa: PLR0913 -- one keyword per bronze column, mirrors _insert_silver_row's own shape
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: str,
+    name: str,
+    country: str,
+    birth_date: str,
+    event_ts: str,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    source_row_number: int,
+    record_hash: bytes,
+) -> None:
+    """Seed one `staging.customers` (durable bronze) row directly via SQL.
+
+    ``SCDPublisher`` (plan 10-04) reads bronze directly for its per-key
+    recompute -- never the caller-supplied ``source_table`` argument -- so
+    this file's own Behavior 2/3 test needs a matching bronze row for every
+    silver row it seeds, mirroring what a real `stage_ingest()` call would
+    already have promoted (`Rule 1 fix` -- see this module's own docstring).
+    """
+    conn.execute(
+        """
+        INSERT INTO staging.customers (
             customer_id, name, country, birth_date, event_ts,
             _run_id, _file_id, _batch_id, _source_row_number,
             _record_hash, _record_hash_version
@@ -325,8 +408,19 @@ def _read_customer_name(migrated_dsn: str, *, customer_id: int) -> str | None:
 
 
 def _normalized_customers_count(migrated_dsn: str) -> int:
+    """Count DISTINCT `customer_id`s in `normalized.customers` (cardinality-aware, plan 10-04).
+
+    Since migration 0035, `normalized.customers` may legitimately hold more
+    than one physical ROW per `customer_id` (an SCD2 version chain) -- a
+    plain `COUNT(*)` would conflate "how many distinct customers exist" with
+    "how many SCD2 version rows exist," two different questions. Every call
+    site below asks the former ("did this call add any NEW rows / customers
+    at all") -- `COUNT(DISTINCT customer_id)` is the cardinality-safe answer.
+    """
     with psycopg.connect(migrated_dsn) as conn:
-        row = conn.execute("SELECT COUNT(*) FROM normalized.customers").fetchone()
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT customer_id) FROM normalized.customers",
+        ).fetchone()
     assert row is not None
     return int(row[0])
 
@@ -392,6 +486,34 @@ def test_two_staged_runs_finalize_together_and_a_second_call_is_idempotent(
             record_hash=hashlib.sha256(b"publish-ingest-a").digest(),
         )
         _insert_silver_row(
+            conn,
+            customer_id=customer_id_b,
+            name="FromRunB",
+            country="CA",
+            birth_date="1990-01-01",
+            event_ts="2026-08-18T10:00:00+00:00",
+            run_id=run_id_b,
+            file_id=file_id_b,
+            batch_id=batch_id_b,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"publish-ingest-b").digest(),
+        )
+        # SCDPublisher (plan 10-04) reads bronze, not silver, for its
+        # touched-key discovery/recompute -- see this module's own docstring.
+        _insert_bronze_row(
+            conn,
+            customer_id=customer_id_a,
+            name="FromRunA",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-08-18T10:00:00+00:00",
+            run_id=run_id_a,
+            file_id=file_id_a,
+            batch_id=batch_id_a,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"publish-ingest-a").digest(),
+        )
+        _insert_bronze_row(
             conn,
             customer_id=customer_id_b,
             name="FromRunB",
