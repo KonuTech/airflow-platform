@@ -4,8 +4,8 @@ milestone: v1.35.5
 milestone_name: milestone
 status: executing
 stopped_at: Phase 10 context gathered
-last_updated: "2026-08-21T11:49:46.015Z"
-last_activity: 2026-08-21 -- Phase 10 planning complete
+last_updated: "2026-08-21T12:07:48.411Z"
+last_activity: 2026-08-21 -- Phase 10 execution started
 progress:
   total_phases: 12
   completed_phases: 10
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** Every file, batch and record that enters the platform can be traced, explained, reprocessed and trusted.
-**Current focus:** Phase 09 — etl-correctness-dedup-incremental-backfill-recovery
+**Current focus:** Phase 10 — slowly-changing-dimensions
 
 ## Current Position
 
-Phase: 09 (etl-correctness-dedup-incremental-backfill-recovery) — COMPLETE
-Plan: 11 of 11
-Status: Ready to execute
-Last activity: 2026-08-21 -- Phase 10 planning complete
+Phase: 10 (slowly-changing-dimensions) — EXECUTING
+Plan: 1 of 9
+Status: Executing Phase 10
+Last activity: 2026-08-21 -- Phase 10 execution started
 
 Progress: [██████████] 100%
 
