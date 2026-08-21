@@ -1040,6 +1040,18 @@ class MetadataRepository(Protocol):
         caller-supplied and never committed or rolled back here — this
         method MUST run inside the caller's already-open transaction.
 
+        D-08 (Phase 10, SCD-03): `discrepancy`'s formula and `output_count`'s
+        meaning are BOTH left exactly as written above -- neither is
+        redefined for SCD2 datasets. Once a Type-2 SCD dimension
+        (`normalized.customers`) can legitimately hold more than one
+        physical row per business key, `output_count` (and therefore
+        `discrepancy`) can be non-zero-discrepancy by design for a clean
+        publish with zero rejects/dedups -- that is expected, not a bug.
+        `key_count_output`/`key_count_input` are the fields whose meaning
+        stays invariant to SCD2 history depth ("does the target hold the
+        same SET of business keys as the source") and are what a caller
+        should compare for that question instead.
+
         Args:
             conn: An already-open connection, inside an already-open
                 transaction.
@@ -1051,7 +1063,17 @@ class MetadataRepository(Protocol):
                 `"bronze_silver"` or `"silver_gold"` (app-validated
                 vocabulary, migration 0032).
             input_count: The row count on this hop's input side.
-            output_count: The row count on this hop's output side.
+            output_count: The LITERAL total physical row count on this hop's
+                output side (`count(*)`) -- never redefined by this method.
+                For a Type-2 SCD dimension (e.g. `normalized.customers`,
+                Phase 10), `output_count` can legitimately EXCEED
+                `key_count_output` once more than one SCD2 version exists
+                for the same business key: `output_count` counts every
+                physical row (all historical versions), while
+                `key_count_output` counts distinct business keys. A caller
+                asking "does the target hold the same SET of business keys
+                as the source" should compare against `key_count_output`,
+                not `output_count` -- see `key_count_output` below.
             rejected_count: Rows quarantined between input and output on
                 this hop. Defaults to `0`.
             dedup_count: Rows deduplicated away between input and output on
@@ -1079,7 +1101,12 @@ class MetadataRepository(Protocol):
             key_count_input: The distinct business-key count on the input
                 side, or `None` when not computed for this hop.
             key_count_output: The distinct business-key count on the output
-                side, or `None` when not computed for this hop.
+                side, or `None` when not computed for this hop. For a
+                Type-2 SCD dimension this is the "does the target hold the
+                same set of business keys as the source" figure -- it stays
+                equal to the source's distinct-key count even when
+                `output_count` (this method's literal `count(*)`) grows
+                past it as historical SCD2 versions accumulate.
             expected_row_count: The `_BATCH_COMPLETE` manifest's declared row
                 count (VALID-06, D-23), or `None` when no manifest applied to
                 this file. Only ever populated at the `raw_bronze` hop.
