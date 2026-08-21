@@ -33,6 +33,34 @@ This module performs no I/O of its own: ``generate_dated_series`` returns
 in-memory bytes plus a manifest recording exactly where each injected
 property lives, so it is unit-testable without S3, MinIO or a real dataset
 config loader. Plan 09-11 is the only caller that uploads these bytes.
+
+## The roster model (plan 10-06)
+
+``customers.yaml`` declares ``source.change_semantics: snapshot`` (D-04):
+every discovered file is the FULL current extent of the customer population,
+not an incremental delta. The SCD Publisher's DELETE-detection sweep (plan
+10-03) treats each pass's file that way — comparing it against the
+currently-``is_current`` gold rows and closing out anything absent. Before
+this plan, the customers path here minted ``rows_per_day`` brand-new
+``customer_id`` values EVERY day (a permanently-growing population, never
+repeating) — under a real ``snapshot``-semantics publisher that shape would
+make every previously-known customer look "vanished" on day two, tripping
+D-06's mass-delete circuit breaker on ordinary, correct traffic.
+
+The fix is structural, not a patch: customers is now a bounded,
+``rows_per_day``-sized ROSTER, generated once (customer_id = ``_CUSTOMER_ID_BASE
++ member_index``, day-independent — the same formula this module always used
+for day 0, just no longer scaled by day index), and RESENT IN FULL every
+non-gap day. Each roster member's baseline name/country/birth_date/
+signup_country is drawn ONCE from a CUSTOMER-scoped stream (keyed by that
+member's own ``customer_id``, not by any day's filename) — this is what makes
+a member's values stable across every day's file. ``event_ts`` is the only
+field that always varies by day, since it must show that day's own delivery.
+
+The ``orders`` path is completely untouched by this redesign (D-01 excludes
+orders from SCD; it keeps the original "new IDs born per day" model) — every
+call in this module explicitly branches on ``dataset`` before reaching any
+roster logic, and ``_render_row`` (orders' own per-row renderer) is unchanged.
 """
 
 from __future__ import annotations
@@ -50,8 +78,12 @@ if TYPE_CHECKING:
 
 # configs/datasets/customers.yaml / orders.yaml `columns:` blocks, read this
 # session — column order matches each dataset's real schema exactly.
+# `signup_country` (D-13, plan 10-01) is customers' new Type-0 column: its
+# value is picked once per customer_id and never revised, which is exactly
+# what the roster model's per-member baseline stream already gives every
+# other customer field by construction.
 _DATASET_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
-    "customers": ("customer_id", "name", "country", "birth_date", "event_ts"),
+    "customers": ("customer_id", "name", "country", "birth_date", "event_ts", "signup_country"),
     "orders": ("order_id", "customer_id", "order_date", "amount"),
 }
 
@@ -107,9 +139,12 @@ _BIRTH_DATES: Final[tuple[str, ...]] = (
 # `[1_500_000_000, 1_999_000_000)`, `test_backfill_reentry.py`'s
 # `[2_000_000_000, 2_100_000_000)`, `test_pod_kill_retry.py`'s
 # `[2_000_000, 1_000_000_000)`) so a concurrently-running e2e test can never
-# collide with this generator's own IDs. The day-index multiplier
-# (`_ID_DAY_MULTIPLIER = 10_000`, not `1_000`) leaves headroom for any
-# realistic `rows_per_day` without two days' ID blocks colliding.
+# collide with this generator's own IDs. `_ID_DAY_MULTIPLIER` remains a
+# per-day spacing constant for `orders` (unchanged); customers' roster
+# formula (plan 10-06) is deliberately DAY-INDEPENDENT now, so it no longer
+# uses this multiplier at all -- kept exported since
+# `tests/e2e/slice/test_backfill_2year_sweep.py` imports it directly for its
+# own order_id bound computation.
 _CUSTOMER_ID_BASE: Final = 2_100_100_000
 _ORDER_ID_BASE: Final = 2_110_000_000
 _ID_DAY_MULTIPLIER: Final = 10_000
@@ -118,8 +153,8 @@ _ID_DAY_MULTIPLIER: Final = 10_000
 # `ReferentialIntegrityBarrier` -> `normalized.customers`, `strategy:
 # QUARANTINE_RECORD`) must reference customer_id values the customers
 # series ITSELF will actually publish for the referenced rows to resolve as
-# genuine, non-orphaned matches -- day_index=0's own first 30 customer rows,
-# using the IDENTICAL formula `_render_row` below applies to customers. A
+# genuine, non-orphaned matches -- the roster's own first 30 members, using
+# the IDENTICAL `_CUSTOMER_ID_BASE + n` formula the roster itself uses. A
 # caller generating both series must keep the customers series'
 # `rows_per_day >= 30` (the module default, 50, already satisfies this) for
 # every one of these references to resolve; a caller using a smaller
@@ -157,9 +192,9 @@ class BackfillCorpusManifest:
             extra column; every earlier day's header matches the dataset's
             current real column list exactly.
         late_event_day_index: Day index containing one out-of-order row.
-        late_event_row_index: 0-based row index, within that day's file,
-            whose date column is backdated instead of matching the file's
-            own day.
+        late_event_row_index: 0-based row/roster-member index, within that
+            day's file, whose date column is backdated instead of matching
+            the file's own day.
         filenames: Every generated filename, gap day excluded, in day order.
     """
 
@@ -188,15 +223,18 @@ def generate_dated_series(  # noqa: PLR0913 -- one keyword per D-10 injected-ano
     r"""Generate a deterministic, dated CSV corpus with three injected anomalies.
 
     One file per calendar day in ``[start_date, start_date + num_days)``,
-    except ``gap_day_index`` (D-06/D-10's missing-file gap). Every day's file
-    draws from its own random stream (R1), so inserting or removing another
-    day never perturbs any other day's bytes. This function performs no I/O:
-    it is a pure function of its arguments.
+    except ``gap_day_index`` (D-06/D-10's missing-file gap). ``customers`` is
+    a bounded, ``rows_per_day``-sized ROSTER resent in full every non-gap day
+    (plan 10-06's roster model, see the module docstring); ``orders`` keeps
+    the original "new IDs born per day" model (D-01 excludes it from SCD).
+    Every day's file draws from its own random stream (R1), so inserting or
+    removing another day never perturbs any other day's bytes. This function
+    performs no I/O: it is a pure function of its arguments.
 
     Args:
         dataset: ``"customers"`` or ``"orders"`` — the two datasets this
             platform's config-driven pipeline currently knows.
-        master_seed: Root of every day's derived random stream (R1).
+        master_seed: Root of every derived random stream (R1).
         start_date: Calendar date of day index 0.
         num_days: Total number of calendar days to span.
         gap_day_index: Day index to omit entirely (no key in the returned
@@ -206,7 +244,8 @@ def generate_dated_series(  # noqa: PLR0913 -- one keyword per D-10 injected-ano
         late_event_day_index: Day index containing one backdated row.
         late_event_offset_days: How many days earlier the late row's date
             column is backdated. Defaults to a genuine 3-month-late arrival.
-        rows_per_day: Data rows per generated file.
+        rows_per_day: Data rows per generated file; for ``customers`` this is
+            also the roster's fixed size.
 
     Returns:
         A ``(files, manifest)`` pair. ``files`` maps each generated filename
@@ -227,6 +266,14 @@ def generate_dated_series(  # noqa: PLR0913 -- one keyword per D-10 injected-ano
     extra_values = _SCHEMA_CHANGE_VALUES[dataset]
     late_event_row_index = rows_per_day // 2
 
+    roster_ids: tuple[int, ...] = ()
+    baselines: tuple[dict[str, str], ...] = ()
+    if dataset == "customers":
+        roster_ids = tuple(_CUSTOMER_ID_BASE + m for m in range(rows_per_day))
+        baselines = tuple(
+            _customer_baseline(master_seed, customer_id) for customer_id in roster_ids
+        )
+
     files: dict[str, bytes] = {}
     filenames: list[str] = []
 
@@ -238,28 +285,45 @@ def generate_dated_series(  # noqa: PLR0913 -- one keyword per D-10 injected-ano
             continue  # D-06/D-10: the gap day emits no file at all.
 
         filenames.append(filename)
-        # R1: this file's stream depends on nothing but the master seed and
-        # its own name — never on how many rows any other day consumed.
-        rng = stream_for(master_seed, filename)
 
         include_extra = day_index >= schema_change_day_index
         header = (*columns, extra_column) if include_extra else columns
-
         lines = [",".join(header)]
-        for row_index in range(rows_per_day):
-            is_late = day_index == late_event_day_index and row_index == late_event_row_index
-            fields = _render_row(
-                dataset,
-                rng=rng,
-                day_index=day_index,
-                row_index=row_index,
-                day=day,
-                is_late=is_late,
-                late_event_offset_days=late_event_offset_days,
+
+        if dataset == "customers":
+            lines.extend(
+                _render_customer_day_lines(
+                    master_seed=master_seed,
+                    filename=filename,
+                    roster_ids=roster_ids,
+                    baselines=baselines,
+                    day=day,
+                    day_index=day_index,
+                    late_event_day_index=late_event_day_index,
+                    late_event_row_index=late_event_row_index,
+                    late_event_offset_days=late_event_offset_days,
+                    include_extra=include_extra,
+                    extra_values=extra_values,
+                )
             )
-            if include_extra:
-                fields = (*fields, _pick(rng, extra_values))
-            lines.append(",".join(fields))
+        else:
+            # R1: this file's stream depends on nothing but the master seed
+            # and its own name -- never on how many rows any other day
+            # consumed. Unchanged from before plan 10-06 (orders' own model).
+            rng = stream_for(master_seed, filename)
+            for row_index in range(rows_per_day):
+                is_late = day_index == late_event_day_index and row_index == late_event_row_index
+                fields = _render_row(
+                    rng=rng,
+                    day_index=day_index,
+                    row_index=row_index,
+                    day=day,
+                    is_late=is_late,
+                    late_event_offset_days=late_event_offset_days,
+                )
+                if include_extra:
+                    fields = (*fields, _pick(rng, extra_values))
+                lines.append(",".join(fields))
 
         # R3: built as str, encoded explicitly, never written text-mode.
         # R4: the terminator is explicit, never a writer's default.
@@ -279,8 +343,72 @@ def generate_dated_series(  # noqa: PLR0913 -- one keyword per D-10 injected-ano
     return files, manifest
 
 
-def _render_row(  # noqa: PLR0913 -- one keyword per row-rendering context value, mirrors the caller's own shape
-    dataset: str,
+def _customer_baseline(master_seed: str, customer_id: int) -> dict[str, str]:
+    """Pick one roster member's baseline fields ONCE, from a customer-scoped stream.
+
+    Keyed by the member's own ``customer_id`` (never a day's filename) --
+    this is the roster model's core property: a member's baseline is stable
+    across every day's file by construction, not by coincidence.
+    """
+    rng = stream_for(master_seed, f"customer-baseline:{customer_id}")
+    return {
+        "name": _pick(rng, _NAMES),
+        "country": _pick(rng, _COUNTRIES),
+        "birth_date": _pick(rng, _BIRTH_DATES),
+        "signup_country": _pick(rng, _COUNTRIES),
+    }
+
+
+def _render_customer_day_lines(  # noqa: PLR0913 -- one keyword per roster-rendering context value
+    *,
+    master_seed: str,
+    filename: str,
+    roster_ids: tuple[int, ...],
+    baselines: tuple[dict[str, str], ...],
+    day: date,
+    day_index: int,
+    late_event_day_index: int,
+    late_event_row_index: int,
+    late_event_offset_days: int,
+    include_extra: bool,
+    extra_values: tuple[str, ...],
+) -> list[str]:
+    """Render one day's full roster resend.
+
+    Every roster member is emitted in ascending customer_id order (index
+    order).
+    """
+    event_ts = f"{day.strftime('%Y-%m-%d')}T08:15:00Z"
+    # R1: the schema-change bonus column's per-day values depend only on
+    # this day's own filename -- orthogonal to every customer-scoped
+    # baseline stream above, which depends only on customer_id.
+    extra_rng = stream_for(master_seed, filename) if include_extra else None
+
+    lines: list[str] = []
+    for member_index, customer_id in enumerate(roster_ids):
+        baseline = baselines[member_index]
+
+        row_event_ts = event_ts
+        if day_index == late_event_day_index and member_index == late_event_row_index:
+            late_date = day - timedelta(days=late_event_offset_days)
+            row_event_ts = f"{late_date.strftime('%Y-%m-%d')}T08:15:00Z"
+
+        fields: tuple[str, ...] = (
+            str(customer_id),
+            baseline["name"],
+            baseline["country"],
+            baseline["birth_date"],
+            row_event_ts,
+            baseline["signup_country"],
+        )
+        if include_extra and extra_rng is not None:
+            fields = (*fields, _pick(extra_rng, extra_values))
+        lines.append(",".join(fields))
+
+    return lines
+
+
+def _render_row(  # noqa: PLR0913 -- one keyword per row-rendering context value, unchanged shape from before plan 10-06
     *,
     rng: random.Random,
     day_index: int,
@@ -289,20 +417,15 @@ def _render_row(  # noqa: PLR0913 -- one keyword per row-rendering context value
     is_late: bool,
     late_event_offset_days: int,
 ) -> tuple[str, ...]:
-    """Render one data row's fields, in the dataset's declared column order."""
+    """Render one `orders` data row's fields (order_id, customer_id, order_date, amount).
+
+    `orders`-only since plan 10-06: customers rows are now rendered by
+    `_render_customer_day_lines` from each roster member's own customer-scoped
+    baseline, not a file-scoped stream. This function's own logic and its
+    file-scoped `stream_for(master_seed, filename)` caller convention are
+    UNCHANGED from before plan 10-06 (D-01 excludes orders from SCD).
+    """
     date_value = day - timedelta(days=late_event_offset_days) if is_late else day
-
-    if dataset == "customers":
-        customer_id = str(_CUSTOMER_ID_BASE + day_index * _ID_DAY_MULTIPLIER + row_index)
-        event_ts = f"{date_value.strftime('%Y-%m-%d')}T08:15:00Z"
-        return (
-            customer_id,
-            _pick(rng, _NAMES),
-            _pick(rng, _COUNTRIES),
-            _pick(rng, _BIRTH_DATES),
-            event_ts,
-        )
-
     order_id = str(_ORDER_ID_BASE + day_index * _ID_DAY_MULTIPLIER + row_index)
     order_date = date_value.strftime("%Y-%m-%d")
     return (
