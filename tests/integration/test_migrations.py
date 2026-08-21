@@ -57,6 +57,8 @@ EXPECTED_TABLES = {
     ("meta", "watermark_history"),
     # Plan 09-02, migration 0032 (D-20..D-24's per-file-per-hop reconciliation).
     ("meta", "reconciliation_results"),
+    # Plan 09-10, migration 0034 (a whole-listing-empty backfill tick's gap record).
+    ("meta", "processing_gaps"),
     ("normalized", "customers"),
     ("normalized", "orders"),
 }
@@ -66,10 +68,11 @@ EXPECTED_TABLES = {
 # meta.dedup_decisions (migration 0024) are etl_app SELECT-only (dbt_app owns
 # the INSERT path there), so they are excluded from this narrower set even
 # though they belong in EXPECTED_TABLES. meta.watermark_history (migration
-# 0031) and meta.reconciliation_results (migration 0032) are etl_app
-# SELECT/INSERT-only (append-only tables, never UPDATE'd in place), so they
-# are excluded here too. A future table added to one without the other is a
-# visible diff, not a coincidence of reuse.
+# 0031), meta.reconciliation_results (migration 0032) and
+# meta.processing_gaps (migration 0034) are etl_app SELECT/INSERT-only
+# (append-only tables, never UPDATE'd in place), so they are excluded here
+# too. A future table added to one without the other is a visible diff, not
+# a coincidence of reuse.
 GRANTED_TABLES = sorted(
     EXPECTED_TABLES
     - {
@@ -77,6 +80,7 @@ GRANTED_TABLES = sorted(
         ("meta", "dedup_decisions"),
         ("meta", "watermark_history"),
         ("meta", "reconciliation_results"),
+        ("meta", "processing_gaps"),
     },
 )
 
@@ -365,6 +369,10 @@ def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> Non
         ("meta", "watermarks"),
         ("meta", "watermark_history"),
         ("meta", "reconciliation_results"),
+        # Migration 0033 (plan 09-06): read access for the recovery dashboard, never write.
+        ("meta", "v_run_recovery"),
+        # Migration 0034 (plan 09-10): read access for the gap dashboard, never write.
+        ("meta", "processing_gaps"),
     }
     assert set(granted.keys()) == expected_objects, (
         f"grafana_reader must hold grants on exactly {expected_objects}, got {set(granted.keys())}"

@@ -142,8 +142,18 @@ def _make_context(
     source: _FakeSource,
     file_id: int,
     batch_id: int,
+    metadata: PostgresMetadataRepository,
 ) -> PipelineContext:
-    """A placeholder ``PipelineContext`` -- only ``run``/``config``/``source`` are real."""
+    """A placeholder ``PipelineContext`` -- only ``run``/``config``/``source``/``metadata``
+    are real.
+
+    Plan 09-07 made ``ctx.metadata`` a hard dependency of
+    ``promote_to_durable_bronze`` (``get_or_create_dataset``/
+    ``record_reconciliation`` for the raw_bronze hop) -- a real
+    ``PostgresMetadataRepository`` is required here, matching
+    ``test_batch_complete_control_totals.py``/``test_reconciliation.py``'s
+    own established pattern.
+    """
     return PipelineContext(
         run=RunContext(
             run_id=run_id,
@@ -152,7 +162,7 @@ def _make_context(
             batch_id=batch_id,
         ),
         config=_make_config(),
-        metadata=None,  # type: ignore[arg-type] -- unused by StagingLoader
+        metadata=metadata,
         objects=None,  # type: ignore[arg-type] -- unused by StagingLoader
         db=None,  # type: ignore[arg-type] -- unused by StagingLoader
         log=None,  # type: ignore[arg-type] -- unused by StagingLoader
@@ -270,6 +280,7 @@ def test_promote_appends_staged_rows_and_drops_the_scratch_buffer(
         source=_FakeSource([rows]),
         file_id=file_id,
         batch_id=batch_id,
+        metadata=repository,
     )
     loader = StagingLoader(target_columns=TARGET_COLUMNS)
 
@@ -322,6 +333,7 @@ def test_promote_is_cumulative_across_two_runs(
         source=_FakeSource([rows_a]),
         file_id=file_id_a,
         batch_id=batch_id_a,
+        metadata=repository,
     )
     staging_result_a = loader.load(ctx_a, conn)
     loader.promote_to_durable_bronze(ctx_a, conn, staging_result_a)
@@ -334,6 +346,7 @@ def test_promote_is_cumulative_across_two_runs(
         source=_FakeSource([rows_b]),
         file_id=file_id_b,
         batch_id=batch_id_b,
+        metadata=repository,
     )
     staging_result_b = loader.load(ctx_b, conn)
     loader.promote_to_durable_bronze(ctx_b, conn, staging_result_b)
