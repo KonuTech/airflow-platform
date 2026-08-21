@@ -148,15 +148,15 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 
 - [ ] **SCD-01**: SCD Type 0 retains original values — *(DoD 60)*
 - [ ] **SCD-02**: SCD Type 1 overwrites without history — *(DoD 61)*
-- [ ] **SCD-03**: SCD Type 2 maintains historical versions with `valid_from`, `valid_to` and `is_current` — *(DoD 62)*
+- [x] **SCD-03**: SCD Type 2 maintains historical versions with `valid_from`, `valid_to` and `is_current` — *(DoD 62)*
 - [ ] **SCD-04**: Business/natural keys and surrogate keys are distinct, with the surrogate key independent of the change hash so late corrections cannot mutate it — *(DoD 63)*
 - [ ] **SCD-05**: Change detection is deterministic via a normalized hash of tracked attributes — normalization strictly precedes hashing — *(DoD 64)*
-- [ ] **SCD-06**: Effective dating distinguishes source effective time, business effective time, event time, ingestion time and processing time, and never defaults to ingestion time — *(DoD 65)*
-- [ ] **SCD-07**: Late-arriving changes correct historical validity intervals per dataset policy, by recomputing a key's history from an ordered event log rather than in-place interval surgery — *(DoD 66)*
+- [x] **SCD-06**: Effective dating distinguishes source effective time, business effective time, event time, ingestion time and processing time, and never defaults to ingestion time — *(DoD 65)*
+- [x] **SCD-07**: Late-arriving changes correct historical validity intervals per dataset policy, by recomputing a key's history from an ordered event log rather than in-place interval surgery — *(DoD 66)*
 - [ ] **SCD-08**: Configurable DELETE semantics (`ignore | invalidate | new_record`) apply when a business key disappears from a full snapshot — *(DoD 67, re-scoped: source is full-snapshot CSV batches, not a CDC feed)*
-- [ ] **SCD-09**: Repeated or replayed identical events produce exactly one logical version — *(DoD 68)*
+- [x] **SCD-09**: Repeated or replayed identical events produce exactly one logical version — *(DoD 68)*
 - [ ] **SCD-10**: SCD processing is idempotent under re-application — *(DoD 69)*
-- [ ] **SCD-11**: SCD processing supports backfills without blindly overwriting current dimension state — *(DoD 70)*
+- [x] **SCD-11**: SCD processing supports backfills without blindly overwriting current dimension state — *(DoD 70)*
 - [ ] **SCD-12**: Every SCD2 dimension carries a `btree_gist` exclusion constraint on `(business_key, validity range)` in its creating migration — once overlapping intervals exist the constraint can never be added and every as-of query is silently wrong — *(PITFALLS #2)*
 
 ### OBS — Observability, Lineage and Operations
@@ -361,15 +361,15 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INCR-08 | Phase 4 | Pending |
 | SCD-01 | Phase 10 | Pending |
 | SCD-02 | Phase 10 | Pending |
-| SCD-03 | Phase 10 | Pending |
+| SCD-03 | Phase 10 | Complete |
 | SCD-04 | Phase 10 | Pending |
 | SCD-05 | Phase 10 | Pending |
-| SCD-06 | Phase 10 | Pending |
-| SCD-07 | Phase 10 | Pending |
+| SCD-06 | Phase 10 | Complete |
+| SCD-07 | Phase 10 | Complete |
 | SCD-08 | Phase 10 | Pending |
-| SCD-09 | Phase 10 | Pending |
+| SCD-09 | Phase 10 | Complete |
 | SCD-10 | Phase 10 | Pending |
-| SCD-11 | Phase 10 | Pending |
+| SCD-11 | Phase 10 | Complete |
 | SCD-12 | Phase 10 | Pending |
 | OBS-01 | Phase 7 | Complete |
 | OBS-02 | Phase 3 | Complete |
