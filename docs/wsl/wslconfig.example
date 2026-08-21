@@ -56,3 +56,21 @@ sparseVhd=true
 # failure mode measured on this host). This line forces the unified cgroup
 # v2 hierarchy that `make doctor` checks via `docker info`'s CgroupVersion.
 kernelCommandLine = cgroup_no_v1=all
+
+# Defense-in-depth for `.planning/debug/docker-desktop-wsl2-vm-restart.md`
+# (three occurrences on this host, all with the same downstream symptom: the
+# kind nodes' DAGs hostPath bind mount falls back to an empty tmpfs after an
+# unexplained Docker Desktop/WSL2 VM restart during a long, keyboard/mouse-
+# idle background session). Research there found `vmIdleTimeout` is unlikely
+# to be the SOLE cause — Docker Desktop keeps its WSL distros alive via its
+# own `wslkeepalive` process, which should prevent WSL2's own idle-VM
+# teardown from firing while Docker Desktop is running. -1 disables that
+# teardown outright, at zero cost, in case it is a contributing factor on
+# some future Docker Desktop version or state. It does NOT address the
+# leading hypothesis (Windows entering sleep/modern-standby because its idle
+# timer only counts keyboard/mouse input, not background compute) — that is
+# a Windows power-plan setting, not something `.wslconfig` controls. See the
+# debug session's Resolution for the full research trail and the
+# recommended Windows-side changes `make doctor`/this repo cannot apply for
+# you.
+vmIdleTimeout=-1

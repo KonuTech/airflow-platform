@@ -28,6 +28,11 @@ KIND ?= $(CURDIR)/tools/bin/kind
 HELM ?= $(CURDIR)/tools/bin/helm
 KUBECTL ?= kubectl
 
+# `doctor-live`'s own override point, same shape as KIND=/HELM=/KUBECTL=
+# above — lets a test point it at a fake `docker` without touching the real
+# cluster (tests/policy/test_doctor_live_detects_mount_state.py).
+DOCKER ?= docker
+
 # `tools/` arrives with the corpus generator in plan 01-03. $(wildcard) keeps
 # this target honest until then rather than hard-failing on a path that does not
 # exist yet.
@@ -50,7 +55,7 @@ FILE ?=
 
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
-        install-cluster doctor cluster-up cluster-down cluster-rebuild cluster-verify \
+        install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
         image-airflow image-dbt ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
         migrate-analytics
@@ -139,6 +144,18 @@ install-cluster: uv-guard      ## Install the `cluster` dependency group (boto3,
 
 doctor:                        ## D-10: fail-closed host preflight; cluster-up cannot skip it [plan 02-02]
 	KIND=$(KIND) HELM=$(HELM) KUBECTL=$(KUBECTL) scripts/doctor.sh
+
+doctor-live:                   ## Detect+self-heal the DAGs tmpfs-fallback mount on an already-running cluster [debug: docker-desktop-wsl2-vm-restart]
+	# Unlike `doctor`, this checks a cluster that is ALREADY UP, not a
+	# preflight before creating one. Restarts only the affected kind node
+	# container(s) via `docker restart` if the DAGs hostPath bind mount has
+	# fallen back to tmpfs (the exact symptom of a Docker Desktop/WSL2 VM
+	# restart during a long unattended session — see the debug session for
+	# the researched root cause and its Windows-side mitigation).
+	DOCKER=$(DOCKER) scripts/doctor-live.sh
+
+doctor-live-check:             ## Same detection as doctor-live, report-only, no restart
+	DOCKER=$(DOCKER) DOCTOR_LIVE_REPAIR=false scripts/doctor-live.sh
 
 cluster-up: doctor             ## Create/update the kind cluster and every stage [plan 02-01]
 	# The only bootstrap entry point (D-09) — delegates to scripts/cluster-up.sh
