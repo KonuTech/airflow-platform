@@ -143,7 +143,16 @@ def csv_ingest_customers() -> None:
         retries=3,
         retry_exponential_backoff=True,
         outlets=[customers_asset],
-        **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
+        # 10-07-PLAN.md (Rule 1 fix, live-cluster finding): was
+        # _DISCOVER_RESOURCES (128Mi/256Mi) -- sized for discover's
+        # lightweight bucket-listing job, but publish now runs SCDPublisher
+        # (Phase 10), whose Step C recomputes each touched key's FULL bronze
+        # history in memory. Live-observed OOMKilled (exit_code 137) at
+        # 256Mi during this plan's own live sweep. _STAGE_RESOURCES is
+        # already the generous profile this DAG uses for its heaviest
+        # per-row streaming work; reusing it here gives publish the same
+        # headroom rather than inventing a third resource profile.
+        **common_kpo_kwargs(resources=_STAGE_RESOURCES),
     )
     wire_dbt_build_tracking("customers", stage, dbt_build, publish)  # LOAD-06 (D-14/D-17/D-19)
     aggregate_receipts(stage.output)
