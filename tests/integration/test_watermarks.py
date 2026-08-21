@@ -19,13 +19,18 @@ value -- a repeat would raise ``UniqueViolation``, not silently upsert.
 
 Test 3 (a dataset with no prior watermark row) uses ``"orders"`` --
 deliberately different from Tests 1/2's ``"customers"`` -- so it never
-depends on Tests 1/2's own execution order within this file, and stays
-correct whether this file runs alone (this task's own acceptance criterion,
-``pytest tests/integration/test_watermarks.py -q``) or together with
-``test_reconciliation.py`` (the plan's own combined ``<verification>``
-command, which lists this file FIRST -- pytest runs explicitly-listed files
-in the given order, so ``orders``' watermark is still untouched by
-``test_reconciliation.py`` at the point this file's Test 3 runs).
+depends on Tests 1/2's own execution order within this file. It also calls
+``_delete_watermark_state`` before its own "no prior row" assertion, rather
+than relying on suite-execution order: every file in this directory is
+forced to use the SAME literal dataset name ("orders"/"customers", per
+``MergePublisher``/``OrdersMergePublisher``'s own hardcoding), and
+``get_or_create_dataset`` returns the SAME ``dataset_id`` for that name
+every time -- when this whole directory runs together against one shared
+testcontainers Postgres, ANY other file that has already published
+something for "orders" leaves a real watermark row behind, and pytest's
+own file-collection order (alphabetical by default, not necessarily the
+order any single ``<verification>`` command happens to list files in) is
+not something a "which file runs first" argument can safely depend on.
 """
 
 from __future__ import annotations
@@ -360,6 +365,35 @@ def _true_max_event_ts(migrated_dsn: str) -> datetime | None:
     return row[0]
 
 
+def _delete_watermark_state(
+    migrated_dsn: str,
+    *,
+    dataset_id: int,
+    target_key: str = "default",
+) -> None:
+    """Delete any `meta.watermarks`/`meta.watermark_history` rows for this dataset+target_key.
+
+    `get_or_create_dataset("orders")` returns the SAME `dataset_id` every call -- when this whole
+    directory runs together against one shared testcontainers Postgres, ANY other integration
+    test file that has already published something for the literal dataset name "orders" (every
+    file here is forced to use that literal name, per this module's own docstring) leaves a real
+    watermark row behind before Test 3 below ever runs, which pytest's own file-collection order
+    (alphabetical, not the order any single `<verification>` command happens to list files in)
+    does not protect against. Deleting first makes "a dataset with no prior watermark row" a fact
+    this test constructs for itself, not a fact it hopes suite-execution order preserves.
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            "DELETE FROM meta.watermark_history WHERE dataset_id = %s AND target_key = %s",
+            (dataset_id, target_key),
+        )
+        conn.execute(
+            "DELETE FROM meta.watermarks WHERE dataset_id = %s AND target_key = %s",
+            (dataset_id, target_key),
+        )
+        conn.commit()
+
+
 # --- Test 1: a NEWER max(event_ts) advances cursor_value --------------------
 
 
@@ -495,6 +529,9 @@ def test_first_ever_publish_creates_watermark_row_with_null_old_value(env: _Env)
         dataset_name="orders",
         key_suffix="watermark_orders_first",
     )
+    # Construct "no prior watermark row" as a fact, not an assumption about which order pytest
+    # happened to collect this directory's files in (see _delete_watermark_state's own docstring).
+    _delete_watermark_state(env.migrated_dsn, dataset_id=dataset_id)
     assert env.metadata.get_current_watermark(dataset_id=dataset_id, target_key="default") is None
 
     with psycopg.connect(env.migrated_dsn) as conn:
