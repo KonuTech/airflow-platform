@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any
 from dataplat.load.publish.protocol import Publisher, PublishResult
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from psycopg import Connection
 
     from dataplat.pipeline.protocol import PipelineContext
@@ -110,6 +112,8 @@ class OrdersMergePublisher(Publisher):
         ctx: PipelineContext,  # noqa: ARG002 -- unused; see class docstring + Args below
         source_table: str,
         conn: Connection[Any],
+        *,
+        staged_run_ids: Sequence[int],  # noqa: ARG002 -- unused; see Args below
     ) -> PublishResult:
         """Publish ``source_table``'s rows into ``normalized.orders``.
 
@@ -123,6 +127,10 @@ class OrdersMergePublisher(Publisher):
                 identifier only -- see the module docstring.
             conn: An open connection, inside an open transaction the caller
                 owns. Never committed or rolled back here.
+            staged_run_ids: Unused by this ``Publisher`` -- its whole-table
+                ``ON CONFLICT`` publish statement needs no run-scoping
+                (Phase 10, 10-01-PLAN.md Task 3). Accepted only to satisfy
+                the ``Publisher`` protocol's shared signature.
 
         Returns:
             A ``PublishResult`` whose ``rows_affected`` is

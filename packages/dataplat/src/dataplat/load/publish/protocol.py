@@ -19,6 +19,16 @@ staged row does not actually improve on what's already published. Callers
 that need to know which business keys THIS publish call actually affected
 (e.g. ``run.py``'s post-publish reject-resolution barrier) must use
 ``published_business_keys``, never a blind read of the staging table.
+
+``staged_run_ids`` (Phase 10, 10-01-PLAN.md Task 3) was added to
+``publish()``'s signature for a similar reason: the SCD Publisher's
+DELETE-detection sweep (Finding F-2) must scope its snapshot diff to only
+THIS publish pass's own newly-staged runs -- a whole-table read of
+``silver.<dataset>`` would make DELETE-detection permanently vacuous, since
+dbt's incremental model retains every business key ever seen forever. The
+caller (``publish_ingest``) computes this list once, before opening the
+publish transaction, and passes it in unchanged; a ``Publisher`` must never
+re-derive it internally.
 """
 
 from __future__ import annotations
@@ -27,6 +37,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from psycopg import Connection
 
     from dataplat.pipeline.protocol import PipelineContext
@@ -71,6 +83,8 @@ class Publisher(Protocol):
         ctx: PipelineContext,
         source_table: str,
         conn: Connection[Any],
+        *,
+        staged_run_ids: Sequence[int],
     ) -> PublishResult:
         """Commit ``source_table``'s rows to this dataset's target table.
 
@@ -85,6 +99,11 @@ class Publisher(Protocol):
                 a per-run scratch staging table before plan 08.1-10,
                 ``silver.<dataset>`` from plan 08.1-10 onward.
             conn: An open connection, inside an open transaction.
+            staged_run_ids: The exact list of ``run_id``s this publish pass
+                is finalizing, computed by the caller BEFORE this call and
+                never re-derived inside ``publish()`` -- needed by any
+                ``Publisher`` whose DELETE-detection or recompute logic must
+                be scoped to "this pass's own files" (Finding F-2, Phase 10).
 
         Returns:
             The outcome of this publish call.

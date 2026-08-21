@@ -156,8 +156,18 @@ def test_etl_app_grants(migrated_dsn: str) -> None:
                 (schema, table),
             ).fetchall()
             privileges = {row[0] for row in rows}
-            assert privileges == {"SELECT", "INSERT", "UPDATE"}, (
-                f"{schema}.{table}: expected exactly SELECT/INSERT/UPDATE, got {privileges}"
+            # Migration 0035 (T-10-02) grants etl_app DELETE on
+            # normalized.customers alone -- see
+            # test_etl_app_has_delete_on_normalized_customers below for the
+            # dedicated, narrowly-scoped proof. Every other GRANTED_TABLES
+            # entry keeps the original SELECT/INSERT/UPDATE-only shape.
+            expected = (
+                {"SELECT", "INSERT", "UPDATE", "DELETE"}
+                if (schema, table) == ("normalized", "customers")
+                else {"SELECT", "INSERT", "UPDATE"}
+            )
+            assert privileges == expected, (
+                f"{schema}.{table}: expected exactly {expected}, got {privileges}"
             )
 
 
@@ -238,24 +248,38 @@ def test_ingestion_runs_schema_version_id_has_an_fk_after_0009(migrated_dsn: str
 
 
 def _customers_customer_id_constraint_types(dsn: str) -> tuple[str, ...]:
-    """Return every `table_constraints.constraint_type` covering `customer_id` alone.
+    """Return every `pg_constraint.contype` covering `customer_id`.
 
     A plain index is not a constraint at all, so this returns an empty tuple
-    for it -- distinct from a real `UNIQUE` constraint, which always shows up
-    here (`information_schema.table_constraints` joined through
-    `key_column_usage`).
+    for it. Queries `pg_constraint` directly (via `pg_attribute`/`conkey`),
+    NOT `information_schema.table_constraints`/`key_column_usage`: an
+    `EXCLUDE` constraint (migration 0035, contype `'x'`) has no
+    representation in `information_schema` at all -- it is a
+    PostgreSQL-specific constraint type outside the SQL standard that
+    `information_schema` models, so the original `information_schema`-based
+    query would silently return an empty tuple for it, indistinguishable
+    from "no constraint at all". `pg_constraint` is the one source that
+    actually shows every constraint type this repo uses, including `'u'`
+    (UNIQUE, pre-migration-0035) and `'x'` (EXCLUDE, post-migration-0035).
+
+    Excludes `contype = 'n'` (a catalogued NOT NULL constraint) -- confirmed
+    live (PostgreSQL 18 now catalogues `NOT NULL` as a real `pg_constraint`
+    row, not merely `pg_attribute.attnotnull`): `customer_id nullable=False`
+    (migration 0005) always produces one, in every migration state this
+    function is called against, which is irrelevant to what every caller of
+    this helper actually wants to know (uniqueness/exclusion shape).
     """
     with psycopg.connect(dsn) as conn:
         rows = conn.execute(
             """
-            SELECT tc.constraint_type
-              FROM information_schema.table_constraints tc
-              JOIN information_schema.key_column_usage kcu
-                ON tc.constraint_name = kcu.constraint_name
-               AND tc.table_schema = kcu.table_schema
-             WHERE tc.table_schema = 'normalized'
-               AND tc.table_name = 'customers'
-               AND kcu.column_name = 'customer_id'
+            SELECT DISTINCT con.contype
+              FROM pg_constraint con
+              JOIN pg_attribute att
+                ON att.attrelid = con.conrelid
+               AND att.attnum = ANY(con.conkey)
+             WHERE con.conrelid = 'normalized.customers'::regclass
+               AND att.attname = 'customer_id'
+               AND con.contype != 'n'
             """,
         ).fetchall()
     return tuple(row[0] for row in rows)
@@ -271,26 +295,56 @@ def _index_exists(dsn: str, *, schema: str, index_name: str) -> bool:
 
 
 def test_0006_customer_id_has_a_real_unique_constraint(migrated_dsn: str) -> None:
-    """LOAD-09's `ON CONFLICT (customer_id)` needs a real conflict target, not merely an index."""
-    assert _customers_customer_id_constraint_types(migrated_dsn) == ("UNIQUE",)
-    assert not _index_exists(
-        migrated_dsn,
-        schema="normalized",
-        index_name="ix_customers_customer_id",
-    )
+    """LOAD-09's original `ON CONFLICT (customer_id)` conflict target, as of migration 0006 alone.
+
+    `migrated_dsn` always runs the FULL migration chain to `head` (migration
+    0035 included), so the constraint actually present on `customer_id` at
+    this test's own start is already `'x'` (EXCLUDE) -- migration 0035 drops
+    0006's `UNIQUE` constraint (D-07: `ON CONFLICT` is no longer this
+    table's write path once more than one row per key is legal). This test
+    downgrades to exactly `"0006"` first to observe 0006's own,
+    now-historical guarantee, then restores `head` -- proving both that
+    0006's UNIQUE constraint still applies cleanly in isolation AND that
+    `head`'s real state is EXCLUDE, not UNIQUE (see the companion round-trip
+    test below for the full downgrade/upgrade proof).
+    """
+    alembic_config = Config(str(ALEMBIC_INI))
+    previous = os.environ.get("ALEMBIC_DSN")
+    os.environ["ALEMBIC_DSN"] = migrated_dsn
+    try:
+        command.downgrade(alembic_config, "0006")
+        assert _customers_customer_id_constraint_types(migrated_dsn) == ("u",)
+        assert not _index_exists(
+            migrated_dsn,
+            schema="normalized",
+            index_name="ix_customers_customer_id",
+        )
+    finally:
+        command.upgrade(alembic_config, "head")
+        if previous is None:
+            os.environ.pop("ALEMBIC_DSN", None)
+        else:
+            os.environ["ALEMBIC_DSN"] = previous
+
+    assert _customers_customer_id_constraint_types(migrated_dsn) == ("x",)
 
 
 def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_constraint(
     migrated_dsn: str,
 ) -> None:
-    """`alembic downgrade 0005` cleanly reverses 0006; re-`upgrade head` restores it.
+    """`alembic downgrade 0005` reverses 0006 (and 0035, above it); `upgrade head` restores both.
 
     Targets the explicit revision `"0005"` rather than the relative `"-1"`:
     migration `0007` (plan 04-04) added a new head above `0006`, so `"-1"`
     from head would now reverse `0007` instead of `0006` -- an explicit
-    target is what this test actually means ("undo exactly 0006's change"),
-    and stays correct regardless of how many further migrations are added
-    later.
+    target is what this test actually means ("undo everything down to and
+    including 0006's change"), and stays correct regardless of how many
+    further migrations are added later. Since migration 0035 is now above
+    0006 in the chain, downgrading to `"0005"` necessarily reverses 0035
+    first (its own `downgrade()` restores 0006's UNIQUE constraint), then
+    0006 itself (restoring 0005's plain index) -- both are exercised by one
+    `command.downgrade(..., "0005")` call, matching Alembic's own
+    step-through-every-intermediate-revision semantics.
 
     `migrated_dsn` is session-scoped and shared by every other module in
     `tests/integration/`, so this test restores it to `head` in a `finally`
@@ -314,7 +368,7 @@ def test_0006_downgrade_restores_the_plain_index_and_reupgrade_restores_the_cons
         else:
             os.environ["ALEMBIC_DSN"] = previous
 
-    assert _customers_customer_id_constraint_types(migrated_dsn) == ("UNIQUE",)
+    assert _customers_customer_id_constraint_types(migrated_dsn) == ("x",)
     assert not _index_exists(
         migrated_dsn,
         schema="normalized",
@@ -717,22 +771,25 @@ _GOLD_INDEXES = (
 )
 
 
-def test_gold_indexes_exist_and_business_key_uniqueness_is_unchanged(migrated_dsn: str) -> None:
-    """D-13: all five gold physical-modeling indexes exist, uniqueness guarantees are untouched.
+def test_gold_indexes_exist_and_orders_business_key_uniqueness_is_unchanged(
+    migrated_dsn: str,
+) -> None:
+    """D-13: all five gold physical-modeling indexes exist; `orders`' UNIQUE guarantee is untouched.
 
     Two independent properties: (1) `pg_indexes` shows all five named
     indexes after `alembic upgrade head`; (2) the pre-existing
-    `uq_customers_customer_id`/`uq_orders_order_id` `UNIQUE` constraints
-    (migrations 0006/0017) still reject a duplicate business key -- proving
-    migration 0027 (indexes only, per its own module docstring) did not
-    weaken `MergePublisher`/`OrdersMergePublisher`'s `ON CONFLICT` targets.
+    `uq_orders_order_id` `UNIQUE` constraint (migration 0017) still rejects
+    a duplicate business key -- proving migration 0027 (indexes only, per
+    its own module docstring) did not weaken `OrdersMergePublisher`'s
+    `ON CONFLICT` target. `customers`'s own business-key-uniqueness shape
+    changed under migration 0035 (D-07) -- see
+    `test_gold_customers_shape_is_scd2_not_unique` below, which replaces
+    this test's original `customers` half.
     """
     for schema, _table, index_name in _GOLD_INDEXES:
         assert _index_exists(migrated_dsn, schema=schema, index_name=index_name), (
             f"missing index {schema}.{index_name}"
         )
-
-    assert _customers_customer_id_constraint_types(migrated_dsn) == ("UNIQUE",)
 
     run_id, file_id, batch_id = _seed_minimal_lineage_row(
         migrated_dsn,
@@ -761,6 +818,102 @@ def test_gold_indexes_exist_and_business_key_uniqueness_is_unchanged(migrated_ds
                 (777_001, 1, run_id, file_id, batch_id, b"gold-idx-hash-2"),
             )
         conn.rollback()
+
+
+def test_gold_customers_shape_is_scd2_not_unique(migrated_dsn: str) -> None:
+    """Migration 0035 (D-07/SCD-12): `customers`'s business-key guarantee is EXCLUDE, not UNIQUE.
+
+    Replaces this module's original `customers` half of
+    `test_gold_indexes_exist_and_business_key_uniqueness_is_unchanged`
+    (Finding F-4, 10-RESEARCH.md): after migration 0035, more than one row
+    per `customer_id` is legal and expected (SCD2 version history) -- the
+    real business-key guarantee at `head` is the exclusion constraint
+    (`excl_customers_business_key_validity`, `contype = 'x'`), never a
+    `UNIQUE` constraint. `signup_country` (D-13) is asserted present here
+    too, alongside the other SCD2 columns migration 0035 adds.
+    """
+    assert _customers_customer_id_constraint_types(migrated_dsn) == ("x",)
+
+    with psycopg.connect(migrated_dsn) as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                 WHERE table_schema = 'normalized' AND table_name = 'customers'
+                """,
+            ).fetchall()
+        }
+    for expected_column in ("valid_to", "is_current", "validity", "signup_country"):
+        assert expected_column in columns, f"normalized.customers missing {expected_column!r}"
+
+
+def test_etl_app_has_delete_on_normalized_customers(migrated_dsn: str) -> None:
+    """Migration 0035 (T-10-02): `etl_app` gains `DELETE` on `normalized.customers` only.
+
+    Verified against `information_schema.role_table_grants` directly
+    (the same source `test_etl_app_grants` above reads), rather than
+    assumed from the migration text alone -- T-10-02's own mitigation
+    plan requires this be checked live, not assumed.
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        rows = conn.execute(
+            """
+            SELECT privilege_type
+              FROM information_schema.role_table_grants
+             WHERE grantee = 'etl_app' AND table_schema = 'normalized' AND table_name = 'customers'
+            """,
+        ).fetchall()
+    privileges = {row[0] for row in rows}
+    assert privileges == {"SELECT", "INSERT", "UPDATE", "DELETE"}, (
+        f"normalized.customers: expected SELECT/INSERT/UPDATE/DELETE for etl_app, got {privileges}"
+    )
+
+
+def test_exclusion_constraint_rejects_overlapping_validity(migrated_dsn: str) -> None:
+    """SCD-12: two rows for the SAME customer_id with overlapping validity ranges are rejected.
+
+    "Attempt the forbidden thing, assert the specific psycopg error" style,
+    matching `test_dbt_app_can_insert_dedup_audit_but_not_update_or_delete`'s
+    own precedent above. Both rows omit `valid_to` (defaulting to the
+    far-future sentinel), so their `validity` ranges are `[event_ts_1, 9999)`
+    and `[event_ts_2, 9999)` -- any two distinct `event_ts` values for the
+    same `customer_id` necessarily overlap under that shape, which is
+    exactly the case the exclusion constraint exists to reject.
+    """
+    run_id, file_id, batch_id = _seed_minimal_lineage_row(
+        migrated_dsn,
+        dataset_name="test_migrations_exclusion_constraint_overlap",
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        conn.execute(
+            """
+            INSERT INTO normalized.customers
+                (customer_id, name, country, birth_date, event_ts,
+                 _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+            VALUES (%s, 'Ada', 'US', NULL, '2026-01-01T00:00:00+00', %s, %s, %s, 1, %s)
+            """,
+            (777_777, run_id, file_id, batch_id, b"excl-hash-1"),
+        )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.ExclusionViolation):
+            conn.execute(
+                """
+                INSERT INTO normalized.customers
+                    (customer_id, name, country, birth_date, event_ts,
+                     _run_id, _file_id, _batch_id, _source_row_number, _record_hash)
+                VALUES (%s, 'Ada', 'US', NULL, '2026-02-01T00:00:00+00', %s, %s, %s, 2, %s)
+                """,
+                (777_777, run_id, file_id, batch_id, b"excl-hash-2"),
+            )
+        conn.rollback()
+
+        conn.execute(
+            "DELETE FROM normalized.customers WHERE customer_id = %s",
+            (777_777,),
+        )
+        conn.commit()
 
 
 def test_dbt_app_has_no_grant_on_run_stages(migrated_dsn: str) -> None:
