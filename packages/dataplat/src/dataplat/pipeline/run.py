@@ -137,7 +137,19 @@ _LEASE_DURATION = timedelta(minutes=5)
 # `DataPlatformError`), never a bare `KeyError` and never a silent fallback
 # onto another dataset's columns.
 _TARGET_COLUMNS_BY_DATASET: dict[str, tuple[str, ...]] = {
-    "customers": ("customer_id", "name", "country", "birth_date", "event_ts"),
+    # signup_country (D-13, plan 10-01) appended: customers.yaml's own
+    # `columns:` block gained this Type-0 column in migration 0035, and
+    # staging.customers (durable bronze) gained the matching nullable
+    # column in migration 0037 (plan 10-04) -- but this lookup itself was
+    # never updated, a genuine pre-existing gap plan 10-04's own SUMMARY
+    # flagged as "will block plan 10-07's live 2-year backfill sweep until
+    # fixed" (Rule 3: every real stage_ingest() call for customers would
+    # otherwise raise ValueError at StagingLoader._build_stages, since
+    # ColumnContract("signup_country") has no entry in this tuple). Fixed
+    # here, appended last to match the CSV/staging-table column order
+    # tools/corpus/dated_series.py's _DATASET_COLUMNS and customers.yaml's
+    # own columns: block both already use.
+    "customers": ("customer_id", "name", "country", "birth_date", "event_ts", "signup_country"),
     "orders": ("order_id", "customer_id", "order_date", "amount"),
 }
 

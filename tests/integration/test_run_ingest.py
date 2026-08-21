@@ -140,7 +140,13 @@ _MERGE_PUBLISHER_SCD2_XFAIL_REASON = (
 )
 
 _BUCKET = "run-ingest-test"
-_CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+# 10-07-PLAN.md Task 1 (Rule 1 fix): 6 columns, matching customers.yaml's real
+# shape since migration 0035/plan 10-01 added `signup_country` (D-13) -- see
+# test_stage_ingest.py's own identical fix for the full rationale
+# (`dataplat.pipeline.run._TARGET_COLUMNS_BY_DATASET["customers"]` is a
+# dataset-name-keyed global; a narrower row desynchronizes StagingLoader's
+# COPY column alignment by one position).
+_CSV_HEADER = "customer_id,name,country,birth_date,event_ts,signup_country\n"
 # plan 08-11: every STAGED run now writes a report.json artifact to the
 # real "validated" bucket (VALID-04's MinIO-artifact half) -- this file's
 # throwaway MinioContainer is a bare instance, not the Helm-provisioned
@@ -155,7 +161,7 @@ def _csv_bytes(rows: int, *, start_id: int) -> bytes:
     for offset in range(rows):
         customer_id = start_id + offset
         lines.append(
-            f"{customer_id},Name{customer_id},US,1990-01-01,2026-01-01T00:00:00+00:00\n",
+            f"{customer_id},Name{customer_id},US,1990-01-01,2026-01-01T00:00:00+00:00,PL\n",
         )
     return "".join(lines).encode("utf-8")
 
@@ -207,6 +213,13 @@ def _make_config() -> DatasetConfig:
                 nullable=False,
                 required=True,
                 format="%Y-%m-%dT%H:%M:%S%z",
+            ),
+            ColumnContract(
+                name="signup_country",
+                type="string",
+                nullable=True,
+                required=False,
+                description="Country the customer originally signed up from (SCD Type 0, D-13)",
             ),
         ],
     )

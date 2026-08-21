@@ -58,13 +58,30 @@ pytestmark = pytest.mark.integration
 
 _BUCKET = "stage-ingest-test"
 _VALIDATED_BUCKET = "validated"
-_CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+# 10-07-PLAN.md Task 1 (Rule 1 fix): 6 columns, matching customers.yaml's real
+# shape since migration 0035/plan 10-01 added `signup_country` (D-13) --
+# `dataplat.pipeline.run._TARGET_COLUMNS_BY_DATASET["customers"]` is a
+# dataset-name-keyed global (not derived from this test's own local
+# `DatasetConfig`), so it now ALWAYS resolves to the 6-column tuple
+# regardless of what `_make_config()` declares. A 5-column fixture row used
+# to align by coincidence (target_columns was ALSO 5 columns); fixing that
+# gap (this plan's own Task 1 blocker) exposed `StagingLoader.load()`'s
+# narrower-row branch, which does not pad -- a 5-wide row against a 6-wide
+# `column_list` desynchronizes every COPY value by one position (live-
+# confirmed: `_source_row_number` received a hash-looking string). Widening
+# this fixture to 6 columns is the correct, minimal fix; the alternative
+# (teaching `StagingLoader` to pad narrower rows) is real, larger,
+# out-of-scope architectural work (D-13's own "files delivered before this
+# column existed never carried it" backward-compatibility case) this plan
+# does not need for its own live proof, since `tools/corpus/dated_series.py`
+# (plan 10-06) already always emits all 6 columns.
+_CSV_HEADER = "customer_id,name,country,birth_date,event_ts,signup_country\n"
 
 
 def _row(customer_id: int, *, empty_name: bool = False) -> str:
     """One well-formed customers CSV row, optionally with an empty `name` (a completeness violation)."""  # noqa: E501, W505
     name = "" if empty_name else f"Name{customer_id}"
-    return f"{customer_id},{name},US,1990-01-01,2026-01-01T00:00:00+00:00\n"
+    return f"{customer_id},{name},US,1990-01-01,2026-01-01T00:00:00+00:00,PL\n"
 
 
 def _csv_bytes(rows: int, *, start_id: int) -> bytes:
@@ -129,6 +146,13 @@ def _make_config() -> DatasetConfig:
                 nullable=False,
                 required=True,
                 format="%Y-%m-%dT%H:%M:%S%z",
+            ),
+            ColumnContract(
+                name="signup_country",
+                type="string",
+                nullable=True,
+                required=False,
+                description="Country the customer originally signed up from (SCD Type 0, D-13)",
             ),
         ],
     )
