@@ -223,6 +223,19 @@ class _ReconciliationAggregates:
     every file finalized this pass, mirroring ``rows_loaded``'s own
     aggregate-attribution precedent (see ``publish_ingest``'s own
     ``finalize_publication`` call site).
+
+    D-08 (Phase 10, SCD-03): ``output_count`` keeps its literal, unchanged
+    meaning -- ``count(*) FROM target_table``, every physical row -- and is
+    NEVER redefined here. For a Type-2 SCD dimension (``normalized.
+    customers``) this legitimately grows past ``key_count_output`` (already
+    ``count(DISTINCT business_key_column) FROM target_table``, unchanged)
+    once more than one SCD2 version exists for the same business key: a
+    clean publish with zero rejects/dedups against a multi-versioned
+    customers table is NOT expected to show zero discrepancy the way it
+    does for a Type-1/Type-0-only dataset like ``orders``. Any comparison
+    whose intent is "does the target hold the same SET of business keys as
+    the source" must use ``key_count_input``/``key_count_output``, never
+    ``input_count``/``output_count``.
     """
 
     input_count: int

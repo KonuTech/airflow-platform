@@ -156,7 +156,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop + recreate migration 0030's (pre-is_current-filter) view verbatim -- a genuine reversal."""
+    """Drop + recreate migration 0030's (pre-``is_current``-filter) view verbatim -- a reversal."""
     op.execute("DROP VIEW meta.v_customers_lineage")
     op.execute(_PRIOR_CREATE_VIEW)
     op.execute("GRANT SELECT ON meta.v_customers_lineage TO etl_app")

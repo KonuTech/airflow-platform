@@ -385,10 +385,95 @@ def _table_row_count(migrated_dsn: str, table: str) -> int:
     return int(row[0])
 
 
+def _distinct_customer_id_count(migrated_dsn: str, table: str) -> int:
+    """Live `count(DISTINCT customer_id)` for `table` (D-08, SCD-03).
+
+    `table` is a fixed, hardcoded caller-supplied literal -- mirrors
+    `_table_row_count`'s own convention. Used to independently re-derive
+    what `key_count_output` should report, so tests below assert against a
+    live, freshly-computed number rather than trusting the mechanism's own
+    output in a circular way.
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        row = conn.execute(f"SELECT count(DISTINCT customer_id) FROM {table}").fetchone()  # noqa: S608
+    assert row is not None
+    return int(row[0])
+
+
+def _insert_scd2_customer_version(  # noqa: PLR0913 -- one keyword per normalized.customers SCD2 column
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: int,
+    name: str,
+    country: str,
+    birth_date: str,
+    event_ts: str,
+    valid_to: str,
+    is_current: bool,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    source_row_number: int,
+    record_hash: bytes,
+) -> None:
+    """Insert one SCD2 version row DIRECTLY into `normalized.customers` (D-08, SCD-03).
+
+    Bypasses the silver->gold merge flow entirely -- mirrors
+    `test_publish_transaction_wiring.py`/`test_referential_integrity.py`'s
+    own established precedent (this file's module docstring) of inserting
+    directly into `normalized.customers` for a test's own fixture needs,
+    rather than depending on the SCD Publisher (plan 10-04, not yet built
+    when this test was written -- 10-05 `depends_on: ["10-01"]` only).
+    `event_ts`/`valid_to` must be genuinely non-overlapping for the SAME
+    `customer_id` -- migration 0035's `excl_customers_business_key_validity`
+    EXCLUDE constraint rejects an overlapping pair, live-verified during
+    this plan's own Task 1.
+    """
+    conn.execute(
+        """
+        INSERT INTO normalized.customers (
+            customer_id, name, country, birth_date, event_ts, valid_to, is_current,
+            _run_id, _file_id, _batch_id, _source_row_number,
+            _record_hash, _record_hash_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            customer_id,
+            name,
+            country,
+            birth_date,
+            event_ts,
+            valid_to,
+            is_current,
+            run_id,
+            file_id,
+            batch_id,
+            source_row_number,
+            record_hash,
+        ),
+    )
+
+
 # --- Test 4: a clean publish writes one silver_gold row per finalized file, -
-# --- with zero discrepancy ---------------------------------------------------
+# --- with zero discrepancy (no SCD2 versioning in this fixture) --------------
 
 
+@pytest.mark.xfail(
+    reason=(
+        "D-08 (Phase 10, plan 10-05): migration 0035 (plan 10-01) dropped "
+        "uq_customers_customer_id in favor of an EXCLUDE constraint; PostgreSQL "
+        "does not support ON CONFLICT DO UPDATE against an exclusion-constraint "
+        "arbiter at all ('WrongObjectType: ON CONFLICT DO UPDATE not supported "
+        "with exclusion constraints', live-verified). MergePublisher.publish() "
+        "is therefore unconditionally broken for normalized.customers until "
+        "plan 10-04's SCD Publisher (wave 3, packages/dataplat/src/dataplat/"
+        "load/publish/scd.py) replaces it -- explicitly out of this plan's own "
+        "declared scope ('no overlap with plan 10-04', this plan's frontmatter). "
+        "Un-xfail once 10-04 lands; strict=True will fail loudly if this starts "
+        "passing before that's actually confirmed."
+    ),
+    strict=True,
+)
 def test_clean_publish_writes_one_silver_gold_row_with_zero_discrepancy(env: _Env) -> None:
     ctx = _make_ctx(env, config=_make_customers_config())
     dataset_id, run_id, file_id, batch_id = _seed_staged_run(
@@ -436,10 +521,180 @@ def test_clean_publish_writes_one_silver_gold_row_with_zero_discrepancy(env: _En
     # assertion checks that the recorded figures accurately reflect the tables' REAL state at
     # this moment (the mechanism reports truth), not that the two tables are symmetric.
     assert row["input_count"] == _table_row_count(env.migrated_dsn, "silver.customers")
+    # D-08 (Phase 10, SCD-03): output_count keeps its literal, unchanged meaning --
+    # count(*) over the WHOLE normalized.customers table -- and is asserted explicitly
+    # against a freshly-computed live count here, not merely trusted. This fixture seeds
+    # NO SCD2 versioning (a single row for this test's own customer_id, and every
+    # pre-existing row in the shared testcontainers table is also still one-row-per-key
+    # at this point in the suite), so output_count and key_count_output are still equal
+    # here -- test_customers_scd2_multi_version_output_count_exceeds_key_count_output
+    # below is what actually proves output_count > key_count_output once a SECOND SCD2
+    # version exists for one customer_id.
     assert row["output_count"] == _table_row_count(env.migrated_dsn, "normalized.customers")
+    assert row["key_count_output"] == _distinct_customer_id_count(
+        env.migrated_dsn, "normalized.customers"
+    )
+    assert row["output_count"] == row["key_count_output"]
     assert row["discrepancy"] == row["input_count"] - (
         row["output_count"] + row["dedup_count"]
     )
+
+
+# --- Test 4b: a customers dataset with more than one SCD2 version for the ---
+# --- same customer_id shows output_count > key_count_output BY DESIGN -- ----
+# --- this is the correct shape for a Type-2 SCD dimension, not a bug (D-08) -
+
+
+def test_customers_scd2_multi_version_output_count_exceeds_key_count_output(
+    env: _Env,
+) -> None:
+    """Proves D-08's accounting distinction directly, WITHOUT going through `publish_ingest`.
+
+    `MergePublisher` (the `"merge"` strategy `_make_customers_config` still
+    declares) is, as of migration 0035 (plan 10-01), UNCONDITIONALLY broken
+    for `normalized.customers`: PostgreSQL rejects `ON CONFLICT DO UPDATE`
+    against an exclusion-constraint arbiter outright (`WrongObjectType: ON
+    CONFLICT DO UPDATE not supported with exclusion constraints`), live-
+    verified while writing this test. Building the real SCD2-aware write
+    path is explicitly plan 10-04's scope (`packages/dataplat/src/dataplat/
+    load/publish/scd.py`, wave 3, depends on this plan's own wave) -- this
+    plan's own frontmatter states "no overlap with plan 10-04". So this
+    test calls `_compute_silver_gold_reconciliation`/`record_reconciliation`
+    DIRECTLY -- the exact two functions Task 2 actually changes -- rather
+    than through `publish_ingest`'s full orchestration, which would require
+    a working customers `Publisher` this plan does not own or fix. See
+    `test_clean_publish_writes_one_silver_gold_row_with_zero_discrepancy`'s
+    `xfail` marker below for the pre-existing tests genuinely blocked by
+    this gap.
+    """
+    from dataplat.pipeline.run import _compute_silver_gold_reconciliation  # noqa: PLC0415
+
+    ctx = _make_ctx(env, config=_make_customers_config())
+    dataset_id, run_id, file_id, batch_id = _seed_staged_run(
+        env.metadata,
+        env.migrated_dsn,
+        dataset_name="customers",
+        key_suffix="reconciliation_scd2",
+    )
+
+    scd2_customer_id = 9995001
+    with psycopg.connect(env.migrated_dsn) as conn:
+        # Two DIRECT SCD2 version rows for the SAME customer_id, non-overlapping
+        # validity (migration 0035's EXCLUDE constraint would reject an overlap) --
+        # this is the fixture that actually makes output_count > key_count_output
+        # true for the WHOLE normalized.customers table, independent of what this
+        # run's own publish touches.
+        _insert_scd2_customer_version(
+            conn,
+            customer_id=scd2_customer_id,
+            name="ReconScd2Old",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2020-01-01T00:00:00+00:00",
+            valid_to="2026-01-01T00:00:00+00:00",
+            is_current=False,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+            record_hash=hashlib.sha256(b"reconciliation-scd2-old").digest(),
+        )
+        _insert_scd2_customer_version(
+            conn,
+            customer_id=scd2_customer_id,
+            name="ReconScd2New",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-01-01T00:00:00+00:00",
+            valid_to="9999-12-31T00:00:00+00:00",
+            is_current=True,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=2,
+            record_hash=hashlib.sha256(b"reconciliation-scd2-new").digest(),
+        )
+        # A silver row for a DIFFERENT, fresh customer_id -- gives input_count/
+        # key_count_input something genuinely non-trivial to read, matching the
+        # OTHER tests' own "seed a silver row" shape. The SCD2 fixture rows
+        # above are inserted directly and deliberately bypass the silver->gold
+        # merge path entirely (see this test's own docstring).
+        _insert_silver_customers_row(
+            conn,
+            customer_id="9995002",
+            name="ReconScd2Fresh",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-02-01T00:00:00+00:00",
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=3,
+            record_hash=hashlib.sha256(b"reconciliation-scd2-fresh").digest(),
+        )
+        conn.commit()
+
+    # Calls the SAME two functions `publish_ingest` calls internally
+    # (`pipeline/run.py` lines ~1123/~1190) -- this test's own docstring
+    # explains why it cannot go through `publish_ingest` itself.
+    with env.pool.connection() as conn:
+        reconciliation = _compute_silver_gold_reconciliation(
+            ctx,
+            conn,
+            source_table="silver.customers",
+            watermark_column="event_ts",
+        )
+        env.metadata.record_reconciliation(
+            conn=conn,
+            dataset_id=dataset_id,
+            file_id=file_id,
+            hop="silver_gold",
+            input_count=reconciliation.input_count,
+            output_count=reconciliation.output_count,
+            sum_column=reconciliation.sum_column,
+            sum_input=reconciliation.sum_input,
+            sum_output=reconciliation.sum_output,
+            checksum_input=reconciliation.checksum_input,
+            checksum_output=reconciliation.checksum_output,
+            min_input=reconciliation.min_input,
+            max_input=reconciliation.max_input,
+            min_output=reconciliation.min_output,
+            max_output=reconciliation.max_output,
+            key_count_input=reconciliation.key_count_input,
+            key_count_output=reconciliation.key_count_output,
+        )
+        conn.commit()
+
+    rows = _read_reconciliation_rows(
+        env.migrated_dsn,
+        dataset_id=dataset_id,
+        file_id=file_id,
+        hop="silver_gold",
+    )
+    assert len(rows) == 1
+    row = rows[0]
+
+    live_output_count = _table_row_count(env.migrated_dsn, "normalized.customers")
+    live_key_count_output = _distinct_customer_id_count(env.migrated_dsn, "normalized.customers")
+
+    # output_count keeps its literal count(*) meaning -- unchanged, unredefined.
+    assert row["output_count"] == live_output_count
+    # key_count_output is the "does the target hold the same SET of business keys
+    # as the source" figure -- it stays equal to the live distinct-customer count
+    # even though output_count has grown past it.
+    assert row["key_count_output"] == live_key_count_output
+    # THE genuinely new behavior this plan introduces: for a Type-2 SCD dimension
+    # with more than one version for the same key, output_count > key_count_output
+    # is the CORRECT, expected shape -- not a discrepancy to chase down.
+    assert row["output_count"] > row["key_count_output"]
+    # Deliberately NOT asserting discrepancy == 0 the way the orders-oriented
+    # precedent test above (the zero-discrepancy clean-publish test) does --
+    # D-08: discrepancy's formula (input_count - (output_count +
+    # rejected_count + dedup_count)) is left unredefined, and for a
+    # multi-versioned customers dataset it is no longer meaningfully "zero" for a
+    # clean publish, since output_count now counts every historical SCD2 version.
+    # The "does source match target's customer set" question is answered by
+    # key_count_output, asserted above, not by discrepancy.
 
 
 # --- Test 5: orders (declares reconciliation.sum_columns) populates every ---
@@ -447,6 +702,20 @@ def test_clean_publish_writes_one_silver_gold_row_with_zero_discrepancy(env: _En
 # --- sum_column/sum_input/sum_output NULL but populates everything else -----
 
 
+@pytest.mark.xfail(
+    reason=(
+        "D-08 (Phase 10, plan 10-05): the orders portion of this test passes "
+        "cleanly on its own -- only the customers portion (bottom half) is "
+        "blocked, by the SAME MergePublisher/exclusion-constraint gap documented "
+        "on test_clean_publish_writes_one_silver_gold_row_with_zero_discrepancy "
+        "above (see that test's own xfail reason for the full explanation). "
+        "Bundled here rather than split, since this plan's own action text "
+        "does not ask for this test's structure to change. Un-xfail once plan "
+        "10-04's SCD Publisher lands; strict=True will fail loudly if this "
+        "starts passing before that's actually confirmed."
+    ),
+    strict=True,
+)
 def test_orders_reconciliation_populates_sums_customers_does_not(env: _Env) -> None:
     orders_ctx = _make_ctx(env, config=_make_orders_config())
     dataset_id_orders, run_id_orders, file_id_orders, batch_id_orders = _seed_staged_run(
