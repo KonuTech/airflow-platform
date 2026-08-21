@@ -996,21 +996,31 @@ def test_idempotent_rerun_produces_zero_additional_rows(
         to_iso=sweep_state.full_sweep_to.isoformat(),
         max_active_runs=sweep_state.max_active_runs,
     )
+    # Sizing: live-observed this session (Task 2's own retries and this test's own first
+    # attempt), a re-triggered no-op dagrun still pays the FULL per-file KPO pod-startup cost
+    # (~10-30s per mapped `integrity_gate`/`stage` pod x up to 18 files) -- "zero new rows" does
+    # NOT mean "fast", since idempotency is checked INSIDE `discover`, after the pods already
+    # spun up. A 3-dagrun re-run window under this cluster's real CPU contention (load average
+    # 5-6 on 12 cores, observed live) took >900s for even the LAST of 3 dagruns alone -- 3600s
+    # (60 min) budgets the whole window with real headroom, mirroring Task 2's own
+    # generous-not-guessed-tight timeout philosophy.
     _wait_for_new_backfill_completed(
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_backfill_id=since_customers_backfill_id,
-        timeout=900,
+        timeout=3600,
     )
     # customers' `publish` task fires its `customers_asset` outlet on every SUCCEEDED run --
     # including a pure no-op re-run (finalize_publication handles an empty staged set the same
     # way) -- so orders' own Asset-triggered cascade re-fires too; wait for ITS re-execution to
-    # settle before comparing final counts, rather than a blind sleep.
+    # settle before comparing final counts, rather than a blind sleep. 1800s (30 min): orders'
+    # own re-run pays the same per-file pod-startup cost as customers' above, plus its dbt_build
+    # step, under the same observed cluster contention.
     _wait_for_new_dag_run_terminal(
         airflow_metadata_connection,
         dag_id=_ORDERS_DAG_ID,
         since_pk=since_orders_dag_run_pk,
-        timeout=600,
+        timeout=1800,
     )
 
     after_customers_count = _table_row_count(analytics_connection, "normalized.customers")
@@ -1066,7 +1076,11 @@ def test_live_run_concurrent_with_backfill_same_dataset(
     )
 
     observed_concurrent = False
-    poll_deadline = time.monotonic() + 300
+    # 600s (10 min): customers' live `*/1 * * * *` schedule normally creates a new DagRun within
+    # a minute, but under this cluster's real CPU contention (observed live this session) task
+    # pod scheduling can queue for several minutes before a task instance actually starts
+    # running -- generous headroom over the architecturally-expected ~1 min.
+    poll_deadline = time.monotonic() + 600
     while time.monotonic() < poll_deadline:
         with airflow_metadata_connection.cursor() as cur:
             cur.execute(
@@ -1084,11 +1098,14 @@ def test_live_run_concurrent_with_backfill_same_dataset(
             break
         time.sleep(_POLL_INTERVAL_SECONDS)
 
+    # Sizing: same live-observed per-dagrun pace as test_idempotent_rerun's own comment above
+    # (KPO pod-startup cost dominates, not row count) -- 2700s (45 min) for this single-window
+    # backfill under this cluster's real CPU contention, with headroom.
     _wait_for_new_backfill_completed(
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_backfill_id=since_id,
-        timeout=600,
+        timeout=2700,
     )
 
     assert observed_concurrent, (
