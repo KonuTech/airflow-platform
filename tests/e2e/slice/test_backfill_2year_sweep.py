@@ -155,7 +155,7 @@ _ETL_NAMESPACE = "etl"
 
 # D-27 fallback scale (module docstring): comfortably under discover_files'
 # max_units_per_run: 100 cap, so one discover call drains the whole corpus.
-_MASTER_SEED = "phase-09-plan-11-backfill-2year-sweep-v2"
+_MASTER_SEED = "phase-09-plan-11-backfill-2year-sweep-v3"
 _START_DATE = date(2024, 1, 1)
 _NUM_DAYS = 14
 _GAP_DAY_INDEX = 5
