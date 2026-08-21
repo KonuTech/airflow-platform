@@ -158,6 +158,12 @@ None — no external service configuration required.
   dependency; the full unit suite (526 tests) passes with zero import-time breakage introduced.
 - No blockers or concerns for downstream plans.
 
+## Self-Check: PASSED
+
+All 5 created files confirmed present on disk; all 5 task commit hashes
+(`89a893e`, `ae21751`, `062a634`, `f550a8e`, plus this summary's own
+`e30e4dd`) confirmed present in `git log`.
+
 ---
 *Phase: 10-slowly-changing-dimensions*
 *Completed: 2026-08-21*
