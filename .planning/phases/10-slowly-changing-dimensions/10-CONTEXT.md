@@ -56,6 +56,21 @@ of a CDC feed.
   - `event_ts` — not itself a change-tracked business attribute; it is the effective-date **source**
     (see D-03), excluded from the change hash the same way it's excluded from dedup's business
     columns today.
+- **D-13 (LOCKED — added post-research, 2026-08-21, closes Open Question 1 from `10-RESEARCH.md`):**
+  Research found D-02's column set leaves **no genuine Type-0 example** — `customer_id` is
+  trivially immutable in every SCD design (Type 0/1/2 alike) and doesn't exercise Type-0's actual
+  defining behavior ("reject an incoming change to this column, keep the originally-recorded
+  value"). Treating `customer_id` as the SCD-01 proof would produce a vacuous test with no real
+  Type-0 dispatch logic behind it. **Add a new column, `signup_country` — Type 0** (the country a
+  customer originally registered from, distinct from `country`'s Type-2 "current country" — a
+  clean, non-redundant contrast: current location changes over time, signup origin is a fact
+  recorded once and never revised even under a correction). This requires: adding `signup_country`
+  to `customers.yaml`'s `columns:` block, `normalized.customers`'s DDL (migration 0035 or a
+  follow-up), the fixture/corpus generator, and the SCD Publisher's Type-0 dispatch path (accept
+  the column on first-ever insert for a `customer_id`, silently ignore any later incoming value —
+  no exception, no rejection record, just "never overwritten"). Rejected alternative: treating
+  `customer_id` as the Type-0 proof — cheaper, but tests an invariant true regardless of SCD-01's
+  existence, not the actual capability the requirement describes.
 
 ### Effective Dating (SCD-06)
 
