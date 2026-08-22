@@ -13,17 +13,36 @@ secret is ever interpolated, no step can echo one. That claim is checkable, it
 is true today, and it stops being true the moment someone adds the first
 `secrets.*` reference.
 
-`ALLOWED_SECRETS` is therefore empty, deliberately. It is expected to grow in
-Phase 11, when publishing images introduces a registry credential. **Adding a
-name to it does not merely permit that secret — it invalidates the structural
-claim above and obliges a re-audit of SEC-10 in its general form**, because from
-that point on "no job echoes a secret" becomes a review-time judgement rather
-than something this test can decide. Whoever adds the first entry owes that
-re-audit; they cannot inherit this one.
+`ALLOWED_SECRETS` was empty through Phase 1-10, deliberately. Phase 11 plan
+11-01 is the anticipated trigger this comment named in advance: `publish.yml`
+introduces the platform's first registry credential, `secrets.GITHUB_TOKEN`,
+consumed by `docker/login-action`'s `password:` input to authenticate to
+`ghcr.io`. **Adding a name to `ALLOWED_SECRETS` does not merely permit that
+secret — it invalidates the structural claim above and obliges a re-audit of
+SEC-10 in its general form**, because from that point on "no job echoes a
+secret" becomes a review-time judgement rather than something this test can
+decide alone. That re-audit, performed when `GITHUB_TOKEN` was added:
+
+* `docker/login-action` is the only step reading `secrets.GITHUB_TOKEN`; it is
+  passed as a typed `with.password` input, never interpolated into a `run:`
+  shell body — the action's own contract is to authenticate `docker login`
+  without echoing the credential to its own log output.
+* No `run:` step anywhere in `publish.yml` references `GITHUB_TOKEN`,
+  `secrets.*`, or any construct that could print it (`env_dump_problems`
+  below independently checks the whole workflow for exactly that class of
+  leak, over every step, not only ones referencing a secret).
+* The token is the ephemeral, job-scoped one GitHub Actions injects and
+  auto-revokes at job end — never a long-lived PAT — and its own scope is
+  the minimum this job needs (`packages: write`, `id-token: write`; see
+  `ALLOWED_PERMISSION_WIDENING` below).
+
+A second name added later still obliges its own fresh re-audit; this one
+does not grandfather anything beyond `GITHUB_TOKEN` in `publish.yml`.
 
 Three assertions, matching SEC-10's three decidable parts:
 
-1. every repository-secret reference is in `ALLOWED_SECRETS` (empty in Phase 1);
+1. every repository-secret reference is in `ALLOWED_SECRETS` (empty through
+   Phase 10; `GITHUB_TOKEN` only, from Phase 11 plan 11-01);
 2. every scanner invocation carries `--redact`, so a finding never reaches a log
    with its value intact (SEC-10b);
 3. no run block contains an environment-dumping construct (SEC-10c).
@@ -31,14 +50,23 @@ Three assertions, matching SEC-10's three decidable parts:
 A fourth is asserted because the first would otherwise overstate its own
 strength: `GITHUB_TOKEN` is injected into every workflow whether or not anything
 references `secrets.*`, so "this workflow holds no credential" is only true
-while its permissions stay read-only.
+while its permissions stay read-only. `ALLOWED_PERMISSION_WIDENING` is this
+assertion's own equivalent of `ALLOWED_SECRETS`: empty through Phase 10, and
+from Phase 11 plan 11-01 holding exactly ONE (workflow, job) pin — with the
+EXACT permission set that job may hold, not a blanket exemption — for the same
+reason `publish.yml` needed `GITHUB_TOKEN` allowed above (D-13's cosign
+keyless signing needs `id-token: write`; pushing to GHCR needs
+`packages: write`).
 
 ## D-14 widening: a second scanned surface, additive only
 
-Everything above is the Phase 1 workflow-scoped claim, UNCHANGED. `ALLOWED_
-SECRETS` stays empty for the reason its own comment gives — this phase adds
-no CI secret, and widening that set is a separate, deliberate obligation this
-plan does not take on.
+Everything above is the Phase 1 workflow-scoped claim. `ALLOWED_SECRETS` and
+`ALLOWED_PERMISSION_WIDENING` stay Phase-1-empty AS FAR AS D-14 IS CONCERNED —
+D-14 (Phase 2) adds no CI secret and widens no job's permissions, and neither
+set changed for D-14's sake. Phase 11 plan 11-01 is a wholly separate,
+later widening of both sets, for a wholly separate reason (D-13's image
+publishing) — the paragraphs above this section document that widening on
+its own terms; nothing below this line touches either set.
 
 D-14 needs a DIFFERENT claim over a DIFFERENT surface: no credential literal
 may appear anywhere under `helm/`, `kubernetes/`, `kind/` or `scripts/`.
@@ -84,8 +112,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 MAKEFILE = REPO_ROOT / "Makefile"
 
-# Empty on purpose. Read the module docstring before adding anything.
-ALLOWED_SECRETS: frozenset[str] = frozenset()
+# Read the module docstring before adding anything. GITHUB_TOKEN is the one
+# entry Phase 11 plan 11-01 added, for publish.yml's docker/login-action GHCR
+# auth — the re-audit that entry obliges is written into the docstring above.
+ALLOWED_SECRETS: frozenset[str] = frozenset({"GITHUB_TOKEN"})
 
 SECRET_REFERENCE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -103,6 +133,20 @@ REDACT_FLAG = "--redact"
 SCANNER_INVOCATION = re.compile(r"^\s*\.?/?tools/bin/gitleaks\s+(?P<args>.*)$", re.MULTILINE)
 
 READ_ONLY = {"contents": "read"}
+
+# Read the module docstring before adding anything. Each key is an EXACT
+# (workflow file name, job id) pair; each value is the EXACT permission dict
+# that job is allowed to hold — not "any widening is fine once allowlisted".
+# A future edit that adds a THIRD scope to an already-exempted job is still
+# reported, because the comparison below is equality against this pinned
+# dict, not mere presence of the key.
+ALLOWED_PERMISSION_WIDENING: dict[tuple[str, str], dict[str, str]] = {
+    ("publish.yml", "publish-csv-processor"): {
+        "contents": "read",
+        "packages": "write",  # push the built image to ghcr.io
+        "id-token": "write",  # cosign keyless GitHub-OIDC signing (D-13)
+    },
+}
 
 
 def _workflow_paths() -> list[Path]:
@@ -153,15 +197,25 @@ def unredacted_scanner_invocations(makefile_text: str) -> list[str]:
     ]
 
 
-def permission_problems(workflow: dict[str, Any], label: str = "") -> list[str]:
-    """Report a workflow whose token is not read-only, or a job that widens it."""
+def permission_problems(
+    workflow: dict[str, Any],
+    label: str = "",
+    workflow_name: str = "",
+) -> list[str]:
+    """Report a workflow whose token is not read-only, or a job that widens it
+    beyond its exact `ALLOWED_PERMISSION_WIDENING` pin (if any).
+    """
     problems: list[str] = []
     top = workflow.get("permissions")
     if top != READ_ONLY:
         problems.append(f"{label}workflow permissions are {top!r}, expected {READ_ONLY!r}")
     for job_id, job in (workflow.get("jobs") or {}).items():
-        if "permissions" in job and job["permissions"] != READ_ONLY:
-            problems.append(f"{label}{job_id} widens permissions to {job['permissions']!r}")
+        job_permissions = job.get("permissions")
+        if job_permissions is None or job_permissions == READ_ONLY:
+            continue
+        allowed = ALLOWED_PERMISSION_WIDENING.get((workflow_name, job_id))
+        if job_permissions != allowed:
+            problems.append(f"{label}{job_id} widens permissions to {job_permissions!r}")
     return problems
 
 
@@ -253,20 +307,39 @@ def test_the_workflow_token_stays_read_only() -> None:
     """`GITHUB_TOKEN` is injected whether or not anything references secrets.*.
 
     Without this, "the workflow holds no credential" would be an overstatement:
-    a job with `permissions: write-all` holds a very capable one.
+    a job with `permissions: write-all` holds a very capable one. Widening is
+    permitted only for the exact (workflow, job) pins in
+    `ALLOWED_PERMISSION_WIDENING`, each holding its own EXACT permission set.
     """
     problems: list[str] = []
     for path in _workflow_paths():
         workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-        problems += permission_problems(workflow, label=f"{path.name} ")
+        problems += permission_problems(workflow, label=f"{path.name} ", workflow_name=path.name)
     assert not problems, "the workflow token is not least-privilege:\n" + "\n".join(problems)
 
 
 def test_a_widened_permission_is_reported() -> None:
+    """A job outside `ALLOWED_PERMISSION_WIDENING` must still be caught."""
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8"))
     mutated = copy.deepcopy(workflow)
     next(iter(mutated["jobs"].values()))["permissions"] = {"contents": "write"}
-    assert permission_problems(mutated), "a job widening permissions was not reported"
+    assert permission_problems(mutated, workflow_name="ci.yml"), (
+        "a job widening permissions was not reported"
+    )
+
+
+def test_widening_the_allowlisted_job_beyond_its_pinned_scopes_is_reported() -> None:
+    """The allowlist pins an EXACT set — it is not a rubber stamp for the
+    whole job. Adding a THIRD scope to the one already-exempted job must
+    still be reported.
+    """
+    workflow = yaml.safe_load((WORKFLOW_DIR / "publish.yml").read_text(encoding="utf-8"))
+    mutated = copy.deepcopy(workflow)
+    job = mutated["jobs"]["publish-csv-processor"]
+    job["permissions"]["actions"] = "write"
+    assert permission_problems(mutated, workflow_name="publish.yml"), (
+        "adding an extra permission scope beyond the allowlisted job's pinned set was not reported"
+    )
 
 
 # ===========================================================================
@@ -445,8 +518,16 @@ def test_a_generated_credential_in_a_script_is_not_reported() -> None:
 
 
 def test_the_allowed_secrets_set_is_unchanged_by_d14() -> None:
-    """D-14 must not touch Phase 1's SEC-10 claim — see the module docstring."""
-    assert frozenset() == ALLOWED_SECRETS, (
-        "ALLOWED_SECRETS is no longer empty — see this module's docstring "
-        "before widening it; D-14 adds no CI secret"
+    """D-14 must not touch SEC-10's claim — see the module docstring.
+
+    `ALLOWED_SECRETS` is pinned to exactly the set Phase 11 plan 11-01
+    introduced (`GITHUB_TOKEN`, for `publish.yml`'s GHCR auth) — not empty
+    (that was true only through Phase 10) and not anything wider than that
+    one, deliberate, re-audited entry. D-14 (Phase 2) contributed nothing to
+    this set either way.
+    """
+    assert frozenset({"GITHUB_TOKEN"}) == ALLOWED_SECRETS, (
+        "ALLOWED_SECRETS no longer matches the Phase 11 plan 11-01 baseline "
+        "(exactly {'GITHUB_TOKEN'}) — see this module's docstring before "
+        "widening it further; D-14 itself adds no CI secret"
     )
