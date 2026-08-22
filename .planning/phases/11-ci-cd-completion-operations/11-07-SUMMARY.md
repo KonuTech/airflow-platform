@@ -175,3 +175,13 @@ None - no external service configuration required.
 ---
 *Phase: 11-ci-cd-completion-operations*
 *Completed: 2026-08-22*
+
+## Self-Check: PASSED
+
+All 10 claimed file paths verified present on disk (`retention/__init__.py`,
+`retention/policy.py`, `test_retention_policy.py`,
+`0011-raw-immutability-iam-not-worm.md`, `config/model.py`,
+`customers.yaml`, `orders.yaml`, both `minio.yaml` files,
+`docs/adr/README.md`). All 5 claimed commit hashes verified present in git
+history via `git cat-file -e` (`e25a4b3`, `7d8b9eb`, `212d07e`, `66951b2`,
+`a8e9936`).
