@@ -75,18 +75,24 @@ pytestmark = pytest.mark.integration
 
 _BUCKET = "publish-transaction-wiring-test"
 _VALIDATED_BUCKET = "validated"
-_CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+# 10-07-PLAN.md Task 1 (Rule 1 fix): 6 columns, matching customers.yaml's real
+# shape since migration 0035/plan 10-01 added `signup_country` (D-13) -- see
+# test_stage_ingest.py's own identical fix for the full rationale
+# (`dataplat.pipeline.run._TARGET_COLUMNS_BY_DATASET["customers"]` is a
+# dataset-name-keyed global; a narrower row desynchronizes StagingLoader's
+# COPY column alignment by one position).
+_CSV_HEADER = "customer_id,name,country,birth_date,event_ts,signup_country\n"
 
 
 def _row(customer_id: int, *, empty_name: bool = False) -> str:
     """One well-formed customers CSV row, optionally with an empty `name` (a completeness violation)."""  # noqa: E501, W505
     name = "" if empty_name else f"Name{customer_id}"
-    return f"{customer_id},{name},US,1990-01-01,2026-01-01T00:00:00+00:00\n"
+    return f"{customer_id},{name},US,1990-01-01,2026-01-01T00:00:00+00:00,PL\n"
 
 
 def _row_with_event_ts(customer_id: int, event_ts: str) -> str:
     """One well-formed customers CSV row with an explicit `event_ts` (CR-01's conflict-guard proof)."""  # noqa: E501, W505
-    return f"{customer_id},Name{customer_id},US,1990-01-01,{event_ts}\n"
+    return f"{customer_id},Name{customer_id},US,1990-01-01,{event_ts},PL\n"
 
 
 def _csv_bytes(*, good_count: int, bad_count: int, start_id: int) -> bytes:
@@ -145,6 +151,13 @@ def _make_config(*, rejection_rate_threshold: float) -> DatasetConfig:
                 nullable=False,
                 required=True,
                 format="%Y-%m-%dT%H:%M:%S%z",
+            ),
+            ColumnContract(
+                name="signup_country",
+                type="string",
+                nullable=True,
+                required=False,
+                description="Country the customer originally signed up from (SCD Type 0, D-13)",
             ),
         ],
         quality=QualityConfig(

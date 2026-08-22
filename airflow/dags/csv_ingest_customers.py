@@ -114,10 +114,22 @@ def csv_ingest_customers() -> None:
     )
     wait_for_files >> matched_keys >> gate >> discover
     # D-12: stage is the trace root (OBS-10). No outlets here (08.1-12): stage only lands bronze.
+    # retries=6 (not the DAG's usual 2-3): providers-cncf-kubernetes's KubernetesJobWatcher uses
+    # a documented client-side _request_timeout=30s socket read timeout (separate from the
+    # server-side timeout_seconds=3600 watch duration -- see kubernetes-client/python's own
+    # timeout-settings.md, referenced in kubernetes_executor_utils.py's _run()). Under this DAG's
+    # deliberate max_active_tis_per_dag=1 cap, idle gaps between stage pods are common, so this
+    # watch reconnects constantly; each reconnect has a ~1s gap with no active watch, in which a
+    # pod's own completion event can be missed -- a known race in the pinned watcher, confirmed
+    # live 2026-08-21/22 (clean pod lifecycle, no app error, scheduler received
+    # state=None/failure_details=None). Not fixable from application code. A large mapped stage
+    # fan-out (20+ files) gives many independent chances to hit this low-probability race per
+    # DagRun; 6 retries gives the existing retry mechanism enough attempts to statistically
+    # absorb it without masking a genuine, repeatable application failure.
     stage = TracingKubernetesPodOperator.partial(
         task_id="stage",
         cmds=["dataplat"],
-        retries=3,
+        retries=6,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=1,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
@@ -143,7 +155,16 @@ def csv_ingest_customers() -> None:
         retries=3,
         retry_exponential_backoff=True,
         outlets=[customers_asset],
-        **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
+        # 10-07-PLAN.md (Rule 1 fix, live-cluster finding): was
+        # _DISCOVER_RESOURCES (128Mi/256Mi) -- sized for discover's
+        # lightweight bucket-listing job, but publish now runs SCDPublisher
+        # (Phase 10), whose Step C recomputes each touched key's FULL bronze
+        # history in memory. Live-observed OOMKilled (exit_code 137) at
+        # 256Mi during this plan's own live sweep. _STAGE_RESOURCES is
+        # already the generous profile this DAG uses for its heaviest
+        # per-row streaming work; reusing it here gives publish the same
+        # headroom rather than inventing a third resource profile.
+        **common_kpo_kwargs(resources=_STAGE_RESOURCES),
     )
     wire_dbt_build_tracking("customers", stage, dbt_build, publish)  # LOAD-06 (D-14/D-17/D-19)
     aggregate_receipts(stage.output)

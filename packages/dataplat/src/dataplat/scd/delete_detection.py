@@ -19,6 +19,38 @@ plan's ``<interfaces>``), for the identical reason: an unscoped read of a
 shared, cumulative, append/upsert table produces a permanently-poisoned
 result.
 
+10-07-PLAN.md Task 1 (Rule 4, user-approved live finding): a SECOND, related
+unscoped-read bug, found live against the real cluster's own
+``normalized.customers`` -- 12,001,043 rows, ALL ``is_current = true``, the
+overwhelming majority inserted by Phase 4's original vertical-slice proof
+(``MergePublisher``, weeks before ``staging.customers``/``silver.customers``
+or SCD existed at all). ``find_vanished_customer_ids``'s own ``WHERE
+is_current`` predicate has NO scope beyond that -- it reads every
+``is_current`` row in the whole table, Phase-4-era legacy rows included.
+Since those legacy rows were never staged through the bronze pipeline, they
+can NEVER appear in ANY ``staged_snapshot`` (``silver.customers`` itself
+only holds 1,020 distinct customer_ids, dbt's own genuinely SCD-managed
+working set) -- meaning they are permanently, structurally "vanished" by
+this check's own logic, for every single publish call, forever. As the
+shared, cluster-wide ``normalized.customers`` table accumulates more
+unrelated legacy/other-dataset rows over the project's life, the vanished
+ratio mathematically trends toward 100%, eventually tripping
+``MassDeleteCircuitBreaker`` permanently -- not because anything was
+actually mass-deleted, but because the denominator/numerator both include
+keys this DELETE-detection mechanism was never designed to reason about.
+
+Fix: both ``_VANISHED_SQL`` below and ``load/publish/scd.py``'s
+``_CURRENT_COUNT_SQL`` are now additionally scoped to ``customer_id``s that
+have EVER appeared in ``staging.customers`` (bronze) -- the durable,
+cumulative table the snapshot-fed SCD pipeline actually populates.
+DELETE-detection only makes sense for keys the snapshot pipeline has ever
+legitimately observed; a ``normalized.customers`` row with no corresponding
+bronze row at all is, by construction, unreachable via this dataset's own
+CSV-ingestion path and must never be considered for vanished-ratio
+accounting. This correctly excludes Phase 4's pre-bronze legacy rows from
+BOTH the denominator (``current_count``) and the numerator (vanished set)
+while still catching a real mass-deletion among genuinely SCD-managed keys.
+
 ``MassDeleteCircuitBreaker`` mirrors ``validate/circuit_breaker.py``'s
 ``RejectionRateCircuitBreaker`` shape exactly (constructor-parameterized
 totals, ``apply(ctx)`` never re-derives them, ``current_count == 0`` is the
@@ -67,22 +99,37 @@ if TYPE_CHECKING:
     from dataplat.pipeline.protocol import PipelineContext
 
 # `staged_run_ids` is the ONLY value here -- `silver.customers`/
-# `normalized.customers`/`customer_id`/`is_current` are all literal,
-# hand-written identifiers (T-10-01). The cast to `::text` on the
-# `normalized.customers` side is required because `normalized.customers.
-# customer_id` is `integer` (migration 0005) while `silver.customers.
-# customer_id` is `text` (migration 0023, matching staging's own all-text
-# convention) -- comparing them directly would raise
+# `staging.customers`/`normalized.customers`/`customer_id`/`is_current` are
+# all literal, hand-written identifiers (T-10-01). The cast to `::text` on
+# the `normalized.customers` side is required because `normalized.customers.
+# customer_id` is `integer` (migration 0005) while `silver.customers`/
+# `staging.customers`'s own `customer_id` is `text` (migrations 0022/0023,
+# staging's own all-text convention) -- comparing them directly would raise
 # `operator does not exist: integer = text`.
+#
+# `bronze_known` (10-07-PLAN.md Task 1, live finding): scopes the vanished
+# candidate set to customer_ids that have EVER appeared in `staging.
+# customers` (bronze) -- see the module docstring's live-cluster finding
+# (12,001,043 is_current rows, 1,020 of them ever staged through bronze).
+# Without this scope, every one of Phase 4's pre-bronze legacy rows is
+# permanently "vanished" (never in ANY staged_snapshot, since they never
+# went through the bronze pipeline at all), mathematically guaranteeing the
+# mass-delete ratio trends toward 100% as the shared table accumulates more
+# unrelated legacy data over the project's life.
 _VANISHED_SQL = """
 WITH staged_snapshot AS (
     SELECT DISTINCT customer_id
     FROM   silver.customers
     WHERE  _run_id = ANY(%(staged_run_ids)s)
+),
+bronze_known AS (
+    SELECT DISTINCT customer_id
+    FROM   staging.customers
 )
 SELECT customer_id
 FROM   normalized.customers
 WHERE  is_current
+  AND  customer_id::text IN (SELECT customer_id FROM bronze_known)
   AND  customer_id::text NOT IN (SELECT customer_id FROM staged_snapshot)
 """
 
@@ -91,6 +138,11 @@ def find_vanished_customer_ids(
     conn: Connection[Any], *, staged_run_ids: Sequence[int]
 ) -> set[str]:
     """Return every currently-current ``customer_id`` missing from THIS pass's own silver snapshot.
+
+    Scoped to keys that have ever appeared in ``staging.customers`` (bronze)
+    -- see the module docstring's live-cluster finding on why an unscoped
+    read across ``normalized.customers``' full history is permanently
+    poisoned by pre-bronze legacy rows.
 
     Args:
         conn: An already-open connection. Read-only -- never committed or
@@ -103,9 +155,10 @@ def find_vanished_customer_ids(
         The ``customer_id`` (as ``str``, matching
         ``PublishResult.published_business_keys``'s own string convention)
         of every ``normalized.customers`` row with ``is_current = true``
-        whose key does not appear in ``silver.customers`` among rows tagged
-        with one of ``staged_run_ids``. Empty when ``normalized.customers``
-        has no current rows at all (nothing can vanish from nothing).
+        AND a bronze presence in ``staging.customers``, whose key does not
+        appear in ``silver.customers`` among rows tagged with one of
+        ``staged_run_ids``. Empty when ``normalized.customers`` has no
+        bronze-known current rows at all (nothing can vanish from nothing).
     """
     cursor = conn.execute(_VANISHED_SQL, {"staged_run_ids": list(staged_run_ids)})
     return {str(row[0]) for row in cursor.fetchall()}

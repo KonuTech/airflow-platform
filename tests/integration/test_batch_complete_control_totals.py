@@ -62,11 +62,17 @@ pytestmark = pytest.mark.integration
 _BUCKET = "batch-complete-control-totals-test"
 _VALIDATED_BUCKET = "validated"
 _MARKER_SUFFIX = "_BATCH_COMPLETE"
-_CSV_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+# 10-07-PLAN.md Task 1 (Rule 1 fix): 6 columns, matching customers.yaml's real
+# shape since migration 0035/plan 10-01 added `signup_country` (D-13) -- see
+# test_stage_ingest.py's own identical fix for the full rationale
+# (`dataplat.pipeline.run._TARGET_COLUMNS_BY_DATASET["customers"]` is a
+# dataset-name-keyed global; a narrower row desynchronizes StagingLoader's
+# COPY column alignment by one position).
+_CSV_HEADER = "customer_id,name,country,birth_date,event_ts,signup_country\n"
 
 
 def _row(customer_id: int) -> str:
-    return f"{customer_id},Name{customer_id},US,1990-01-01,2026-01-01T00:00:00+00:00\n"
+    return f"{customer_id},Name{customer_id},US,1990-01-01,2026-01-01T00:00:00+00:00,PL\n"
 
 
 def _csv_bytes(rows: int, *, start_id: int) -> bytes:
@@ -122,6 +128,13 @@ def _make_marker_config(*, key_suffix: str, batch_complete_marker: str | None) -
                 nullable=False,
                 required=True,
                 format="%Y-%m-%dT%H:%M:%S%z",
+            ),
+            ColumnContract(
+                name="signup_country",
+                type="string",
+                nullable=True,
+                required=False,
+                description="Country the customer originally signed up from (SCD Type 0, D-13)",
             ),
         ],
     )

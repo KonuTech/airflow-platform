@@ -107,7 +107,25 @@ FROM   staging.customers
 WHERE  customer_id = %(customer_id)s
 """
 
-_CURRENT_COUNT_SQL = "SELECT count(*) FROM normalized.customers WHERE is_current"
+# 10-07-PLAN.md Task 1 (Rule 4, user-approved live finding): scoped to
+# customer_ids that have EVER appeared in staging.customers (bronze) --
+# MUST stay in lockstep with dataplat.scd.delete_detection._VANISHED_SQL's
+# own identical `bronze_known` scoping (both feed MassDeleteCircuitBreaker's
+# single ratio: this is the denominator, _VANISHED_SQL's own result is the
+# numerator). Live-discovered: normalized.customers has accumulated
+# 12,001,043 is_current rows, the overwhelming majority Phase 4's own
+# pre-bronze legacy data (inserted via MergePublisher, weeks before
+# staging.customers/silver.customers existed) -- an unscoped count here
+# permanently inflates the ratio's denominator with keys the vanished-set
+# query (correctly, post-fix) can never match, since those legacy rows
+# never went through bronze either. See dataplat.scd.delete_detection's own
+# module docstring for the full analysis.
+_CURRENT_COUNT_SQL = """
+SELECT count(*)
+  FROM normalized.customers
+ WHERE is_current
+   AND customer_id::text IN (SELECT DISTINCT customer_id FROM staging.customers)
+"""
 
 # `staged_run_ids` is the only value below.
 _SNAPSHOT_MAX_EVENT_TS_SQL = """
