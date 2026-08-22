@@ -198,6 +198,33 @@ D-06's mass-delete circuit-breaker-trip fixture (Task 3) is a SEPARATE, single-d
 immediately after this module's own extended window — uploaded and processed OUTSIDE the main
 sweep's own backfill window, deliberately (a deliberately-truncated snapshot is expected to fail
 that one day's run loudly, not blend into the successful sweep).
+
+## Plan 10-08: D-10's dedicated same-key concurrency test
+
+D-10 explicitly rejected relying only on Phase 9's inherited `pg_advisory_xact_lock` concurrency
+proof (`test_live_run_concurrent_with_backfill_same_dataset`, D-13, above) — `SCDPublisher`'s
+DELETE+INSERT-per-key recompute write path is genuinely new code, not a reuse of
+`MergePublisher`'s `INSERT ... ON CONFLICT` upsert. `test_scd_concurrent_attribute_change_and_
+correction_same_key` targets exactly ONE roster member (index 48 — untouched by every other
+anomaly this module injects) with TWO conflicting, SEPARATELY-uploaded, SEPARATELY-triggered
+full-roster snapshot deliveries: a live forward attribute change (dated after every existing
+version) and a backdated correction (dated on this corpus' own gap day, landing strictly between
+the member's one pre-existing version's own `valid_from`/`valid_to` boundaries). Both snapshots
+resend the FULL currently-alive roster (`change_semantics: snapshot`, D-04 — a lone single-row
+file would make DELETE-detection wrongly treat every other roster member as vanished), so only
+the targeted member's own tracked attributes actually differ from what gold already holds.
+Separation into two GENUINELY CONCURRENT DagRuns is forced by ORCH-08's own frozen-manifest
+discovery guarantee: the correction file is uploaded and its own triggered backfill's `discover`
+is confirmed to have already claimed it (a real `meta.files` row exists) BEFORE the live file is
+ever uploaded — a file that does not yet exist in the bucket at the moment `discover` runs can
+never be silently absorbed into that SAME DagRun's manifest, only a LATER DagRun's (the live
+schedule's own next tick, already unpaused for this one test). The test then reuses
+`test_live_run_concurrent_with_backfill_same_dataset`'s own polling shape to confirm a genuine
+`running`/`running` overlap actually occurred, waits for both to finish, and asserts the final
+state is deterministic and uncorrupted regardless of commit order — including an independent
+cross-check that feeds the key's own full `staging.customers` bronze history through
+`dataplat.scd.recompute.recompute_version_chain` (plan 10-02's pure function) and asserts the
+live result matches EXACTLY.
 """
 
 from __future__ import annotations
@@ -216,6 +243,8 @@ from tools.corpus.dated_series import (
     BackfillCorpusManifest,
     generate_dated_series,
 )
+
+from dataplat.scd.recompute import BronzeRecord, recompute_version_chain
 
 if TYPE_CHECKING:
     import subprocess
@@ -292,6 +321,25 @@ _MISSING_CUSTOMER_MEMBER_INDEX = 32
 # 15 of the 50-member roster == 30%, comfortably exceeding customers.yaml's
 # configured mass_delete_threshold: 0.10).
 _MASS_DELETE_MEMBER_INDICES = tuple(range(33, 48))
+
+# D-10 (plan 10-08): the dedicated same-key concurrency test's own targeted
+# member index -- disjoint from every other member index this module
+# already claims (30 attribute_change, 31 late_correction, 32
+# missing_customer, 33-47 mass_delete). Untouched by every other anomaly
+# above, so this key enters that test with exactly ONE pre-existing
+# published SCD2 version -- the roster's own plain baseline, unchanged for
+# the whole 2-year sweep window -- whose own valid_from/valid_to boundaries
+# the test's own backdated correction must land strictly between.
+_SCD_CONCURRENCY_MEMBER_INDEX = 48
+
+# dbt's own documented `dbt_valid_to_current` example value -- mirrors
+# migration 0035's `_SENTINEL` and `dataplat.load.publish.scd`'s own
+# `_VALID_TO_SENTINEL` exactly. Duplicated here (not imported) because the
+# latter is a private module-level constant in a different package: this
+# test's own recompute cross-check needs an INDEPENDENT, pure-Python oracle
+# for what SCDPublisher's live write path produced, not a reach into its
+# own internals.
+_SCD_VALID_TO_SENTINEL = datetime(9999, 12, 31, tzinfo=UTC)
 
 _POLL_INTERVAL_SECONDS = 2.0
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -746,6 +794,45 @@ def _wait_for_dataset_files_terminal(
         f"dataset={dataset!r}: not all of {len(filenames)} filenames reached a terminal "
         f"meta.ingestion_runs status within {timeout}s -- missing entirely: {missing}, "
         f"still non-terminal: {pending}"
+    )
+    raise AssertionError(msg)
+
+
+def _wait_for_file_discovered(
+    conn: psycopg.Connection[Any],
+    *,
+    dataset: str,
+    filename: str,
+    timeout: float,
+) -> None:
+    """Poll until `meta.files` has a row for `filename` -- proof `discover` has already claimed it.
+
+    Plan 10-08's own concurrency-separation mechanism: ORCH-08's frozen-manifest discovery means
+    `discover` lists and claims once, never re-derives from a live listing mid-run -- a SECOND
+    file uploaded to the SAME bucket prefix strictly AFTER this call returns can therefore never
+    be silently absorbed into the SAME DagRun's own manifest, only a LATER DagRun's. Used to force
+    two deliberately-conflicting deliveries for the same business key into two GENUINELY SEPARATE,
+    genuinely concurrent DagRuns rather than one DagRun processing both in a single pass.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*)
+                  FROM meta.files f
+                  JOIN meta.datasets d ON d.dataset_id = f.dataset_id
+                 WHERE d.dataset_name = %s AND f.filename = %s
+                """,
+                (dataset, filename),
+            )
+            row = cur.fetchone()
+        if row is not None and row[0] > 0:
+            return
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    msg = (
+        f"dataset={dataset!r} filename={filename!r}: no meta.files row appeared within "
+        f"{timeout}s -- discover never claimed it"
     )
     raise AssertionError(msg)
 
@@ -1830,3 +1917,349 @@ def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(
         f"PRE-mutation barrier stage, not a partial-apply-then-fail race. "
         f"before={before_snapshot!r} after={after_snapshot!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 10-08: D-10's dedicated same-key concurrency test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("_live_concurrency_needs_dag_unpaused")
+def test_scd_concurrent_attribute_change_and_correction_same_key(  # noqa: PLR0913, PLR0915, PLR0917
+    # one param per fixture this test genuinely needs (corpus ordering, cross-test state,
+    # kubectl, s3, 2 DB conns) -- mirrors this module's own established lint-exception
+    # precedent (test_pilot_window_drains_without_cpu_starvation, test_mass_delete_snapshot_...).
+    # PLR0915 (too many statements): this test's 5 numbered correctness assertions (D-10's own
+    # must_haves) each need their own setup/query/assert, mirroring
+    # test_full_2year_sweep_customers_and_orders's own identical PLR0915 exception, just above.
+    sweep_corpus: _Corpus,  # noqa: ARG001 -- ensures test_full_2year_sweep's own gold state exists first
+    sweep_state: _SweepState,
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
+    s3_client: Callable[[str], Any],
+    analytics_connection: psycopg.Connection[Any],
+    airflow_metadata_connection: psycopg.Connection[Any],
+) -> None:
+    """D-10: a live attribute change and a live backfill/correction race for the SAME customer_id.
+
+    Two genuinely concurrent writers target `normalized.customers` for the identical business
+    key: a live attribute change (a forward-dated, permanent value change delivered via the
+    DAG's own `*/1 * * * *` schedule) and a backfill/correction (a backdated value landing
+    strictly between this key's own one pre-existing version's `valid_from`/`valid_to`
+    boundaries, delivered via a separately-triggered backfill). Unlike Phase 9's D-13 proof
+    (`test_live_run_concurrent_with_backfill_same_dataset`, above), which exercises
+    `MergePublisher`'s `INSERT ... ON CONFLICT` upsert path, this test exercises the SAME
+    `pg_advisory_xact_lock('publish:normalized.customers')` LOAD-09 lock guarding
+    `SCDPublisher`'s genuinely new DELETE+INSERT-per-key recompute write path (RESEARCH.md
+    Pattern 4). See the module docstring's "Plan 10-08" section for the full design rationale.
+    """
+    target_customer_id = _CUSTOMER_ID_BASE + _SCD_CONCURRENCY_MEMBER_INDEX
+
+    # Setup/sanity: before the race, this key carries exactly ONE published SCD2 version -- the
+    # roster's own plain, never-overridden baseline (member index _SCD_CONCURRENCY_MEMBER_INDEX
+    # is untouched by every other anomaly this module injects). This is the SAME single version
+    # whose own valid_from/valid_to boundaries the correction below must land strictly between --
+    # a range has two endpoints regardless of how many versions span it.
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT event_ts, valid_to, is_current FROM normalized.customers "
+            "WHERE customer_id = %s",
+            (target_customer_id,),
+        )
+        pre_race_versions = cur.fetchall()
+    assert len(pre_race_versions) == 1, (
+        f"expected exactly ONE pre-existing published SCD2 version for customer_id="
+        f"{target_customer_id!r} before this test's own race begins -- got "
+        f"{len(pre_race_versions)}: {pre_race_versions!r}"
+    )
+    assert pre_race_versions[0][2] is True, (
+        f"expected customer_id={target_customer_id!r}'s one pre-existing version to be "
+        f"is_current=true, got {pre_race_versions[0]!r}"
+    )
+
+    # Build the two conflicting deliveries as SEPARATE, FULL-roster snapshot files
+    # (change_semantics: snapshot, D-04 -- a lone single-row file would make DELETE-detection
+    # wrongly treat every OTHER currently-current roster member as vanished). Both reuse the
+    # SAME master_seed/rows_per_day as sweep_corpus's own roster, so every other member's
+    # baseline value is byte-identical to what gold already holds -- resending them changes
+    # nothing for those keys (same tracked-attribute hash, no new version group), only member
+    # _SCD_CONCURRENCY_MEMBER_INDEX's own override differs. Both exclude
+    # _MISSING_CUSTOMER_MEMBER_INDEX, matching gold's own already-invalidated state for that
+    # member (D-11) so neither snapshot here accidentally "resurrects" it.
+    correction_start_date = _START_DATE + timedelta(days=_NUM_DAYS + 20)
+    gap_date = _START_DATE + timedelta(days=_GAP_DAY_INDEX)
+    correction_offset_days = (correction_start_date - gap_date).days
+    correction_files, correction_manifest = generate_dated_series(
+        "customers",
+        master_seed=_MASTER_SEED,
+        start_date=correction_start_date,
+        num_days=1,
+        # Required parameters, irrelevant here (single-day range, never reached).
+        gap_day_index=1,
+        schema_change_day_index=1,
+        late_event_day_index=1,
+        rows_per_day=_ROWS_PER_DAY,
+        missing_customer_day_index=0,
+        missing_customer_member_index=_MISSING_CUSTOMER_MEMBER_INDEX,
+        late_correction_arrival_day_index=0,
+        late_correction_member_index=_SCD_CONCURRENCY_MEMBER_INDEX,
+        late_correction_offset_days=correction_offset_days,
+    )
+    assert len(correction_manifest.filenames) == 1, (
+        f"expected exactly 1 generated filename for this single-day correction fixture, got "
+        f"{correction_manifest.filenames!r}"
+    )
+    (correction_filename,) = correction_manifest.filenames
+
+    live_start_date = _START_DATE + timedelta(days=_NUM_DAYS + 40)
+    live_files, live_manifest = generate_dated_series(
+        "customers",
+        master_seed=_MASTER_SEED,
+        start_date=live_start_date,
+        num_days=1,
+        gap_day_index=1,
+        schema_change_day_index=1,
+        late_event_day_index=1,
+        rows_per_day=_ROWS_PER_DAY,
+        missing_customer_day_index=0,
+        missing_customer_member_index=_MISSING_CUSTOMER_MEMBER_INDEX,
+        attribute_change_day_index=0,
+        attribute_change_member_index=_SCD_CONCURRENCY_MEMBER_INDEX,
+    )
+    assert len(live_manifest.filenames) == 1, (
+        f"expected exactly 1 generated filename for this single-day live-change fixture, got "
+        f"{live_manifest.filenames!r}"
+    )
+    (live_filename,) = live_manifest.filenames
+
+    app = s3_client("app")
+
+    # --- Deliver (a): the backdated correction, via a triggered backfill. ---
+    app.put_object(
+        Bucket="raw",
+        Key=f"customers/{correction_filename}",
+        Body=correction_files[correction_filename],
+    )
+    since_backfill_id = _latest_backfill_id(airflow_metadata_connection, dag_id=_CUSTOMERS_DAG_ID)
+    from_dt, to_dt = _window(offset_minutes=100, span_minutes=0)
+    _invoke_backfill_create(
+        kubectl,
+        dag_id=_CUSTOMERS_DAG_ID,
+        from_iso=from_dt.isoformat(),
+        to_iso=to_dt.isoformat(),
+        max_active_runs=sweep_state.max_active_runs,
+    )
+
+    # Wait for THIS backfill's own `discover` to have already claimed the correction file (a
+    # real meta.files row exists for it) BEFORE uploading the live-change file below --
+    # ORCH-08's frozen-manifest discovery guarantees a file that does not yet exist in the
+    # bucket at the moment `discover` runs can never be silently absorbed into the SAME
+    # DagRun's own manifest, only a LATER DagRun's. This is what forces the two deliveries
+    # into two GENUINELY SEPARATE DagRuns rather than one DagRun processing both together.
+    _wait_for_file_discovered(
+        analytics_connection,
+        dataset=_CUSTOMERS_DATASET,
+        filename=correction_filename,
+        timeout=600,
+    )
+
+    # --- Deliver (b): the live forward attribute change, picked up by the DAG's own live
+    #     `*/1 * * * *` schedule (unpaused for this test only via
+    #     `_live_concurrency_needs_dag_unpaused`, applied above). ---
+    since_dag_run_pk = _latest_dag_run_pk(airflow_metadata_connection, dag_id=_CUSTOMERS_DAG_ID)
+    app.put_object(
+        Bucket="raw",
+        Key=f"customers/{live_filename}",
+        Body=live_files[live_filename],
+    )
+
+    # Poll for a genuine running/running overlap -- mirrors
+    # test_live_run_concurrent_with_backfill_same_dataset's own polling shape exactly. 600s:
+    # same generous headroom over the architecturally-expected ~1 min live-tick cadence, this
+    # cluster's own real CPU contention can queue task-pod scheduling for several minutes.
+    observed_concurrent = False
+    poll_deadline = time.monotonic() + 600
+    while time.monotonic() < poll_deadline:
+        with airflow_metadata_connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT (backfill_id IS NULL) AS is_live, count(*)
+                  FROM dag_run
+                 WHERE dag_id = %s AND state = 'running'
+                 GROUP BY backfill_id IS NULL
+                """,
+                (_CUSTOMERS_DAG_ID,),
+            )
+            counts = dict(cur.fetchall())
+        if counts.get(True, 0) > 0 and counts.get(False, 0) > 0:
+            observed_concurrent = True
+            break
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    assert observed_concurrent, (
+        "never observed a customers DagRun with backfill_id IS NOT NULL (the correction's own "
+        "backfill) and a customers DagRun with backfill_id IS NULL (the live schedule's own "
+        "tick carrying the attribute-change file) BOTH state='running' at the same sampled "
+        "instant within 600s -- D-10's dedicated concurrency proof requires this overlap to "
+        "actually occur, not just be architecturally possible"
+    )
+
+    # Sizing: same single-window-backfill/single-dagrun-settle precedent values this module
+    # already establishes elsewhere (test_live_run_concurrent_with_backfill_same_dataset's own
+    # identical 2700s waits), under this cluster's real, documented CPU contention.
+    _wait_for_new_backfill_completed(
+        airflow_metadata_connection,
+        dag_id=_CUSTOMERS_DAG_ID,
+        since_backfill_id=since_backfill_id,
+        timeout=2700,
+    )
+    _wait_for_new_dag_run_terminal(
+        airflow_metadata_connection,
+        dag_id=_CUSTOMERS_DAG_ID,
+        since_pk=since_dag_run_pk,
+        timeout=2700,
+    )
+
+    results = _wait_for_dataset_files_terminal(
+        analytics_connection,
+        dataset=_CUSTOMERS_DATASET,
+        filenames=[correction_filename, live_filename],
+        timeout=2700,
+    )
+
+    # --- (1) neither DagRun's own file failed. ---
+    assert results[correction_filename]["status"] == "SUCCEEDED", (
+        f"correction file {correction_filename!r} finished "
+        f"{results[correction_filename]['status']!r}, not SUCCEEDED"
+    )
+    assert results[live_filename]["status"] == "SUCCEEDED", (
+        f"live-change file {live_filename!r} finished {results[live_filename]['status']!r}, "
+        f"not SUCCEEDED"
+    )
+
+    # --- (2) exactly ONE is_current=true row for the targeted customer_id. ---
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM normalized.customers WHERE customer_id = %s AND is_current",
+            (target_customer_id,),
+        )
+        current_count_row = cur.fetchone()
+    assert current_count_row is not None
+    assert current_count_row[0] == 1, (
+        f"expected exactly ONE is_current=true row for customer_id={target_customer_id!r} "
+        f"after both concurrent writers committed, got {current_count_row[0]!r}"
+    )
+
+    # --- (3) no two version rows for this key have overlapping validity ranges -- the
+    #     excl_customers_business_key_validity exclusion constraint (migration 0035) should
+    #     make this structurally impossible; a live occurrence is genuine corruption. ---
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT a.id, b.id
+              FROM normalized.customers a
+              JOIN normalized.customers b
+                ON a.customer_id = b.customer_id
+               AND a.id <> b.id
+               AND a.validity && b.validity
+             WHERE a.customer_id = %s
+             LIMIT 5
+            """,
+            (target_customer_id,),
+        )
+        overlapping_validity = cur.fetchall()
+    assert not overlapping_validity, (
+        f"found overlapping validity ranges for customer_id={target_customer_id!r} -- genuine "
+        f"SCD2 corruption under concurrent writers: {overlapping_validity!r}"
+    )
+
+    # --- (4) the FULL live version chain matches recompute_version_chain's own pure-function
+    #     output for the SAME key's staging.customers history -- proving the live result is
+    #     not merely "non-corrupted" but the SAME deterministic answer the pure recompute
+    #     function would produce, regardless of which writer's transaction committed first. ---
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT customer_id::int, name, country, birth_date, signup_country,
+                   event_ts::timestamptz, _source_row_number
+              FROM staging.customers
+             WHERE customer_id = %s
+            """,
+            (str(target_customer_id),),
+        )
+        bronze_rows = cur.fetchall()
+    history = [
+        BronzeRecord(
+            customer_id=row[0],
+            name=row[1],
+            country=row[2],
+            birth_date=row[3],
+            signup_country=row[4],
+            event_ts=row[5],
+            source_row_number=row[6],
+        )
+        for row in bronze_rows
+    ]
+    expected_versions = recompute_version_chain(history, valid_to_sentinel=_SCD_VALID_TO_SENTINEL)
+    expected_as_tuples = [
+        (
+            v.customer_id,
+            v.name,
+            v.country,
+            v.birth_date,
+            v.signup_country,
+            v.valid_from,
+            v.valid_to,
+            v.is_current,
+        )
+        for v in expected_versions
+    ]
+
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, name, country, birth_date, signup_country, event_ts, "
+            "valid_to, is_current FROM normalized.customers WHERE customer_id = %s "
+            "ORDER BY event_ts",
+            (target_customer_id,),
+        )
+        actual_rows = cur.fetchall()
+    actual_as_tuples = [
+        (
+            row[0],
+            row[1],
+            row[2],
+            row[3].isoformat() if row[3] is not None else None,
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+        )
+        for row in actual_rows
+    ]
+    assert actual_as_tuples == expected_as_tuples, (
+        f"the live version chain for customer_id={target_customer_id!r} does not match "
+        f"recompute_version_chain's own pure-function output over the SAME key's staging."
+        f"customers bronze history -- this is a genuine divergence between the live SCDPublisher "
+        f"write path and the pure recompute oracle, not merely 'non-corrupted'. "
+        f"actual={actual_as_tuples!r} expected={expected_as_tuples!r}"
+    )
+
+    # --- (5) neither run's own failure reason (both SUCCEEDED above, so there should be none)
+    #     is an exclusion-constraint violation -- a live-observed ExclusionViolation would mean
+    #     Pattern 2's recompute math or the advisory-lock discipline has a real bug, never proof
+    #     the constraint "worked as a backstop". ---
+    for filename in (correction_filename, live_filename):
+        run_id = results[filename]["run_id"]
+        with analytics_connection.cursor() as cur:
+            cur.execute(
+                "SELECT error_message, error_detail FROM meta.ingestion_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            error_row = cur.fetchone()
+        assert error_row is not None, f"no meta.ingestion_runs row for run_id={run_id!r}"
+        error_message, error_detail = error_row
+        combined_error_text = f"{error_message!r} {error_detail!r}"
+        assert "ExclusionViolation" not in combined_error_text, (
+            f"file {filename!r} (run_id={run_id!r}) recorded an ExclusionViolation-class "
+            f"failure -- this means Pattern 2's recompute math or the advisory-lock discipline "
+            f"has a real bug, not that the exclusion constraint 'worked as a backstop': "
+            f"error_message={error_message!r} error_detail={error_detail!r}"
+        )
