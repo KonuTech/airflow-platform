@@ -41,7 +41,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 7: Observability, Metrics, Tracing & Lineage** - Prometheus/Grafana, OTel traces across the pod boundary, SQL-queryable lineage and freshness tracking (completed 2026-08-16)
 - [x] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection (completed 2026-08-17)
 - [x] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation (completed 2026-08-21)
-- [ ] **Phase 10: Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history and late-arriving corrections repaired by history recomputation
+- [x] **Phase 10: Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history and late-arriving corrections repaired by history recomputation (completed 2026-08-22)
 - [ ] **Phase 11: CI/CD Completion & Operations** - Ephemeral kind E2E in CI proving the environment rebuilds from the repo, plus runbooks, retention and rebuild-from-raw
 
 ## Phase Details
