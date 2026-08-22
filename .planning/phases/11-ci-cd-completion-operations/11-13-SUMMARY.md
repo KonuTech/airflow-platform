@@ -187,3 +187,10 @@ None - no external service configuration required.
 ---
 *Phase: 11-ci-cd-completion-operations*
 *Completed: 2026-08-22*
+
+## Self-Check: PASSED
+
+- All 17 claimed files (`docs/runbooks/*.md` x15, `tests/policy/test_runbooks_structure.py`,
+  this `SUMMARY.md`) confirmed present via `ls`.
+- All 5 commit hashes (`5d53ca2`, `effc70c`, `f12f002`, `808c174`, `3afb20e`) confirmed present
+  via `git log --oneline --all`.
