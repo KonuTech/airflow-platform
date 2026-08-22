@@ -674,13 +674,12 @@ Plans:
   4. The analytical warehouse is dropped and rebuilt from the immutable raw layer plus versioned configuration, and reconciles to its pre-drop state.
   5. Each runbook scenario can be followed by someone who did not build the platform to reach diagnosis, recovery and verification; retention policies prune raw files, processed files, quarantine, validation reports, ingestion metadata and logs independently of processing logic.
 
-**Plans**: 14 plans in 5 waves
+**Plans**: 14 plans in 6 waves
 
 Plans:
 **Wave 1**
 
 - [ ] 11-01-PLAN.md — Slice 1: csv-processor GHCR publish (build, SBOM, cosign sign, trivy scan)
-- [ ] 11-06-PLAN.md — CI polish: coverage job-summary/artifact, dagtest CI job, rollback Make target
 - [ ] 11-07-PLAN.md — Retention contracts + policy evaluator (TDD) + D-40 verify/ADR-0011
 - [ ] 11-09-PLAN.md — Chaos I: scaffolding + pod_crash + database_unavailable + minio_unavailable + vault_unavailable
 - [ ] 11-11-PLAN.md — Rebuild reconciliation building blocks (_table_checksum columns=, snapshot/compare)
@@ -694,15 +693,19 @@ Plans:
 - [ ] 11-10-PLAN.md — Chaos II: malformed_csv + invalid_encoding + oom + task_timeout + duplicate_batch
 - [ ] 11-14-PLAN.md — Runbooks II: 3 chaos-trailing docs, completes the 18-file §89 set
 
-**Wave 3** *(blocked on Wave 2 completion)*
+**Wave 3** *(blocked on Wave 2 completion — moved from Wave 1 during plan-checker revision so its live rollback proof can target a real image published by 11-02)*
 
-- [ ] 11-04-PLAN.md — Slice 4: PR smoke E2E workflow (image-override mechanism + 4-point D-20 subset)
+- [ ] 11-06-PLAN.md — CI polish: coverage job-summary/artifact, dagtest CI job, rollback Make target (live-verified against 11-02's published images)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
+- [ ] 11-04-PLAN.md — Slice 4: PR smoke E2E workflow (image-override mechanism + 4-point D-20 subset)
+
+**Wave 5** *(blocked on Wave 4 completion — deliberately placed above its dependency-minimum wave to avoid a same-wave Makefile conflict with 11-04/11-06)*
+
 - [ ] 11-12-PLAN.md — Rebuild-from-raw orchestration script + Make target + live D-29 proof
 
-**Wave 5** *(blocked on Wave 4 completion)*
+**Wave 6** *(blocked on Wave 5 completion)*
 
 - [ ] 11-05-PLAN.md — Slice 5: full E2E + rebuild-from-raw capstone + parallel chaos workflow
 
