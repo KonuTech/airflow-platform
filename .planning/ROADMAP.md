@@ -674,7 +674,37 @@ Plans:
   4. The analytical warehouse is dropped and rebuilt from the immutable raw layer plus versioned configuration, and reconciles to its pre-drop state.
   5. Each runbook scenario can be followed by someone who did not build the platform to reach diagnosis, recovery and verification; retention policies prune raw files, processed files, quarantine, validation reports, ingestion metadata and logs independently of processing logic.
 
-**Plans**: TBD
+**Plans**: 14 plans in 5 waves
+
+Plans:
+**Wave 1**
+
+- [ ] 11-01-PLAN.md — Slice 1: csv-processor GHCR publish (build, SBOM, cosign sign, trivy scan)
+- [ ] 11-06-PLAN.md — CI polish: coverage job-summary/artifact, dagtest CI job, rollback Make target
+- [ ] 11-07-PLAN.md — Retention contracts + policy evaluator (TDD) + D-40 verify/ADR-0011
+- [ ] 11-09-PLAN.md — Chaos I: scaffolding + pod_crash + database_unavailable + minio_unavailable + vault_unavailable
+- [ ] 11-11-PLAN.md — Rebuild reconciliation building blocks (_table_checksum columns=, snapshot/compare)
+- [ ] 11-13-PLAN.md — Runbooks I: 15 real-incident/existing-feature/stub docs + structural policy test
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 11-02-PLAN.md — Slice 2: all 3 images + PR-tag variant + GHCR cleanup + semver-on-release
+- [ ] 11-03-PLAN.md — Slice 3: Kyverno admission enforcement (chart, policy, live positive+negative proof)
+- [ ] 11-08-PLAN.md — Retention DAG wiring: platform_retention DAG + dagtest proof
+- [ ] 11-10-PLAN.md — Chaos II: malformed_csv + invalid_encoding + oom + task_timeout + duplicate_batch
+- [ ] 11-14-PLAN.md — Runbooks II: 3 chaos-trailing docs, completes the 18-file §89 set
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 11-04-PLAN.md — Slice 4: PR smoke E2E workflow (image-override mechanism + 4-point D-20 subset)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 11-12-PLAN.md — Rebuild-from-raw orchestration script + Make target + live D-29 proof
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 11-05-PLAN.md — Slice 5: full E2E + rebuild-from-raw capstone + parallel chaos workflow
 
 **Research stage**: S13 + S14. **Skip `--research-phase`** — the CI patterns are standard and `values-ci.yaml` already exists from Phase 2.
 
