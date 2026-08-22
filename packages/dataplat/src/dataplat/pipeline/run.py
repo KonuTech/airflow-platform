@@ -104,6 +104,7 @@ from dataplat.validate.referential import ReferentialIntegrityBarrier
 from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from decimal import Decimal
 
     from psycopg import Connection
@@ -298,18 +299,56 @@ def _scalar(conn: Connection[Any], query: str) -> Any:
     return row[0]
 
 
-def _table_checksum(conn: Connection[Any], table: str) -> str | None:
-    """Compute an order-independent aggregate hash over every row of ``table`` (D-21).
+def _table_checksum(
+    conn: Connection[Any],
+    table: str,
+    *,
+    columns: Sequence[str] | None = None,
+) -> str | None:
+    """Compute an order-independent aggregate hash over rows of ``table`` (D-21, D-29).
 
     ``bit_xor`` is commutative -- the result does not depend on row order,
     so two tables holding the SAME rows in a DIFFERENT physical order
     produce the SAME checksum. `table` is a config-resolved identifier
     (T-09-03), interpolated as an identifier only.
+
+    Args:
+        conn: An already-open connection, inside the caller's own open
+            transaction.
+        table: A config-resolved table identifier (T-09-03), e.g.
+            ``"silver.customers"``. Interpolated as an identifier only,
+            never row content.
+        columns: ``None`` (the default) hashes every column of ``table`` --
+            byte-for-byte identical to this function's behavior before D-29,
+            and its original caller (``_compute_silver_gold_reconciliation``,
+            below) always passes this default, so its behavior is unchanged.
+            When provided, hashes ONLY the named columns instead of ``SELECT
+            *`` -- ``dataplat.pipeline.rebuild_reconciliation``'s
+            ``snapshot_table_state`` (D-29 point 2, Pitfall 7) passes a
+            dataset's BUSINESS columns here, explicitly excluding the six
+            embedded lineage columns a rebuild-from-raw deliberately
+            re-mints with fresh identity/timestamp values: ``_run_id``,
+            ``_file_id``, ``_batch_id``, ``_source_row_number``,
+            ``_ingested_at`` (staging/bronze tables) and ``_dbt_loaded_at``
+            (silver tables only) -- see ``.planning/research/
+            ARCHITECTURE.md`` §2.3. ``_record_hash``/``_record_hash_version``
+            are deliberately NOT excluded by this module -- they are
+            deterministic functions of business data and SHOULD match
+            across a rebuild (a useful extra determinism check, not noise);
+            a caller wanting that check simply includes them in ``columns``.
+            Every name in ``columns`` is a config-resolved identifier
+            (T-09-03), interpolated as an identifier only, never row
+            content.
+
+    Returns:
+        The hex-encoded aggregate hash, or ``None`` for an empty table (or
+        an empty ``columns`` selection).
     """
-    # `table` is a config-resolved identifier (T-09-03), never row content.
+    # `table`/`columns` are config-resolved identifiers (T-09-03), never row content.
+    source = f"{table} t" if columns is None else f"(SELECT {', '.join(columns)} FROM {table}) t"  # noqa: S608
     query = (
         f"SELECT to_hex(bit_xor(('x' || substr(md5(t::text), 1, 16))::bit(64)::bigint)) "  # noqa: S608
-        f"FROM {table} t"
+        f"FROM {source}"
     )
     result = _scalar(conn, query)
     return None if result is None else str(result)
