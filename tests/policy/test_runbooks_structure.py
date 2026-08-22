@@ -48,6 +48,40 @@ THIS_PLAN_RUNBOOKS = (
     "unauthorized-access.md",
 )
 
+_HEADING_RE = re.compile(r"^##\s+(\S+)", re.MULTILINE)
+
+
+def missing_headings(text: str) -> list[str]:
+    """Report structural problems in `text`'s `##` headings against `REQUIRED_HEADINGS`.
+
+    A heading counts only as an exact `## <word>` line match -- `_HEADING_RE` anchors
+    to line start and requires whitespace immediately after the two literal `#`
+    characters, so a deeper `### Symptoms` subheading is never mistaken for a real
+    section marker, and a mention of "Symptoms" inside prose is never counted either.
+
+    Returns an empty list when `text` has exactly the 5 `REQUIRED_HEADINGS`, each
+    appearing once, in order. Otherwise returns one message per distinct problem
+    class found (missing, unexpected extra, or present-but-wrong-order/duplicated) --
+    every problem class is reported, not just the first one hit, so a single run of
+    `missing_headings` gives a complete diagnostic rather than requiring repeated
+    fix-rerun cycles to discover the next issue.
+    """
+    found = _HEADING_RE.findall(text)
+    problems: list[str] = []
+
+    missing = [heading for heading in REQUIRED_HEADINGS if heading not in found]
+    if missing:
+        problems.append(f"missing heading(s): {missing}")
+
+    extra = [heading for heading in found if heading not in REQUIRED_HEADINGS]
+    if extra:
+        problems.append(f"unexpected heading(s): {extra}")
+
+    if not missing and not extra and tuple(found) != REQUIRED_HEADINGS:
+        problems.append(f"headings present but out of order or duplicated: {found}")
+
+    return problems
+
 
 def test_every_runbook_created_so_far_has_the_five_required_headings() -> None:
     problems: list[str] = []
@@ -71,4 +105,6 @@ def test_a_runbook_missing_a_heading_is_reported() -> None:
             f"## {heading}\ncontent\n" for heading in REQUIRED_HEADINGS if heading != omit
         )
         problems = missing_headings(mutated)
-        assert problems, f"removing '## {omit}' from an otherwise-complete document was not reported"
+        assert problems, (
+            f"removing '## {omit}' from an otherwise-complete document was not reported"
+        )
