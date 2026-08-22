@@ -259,16 +259,14 @@ def test_table_checksum_columns_arg_is_order_independent_like_the_original(
             "(business_a text, business_b text, _run_id bigint)"
         )
         conn.execute(
-            "INSERT INTO checksum_order_fwd VALUES ('a', '1', 10), ('b', '2', 20), "
-            "('c', '3', 30)"
+            "INSERT INTO checksum_order_fwd VALUES ('a', '1', 10), ('b', '2', 20), ('c', '3', 30)"
         )
         conn.execute(
             "CREATE TEMPORARY TABLE checksum_order_rev "
             "(business_a text, business_b text, _run_id bigint)"
         )
         conn.execute(
-            "INSERT INTO checksum_order_rev VALUES ('c', '3', 30), ('b', '2', 20), "
-            "('a', '1', 10)"
+            "INSERT INTO checksum_order_rev VALUES ('c', '3', 30), ('b', '2', 20), ('a', '1', 10)"
         )
 
         fwd = _table_checksum(conn, "checksum_order_fwd", columns=business_columns)
