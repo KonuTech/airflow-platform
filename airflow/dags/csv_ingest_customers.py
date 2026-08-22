@@ -135,9 +135,14 @@ def csv_ingest_customers() -> None:
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
     # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
+    # retries=6 (not the DAG's usual 2): same KubernetesJobWatcher request-timeout race as
+    # `stage` above (see that task's own comment) -- live-confirmed 2026-08-22 during plan
+    # 10-08's concurrency test to also hit dbt_build, recovering via resolve_dbt_build_status's
+    # own resilience but still needing more than 2 attempts under this DAG's max_active_tis_per_dag=1
+    # cap's idle-gap-heavy scheduling.
     dbt_build = KubernetesPodOperator(
         task_id="dbt_build",
-        retries=2,
+        retries=6,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=1,
         **common_kpo_kwargs(
@@ -148,11 +153,15 @@ def csv_ingest_customers() -> None:
             include_dataplat_credentials=False,
         ),
     )
+    # retries=6 (not the DAG's usual 2-3): same KubernetesJobWatcher request-timeout race as
+    # `stage` above -- live-confirmed 2026-08-22 during plan 10-08's concurrency test to also
+    # hit publish, which (unlike dbt_build) has no equivalent resolve_*_status resilience of its
+    # own, so it needs the retry headroom directly.
     publish = KubernetesPodOperator(
         task_id="publish",
         cmds=["dataplat"],
         arguments=["publish", "--dataset", "customers"],
-        retries=3,
+        retries=6,
         retry_exponential_backoff=True,
         outlets=[customers_asset],
         # 10-07-PLAN.md (Rule 1 fix, live-cluster finding): was
