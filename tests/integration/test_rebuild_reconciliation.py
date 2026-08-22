@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import inspect
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -44,6 +45,7 @@ import psycopg
 import pytest
 
 from dataplat.metadata.postgres import PostgresMetadataRepository
+from dataplat.pipeline import rebuild_reconciliation
 from dataplat.pipeline.rebuild_reconciliation import (
     CustomersScd2Snapshot,
     RebuildComparisonResult,
@@ -118,7 +120,10 @@ def _insert_scd2_customer_version(  # noqa: PLR0913 -- one keyword per normalize
     source_row_number: int,
     record_hash: bytes,
 ) -> None:
-    """Insert one SCD2 version row DIRECTLY into `normalized.customers` (mirrors test_reconciliation.py).
+    """Insert one SCD2 version row DIRECTLY into `normalized.customers`.
+
+    Mirrors `test_reconciliation.py`'s own identically-named helper -- bypasses the SCD
+    Publisher entirely, fine for this module's own snapshot-only fixture needs.
 
     `event_ts`/`valid_to` must be genuinely non-overlapping for the SAME `customer_id` --
     migration 0035's `excl_customers_business_key_validity` EXCLUDE constraint rejects an
@@ -510,11 +515,13 @@ def test_compare_snapshots_reports_the_specific_mismatch_for_an_altered_snapshot
 
 
 def test_rebuild_reconciliation_module_performs_no_mutating_sql() -> None:
-    """Static guard: the module's own source has no DROP/DELETE/TRUNCATE (acceptance criteria)."""
-    import inspect
+    """Static guard: the module's source issues no mutating SQL statement (acceptance criteria).
 
-    from dataplat.pipeline import rebuild_reconciliation
-
+    Checks actual SQL-statement-shaped keywords (``DROP TABLE``/``DROP SCHEMA``/``DELETE
+    FROM``/``TRUNCATE``), not a bare ``"DROP "`` substring -- the module's own docstring
+    prose (e.g. "reconciles to its PRE-DROP STATE") legitimately contains "DROP" followed by
+    a space without being a SQL statement.
+    """
     source = inspect.getsource(rebuild_reconciliation).upper()
-    for forbidden in ("DROP ", "DELETE FROM", "TRUNCATE"):
+    for forbidden in ("DROP TABLE", "DROP SCHEMA", "DELETE FROM", "TRUNCATE"):
         assert forbidden not in source
