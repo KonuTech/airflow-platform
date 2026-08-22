@@ -595,22 +595,25 @@ def _table_checksum(
 
 **If this table is empty:** N/A — see entries above.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **What does the "CDC failure" runbook (§89 item 11) actually document, given CDC is entirely out of scope for v1?**
    - What we know: REQUIREMENTS.md's "Out of Scope" section confirms CDC (DoD 44/45/46/87) was dropped from v1 on 2026-08-21; no CDC `Source` is implemented; the `Source`/`Publisher` seam (Phase 3 ADR) "still admits a CDC Source later without redesign."
    - What's unclear: Whether D-41 expects a full runbook here at all, or a short "not applicable, here's why, here's the seam that would carry it" stub.
    - Recommendation: Write the short stub. Silently omitting the file is worse for the Core Value's own "traceable, explained" standard than an honest one-paragraph "not applicable" entry with a pointer to the architectural seam. Treat this as a documentation decision the planner can make directly rather than something requiring a round-trip to the user.
+   - **Resolution:** Written exactly as recommended, in plan 11-13 Task 2 — see `docs/runbooks/cdc-failure.md`, which states CDC is out of v1 scope and names the Source/Publisher seam (ADR-0008) that would carry it later.
 
 2. **Does the Kyverno chart require `cert-manager` or fully self-manage webhook certs?**
    - What we know: The chart's `values.yaml` structure (admissionController container/initContainer/resources) was inspected in detail; no `cert-manager` dependency was observed in the sections read, and Kyverno has historically self-managed its webhook certs via an internal cert-controller.
    - What's unclear: This was not exhaustively confirmed against the full `values.yaml` (2511 lines; only ~800 were inspected in detail) or the chart's `templates/`.
    - Recommendation: Confirm during Wave 0 by rendering the chart (`helm template`) and checking for a `cert-manager.io/*` CRD reference or an internal `kyverno-svc.kyverno.svc` self-signed cert Job/hook before finalizing the values files.
+   - **Resolution:** Resolved procedurally by plan 11-03 Task 1, which requires rendering the chart and recording a one-line comment on whichever finding is true (cert-manager dependency vs. self-managed cert-controller) in the values file itself, before any values file is finalized — the open question is settled at implementation time, not left open.
 
 3. **Where exactly does the `ImageValidatingPolicy` manifest itself get committed and applied, given it's not a Helm `values.yaml` key?**
    - What we know: The Kyverno Helm chart installs the CONTROLLER and its CRDs; it does not appear to accept initial policies as a `values.yaml` input (no such key was found in the sections of `values.yaml` inspected).
    - What's unclear: Whether the project should ship the policy as a raw manifest applied by a new numbered stage script (matching the `scripts/stages/NN-*.sh` pattern) or via a small wrapper Helm chart of its own (matching how `helm/kyverno-policies/` might mirror `helm/schemas/cnpg/`'s precedent of a project-owned adjunct to a vendored chart).
    - Recommendation: A new `scripts/stages/26-kyverno-policy.sh` (immediately after the Kyverno chart's own stage, per Pitfall 4's "deploy early" finding) applying a committed manifest via `kubectl apply -f` is the simplest option consistent with existing patterns and INFRA-07's "no manual kubectl surgery" (the apply is scripted and idempotent, not manual). This is squarely within CONTEXT.md's "Claude's Discretion: exact Kyverno ClusterPolicy resource shape/naming."
+   - **Resolution:** Confirmed by 11-PATTERNS.md's own discovery: the manifest lives at `kubernetes/kyverno-policy.yaml`, not under a new `helm/kyverno-policies/` directory (11-PATTERNS.md found no precedent for that shape — `helm/schemas/cnpg/` holds only kubeconform CRD schemas, never applied manifests). Carried into plan 11-03 Task 2 (`kubernetes/kyverno-policy.yaml` + `scripts/stages/25-kyverno.sh`/`26-kyverno-policy.sh`), exactly as recommended here.
 
 ## Environment Availability
 

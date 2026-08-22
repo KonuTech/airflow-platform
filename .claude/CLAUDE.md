@@ -403,7 +403,7 @@ If the platform ingests fast but cannot answer *"where did this row come from, a
 | `actions/checkout` | `v7.0.1` |
 | `actions/setup-python` | `v7.0.0` |
 | `astral-sh/setup-uv` | `v9.0.0` |
-| `docker/setup-buildx-action` | `v4.2.0` |
+| `docker/setup-buildx-action` | `v4.3.0` |
 | `docker/build-push-action` | `v7.3.0` |
 | `azure/setup-helm` | `v5.0.1` |
 | `aquasecurity/trivy-action` | `v0.36.0` (trivy `0.73.0`) |
