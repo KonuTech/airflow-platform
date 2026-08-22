@@ -51,9 +51,10 @@ resources:
 buckets:
   # `objectlocking: false` on every bucket, D-08: WORM retention was
   # considered and rejected because retained test objects cannot be cleaned
-  # up in place; Phase 11 (rebuild-from-raw, ephemeral environment) is the
-  # named place to revisit it. `versioning: true` on `raw` alone is what
-  # makes a correction a new version instead of an overwrite (§63).
+  # up in place; this was revisited in Phase 11: ADR-0011 confirms the IAM
+  # deny-delete policy below as the resolution, not WORM. `versioning: true`
+  # on `raw` alone is what makes a correction a new version instead of an
+  # overwrite (§63).
   #
   # `policy: none` here is the bucket's ANONYMOUS access policy
   # (`mc anonymous set none|download|upload|public`) — unrelated to the

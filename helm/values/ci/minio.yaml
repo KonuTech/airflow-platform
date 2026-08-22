@@ -13,7 +13,10 @@
 # single IAM policy allowing the pipeline's reads/writes on its working
 # buckets while denying it any delete against `raw`, and every credential
 # referenced by Secret NAME only. No credential literal of any kind appears
-# in this file.
+# in this file. D-08's WORM-vs-IAM question was revisited in Phase 11:
+# ADR-0011 confirms the `objectlocking: false` / IAM-deny-delete shape below
+# as the resolution, not object-lock/WORM -- see
+# helm/values/local/minio.yaml's fuller comment on this same rationale.
 
 mode: standalone
 replicas: 1

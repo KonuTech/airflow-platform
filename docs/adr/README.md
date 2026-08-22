@@ -21,6 +21,8 @@ preview. If the decision has not been made yet, there is nothing to record.
 | [0007](0007-helm-4-over-helm-3.md) | Helm 4.2.3 is adopted over the documented Helm 3.21.3 fallback | accepted | 2026-08-12 |
 | [0008](0008-pipeline-composition-seam.md) | Pipeline composition is `Source` → `RecordChunk` → `Stage` → `Publisher`, not README §68's flat taxonomy | accepted | 2026-08-13 |
 | [0009](0009-openbao-licence-escape-hatch.md) | Vault's BUSL-1.1 licence is accepted for this milestone; OpenBao is the named migration target | accepted | 2026-08-14 |
+| [0010](0010-dbt-silver-layer-boundary.md) | dbt owns bronze-to-silver transformation only — gold publish and SCD2 stay Python-owned | accepted | 2026-08-18 |
+| [0011](0011-raw-immutability-iam-not-worm.md) | Raw immutability is enforced via an IAM deny-delete policy, not object-lock/WORM | accepted | 2026-08-22 |
 
 Records 0002 through 0005 are the decisions Phase 1 actually takes. 0002 is the
 headline departure from README §68/§75; 0003 and 0004 are its physical
@@ -30,7 +32,11 @@ is the phase's Helm 4 compatibility gate result. 0008 is Phase 3's composition
 seam — the piece of README §68's departure ADR-0002 did not itself settle. 0009
 is Phase 5's licence-risk acceptance for Vault, fulfilling the record this table's
 own "Deliberately deferred records" section had already reserved before Phase 5
-began.
+began. 0010 is Phase 08.1's reversal of the original blanket dbt exclusion,
+scoping dbt to bronze-to-silver transformation only. 0011 is Phase 11's
+resolution of Phase 2's own D-08 raw-immutability revisit point, confirming the
+IAM deny-delete policy already shipped in Phase 2 as the permanent mechanism,
+not object-lock/WORM.
 
 `0000-template.md` is the template. `0000` is its permanent number; it is never a
 record and never appears in the table above.
