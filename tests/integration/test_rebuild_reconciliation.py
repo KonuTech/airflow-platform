@@ -16,18 +16,43 @@ Mirrors `test_reconciliation.py`'s own fixture shape (`migrated_dsn`, direct
 `psycopg.connect(...)` helpers, per-file-duplicated seeding helpers -- this test suite's
 established convention, restated in that file's own module docstring) rather than inventing
 a different harness.
+
+`test_compare_snapshots_*` below need NO database connection at all -- `compare_snapshots`
+is a pure function (Task 2's own action text). They are still collected in this file, under
+the SAME `pytest.mark.integration` mark as every other test here, for cohesion with the
+`snapshot_table_state`/`snapshot_customers_scd2_state` tests they directly complement
+(Task 2's own acceptance criteria explicitly sanctions this tradeoff over a file split). This
+is not merely a style choice: `tests/integration/conftest.py`'s `_require_docker` fixture is
+`autouse=True` at the whole-directory level, and that conftest module imports
+`testcontainers.community.{minio,postgres}` unconditionally at module scope -- any test
+physically located under `tests/integration/` already requires the `cluster` dependency
+group to even be collected, regardless of its own markers. `make check`'s offline gate
+excludes `tests/integration/` by PATH (`Makefile`'s `test`/`check` targets name only
+`tests/unit`/`tests/regression`), not by marker filtering, so there is no real offline-gate
+benefit to splitting the pure tests into a separate file.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import psycopg
 import pytest
 
 from dataplat.metadata.postgres import PostgresMetadataRepository
+from dataplat.pipeline.rebuild_reconciliation import (
+    CustomersScd2Snapshot,
+    RebuildComparisonResult,
+    ScdKeySnapshot,
+    TableSnapshot,
+    compare_snapshots,
+    snapshot_customers_scd2_state,
+    snapshot_table_state,
+)
 from dataplat.pipeline.run import _table_checksum
 from dataplat.storage.db import create_pool
 
@@ -68,6 +93,53 @@ def _insert_silver_customers_row(  # noqa: PLR0913 -- one keyword per silver col
             country,
             birth_date,
             event_ts,
+            run_id,
+            file_id,
+            batch_id,
+            source_row_number,
+            record_hash,
+        ),
+    )
+
+
+def _insert_scd2_customer_version(  # noqa: PLR0913 -- one keyword per normalized.customers SCD2 column
+    conn: psycopg.Connection[Any],
+    *,
+    customer_id: int,
+    name: str,
+    country: str,
+    birth_date: str,
+    event_ts: str,
+    valid_to: str,
+    is_current: bool,
+    run_id: int,
+    file_id: int,
+    batch_id: int,
+    source_row_number: int,
+    record_hash: bytes,
+) -> None:
+    """Insert one SCD2 version row DIRECTLY into `normalized.customers` (mirrors test_reconciliation.py).
+
+    `event_ts`/`valid_to` must be genuinely non-overlapping for the SAME `customer_id` --
+    migration 0035's `excl_customers_business_key_validity` EXCLUDE constraint rejects an
+    overlapping pair.
+    """
+    conn.execute(
+        """
+        INSERT INTO normalized.customers (
+            customer_id, name, country, birth_date, event_ts, valid_to, is_current,
+            _run_id, _file_id, _batch_id, _source_row_number,
+            _record_hash, _record_hash_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            customer_id,
+            name,
+            country,
+            birth_date,
+            event_ts,
+            valid_to,
+            is_current,
             run_id,
             file_id,
             batch_id,
@@ -274,3 +346,175 @@ def test_table_checksum_columns_arg_is_order_independent_like_the_original(
 
     assert fwd is not None
     assert fwd == rev
+
+
+# --- Task 2: rebuild_reconciliation.py -- snapshot + compare -----------------
+
+
+def test_snapshot_table_state_captures_row_count_and_scoped_checksum(migrated_dsn: str) -> None:
+    """`snapshot_table_state()` reports `row_count` + a Task-1-column-scoped `checksum`."""
+    business_columns = ("customer_id", "name", "country", "birth_date", "event_ts")
+    _dataset_id, run_id, file_id, batch_id = _seed_dataset_file_batch_run(
+        migrated_dsn, dataset_name="rebuild_recon_snapshot", key_suffix="snapshot_basic"
+    )
+    with psycopg.connect(migrated_dsn) as conn:
+        for i in range(3):
+            _insert_silver_customers_row(
+                conn,
+                # Pure-digit string -- see the identical comment on the nochg test above.
+                customer_id=f"970301{i}",
+                name=f"Snapshot{i}",
+                country="US",
+                birth_date="1990-01-01",
+                event_ts="2026-01-01T00:00:00+00:00",
+                run_id=run_id,
+                file_id=file_id,
+                batch_id=batch_id,
+                source_row_number=i + 1,
+                record_hash=f"snapshot-basic-hash-{i}".encode().ljust(32, b"0"),
+            )
+        conn.commit()
+
+        expected_checksum = _table_checksum(conn, "silver.customers", columns=business_columns)
+        expected_row_count = conn.execute("SELECT count(*) FROM silver.customers").fetchone()
+        assert expected_row_count is not None
+
+        snapshot = snapshot_table_state(conn, "silver.customers", business_columns=business_columns)
+
+    assert isinstance(snapshot, TableSnapshot)
+    assert snapshot.table == "silver.customers"
+    assert snapshot.row_count == int(expected_row_count[0])
+    assert snapshot.checksum == expected_checksum
+
+
+def test_snapshot_customers_scd2_state_captures_version_count_and_is_current_state_per_key(
+    migrated_dsn: str,
+) -> None:
+    """A dedicated SCD2-aware snapshot captures per-key version count + current-row validity."""
+    business_columns = ("customer_id", "name", "country", "birth_date", "event_ts")
+    _dataset_id, run_id, file_id, batch_id = _seed_dataset_file_batch_run(
+        migrated_dsn, dataset_name="rebuild_recon_scd2", key_suffix="snapshot_scd2"
+    )
+    scd2_customer_id = 9704001
+    with psycopg.connect(migrated_dsn) as conn:
+        _insert_scd2_customer_version(
+            conn,
+            customer_id=scd2_customer_id,
+            name="ScdOld",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2020-01-01T00:00:00+00:00",
+            valid_to="2026-01-01T00:00:00+00:00",
+            is_current=False,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+            record_hash=b"snapshot-scd2-old-hash-0000000000",
+        )
+        _insert_scd2_customer_version(
+            conn,
+            customer_id=scd2_customer_id,
+            name="ScdNew",
+            country="US",
+            birth_date="1990-01-01",
+            event_ts="2026-01-01T00:00:00+00:00",
+            valid_to="9999-12-31T00:00:00+00:00",
+            is_current=True,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=2,
+            record_hash=b"snapshot-scd2-new-hash-0000000000",
+        )
+        conn.commit()
+
+        scd2_snapshot = snapshot_customers_scd2_state(conn, business_columns=business_columns)
+
+    assert isinstance(scd2_snapshot, CustomersScd2Snapshot)
+    key_snapshot = next(k for k in scd2_snapshot.keys if k.business_key == str(scd2_customer_id))
+    assert key_snapshot.version_count == 2
+    assert key_snapshot.current_valid_from == datetime(2026, 1, 1, tzinfo=UTC)
+    assert key_snapshot.current_valid_to == datetime(9999, 12, 31, tzinfo=UTC)
+    assert key_snapshot.current_is_current is True
+
+
+def test_compare_snapshots_reports_full_match_for_identical_snapshots() -> None:
+    """Comparing an identical pre/post snapshot pair reports a full match, no differences."""
+    before = TableSnapshot(table="normalized.customers", row_count=3, checksum="abc123")
+    after = TableSnapshot(table="normalized.customers", row_count=3, checksum="abc123")
+
+    result = compare_snapshots(before, after)
+
+    assert isinstance(result, RebuildComparisonResult)
+    assert result.matches is True
+    assert result.mismatches == ()
+
+    scd2_before = CustomersScd2Snapshot(
+        table_snapshot=before,
+        keys=(
+            ScdKeySnapshot(
+                business_key="1",
+                version_count=1,
+                current_valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+                current_valid_to=datetime(9999, 12, 31, tzinfo=UTC),
+                current_is_current=True,
+            ),
+        ),
+    )
+    scd2_after = dataclasses.replace(scd2_before)
+
+    scd2_result = compare_snapshots(scd2_before, scd2_after)
+
+    assert scd2_result.matches is True
+    assert scd2_result.mismatches == ()
+
+
+def test_compare_snapshots_reports_the_specific_mismatch_for_an_altered_snapshot() -> None:
+    """Mutating exactly one field causes `compare_snapshots()` to name exactly that field."""
+    before = TableSnapshot(table="normalized.customers", row_count=3, checksum="abc123")
+
+    row_count_mismatch = compare_snapshots(
+        before, dataclasses.replace(before, row_count=before.row_count + 1)
+    )
+    assert row_count_mismatch.matches is False
+    assert row_count_mismatch.mismatches == ("row_count",)
+
+    checksum_mismatch = compare_snapshots(
+        before, dataclasses.replace(before, checksum="deliberately-altered-checksum")
+    )
+    assert checksum_mismatch.matches is False
+    assert checksum_mismatch.mismatches == ("checksum",)
+
+    scd2_before = CustomersScd2Snapshot(
+        table_snapshot=before,
+        keys=(
+            ScdKeySnapshot(
+                business_key="1",
+                version_count=1,
+                current_valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+                current_valid_to=datetime(9999, 12, 31, tzinfo=UTC),
+                current_is_current=True,
+            ),
+        ),
+    )
+    scd2_after = dataclasses.replace(
+        scd2_before,
+        keys=(dataclasses.replace(scd2_before.keys[0], version_count=2),),
+    )
+
+    scd2_mismatch = compare_snapshots(scd2_before, scd2_after)
+
+    assert scd2_mismatch.matches is False
+    assert scd2_mismatch.mismatches == ("scd2_key:1.version_count",)
+
+
+def test_rebuild_reconciliation_module_performs_no_mutating_sql() -> None:
+    """Static guard: the module's own source has no DROP/DELETE/TRUNCATE (acceptance criteria)."""
+    import inspect
+
+    from dataplat.pipeline import rebuild_reconciliation
+
+    source = inspect.getsource(rebuild_reconciliation).upper()
+    for forbidden in ("DROP ", "DELETE FROM", "TRUNCATE"):
+        assert forbidden not in source
