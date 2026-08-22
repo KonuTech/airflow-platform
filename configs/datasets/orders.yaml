@@ -76,6 +76,18 @@ quality:
       params:
         target_table: normalized.customers
 
+# retention: is D-36/D-37/D-38/D-39's per-dataset retention-window
+# declaration (Phase 11, 11-CONTEXT.md) -- same tiered defaults and same
+# deliberate raw_days omission as customers.yaml's own retention: block;
+# see that file's comment for the full D-37 tiering rationale.
+retention:
+  processed_days: 60
+  quarantine_days: 180
+  validation_reports_days: 730
+  ingestion_metadata_days: 730
+  logs_days: 30
+  enforce: false
+
 # columns: is D-17's minimal orders schema -- order_id/customer_id/
 # order_date/amount, mirroring customers.yaml's own columns: shape and
 # strptime-format discipline (STACK.md §F: dates are never parsed by

@@ -110,6 +110,28 @@ scd:
   delete_semantics: invalidate
   mass_delete_threshold: 0.10
 
+# retention: is D-36/D-37/D-38/D-39's per-dataset retention-window
+# declaration (Phase 11, 11-CONTEXT.md). raw_days is deliberately OMITTED
+# (not merely left at its default): rebuild-from-raw (INCR-07) needs the
+# FULL raw history to work, so raw's indefinite default is a deliberate
+# choice, not an oversight -- the comment IS the record of that choice.
+# processed/quarantine/validation_reports/ingestion_metadata/logs use
+# concrete numeric defaults within D-37's locked tiers: processed (cheaply
+# re-derivable from raw) short, quarantine (unresolved work needing human
+# attention) longer, validation reports + ingestion metadata (the audit/
+# lineage trail the Core Value statement promises) long, logs (standard
+# operational hygiene) short. enforce: false matches D-38's dry-run-by-
+# default safety guarantee -- RetentionConfig.enforce already defaults to
+# False at the Pydantic model level, so this line is explicit-not-implicit
+# documentation of that guarantee, not what makes it true.
+retention:
+  processed_days: 60
+  quarantine_days: 180
+  validation_reports_days: 730
+  ingestion_metadata_days: 730
+  logs_days: 30
+  enforce: false
+
 # columns: is D-18's source of truth for per-column type/nullable/required/
 # business_key/semantics, cross-validated against deduplication.keys above
 # (customer_id here is business_key: true, matching keys: [customer_id]).
