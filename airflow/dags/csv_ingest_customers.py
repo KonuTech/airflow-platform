@@ -114,10 +114,22 @@ def csv_ingest_customers() -> None:
     )
     wait_for_files >> matched_keys >> gate >> discover
     # D-12: stage is the trace root (OBS-10). No outlets here (08.1-12): stage only lands bronze.
+    # retries=6 (not the DAG's usual 2-3): providers-cncf-kubernetes's KubernetesJobWatcher uses
+    # a documented client-side _request_timeout=30s socket read timeout (separate from the
+    # server-side timeout_seconds=3600 watch duration -- see kubernetes-client/python's own
+    # timeout-settings.md, referenced in kubernetes_executor_utils.py's _run()). Under this DAG's
+    # deliberate max_active_tis_per_dag=1 cap, idle gaps between stage pods are common, so this
+    # watch reconnects constantly; each reconnect has a ~1s gap with no active watch, in which a
+    # pod's own completion event can be missed -- a known race in the pinned watcher, confirmed
+    # live 2026-08-21/22 (clean pod lifecycle, no app error, scheduler received
+    # state=None/failure_details=None). Not fixable from application code. A large mapped stage
+    # fan-out (20+ files) gives many independent chances to hit this low-probability race per
+    # DagRun; 6 retries gives the existing retry mechanism enough attempts to statistically
+    # absorb it without masking a genuine, repeatable application failure.
     stage = TracingKubernetesPodOperator.partial(
         task_id="stage",
         cmds=["dataplat"],
-        retries=3,
+        retries=6,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=1,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
