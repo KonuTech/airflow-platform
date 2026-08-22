@@ -623,7 +623,32 @@ Plans:
   3. A late-arriving correction dated between two existing versions rebuilds that key's history correctly from the ordered batch history, and applying it twice yields the same result.
   4. Effective dates come from source, business or event time as configured and never default to ingestion time — verified on a backfilled batch, where SCD Type 0 retains originals and Type 1 overwrites without history, and a business key absent from a full snapshot applies the dataset's configured DELETE semantics (`ignore | invalidate | new_record`).
 
-**Plans**: TBD
+**Plans**: 9 plans in 5 waves
+
+Plans:
+**Wave 1**
+
+- [x] 10-01-PLAN.md — SCD2 DDL/config/protocol foundation: migrate `normalized.customers`, `ColumnContract.scd_type`/`ScdConfig`, `staged_run_ids` threading (SCD-03, SCD-12)
+- [x] 10-02-PLAN.md — Pure-function building blocks (TDD): `tracked_attribute_hash` + `recompute_version_chain` Type-0/1/2 dispatch (SCD-01, SCD-02, SCD-04, SCD-05)
+- [x] 10-06-PLAN.md — Roster-based customers corpus generator: attribute_change/late_correction/missing_customer/mass_delete anomaly injectors (SCD-01, SCD-07, SCD-08, QUAL-14)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 10-03-PLAN.md — Run-scoped DELETE-detection snapshot diff + D-06 mass-delete circuit breaker (SCD-08)
+- [x] 10-05-PLAN.md — Fix `meta.v_customers_lineage` and reconciliation accounting for multi-row-per-key gold state (SCD-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 10-04-PLAN.md — Assemble and register the real `SCDPublisher`; retire `MergePublisher` for customers (SCD-03, SCD-06, SCD-07, SCD-09, SCD-11)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 10-07-PLAN.md — Live 2-year sweep proof: SCD version boundaries, late correction, DELETE invalidate, D-06 circuit-breaker live trip (SCD-03, SCD-06, SCD-07, SCD-08, SCD-09, SCD-10, SCD-11, QUAL-14) — 4 live bugs found and fixed (`publish` OOM, `MassDeleteCircuitBreaker` scoping, DAG-schedule contention, `KubernetesJobWatcher` retry race); code-complete and reviewed, full automated live pass not achieved (cluster-throughput/test-timeout gap, documented as a known follow-up, not a code defect)
+- [x] 10-09-PLAN.md — Close Finding F-4's e2e test blast radius: six SCD2 cardinality-assumption files audited, all clean (SCD-03)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 10-08-PLAN.md — D-10's dedicated same-key concurrency test: live attribute-change + backfill/correction race (SCD-09, SCD-10) — core claim verified twice live (direct SQL + harness-native); same automated-pass gap as 10-07
 
 **Research stage**: S12. **Use `/gsd-plan-phase --research-phase`** — this is the hardest correctness work in the project (SCD2 late-arriving corrections and idempotent re-application). PITFALLS C7–C9 are dense but the design space is still open.
 
