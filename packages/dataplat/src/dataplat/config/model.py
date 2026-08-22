@@ -541,6 +541,73 @@ class ScdConfig(BaseModel):
     mass_delete_threshold: float
 
 
+class RetentionConfig(BaseModel):
+    """A dataset's opt-in, per-layer retention window declaration (D-36/D-37/D-38/D-39).
+
+    Absent entirely when a dataset declares no retention policy -- mirrors
+    ``ScdConfig``/``FreshnessConfig``/``QualityConfig``/``ReconciliationConfig``'s
+    own opt-in precedent (10-CONTEXT.md, 08-CONTEXT.md, this module's other
+    classes above). A dataset YAML that omits ``retention:`` entirely
+    behaves identically to today -- no automatic pruning happens anywhere
+    for that dataset. The ``platform_retention`` maintenance DAG (plan
+    11-08, D-35) is this config's one intended consumer, and is
+    deliberately NOT part of any ingestion DAG's own task graph (README
+    §64's "retention must remain separate from processing logic").
+
+    Every ``*_days`` field below is the number of days a layer's artifacts
+    may age past before becoming a delete CANDIDATE, or ``None`` for
+    structurally indefinite retention (no automatic pruning, ever, for
+    that layer) -- ``dataplat.retention.policy`` is the sole interpreter
+    of these windows, and its own boundary convention (exclusive: an item
+    aged EXACTLY the window is NOT yet a candidate) is documented on that
+    module directly, not here.
+
+    Attributes:
+        raw_days: The `raw` MinIO layer's retention window in days, or
+            ``None`` (the field default) for indefinite retention -- D-36:
+            rebuild-from-raw (INCR-07) needs the FULL raw history to work,
+            so raw's SHIPPED default stays indefinite even though this
+            field proves the window is structurally configurable.
+        processed_days: The `processed` MinIO layer's retention window in
+            days, or ``None`` for indefinite. D-37's tiering: cheaply
+            re-derivable from raw, so a short window is typical.
+        quarantine_days: The `quarantine` MinIO layer's retention window
+            in days, or ``None`` for indefinite. D-37's tiering: represents
+            unresolved work needing human attention, so a longer window
+            than `processed` is typical.
+        validation_reports_days: The validation-report artifacts'
+            retention window in days, or ``None`` for indefinite. D-37's
+            tiering: part of the audit/lineage trail the Core Value
+            statement promises, so a long window is typical.
+        ingestion_metadata_days: The `meta.*` ingestion-metadata rows'
+            retention window in days, or ``None`` for indefinite. Same
+            D-37 tiering rationale as `validation_reports_days`.
+        logs_days: Operational log retention window in days, or ``None``
+            for indefinite. D-37's tiering: standard operational hygiene,
+            typically the shortest window of the six.
+        enforce: Whether a `platform_retention` run is permitted to
+            actually act on this dataset's over-window candidates.
+            Defaults to ``False`` at the FIELD level (D-38) -- not merely a
+            YAML convention -- so a dataset config that omits
+            ``retention:`` entirely, or omits ``enforce:`` inside it, can
+            never accidentally hard-delete. Every evaluation reports what
+            WOULD be deleted regardless of this flag's value; only the
+            caller (a future DAG task, never ``dataplat.retention.policy``
+            itself) inspects this flag to decide whether to act on a
+            report -- the evaluator performs no I/O either way.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    raw_days: int | None = None
+    processed_days: int | None = None
+    quarantine_days: int | None = None
+    validation_reports_days: int | None = None
+    ingestion_metadata_days: int | None = None
+    logs_days: int | None = None
+    enforce: bool = False
+
+
 class DatasetConfig(BaseModel):
     """The complete, validated configuration for one dataset.
 
@@ -587,6 +654,12 @@ class DatasetConfig(BaseModel):
             circuit-breaker declaration (D-05/D-06, 10-CONTEXT.md), or
             ``None`` when this dataset is not SCD-tracked —
             ``customers.yaml`` populates this for real.
+        retention: The dataset's opt-in, per-layer retention window
+            declaration (D-36/D-37/D-38/D-39, 11-CONTEXT.md), or ``None``
+            when this dataset declares no retention policy — a dataset
+            with no ``retention:`` block behaves identically to today, no
+            accidental retention enforcement anywhere. ``customers.yaml``
+            and ``orders.yaml`` both populate this for real.
         csv: Structural CSV-parsing overrides. Defaults to "detect
             everything" (``CsvParsingConfig``'s own field defaults).
         schema_evolution_on_new_column: Policy applied when a file
@@ -614,6 +687,7 @@ class DatasetConfig(BaseModel):
     quality: QualityConfig | None = None
     reconciliation: ReconciliationConfig | None = None
     scd: ScdConfig | None = None
+    retention: RetentionConfig | None = None
     csv: CsvParsingConfig = Field(default_factory=CsvParsingConfig)
     schema_evolution_on_new_column: str = "evolve"
     schema_evolution_on_missing_or_retyped_column: str = "freeze"
