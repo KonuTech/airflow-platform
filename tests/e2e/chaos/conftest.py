@@ -7,15 +7,19 @@ does the identical thing for the identical reason: `tests/e2e/chaos` is a SIBLIN
 `tests/e2e/cluster`, not a child of it, so pytest's own directory-based conftest inheritance
 cannot supply them for free). `vault_addr` is re-exported from `tests.e2e.vault.conftest` the
 same way, and `analytics_connection`/`analytics_owner_connection`/`slice_fixtures_dir`/
-`_unpause_slice_dags` from `tests.e2e.slice.conftest` -- every chaos test that uploads a file and
-polls `meta.*` for it needs the identical DB-connection/DAG-unpause machinery
-`tests/e2e/slice`'s own suite already built, and this repository's convention is to import it,
-never re-derive a second, divergent copy.
+`_unpause_slice_dags`/`airflow_metadata_connection` from `tests.e2e.slice.conftest` -- every chaos
+test that uploads a file and polls `meta.*` for it needs the identical DB-connection/DAG-unpause
+machinery `tests/e2e/slice`'s own suite already built, and this repository's convention is to
+import it, never re-derive a second, divergent copy. `airflow_metadata_connection` (added by
+11-10-PLAN.md, `test_oom.py`/`test_task_timeout.py`) is the one addition beyond what 11-09-PLAN.md
+originally needed: both of those tests must directly query `task_instance.state` on the real
+Airflow metadata database, the only DB-queryable proof that a killed/timed-out task genuinely
+reached a clean terminal state.
 
-`cnpg_hibernation_fault` is the ONE new fixture this suite adds (11-09-PLAN.md's own Task 1
-action text). It is deliberately NOT the `network_fault`-via-`NetworkPolicy` mechanism the plan
-originally specified — see its own docstring for why, and this module's `_NETWORK_POLICY_
-ENFORCEMENT_FINDING` constant for the live evidence.
+`cnpg_hibernation_fault` is the ONE new fixture 11-09-PLAN.md's own Task 1 action text added. It is
+deliberately NOT the `network_fault`-via-`NetworkPolicy` mechanism the plan originally specified —
+see its own docstring for why, and this module's `_NETWORK_POLICY_ENFORCEMENT_FINDING` constant for
+the live evidence.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from tests.e2e.cluster.conftest import (  # noqa: F401 -- re-exported as pytest 
 )
 from tests.e2e.slice.conftest import (  # noqa: F401 -- re-exported as pytest fixtures below
     _unpause_slice_dags,
+    airflow_metadata_connection,
     analytics_connection,
     analytics_owner_connection,
     slice_fixtures_dir,
