@@ -127,6 +127,34 @@ regex over `key: value` / `key=value` assignments instead of a parsed-YAML
 walk — forward-looking, since nothing in the current tree matches it (every
 credential in every script is either a Secret NAME or the output of
 `_random_hex`/a `kubectl get` read, never a literal).
+
+## Phase 11 plan 11-04: two more names — a second, independent re-audit
+
+`e2e-smoke.yml` (D-21) conditionally logs into Docker Hub to raise the
+anonymous pull-rate limit for the upstream chart images its own ephemeral
+cluster-up pulls, adding `secrets.DOCKERHUB_USERNAME` and
+`secrets.DOCKERHUB_TOKEN` — the platform's first NON-GitHub-issued
+credential referenced by any workflow. This obliges its own fresh re-audit,
+independent of the `GITHUB_TOKEN` one above:
+
+* Both are read exactly once, via `docker/login-action`'s typed
+  `with.username`/`with.password` inputs — never interpolated into a `run:`
+  shell body (the same non-echoing shape already established for
+  `GITHUB_TOKEN`). `env_dump_problems` independently checks the whole
+  workflow for any environment-dumping construct regardless of which secret
+  it might expose.
+* The login step itself is gated `if: ${{ secrets.DOCKERHUB_USERNAME != ''
+  }}` — never a hard requirement. An unconfigured secret degrades to
+  anonymous Docker Hub pulls, it does not fail the job (this plan's own
+  `user_setup` note).
+* Neither secret widens any job's `permissions:` — `e2e-smoke.yml`'s `smoke`
+  job declares no `permissions:` key at all (inherits the workflow-level
+  `contents: read` floor unchanged), unlike `publish.yml`'s `GITHUB_TOKEN`
+  use, which needed `packages: write`/`id-token: write`. No
+  `ALLOWED_PERMISSION_WIDENING` entry is needed for this workflow.
+* Both are read-only Docker Hub credentials (an access token, never a
+  password with write scope) — scoped to authentication for `docker pull`
+  only, nothing this job ever pushes to Docker Hub.
 """
 
 from __future__ import annotations
@@ -142,10 +170,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 MAKEFILE = REPO_ROOT / "Makefile"
 
-# Read the module docstring before adding anything. GITHUB_TOKEN is the one
+# Read the module docstring before adding anything. GITHUB_TOKEN is the
 # entry Phase 11 plan 11-01 added, for publish.yml's docker/login-action GHCR
-# auth — the re-audit that entry obliges is written into the docstring above.
-ALLOWED_SECRETS: frozenset[str] = frozenset({"GITHUB_TOKEN"})
+# auth. DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are the two Phase 11 plan 11-04
+# added, for e2e-smoke.yml's own optional docker/login-action Docker Hub
+# auth (D-21) — each addition's own re-audit is written into the docstring
+# above.
+ALLOWED_SECRETS: frozenset[str] = frozenset(
+    {"GITHUB_TOKEN", "DOCKERHUB_USERNAME", "DOCKERHUB_TOKEN"},
+)
 
 SECRET_REFERENCE = re.compile(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -573,14 +606,17 @@ def test_a_generated_credential_in_a_script_is_not_reported() -> None:
 def test_the_allowed_secrets_set_is_unchanged_by_d14() -> None:
     """D-14 must not touch SEC-10's claim — see the module docstring.
 
-    `ALLOWED_SECRETS` is pinned to exactly the set Phase 11 plan 11-01
-    introduced (`GITHUB_TOKEN`, for `publish.yml`'s GHCR auth) — not empty
-    (that was true only through Phase 10) and not anything wider than that
-    one, deliberate, re-audited entry. D-14 (Phase 2) contributed nothing to
-    this set either way.
+    `ALLOWED_SECRETS` is pinned to exactly the set Phase 11 plans 11-01 and
+    11-04 introduced (`GITHUB_TOKEN` for `publish.yml`'s GHCR auth;
+    `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` for `e2e-smoke.yml`'s optional
+    Docker Hub auth, D-21) — not empty (that was true only through Phase 10)
+    and not anything wider than those three, deliberate, re-audited entries.
+    D-14 (Phase 2) contributed nothing to this set either way.
     """
-    assert frozenset({"GITHUB_TOKEN"}) == ALLOWED_SECRETS, (
-        "ALLOWED_SECRETS no longer matches the Phase 11 plan 11-01 baseline "
-        "(exactly {'GITHUB_TOKEN'}) — see this module's docstring before "
-        "widening it further; D-14 itself adds no CI secret"
+    baseline = frozenset({"GITHUB_TOKEN", "DOCKERHUB_USERNAME", "DOCKERHUB_TOKEN"})
+    assert baseline == ALLOWED_SECRETS, (
+        "ALLOWED_SECRETS no longer matches the Phase 11 plan 11-01/11-04 "
+        "baseline (exactly {'GITHUB_TOKEN', 'DOCKERHUB_USERNAME', "
+        "'DOCKERHUB_TOKEN'}) — see this module's docstring before widening "
+        "it further; D-14 itself adds no CI secret"
     )

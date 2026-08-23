@@ -58,7 +58,7 @@ FILE ?=
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration test-dagtest image-csv-processor \
         image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
-        migrate-analytics rebuild-from-raw rollback
+        migrate-analytics rebuild-from-raw rollback smoke-verify
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -340,6 +340,68 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice 
 	# other suite collected here needs too, so a second target would just
 	# duplicate this one's own invocation shape for no reason.
 	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice tests/e2e/observability -q
+
+smoke-verify:                   ## D-20: fast PR-gating subset (4 checks) against the live cluster — distinct from cluster-verify's full suite [plan 11-04]
+	# D-19/D-20: e2e-smoke.yml's own 4-point proof, composed as ONE target so
+	# both a developer and .github/workflows/e2e-smoke.yml invoke the exact
+	# same gate. Deliberately narrower and faster than cluster-verify above
+	# (which runs this phase's WHOLE e2e/cluster+slice+observability suite) —
+	# this target runs only what D-20 names: (1) core Helm releases/
+	# Deployments/StatefulSets healthy including Kyverno, (2) one real DAG
+	# run reaching SUCCEEDED, (3) Vault positive+negative, (4) Kyverno
+	# positive+negative. No broad "everything healthy" test already existed
+	# in tests/e2e/cluster/ (checked: test_airflow_workloads.py/test_node_
+	# capacity.py/etc. are each scoped to one component) — check (1) is
+	# therefore a minimal new shell assertion here, not a new pytest file,
+	# matching this Makefile's own established inline-shell idiom (see
+	# `rollback`/`migrate-analytics` above) rather than adding pytest
+	# collection overhead for what is fundamentally two `kubectl`/`helm`
+	# queries. Check (2) is a small, suite-local trigger+poll using the
+	# `airflow dags trigger`/`airflow dags state` CLI directly (never a DB
+	# port-forward) -- deliberately NOT `tests/e2e/slice/test_smoke_and_
+	# idempotency.py::test_smoke_dag_xcom_contains_built_sha`, which also
+	# asserts the XCom `git_sha` matches this checkout's own `git rev-parse
+	# --short HEAD`: in e2e-smoke.yml's own ephemeral-kind context the pod
+	# runs the PR's own GHCR image (built with the FULL git SHA build-arg,
+	# per publish.yml), which can never equal a local `--short HEAD` value --
+	# reusing that test as-is would fail for a reason unrelated to what D-20
+	# actually needs proven here (does a real DAG run reach SUCCEEDED).
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	if ! $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
+	  echo "ERROR: no live cluster reachable at context $$ctx" >&2; \
+	  exit 1; \
+	fi; \
+	echo "==> [1/4] core Helm releases deployed + Deployments/StatefulSets Ready"; \
+	not_deployed=$$("$(HELM)" list -A -o json --kube-context "$$ctx" | python3 -c "import json, sys; releases = json.load(sys.stdin); print('\n'.join(r['name'] for r in releases if r['status'] != 'deployed'))"); \
+	if [ -n "$$not_deployed" ]; then \
+	  echo "ERROR: Helm releases not in 'deployed' status:" >&2; echo "$$not_deployed" >&2; exit 1; \
+	fi; \
+	not_ready=$$($(KUBECTL) --context "$$ctx" get deploy,statefulset -A -o json | python3 -c "import json, sys; d = json.load(sys.stdin); bad = [f\"{i['metadata']['namespace']}/{i['kind']}/{i['metadata']['name']} ({(i.get('status', {}).get('readyReplicas', 0) or 0)}/{i['spec'].get('replicas', 1)} ready)\" for i in d['items'] if (i.get('status', {}).get('readyReplicas', 0) or 0) < i['spec'].get('replicas', 1)]; print('\n'.join(bad))"); \
+	if [ -n "$$not_ready" ]; then \
+	  echo "ERROR: Deployments/StatefulSets not fully Ready:" >&2; echo "$$not_ready" >&2; exit 1; \
+	fi; \
+	echo "    all Helm releases deployed, all Deployments/StatefulSets Ready"; \
+	echo "==> [2/4] smoke_kubernetes_pod DAG run reaches success"; \
+	run_id="smoke-verify-$$(date +%s)-$$$$"; \
+	$(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags unpause smoke_kubernetes_pod >/dev/null; \
+	$(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags trigger smoke_kubernetes_pod --run-id "$$run_id" >/dev/null; \
+	state=""; \
+	for _ in $$(seq 1 60); do \
+	  state=$$($(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags state smoke_kubernetes_pod "$$run_id" 2>/dev/null | tail -n1 | tr -d '\r'); \
+	  if [ "$$state" = "success" ] || [ "$$state" = "failed" ]; then break; fi; \
+	  sleep 5; \
+	done; \
+	if [ "$$state" != "success" ]; then \
+	  echo "ERROR: smoke_kubernetes_pod run $$run_id did not reach 'success' (last observed state: $$state)" >&2; \
+	  exit 1; \
+	fi; \
+	echo "    smoke_kubernetes_pod run $$run_id reached success"
+	@echo "==> [3/4] Vault positive+negative"
+	$(RUN_CLUSTER) pytest tests/e2e/vault -q -m cluster
+	@echo "==> [4/4] Kyverno positive+negative"
+	$(RUN_CLUSTER) pytest tests/e2e/cluster/test_kyverno_admission.py -q -m cluster
+	@echo "==> smoke-verify: all 4 D-20 checks passed"
 
 test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — migrations, dataplat [plan 03-02]
 	# $(RUN_CLUSTER), same reasoning as cluster-verify above: testcontainers

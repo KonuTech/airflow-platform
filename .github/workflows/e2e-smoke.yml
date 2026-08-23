@@ -1,0 +1,118 @@
+# Phase 11 plan 11-04 (CICD-09, D-19/D-20): the PR-gating fast smoke subset.
+# Spins up its own ephemeral kind cluster inside GitHub Actions on every pull
+# request and runs the D-20 4-point proof (via `make smoke-verify`) against
+# the PR's OWN just-published `pr-<number>` images — not main's last merge
+# build (11-RESEARCH.md Pitfall 5). The full local E2E suite (`make
+# cluster-verify`, covering the 2-year sweep and observability) stays
+# reserved for `e2e-full.yml`, gated to merge only (plan 11-05).
+name: E2E smoke (PR)
+
+on:
+  pull_request:
+
+# Least privilege at the workflow level, matching ci.yml/publish.yml's own
+# floor — this job never publishes anything and never needs to widen this.
+# GHCR images `publish.yml` already produced are public, so no `packages:`
+# permission is needed to pull them.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.3"
+
+jobs:
+  smoke:
+    name: Ephemeral-kind fast smoke subset (D-20)
+    runs-on: ubuntu-latest
+    # Cluster boot + a handful of targeted checks (4 D-20 points), materially
+    # faster than cluster-verify's full local suite — measured starting
+    # ceiling, not a guess dressed as a fact (mirrors publish.yml's own
+    # per-matrix-leg timeout comment).
+    timeout-minutes: 30
+    # A pull_request from a FORK never receives a published `pr-<number>`
+    # image at all (publish.yml's own fork guard — GitHub never grants
+    # `packages: write` on fork-originated pull_request runs). Guarding here
+    # explicitly means a fork PR's smoke run is a clean, understood skip,
+    # not a confusing cluster-up against an image that was never published.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Live-verified (plan 11-04 Task 3, bisected against 10 throwaway pushes):
+    # referencing `secrets.*` directly inside a step's own `if:` conditional
+    # makes GitHub's own workflow parser reject this file at PARSE time —
+    # zero jobs, a generic "likely failed because of a workflow file issue"
+    # push-triggered failure, and the workflow never registers for
+    # `pull_request` at all. The safe pattern (also live-confirmed) is to
+    # mirror the secret into a job-level `env:` var first, then gate the
+    # step on `env.*` instead — `secrets.*` stays fine to reference directly
+    # inside a step's `with:` block (also confirmed in the same bisection),
+    # only the `if:` position is affected.
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # `cluster`-group only (boto3/psycopg): this job never runs `make
+      # check`'s offline gate, only cluster-dependent targets.
+      - run: make install-cluster
+
+      # D-21: raises the runner's Docker Hub pull-rate limit for the
+      # upstream chart images `make cluster-up` pulls (Airflow, MinIO,
+      # Vault, Kyverno, CNPG, ingress-nginx). Conditioned on the repo
+      # secret being configured at all — never a hard requirement, and
+      # never a failure when absent (this plan's own `user_setup` note).
+      - name: Docker Hub login (optional, raises anonymous pull-rate limit)
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # kind and helm are installed by `scripts/cluster-up.sh` itself (its
+      # own first two lines, tools/k8s/install_{kind,helm}.sh) — no separate
+      # install step here, matching D-09's single-entry-point convention
+      # ("no manual kind surgery" outside cluster-up.sh). kubectl needs no
+      # install at all: `actions/runner-images`' own Ubuntu 24.04 image ships
+      # kubectl 1.36.3 pre-installed, within the one-minor version-skew
+      # `scripts/doctor.sh` already requires against this project's pinned
+      # Kubernetes 1.35.5 node image (the same skew this project's own local
+      # host, kubectl 1.36.1, already runs under).
+      - name: Point cluster-up at this PR's own GHCR Airflow image
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "AIRFLOW_IMAGE_OVERRIDE_REPO=ghcr.io/${owner}/airflow" >> "$GITHUB_ENV"
+          echo "AIRFLOW_IMAGE_OVERRIDE_TAG=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_ENV"
+
+      # scripts/doctor.sh's own preflight floors (DOCTOR_MIN_CPUS=8,
+      # DOCTOR_MIN_MEM_GB=20) are calibrated for the documented LOCAL WSL2
+      # dev floor (docs/wsl/wslconfig.example), not this project's own
+      # already-documented CI runner sizing (CLAUDE.md: "GitHub-hosted
+      # runners are 4 CPU / 16 GB"). Live-measured on this exact runner
+      # (plan 11-04 Task 3): 4 CPUs, ~15GiB. Both floors are explicitly
+      # documented as overridable via env vars in scripts/doctor.sh's own
+      # header comment ("lower DOCTOR_MIN_CPUS only if you accept a smaller
+      # cluster") — set here, not edited in doctor.sh itself, since this is
+      # this workflow's own CI-specific environment, not a change to the
+      # local-dev default.
+      - name: Bring up the ephemeral kind cluster (CI profile)
+        env:
+          DOCTOR_MIN_CPUS: "4"
+          DOCTOR_MIN_MEM_GB: "14"
+        run: PROFILE=ci make cluster-up
+
+      - name: Point csv_processor_image/dbt_image at this PR's own GHCR images
+        run: scripts/ci-set-workload-images.sh pr-${{ github.event.pull_request.number }}
+
+      # The D-20 4-point proof, composed as one Make target so a developer
+      # and this workflow invoke the exact same gate (Makefile's own
+      # `smoke-verify` docstring).
+      - name: Run the D-20 fast smoke subset (make smoke-verify)
+        run: make smoke-verify

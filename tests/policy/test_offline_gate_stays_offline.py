@@ -71,6 +71,22 @@ ARGUED_TESTS_E2E_TARGETS: tuple[tuple[str, str], ...] = (
             "its existing callers do not expect."
         ),
     ),
+    (
+        "smoke-verify",
+        (
+            "D-20 (plan 11-04): the fast, 4-point PR-gating subset "
+            "e2e-smoke.yml runs against an ephemeral kind cluster -- "
+            "deliberately narrower than cluster-verify (which runs this "
+            "phase's whole e2e/cluster+slice+observability suite): only "
+            "tests/e2e/vault -m cluster and tests/e2e/cluster/"
+            "test_kyverno_admission.py -m cluster, plus two non-pytest "
+            "shell/CLI checks (core Helm releases/Deployments/StatefulSets "
+            "Ready, and one real smoke_kubernetes_pod DAG run reaching "
+            "success). A separate target from cluster-verify/vault-verify "
+            "for the same reason those two are separate from each other: "
+            "different preconditions and a different (faster) budget."
+        ),
+    ),
 )
 
 # A target line: `name: prereq1 prereq2  ## comment`. The negative lookahead
