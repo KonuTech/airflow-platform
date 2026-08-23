@@ -194,3 +194,81 @@ own live evidence.
 | `tests/e2e/chaos/test_database_unavailable.py` cannot pass live until defect 1 (and likely defect 2) above are fixed — the fault window this test must hold (upload → trigger → wait for `discover` to fail) deterministically overlaps `list_run_ids_pending_dbt_build`'s own DagRun-start-time execution, so this is not a rare flake to retry past. | Open — CRITICAL | 2026-08-22, plan 11-09 |
 | `tests/e2e/chaos/test_vault_unavailable.py` — same root cause as the row above, via Vault instead of the DB directly (both back the same `analytics_db_default` Connection `list_run_ids_pending_dbt_build` needs); this file's OWN sealing mechanism (pod-delete restart, replacing a separately-broken `vault operator seal` CLI call — see this file's own module docstring) is fixed and live-confirmed working in this plan's own commit, but a full live pass of the test's recovery assertions remains blocked on defect 1. | Open — CRITICAL (same root cause) | 2026-08-23, plan 11-09 |
 | `tests/e2e/chaos/test_minio_unavailable.py` — NOT blocked by defect 1's primary DB/Vault trigger (a MinIO-only fault does not touch `list_run_ids_pending_dbt_build`'s own connection), but IS affected by defect 1's secondary symptom (`publish`'s gate-decoupling extends how long the DagRun takes to reach a clean `failed` state after `list_matched_keys` itself already failed) compounding with today's unusually severe pre-existing KubernetesJobWatcher flakiness (plan 10-08); this file's own timeouts were bumped (`_RECOVERY_TIMEOUT_SECONDS` 3600→5400s, `_DAGRUN_FAILED_TIMEOUT_SECONDS` 180→900s) to accommodate the live-observed worst case, in this plan's own commit. A full clean live pass was not achieved this session (two attempts: one killed by a harness-level background-task limit unrelated to this test's own correctness, one still in flight when this session's own time budget was reached) but nothing observed contradicts the fault-injection mechanism itself being correct. | Open — not a defect-1 blocker, needs one more clean live attempt | 2026-08-23, plan 11-09 |
+
+## Plan 11-10
+
+### Live cluster CPU-starvation episode encountered during this plan's own execution (not caused by this plan)
+
+Found live while starting Task 1's own verification (`uv run --group cluster pytest tests/e2e/
+chaos/test_duplicate_batch.py`): the very first `_unpause_slice_dags` autouse fixture call
+(`kubectl exec deploy/airflow-api-server -- airflow dags unpause smoke_kubernetes_pod`) exceeded
+the `kubectl` fixture's own hardcoded 30s subprocess timeout (`tests/e2e/cluster/conftest.py`'s
+`_run` helper, `timeout: int = 30` -- a shared fixture default this plan's own file scope does not
+touch). A manual, unbounded retry of the identical command completed successfully but took
+**2m21s** — a ~4-5x normal latency for what is ordinarily a sub-second CLI round-trip.
+
+**Live diagnosis, before writing any of this plan's own test files against the cluster:**
+- `docker stats --no-stream` on the three kind node containers showed **342-481% CPU** each
+  (`airflow-platform-control-plane`, `-worker`, `-worker2`) — this project's own `kind/cluster.yaml`
+  budgets ~3 allocatable CPU/node, so this is the node genuinely CPU-saturated, not a measurement
+  artifact.
+- `airflow-scheduler`'s pod progressed from `1/2 Running` (repeated liveness-probe-triggered
+  restarts, `kubectl describe pod` events: `Liveness probe failed: command timed out ... timed out
+  after 20s`) to a genuine **`CrashLoopBackOff`** within the same ~15-minute window this plan's own
+  research/writing phase took. The scheduler container's own `lastState` showed `exitCode: 0,
+  reason: "Completed"` — a clean `SIGTERM` from kubelet after the startup/liveness probe's own
+  `airflow jobs check --job-type SchedulerJob --local` exec call itself could not get scheduled
+  within its 20s window, not an application crash or OOM (node `MemoryPressure`/`DiskPressure`/
+  `PIDPressure` conditions all `False`) — the exact CPU-starvation-cascade shape this project's own
+  `STATE.md` Blockers/Concerns section has already documented multiple times (260817-mvp, the
+  `airflow-scheduler-stuck-tasks` debug session, `dagrun-scheduler-stall.md`).
+- Root cause, most likely: `csv_ingest_customers`'s own pre-existing `stage` backlog (a
+  `scheduled__2026-08-23T03:26:00+00:00` DagRun, observed at 56/61 `stage` mapped instances
+  `success` with 5 still `up_for_retry`, downstream `dbt_build`/`publish` not yet started) was
+  STILL actively churning through this plan's own dispatch-time "confirmed healthy" window and
+  this plan's own subsequent ~1-hour research phase, and eventually tipped the shared node(s) into
+  the same CPU-contention regime this project's own history repeatedly names. **Not caused by this
+  plan's own new files**: at every point this was observed, `kubectl get pods -n etl` showed ZERO
+  running pods — no `chaos_probe` probe was ever triggered before this finding.
+
+**Why not "fixed" here:** this is the SAME class of issue `.planning/debug/resolved/
+airflow-scheduler-stuck-tasks.md` and the `260817-*` quick tasks already root-caused and
+partially mitigated (concurrency caps, monitoring-stack trims) — a full remediation is a `/gsd:
+debug` session's own scope, not a single chaos-test-authoring plan's. This plan's own test design
+already anticipates and is resilient to this class of latency (see `test_oom.py`/
+`test_task_timeout.py`'s own module docstrings: "Generous under this cluster's own documented,
+live-observed CPU-contention latency").
+
+**Update — sustained, not transient (same session, ~90 minutes later):** re-checked repeatedly
+after the initial finding above, specifically waiting for a recovery signal before attempting any
+live test again. `airflow-scheduler` cycled `CrashLoopBackOff` -> `1/2 Running` (still not
+`Ready`) and back to `CrashLoopBackOff` again over that window (17 total restarts observed by the
+end), never once reaching `2/2 Ready`. Two separate, spaced re-attempts of the identical
+`uv run --group cluster pytest tests/e2e/chaos/test_duplicate_batch.py` command — the simplest
+test in this plan, requiring no DAG trigger at all, only one `kubectl exec ... airflow dags
+unpause` call via the session-scoped `_unpause_slice_dags` autouse fixture — both failed
+identically at the same `kubectl` fixture's hardcoded 30s subprocess timeout
+(`tests/e2e/cluster/conftest.py`). `docker stats` CPU stayed in the 276-420%/node range
+throughout. **Conclusion: this is a sustained platform incident, not a brief blip** — none of
+this plan's 5 chaos test files could be live-verified in this session as a direct result, through
+no fault of their own code (confirmed via `ruff check`/`ruff format --check`/`mypy`, all clean,
+and via `py_compile` for the new DAG file). Following the established precedent set by this
+plan's own prerequisite (11-09-SUMMARY.md's key-decision: "Committed test_database_unavailable.py
+... despite none of them currently passing live, because the test code itself is correct ... and
+the reason they don't pass is a genuine, independently-reproduced platform bug outside this
+plan's own scope"), this plan's 5 test files and the new `chaos_probe.py` DAG are committed as
+correct, live-verification-blocked code — see `11-10-SUMMARY.md` for the full accounting.
+
+**Recommended follow-up:** a dedicated `/gsd:debug` session, starting from this entry's own live
+evidence, once the shared cluster's ambient load has genuinely settled enough to attempt
+diagnosis without the diagnosis itself further starving an already-CPU-saturated node. The
+established diagnostic/fix pattern from prior incidents applies first (`docker stats`, `kubectl
+describe node`, check for an `etl`-namespace pod fan-out or a `stage`/`integrity_gate` backlog);
+if none of those explain it, this specific episode (scheduler `CrashLoopBackOff` with `exitCode
+0`/`reason=Completed`, no node-level Memory/Disk/PID pressure, and a >90-minute non-self-healing
+duration) is new enough in degree, if not in kind, to warrant fresh diagnosis rather than being
+assumed identical to a prior, shorter-lived incident. Before any further live chaos-test
+execution against this cluster (this plan's own remaining work: live-verifying all 5 files,
+`test_oom.py`/`test_task_timeout.py` in particular, which themselves add MORE load via a real
+`chaos_probe_oom_publish_customers`/`chaos_probe_timeout_publish_customers` trigger), confirm
+`airflow-scheduler` reaches a genuine, sustained `2/2 Ready` first.
