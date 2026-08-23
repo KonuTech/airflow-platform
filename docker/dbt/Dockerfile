@@ -48,8 +48,17 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 # pinned to the SAME version the rest of the platform uses (Airflow's own
 # constraints pin it too) -- resolve_secrets.py's only runtime dependency
 # beyond the stdlib.
+# D-07 (2026-08-23): dbt-core 1.12.2's own pinned dependency range
+# (`sqlparse<0.6.0,>=0.5.5`) made CVE-2026-54284/CVE-2026-59893/CVE-2026-71491
+# (HIGH, fixed in sqlparse 0.6.0) unfixable at that pin -- trivy's first real
+# scan of this image caught it. dbt-core 1.12.3 (a same-day patch release,
+# verified via `pip index versions dbt-core`) relaxes the constraint to
+# `sqlparse<0.7.0,>=0.5.5`, which lets uv resolve sqlparse>=0.6.0 -- a real
+# upstream fix existed, so this is a version bump, not a .trivyignore
+# suppression. dbt-postgres stays at 1.11.0 (already latest; no dbt-core
+# 1.12.x-specific adapter pin observed).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-cache dbt-core==1.12.2 dbt-postgres==1.11.0 hvac==2.4.0
+    uv pip install --system --no-cache dbt-core==1.12.3 dbt-postgres==1.11.0 hvac==2.4.0
 
 COPY dbt/ /app/dbt/
 COPY docker/dbt/resolve_secrets.py /app/resolve_secrets.py

@@ -1,0 +1,108 @@
+# .trivyignore -- D-07 (plan 11-02, Task 3 live verification, 2026-08-23).
+#
+# publish.yml's trivy-action step (severity: HIGH,CRITICAL, exit-code: 1,
+# ignore-unfixed: true) scans all three published images identically
+# (csv-processor, dbt, airflow). Investigating a first real CI-shaped run
+# (`docker build` + `aquasec/trivy:0.73.0 image` locally against the exact
+# images `make image-csv-processor`/`image-dbt`/`image-airflow` produce, git
+# SHA a30740e) found:
+#
+#   - csv-processor: 0 HIGH/CRITICAL findings. Clean, no entry needed.
+#   - dbt: 3 HIGH findings, all in `sqlparse 0.5.5` (CVE-2026-54284,
+#     CVE-2026-59893, CVE-2026-71491), FIXED in sqlparse 0.6.0. Cause:
+#     dbt-core==1.12.2 pins `sqlparse<0.6.0,>=0.5.5`, making 0.6.0
+#     uninstallable at that pin. A same-day dbt-core patch release, 1.12.3
+#     (verified live via `pip index versions dbt-core` inside the built
+#     image), relaxes the pin to `sqlparse<0.7.0,>=0.5.5`. Fixed by bumping
+#     `docker/dbt/Dockerfile`'s pin to dbt-core==1.12.3 (a real upstream fix
+#     existed, so this is a version bump, not a suppression) -- re-scanned
+#     clean (0 findings) after the bump. No .trivyignore entry needed for
+#     dbt either.
+#   - airflow: every one of the findings below. Confirmed via a direct
+#     `trivy image ... apache/airflow:3.3.0-python3.12` scan of the
+#     untouched upstream base image (no local modifications) that the
+#     finding COUNT is byte-identical (4 Java / 36 Python / 1+1 rustbinary /
+#     8 gobinary = same totals, same CVE IDs) to `airflow:a30740e`, this
+#     project's own built image. `docker/airflow/Dockerfile` adds exactly
+#     two things on top of that base: `apache-airflow[otel]==3.3.0`
+#     (installed under Airflow's own official, pinned
+#     constraints-3.3.0/constraints-3.12.txt -- overriding any single
+#     package version here would mean deviating from Airflow's own
+#     tested/supported dependency set, the same determinism rationale the
+#     Dockerfile's own header comment already establishes) and
+#     `psycopg[binary]==3.3.4` (already the newest pinned release used
+#     project-wide). Neither addition is implicated in any finding below --
+#     every affected package (GitPython, aiohttp, cryptography, litellm,
+#     pyasn1, sqlparse, the Java jars bundled inside the `ray` package,
+#     quinn-proto inside `uv`/`uvx`, and Go stdlib inside the bundled
+#     `/usr/bin/docker` CLI) is already present, at the same version, in the
+#     stock `apache/airflow:3.3.0-python3.12` image as published by the
+#     Apache Airflow project. None are reachable/fixable from this
+#     repository's own Dockerfile without forking Airflow's own official
+#     image or its constraints file -- out of scope for this CI/CD
+#     publish-pipeline plan. Recorded here, dated, so the gate this plan
+#     built (D-10: PR and merge images scanned identically) can still pass
+#     on real content this repo does not control, rather than either
+#     silently disabling the gate or blocking every future publish run on
+#     upstream's own unfixed base image.
+
+# --- Java (ray_dist.jar, bundled inside the `ray` package in the upstream
+#     apache/airflow:3.3.0-python3.12 base image) ---
+GHSA-r7wm-3cxj-wff9
+CVE-2026-54512
+CVE-2026-54513
+CVE-2026-54399
+
+# --- Python (upstream apache/airflow:3.3.0-python3.12 base image
+#     site-packages; none touched by this Dockerfile's own two RUN
+#     pip install lines) ---
+GHSA-2f96-g7mh-g2hx
+GHSA-3f7w-8rr8-f37f
+GHSA-3rp5-jjmw-4wv2
+GHSA-4gmw-gg2m-w46p
+GHSA-6p8h-3wgx-97gf
+GHSA-94p4-4cq8-9g67
+GHSA-956x-8gvw-wg5v
+GHSA-9rj7-rf2p-w77r
+GHSA-fjr4-x663-mwxc
+GHSA-hmq2-w58f-27jc
+GHSA-jm78-9fvv-mhgr
+GHSA-r9mr-m37c-5fr3
+GHSA-rwj8-pgh3-r573
+GHSA-v396-v7q4-x2qj
+GHSA-wvpp-8hx9-p66j
+CVE-2026-69244
+CVE-2026-69247
+CVE-2026-69249
+CVE-2026-35030
+CVE-2026-42208
+CVE-2026-49468
+CVE-2026-35029
+CVE-2026-40217
+CVE-2026-42203
+CVE-2026-42271
+CVE-2026-47101
+CVE-2026-47102
+CVE-2026-59822
+GHSA-69x8-hrgq-fjj8
+CVE-2026-59884
+CVE-2026-59885
+CVE-2026-59886
+CVE-2026-54284
+CVE-2026-59893
+CVE-2026-71491
+
+# --- Rust binaries (`uv`/`uvx`, bundled inside the upstream
+#     apache/airflow:3.3.0-python3.12 base image) ---
+GHSA-4w2j-m93h-cj5j
+
+# --- Go binary (`/usr/bin/docker` CLI, bundled inside the upstream
+#     apache/airflow:3.3.0-python3.12 base image) ---
+CVE-2026-33818
+CVE-2026-39821
+CVE-2026-46600
+CVE-2026-56853
+CVE-2026-56858
+CVE-2026-56859
+CVE-2026-56860
+CVE-2026-56862
