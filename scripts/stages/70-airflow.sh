@@ -73,8 +73,26 @@ else
     helm_install airflow apache-airflow/airflow airflow AIRFLOW_CHART_VERSION airflow hookOnly
 fi
 
-echo "==> waiting for the three Airflow Deployments and the triggerer StatefulSet"
+echo "==> waiting for the Airflow Deployments/StatefulSets to report Ready"
 wait_for_deploy_available airflow airflow-api-server
-wait_for_deploy_available airflow airflow-scheduler
+# Post-merge fix (CICD-09 follow-up, live-diagnosed against a genuinely fresh
+# ephemeral CI run, this session): the official Airflow chart renders
+# `<release>-scheduler` as a **StatefulSet** under LocalExecutor (CI's own
+# D-06 fourth-axis executor) but as a **Deployment** under KubernetesExecutor
+# (local's executor) -- confirmed by `helm template` against BOTH
+# helm/values/{local,ci}/airflow.yaml, this session: identical chart,
+# identical version, the only input that changes the rendered Kind is
+# `executor`. `kubectl wait deploy/airflow-scheduler` against a cluster whose
+# chart actually created a StatefulSet fails immediately with NotFound --
+# not a slow-readiness timeout, an outright wrong resource reference. This
+# was never caught until now because CI's own cluster-up had never reached
+# this stage before (blocked earlier by the kind-cluster-sizing and Kyverno
+# gaps this same follow-up fixes) -- local's KubernetesExecutor path always
+# exercised the Deployment branch correctly.
+if [ "${PROFILE:-local}" = "ci" ]; then
+  wait_for_statefulset_ready airflow airflow-scheduler
+else
+  wait_for_deploy_available airflow airflow-scheduler
+fi
 wait_for_deploy_available airflow airflow-dag-processor
 wait_for_statefulset_ready airflow airflow-triggerer
