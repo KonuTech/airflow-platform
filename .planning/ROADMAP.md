@@ -691,7 +691,7 @@ Plans:
 - [x] 11-03-PLAN.md — Slice 3: Kyverno admission enforcement (chart, policy, live positive+negative proof)
 - [x] 11-08-PLAN.md — Retention DAG wiring: platform_retention DAG + dagtest proof
 - [x] 11-10-PLAN.md — Chaos II: malformed_csv + invalid_encoding + oom + task_timeout + duplicate_batch
-- [ ] 11-14-PLAN.md — Runbooks II: 3 chaos-trailing docs, completes the 18-file §89 set
+- [x] 11-14-PLAN.md — Runbooks II: 3 chaos-trailing docs, completes the 18-file §89 set
 
 **Wave 3** *(blocked on Wave 2 completion — moved from Wave 1 during plan-checker revision so its live rollback proof can target a real image published by 11-02)*
 
