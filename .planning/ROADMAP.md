@@ -699,7 +699,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 11-04-PLAN.md — Slice 4: PR smoke E2E workflow (image-override mechanism + 4-point D-20 subset)
+- [x] 11-04-PLAN.md — Slice 4: PR smoke E2E workflow (image-override mechanism + 4-point D-20 subset)
 
 **Wave 5** *(blocked on Wave 4 completion — deliberately placed above its dependency-minimum wave to avoid a same-wave Makefile conflict with 11-04/11-06)*
 
