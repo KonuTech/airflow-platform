@@ -83,6 +83,28 @@ metadata:
 spec:
   failurePolicy: Fail
 
+  # [Rule 3 fix, plan 11-06] Raised from the CRD's own 10s default to 30s --
+  # the maximum this CRD's own schema permits ("the value must be between 1
+  # and 30 seconds"), itself capped by the Kubernetes API's own hard ceiling
+  # for any admission webhook. Found live while proving `make rollback`
+  # (D-12): re-verifying `ghcr.io/konutech/airflow`'s cosign signature
+  # against the real GHCR registry (a live network round-trip Kyverno's own
+  # ivpol.mutate.kyverno.svc-fail webhook makes on every admission, cache or
+  # not) consistently took 15-20s under this session's ambient cluster load
+  # -- confirmed via kyverno-admission-controller's own logs: repeated
+  # "verifying cosign image signature" TRC lines followed by "Get
+  # \"https://ghcr.io/v2/\": context canceled" and "write: broken pipe" at
+  # exactly the 10s mark, on every one of several consecutive attempts, for
+  # a Deployment/StatefulSet UPDATE (Kyverno's own pod-policy autogen
+  # extends this same rule to controller resources). Not a security
+  # weakening: verification is still mandatory and must still succeed
+  # (validationActions stays [Deny], failurePolicy stays Fail) -- this only
+  # gives a legitimate, correctly-signed verification enough wall-clock time
+  # to complete against a real remote registry instead of being cut off
+  # mid-flight by a too-short webhook deadline.
+  webhookConfiguration:
+    timeoutSeconds: 30
+
   matchConstraints:
     resourceRules:
       - apiGroups: [""]

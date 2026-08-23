@@ -214,9 +214,52 @@ def airflow_env(airflow_metadata_dsn: str) -> Iterator[None]:
             f"STDERR:\n{migrate.stderr}",
         )
 
+    # [Rule 1/3 fix, plan 11-06] Force THIS process's own airflow.settings to
+    # (re)bind against the DSN just set above, rather than trusting whichever
+    # DSN was in effect the first time `airflow.settings` happened to import
+    # in this interpreter. Two sibling modules in this same tests/dagtest/
+    # package (test_gap_recorder.py, test_run_stage_recorder.py) import
+    # `_common.gap_recorder`/`_common.run_stage_recorder` at MODULE level
+    # (their own documented, deliberate exception to this file's "deferred
+    # import" discipline -- both need their `sys.path` bootstrap unconditionally
+    # at collection time). Both of those modules import `airflow.sdk.bases.
+    # hook.BaseHook`, which transitively triggers `airflow.settings.
+    # initialize()` -- empirically confirmed this session -- during pytest's
+    # COLLECTION phase, which always completes before ANY fixture (including
+    # this one) runs, regardless of which test file is named first on the
+    # command line. That collection-time initialize() call reads whatever
+    # `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` happened to be set (or unset,
+    # falling back to the default `sqlite:///~/airflow/airflow.db`) BEFORE
+    # this fixture ever ran, permanently binding `airflow.settings.Session`
+    # to that engine for the rest of the process — a later env-var change
+    # alone does not rebind it. Symptom, reproduced live: `dag.test()` in
+    # test_backfill_dagrun.py/test_platform_retention_dagrun.py raised
+    # `sqlite3.OperationalError: no such table: task_instance` only when the
+    # full `tests/dagtest/` suite ran together (never when either failing
+    # file ran alone) — a real, previously-latent bug this plan's own new
+    # `pytest tests/dagtest -q` invocation is the first thing to ever
+    # exercise. `configure_vars()` re-reads `conf.get("database",
+    # "sql_alchemy_conn")`, which resolves the env var live (not cached at
+    # import), so this sequence is correct and idempotent whether or not the
+    # premature import already happened.
+    import airflow.settings as _airflow_settings  # noqa: PLC0415 -- deferred import, see module docstring
+
+    _airflow_settings.configure_vars()
+    _airflow_settings.dispose_orm()
+    _airflow_settings.configure_orm()
+
     try:
         yield
     finally:
+        # Dispose the ORM's connection pool BEFORE the `airflow_metadata_dsn`
+        # fixture's own testcontainers teardown runs (pytest tears down
+        # depended-upon fixtures in reverse setup order, so this always
+        # happens first) -- otherwise `dispose_orm`'s own `atexit` callback
+        # fires after the container is already gone, logging a benign but
+        # noisy `psycopg.OperationalError: consuming input failed: server
+        # closed the connection unexpectedly` on interpreter shutdown
+        # (observed live this session).
+        _airflow_settings.dispose_orm()
         for key, value in previous_env.items():
             if value is None:
                 os.environ.pop(key, None)

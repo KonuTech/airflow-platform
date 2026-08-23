@@ -56,9 +56,9 @@ FILE ?=
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
-        minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
+        minio-creds helm-lint manifests manifest-policy test-integration test-dagtest image-csv-processor \
         image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
-        migrate-analytics rebuild-from-raw
+        migrate-analytics rebuild-from-raw rollback
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -266,6 +266,61 @@ rebuild-from-raw:                ## D-28..D-33: DROP the ETL-owned schemas + wip
 	# single most destructive operation in this whole platform.
 	$(RUN_CLUSTER) python scripts/rebuild-from-raw.py
 
+# D-12: this recipe IS the rollback runbook (Claude's Discretion, per this
+# phase's own CONTEXT.md grant -- no separate docs/runbooks/ file). Procedure
+# for an operator undoing a bad deploy at 2am:
+#   1. Identify a prior, already-published git SHA (one that went through
+#      .github/workflows/publish.yml on an earlier merge to main -- plan
+#      11-01/11-02). `git log --oneline` against `main` is the source of
+#      truth; a SHA that was never published has no ghcr.io image to pull.
+#   2. `make rollback SHA=<that sha>` against the live cluster. This
+#      repoints all three workloads (csv-processor, dbt, airflow) at that
+#      SHA's already-published GHCR images -- no rebuild, no hand-edited
+#      Helm values.
+#   3. The target blocks until the Airflow chart's Deployments/StatefulSet
+#      genuinely report Ready on the new image (see the --wait=hookOnly
+#      note below) before it reports success -- a non-zero exit means the
+#      rollback did not complete, not merely that it was applied.
+rollback:                        ## D-12: redeploy all three workloads (csv-processor/dbt/airflow) at a prior, already-published git SHA -- the bad-deploy-at-2am runbook [plan 11-06]
+	@if [ -z "$(SHA)" ]; then echo "ERROR: SHA is required, e.g. make rollback SHA=abc1234" >&2; exit 1; fi
+	@set -a; . helm/versions.env; set +a; \
+	set -e; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	if ! $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
+	  echo "ERROR: no live cluster reachable at context $$ctx -- a rollback with no cluster to roll back is a silent no-op, refusing to proceed" >&2; \
+	  exit 1; \
+	fi; \
+	owner="$$(git remote get-url origin | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$$#\1#' | tr '[:upper:]' '[:lower:]')"; \
+	if [ -z "$$owner" ]; then \
+	  echo "ERROR: could not resolve the GitHub owner from 'git remote get-url origin'" >&2; \
+	  exit 1; \
+	fi; \
+	echo "==> resolved owner=$$owner, rolling back to SHA=$(SHA)"; \
+	echo "==> registering csv_processor_image=ghcr.io/$$owner/csv-processor:$(SHA)"; \
+	$(KUBECTL) --context "$$ctx" exec -n airflow deploy/airflow-api-server -- \
+	  airflow variables set csv_processor_image "ghcr.io/$$owner/csv-processor:$(SHA)"; \
+	echo "==> registering dbt_image=ghcr.io/$$owner/dbt:$(SHA)"; \
+	$(KUBECTL) --context "$$ctx" exec -n airflow deploy/airflow-api-server -- \
+	  airflow variables set dbt_image "ghcr.io/$$owner/dbt:$(SHA)"; \
+	echo "==> re-running the Airflow chart upgrade at defaultAirflowTag=$(SHA)"; \
+	echo "helm upgrade --install airflow apache-airflow/airflow --version $$AIRFLOW_CHART_VERSION -n airflow -f helm/values/$(PROFILE)/airflow.yaml --set defaultAirflowRepository=ghcr.io/$$owner/airflow --set defaultAirflowTag=$(SHA) --wait=hookOnly --timeout $${HELM_INSTALL_TIMEOUT:-5m}"; \
+	"$(HELM)" upgrade --install airflow apache-airflow/airflow \
+	  --version "$$AIRFLOW_CHART_VERSION" \
+	  --namespace airflow \
+	  -f "helm/values/$(PROFILE)/airflow.yaml" \
+	  --set defaultAirflowRepository="ghcr.io/$$owner/airflow" \
+	  --set defaultAirflowTag="$(SHA)" \
+	  --wait=hookOnly \
+	  --timeout "$${HELM_INSTALL_TIMEOUT:-5m}" \
+	  --kube-context "$$ctx"; \
+	echo "==> waiting for the three Airflow Deployments and the triggerer StatefulSet to report Ready on the new image"; \
+	. scripts/wait-for.sh; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-api-server; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-scheduler; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-dag-processor; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_statefulset_ready airflow airflow-triggerer; \
+	echo "==> rollback to SHA=$(SHA) complete: csv-processor/dbt Variables and the Airflow chart's own image are all genuinely serving"
+
 cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice and tests/e2e/observability against the live cluster [plan 02-02, extended 04-09, 07-07]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
 	# deliberately excluded from `dev` and from every uv default-group set, so
@@ -299,6 +354,20 @@ test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — mig
 	# .github/workflows/ci.yml's `integration` job) — separated from `check`
 	# for local-dev speed and Docker-optionality, not exempted from CI.
 	$(RUN_CLUSTER) pytest tests/integration -q
+
+test-dagtest:                    ## CICD-05: dag.test() suite (testcontainers Airflow metadata DB) — closes a pre-existing never-CI'd gap [plan 11-06]
+	# $(RUN_CLUSTER), NOT $(RUN): tests/dagtest/test_run_stage_recorder.py and
+	# test_gap_recorder.py both `import psycopg` directly (checked against
+	# tests/dagtest/conftest.py's own import list per this plan's own
+	# instruction, not guessed) — psycopg lives in the `cluster` dependency
+	# group, deliberately excluded from `dev`/every uv default-group set, the
+	# SAME reason test-integration above needs $(RUN_CLUSTER). Otherwise
+	# structurally identical to test-integration: needs a local Docker
+	# daemon (a throwaway testcontainers PostgreSQL for the Airflow metadata
+	# DB, never the analytical one — tests/dagtest/conftest.py's own T-08-22
+	# separation), reachable from NEITHER `check` nor `ci`'s `check` job —
+	# runs as its own CI job (.github/workflows/ci.yml's `dagtest` job).
+	$(RUN_CLUSTER) pytest tests/dagtest -q
 
 # GIT_SHA is fixed once per `make` invocation, ahead of the target below, so
 # `docker tag`/`docker push`/the Airflow Variable registration all reference
