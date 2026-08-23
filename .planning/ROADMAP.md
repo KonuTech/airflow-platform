@@ -695,7 +695,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion — moved from Wave 1 during plan-checker revision so its live rollback proof can target a real image published by 11-02)*
 
-- [ ] 11-06-PLAN.md — CI polish: coverage job-summary/artifact, dagtest CI job, rollback Make target (live-verified against 11-02's published images)
+- [x] 11-06-PLAN.md — CI polish: coverage job-summary/artifact, dagtest CI job, rollback Make target (live-verified against 11-02's published images)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
