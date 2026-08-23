@@ -39,6 +39,36 @@ decide alone. That re-audit, performed when `GITHUB_TOKEN` was added:
 A second name added later still obliges its own fresh re-audit; this one
 does not grandfather anything beyond `GITHUB_TOKEN` in `publish.yml`.
 
+## Phase 11 plan 11-02: same secret, three more jobs — a widening of
+## `ALLOWED_PERMISSION_WIDENING`, not of `ALLOWED_SECRETS`
+
+Plan 11-02 restructured `publish.yml`'s single `publish-csv-processor` job
+into a 3-image matrix job renamed `publish`, added a `retag-release` job
+(D-03, `release`-triggered manifest retagging), and added a wholly new
+workflow file, `ghcr-cleanup.yml` (D-11, PR-close package cleanup). None of
+this introduces a new secret NAME — every job below still reads only
+`secrets.GITHUB_TOKEN`, already audited above — but three (workflow, job)
+permission-widening pins replace/join the one plan 11-01 added:
+
+* `("publish.yml", "publish")` replaces the old `("publish.yml",
+  "publish-csv-processor")` entry (same job, renamed by the matrix
+  restructure) — same exact permission set as before
+  (`packages: write`, `id-token: write`, plus `contents: read`).
+* `("publish.yml", "retag-release")` — `contents: read` +
+  `packages: write` only. No `id-token: write`: this job never signs
+  anything, it only copies an already-signed manifest reference to a new
+  tag via `docker buildx imagetools create`, authenticated through the
+  same `docker/login-action` `with.password` typed input as `publish`
+  (never interpolated into a `run:` body).
+* `("ghcr-cleanup.yml", "cleanup")` — `packages: write` only (no
+  `contents` at all: this job never checks out repository code, only
+  calls the GitHub Packages REST API via `gh api` and the
+  `actions/delete-package-versions` action). Its one `run:` step that
+  touches `secrets.GITHUB_TOKEN` does so via a typed `env: GH_TOKEN: ...`
+  block (`gh`'s own documented CI authentication pattern), not
+  string-interpolated into the shell body — the same non-echoing shape
+  already audited for `docker/login-action` above.
+
 Three assertions, matching SEC-10's three decidable parts:
 
 1. every repository-secret reference is in `ALLOWED_SECRETS` (empty through
@@ -141,10 +171,25 @@ READ_ONLY = {"contents": "read"}
 # reported, because the comparison below is equality against this pinned
 # dict, not mere presence of the key.
 ALLOWED_PERMISSION_WIDENING: dict[tuple[str, str], dict[str, str]] = {
-    ("publish.yml", "publish-csv-processor"): {
+    # Phase 11 plan 11-01, renamed by plan 11-02's 3-image matrix restructure
+    # (publish-csv-processor -> publish); same exact permission set.
+    ("publish.yml", "publish"): {
         "contents": "read",
         "packages": "write",  # push the built image to ghcr.io
         "id-token": "write",  # cosign keyless GitHub-OIDC signing (D-13)
+    },
+    # Phase 11 plan 11-02 (D-03): retags an already-published, already-signed
+    # SHA image with a release's semver tag — no new signing, so no
+    # id-token: write.
+    ("publish.yml", "retag-release"): {
+        "contents": "read",
+        "packages": "write",  # docker buildx imagetools create -> ghcr.io
+    },
+    # Phase 11 plan 11-02 (D-11): deletes a closed PR's pr-<number> GHCR
+    # package versions. Never checks out repository code, so no
+    # contents: read at all.
+    ("ghcr-cleanup.yml", "cleanup"): {
+        "packages": "write",  # list + delete package versions via gh api
     },
 }
 
@@ -330,16 +375,24 @@ def test_a_widened_permission_is_reported() -> None:
 
 def test_widening_the_allowlisted_job_beyond_its_pinned_scopes_is_reported() -> None:
     """The allowlist pins an EXACT set — it is not a rubber stamp for the
-    whole job. Adding a THIRD scope to the one already-exempted job must
-    still be reported.
+    whole job. Adding a THIRD scope to an already-exempted job must still be
+    reported. Exercised against all three plan-11-02 (workflow, job) pins,
+    not just `publish`, so a future job-specific regression in any one of
+    them is still caught.
     """
-    workflow = yaml.safe_load((WORKFLOW_DIR / "publish.yml").read_text(encoding="utf-8"))
-    mutated = copy.deepcopy(workflow)
-    job = mutated["jobs"]["publish-csv-processor"]
-    job["permissions"]["actions"] = "write"
-    assert permission_problems(mutated, workflow_name="publish.yml"), (
-        "adding an extra permission scope beyond the allowlisted job's pinned set was not reported"
-    )
+    for workflow_name, job_id in (
+        ("publish.yml", "publish"),
+        ("publish.yml", "retag-release"),
+        ("ghcr-cleanup.yml", "cleanup"),
+    ):
+        workflow = yaml.safe_load((WORKFLOW_DIR / workflow_name).read_text(encoding="utf-8"))
+        mutated = copy.deepcopy(workflow)
+        job = mutated["jobs"][job_id]
+        job["permissions"]["actions"] = "write"
+        assert permission_problems(mutated, workflow_name=workflow_name), (
+            f"{workflow_name} {job_id}: adding an extra permission scope beyond the "
+            "allowlisted job's pinned set was not reported"
+        )
 
 
 # ===========================================================================
