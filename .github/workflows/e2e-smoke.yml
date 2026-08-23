@@ -127,6 +127,21 @@ jobs:
       - name: Point csv_processor_image/dbt_image at this PR's own GHCR images
         run: scripts/ci-set-workload-images.sh pr-${{ github.event.pull_request.number }}
 
+      # Post-merge fix (CICD-09 follow-up): a fresh ephemeral cluster's
+      # analytical DB has only CNPG's own `initdb.postInitApplicationSQL`
+      # roles (etl_app) -- `dbt_app` (and every staging/silver GRANT) is
+      # created by Alembic migrations (migrations/versions/0021_dbt_app_role_
+      # staging_silver_grants.py onward), never run automatically by
+      # `make cluster-up`. `make migrate-analytics` is this project's own
+      # established runbook step for this (Makefile's own header comment).
+      # Must run BEFORE vault-bootstrap below: vault-bootstrap.py's
+      # `_ensure_dbt_secret` execs `ALTER ROLE dbt_app ...` against the live
+      # DB the first time it provisions the `etl/dbt-db` KV secret, and
+      # live-diagnosed (this session) failing with `role "dbt_app" does not
+      # exist` when migrations have never run.
+      - name: Run analytical DB migrations
+        run: make migrate-analytics
+
       # Post-merge fix (CICD-09 follow-up): `make cluster-up` deliberately
       # leaves Vault sealed and un-bootstrapped -- scripts/stages/80-vault.sh's
       # own header comment documents this as two separate, scripted steps a
