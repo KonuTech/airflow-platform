@@ -12,6 +12,14 @@ extension (`_ensure_grafana_secrets`, plan 07-06) via `ALTER ROLE grafana_reader
 WITH PASSWORD ...`, following the exact `kubectl exec` + `ALTER ROLE` pattern
 this codebase already uses for `etl_app` (07-RESEARCH.md Pattern 5).
 
+`CREATE ROLE` is guarded by an `IF NOT EXISTS`-shaped `DO $$` block (plan
+11-12) rather than a bare `CREATE ROLE` statement: PostgreSQL roles are
+cluster-global, not schema-scoped, so `scripts/rebuild-from-raw.py`'s
+`DROP SCHEMA ... CASCADE` never removes this role, and a second
+`alembic upgrade head` against a rebuilt-but-not-role-dropped database would
+otherwise fail with `DuplicateObject: role "grafana_reader" already exists`
+every time.
+
 Grants exactly the schema-USAGE + table-SELECT surface Grafana's dashboard
 queries and the freshness alert condition read directly (07-RESEARCH.md
 Architecture Patterns, D-03/D-10): `USAGE` on `meta` and `normalized` (the
@@ -41,7 +49,13 @@ depends_on = None
 
 def upgrade() -> None:
     """Create `grafana_reader`, grant schema USAGE, then SELECT on exactly three tables."""
-    op.execute("CREATE ROLE grafana_reader LOGIN")
+    op.execute(
+        "DO $$ BEGIN "
+        "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_reader') THEN "
+        "CREATE ROLE grafana_reader LOGIN; "
+        "END IF; "
+        "END $$;"
+    )
     op.execute("GRANT USAGE ON SCHEMA meta TO grafana_reader")
     op.execute("GRANT USAGE ON SCHEMA normalized TO grafana_reader")
     op.execute("GRANT SELECT ON meta.datasets, meta.files, meta.ingestion_runs TO grafana_reader")

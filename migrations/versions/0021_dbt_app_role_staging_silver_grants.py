@@ -12,6 +12,13 @@ No password is set here — the migration never embeds a credential literal
 extension (plan 08.1-03), following the exact `kubectl exec` + `ALTER ROLE`
 pattern this codebase already uses for `etl_app`/`grafana_reader`.
 
+`CREATE ROLE` is guarded by an `IF NOT EXISTS`-shaped `DO $$` block (plan
+11-12), matching migration 0011's own fix: PostgreSQL roles are
+cluster-global, not schema-scoped, so `scripts/rebuild-from-raw.py`'s
+`DROP SCHEMA ... CASCADE` never removes this role, and a second
+`alembic upgrade head` against a rebuilt database would otherwise fail with
+`DuplicateObject: role "dbt_app" already exists` every time.
+
 `staging.customers`/`staging.orders` do not exist yet when this migration
 runs (migration 0022 creates them next) — the `ALTER DEFAULT PRIVILEGES`
 statement is what actually makes `dbt_app`'s `SELECT` reach them once they
@@ -45,7 +52,13 @@ depends_on = None
 
 def upgrade() -> None:
     """Create dbt_app; grant staging SELECT (+default privileges); own the new silver schema."""
-    op.execute("CREATE ROLE dbt_app LOGIN")
+    op.execute(
+        "DO $$ BEGIN "
+        "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dbt_app') THEN "
+        "CREATE ROLE dbt_app LOGIN; "
+        "END IF; "
+        "END $$;"
+    )
 
     # Bronze read access (D-08).
     op.execute("GRANT USAGE ON SCHEMA staging TO dbt_app")
