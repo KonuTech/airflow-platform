@@ -198,9 +198,9 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **CICD-03**: Linting runs automatically via ruff — *(DoD 105)*
 - [x] **CICD-04**: Type checking runs automatically via mypy — *(DoD 106)*
 - [ ] **CICD-05**: Unit, integration and E2E tests run automatically with coverage reporting — *(DoD 107)*
-- [ ] **CICD-06**: Container images build automatically and are tagged by git SHA — *(DoD 108)*
+- [x] **CICD-06**: Container images build automatically and are tagged by git SHA — *(DoD 108)*
 - [x] **CICD-07**: Kubernetes manifests and Helm charts are validated in CI — *(DoD 109)*
-- [ ] **CICD-08**: Image vulnerability and dependency scanning run in CI — *(DoD 110)*
+- [x] **CICD-08**: Image vulnerability and dependency scanning run in CI — *(DoD 110)*
 - [ ] **CICD-09**: An ephemeral kind cluster in CI deploys the stack and runs E2E, proving the environment can be recreated from the repository — *(DoD 113)*
 
 ---
@@ -402,9 +402,9 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | CICD-03 | Phase 1 | Complete |
 | CICD-04 | Phase 1 | Complete |
 | CICD-05 | Phase 11 | Pending |
-| CICD-06 | Phase 11 | Pending |
+| CICD-06 | Phase 11 | Complete |
 | CICD-07 | Phase 2 | Complete |
-| CICD-08 | Phase 11 | Pending |
+| CICD-08 | Phase 11 | Complete |
 | CICD-09 | Phase 11 | Pending |
 
 **Coverage:**

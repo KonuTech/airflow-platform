@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Phase 11 context gathered
-last_updated: "2026-08-22T17:12:25.632Z"
-last_activity: 2026-08-22 -- Phase 11 execution started
+stopped_at: "Plan 11-02 fully complete — live PR #8 proof executed and verified end to end (CICD-06/CICD-08 marked complete)"
+last_updated: "2026-08-23T09:33:59.020Z"
+last_activity: 2026-08-23
 progress:
   total_phases: 12
   completed_phases: 11
   total_plans: 135
-  completed_plans: 121
-  percent: 90
+  completed_plans: 127
+  percent: 92
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 11 (ci-cd-completion-operations) — EXECUTING
-Plan: 1 of 14
-Status: Executing Phase 11
-Last activity: 2026-08-22 -- Phase 11 execution started
+Plan: 2 of 14
+Status: Ready to execute
+Last activity: 2026-08-23
 
-Progress: [██████████] 100%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [██████████] 100%
 | Phase 08 P07 | 25min | 2 tasks | 5 files |
 | Phase 08 P08 | 25min | 2 tasks | 4 files |
 | Phase 08 P09 | 10min | 2 tasks | 4 files |
+| Phase 11 P02 | 15min | 0 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,7 @@ Recent decisions affecting current work:
 - [Phase 08]: ReferentialIntegrityBarrier's anti-join SELECT list names customer_id/order_id literally (single-dataset, matching OrdersMergePublisher's precedent) even though staging_table/target_table/target_column/staging_column stay config-driven for the JOIN condition — A generic 'any staging table, any column' barrier remains future work, not this plan's scope; documented in the module docstring
 - [Phase 08]: [Phase 08]: VolumeAnomalyBarrier accepts an optional ctx_db_query testing seam so unit tests can inject (historical_average, prior_run_count) directly, keeping the real per-run SQL query the only code path a live caller ever exercises
 - [Phase 08]: [Phase 08]: VolumeAnomalyBarrier's cold-start threshold is <2 prior SUCCEEDED VOLUME rows -- a structural PASS with observed={'historical_average': None, 'prior_run_count': N}, matching UniquenessRule/ReferentialIntegrityBarrier's own strategy-stored-but-mapped precedent for outcome dispatch
+- [Phase 11]: Plan 11-02's live-PR proof executed via PR #8 (throwaway/11-02-live-pr-proof branch, comment-only edit to docs/ci-branch-protection.md) once gh CLI authentication became available -- confirmed publish.yml's pr-8 tag, sign, and scan chain succeeded for all 3 images (csv-processor, dbt, airflow, run 32630879549), cosign verify passed against the PR-scoped OIDC identity, and ghcr-cleanup.yml (run 32631014608) actually deleted the pr-8 GHCR package versions post-close, re-confirmed via a live gh api re-query. CICD-06/CICD-08 marked complete.
 
 ### Pending Todos
 
@@ -108,7 +110,7 @@ None yet.
 
 ### Blockers/Concerns
 
-- **OPEN (2026-08-23, plan 11-02 residual verification):** plan 11-02's own `<verification>` requires a real, live throwaway GitHub PR proving the pr-tag+sign+scan+cleanup chain end-to-end (open PR, watch `publish.yml` build/sign/scan all 3 images to `pr-<N>` tags, confirm via `gh api` the GHCR package versions exist, close the PR, confirm `ghcr-cleanup.yml` removes them). This session found `gh auth status` reports no authenticated GitHub host and no `GH_TOKEN`/`GITHUB_TOKEN` is set in this environment's shell — `git` itself works fine over SSH (this session's own commits `d5a3ec0`/`cf5f306` were pushed via SSH successfully), but PR creation, Actions-run watching, and GHCR package-version querying all require the GitHub REST/GraphQL API, which SSH access cannot provide. All other plan 11-02 work is done and pushed to `main`: the 3-image matrix `publish.yml`, `ghcr-cleanup.yml`, `tests/policy/test_publish_workflow_guards.py` (20/20 passing), and a trivy HIGH/CRITICAL fix for all three images (dbt: `dbt-core` 1.12.2→1.12.3 version bump resolving 3 sqlparse CVEs; airflow: dated `.trivyignore` entry for 53 findings verified 100% inherited from the untouched `apache/airflow:3.3.0-python3.12` base image). **To unblock:** authenticate `gh` in this environment (`gh auth login`, one-time device-flow) or set `GH_TOKEN`/`GITHUB_TOKEN` for the session, then resume plan 11-02 to complete the live PR proof and finalize STATE.md/ROADMAP.md/REQUIREMENTS.md updates for CICD-06/CICD-08. See `.planning/phases/11-ci-cd-completion-operations/11-02-SUMMARY.md`'s "Blocked: Live PR Proof" section for the exact resume steps.
+- **RESOLVED (2026-08-23, plan 11-02 live-PR proof):** the OPEN blocker below (gh CLI unauthenticated, blocking plan 11-02's required live throwaway-PR proof) was resolved externally (gh auth login completed outside this session). This session executed the full proof: PR #8 (`throwaway/11-02-live-pr-proof`, comment-only edit to `docs/ci-branch-protection.md`) opened, `publish.yml` run `32630879549` succeeded for all 3 matrix legs (csv-processor/dbt/airflow), `pr-8` GHCR package versions confirmed to exist via `gh api`, `cosign verify` confirmed against the csv-processor `pr-8` digest using the PR-scoped OIDC identity, PR closed, `ghcr-cleanup.yml` run `32631014608` succeeded and its own log confirms "Total versions deleted till now: 1", and a post-cleanup `gh api` re-query confirmed all three `pr-8` versions are actually gone. Full details in `.planning/phases/11-ci-cd-completion-operations/11-02-SUMMARY.md`'s "Live PR Proof — RESOLVED" section. CICD-06/CICD-08 marked complete; plan 11-02 fully done.
 - **RESOLVED (2026-08-16, `/gsd:debug` session, `.planning/debug/resolved/airflow-scheduler-stuck-tasks.md`):** the `csv_ingest_customers` stuck-`queued`/`up_for_retry` scheduling issue (was blocking OBS-07's live E2E confirmation) — root cause was node CPU exhaustion (`kind/cluster.yaml`'s 3-allocatable-core/worker budget, ~750m real headroom after the fixed platform baseline) compounded by `ingest` pods' `airflow-xcom-sidecar` container never terminating on completion, leaking ~500m CPU per occurrence. Fixed via `kpo.py`'s `on_finish_action: delete_pod` + `csv_ingest_customers.py`'s `ingest` concurrency cap (5→1), commit `6ea4129`. Verified live: DagRun `scheduled__2026-08-16T17:04:00` reached full `success`, all 7 tasks. The structural node-CPU-budget question (would need cluster recreation) remains an open, deliberately-deferred decision.
 - **RESOLVED (2026-08-16, `/gsd:debug` session, `.planning/debug/resolved/wait-for-files-stuck-task.md`):** residual `wait_for_files`/`discover` stuck-`up_for_retry` flakiness that survived the fix above — root cause was unrelated: `vault-0` reseals on every pod/host-level restart (deliberate single-key Shamir + file storage, no auto-unseal, D-02) and nobody had re-run `make vault-unseal` after the day's host disruption. While sealed, `VaultBackend` can't resolve the `minio_default` connection, surfacing as an indistinguishable "connection not found" 404 that exhausts the sensor's retry budget before failing — with `max_active_runs=1`, each occurrence blocked all new file discovery for its full retry-exhaustion window. This is the 2nd occurrence of the same class as `.planning/debug/resolved/dagrun-scheduler-stall.md` (2026-08-14). Fixed by re-running `scripts/vault-unseal.py` (no code change). Verified: DAG cycled 11+ consecutive clean successes post-fix, and a full re-run of `tests/e2e/observability/` now passes 6/7 (all 3 tests tied to this stuck-task pattern now pass). **Follow-up worth considering (not yet actioned):** a periodic Vault-seal healthcheck/alert, since this has now recurred twice from host-level disruptions.
 - **RESOLVED (2026-08-16, `/gsd:debug` session, `.planning/debug/resolved/prometheus-runs-started-scrape.md`):** `test_prometheus_scrapes_dataplat_metrics_via_the_otel_collector` was querying PromQL for the raw dataplat counter name `runs_started`, but the OTel Collector's Prometheus exporter appends `_total` to monotonic counters by default, so the real series is `runs_started_total` — the metrics pipeline itself (dataplat → OTLP → Collector → Prometheus → Grafana proxy) was already healthy end-to-end; only the test's query string was wrong. Fixed by correcting the query in `tests/e2e/observability/test_grafana_provisioning.py`. Verified: full `tests/e2e/observability/` suite now passes **7/7** cleanly (491s). Combined with the Vault-reseal fix above, Phase 7's E2E observability suite is fully green and no longer flaky.
@@ -143,7 +145,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-23T08:12:56Z
-Stopped at: Plan 11-02 residual verification — trivy gate fixed (dbt/airflow) and pushed, blocked on gh CLI authentication for the live throwaway-PR proof
-Resume file: .planning/phases/11-ci-cd-completion-operations/11-02-SUMMARY.md
+Last session: 2026-08-23T09:33:59.002Z
+Stopped at: Plan 11-02 fully complete — live PR #8 proof executed and verified end to end (CICD-06/CICD-08 marked complete)
+Resume file: None
 None

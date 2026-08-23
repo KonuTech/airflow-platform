@@ -687,7 +687,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 11-02-PLAN.md — Slice 2: all 3 images + PR-tag variant + GHCR cleanup + semver-on-release (code complete, pytest green, trivy gate fixed for all 3 images and pushed to main; BLOCKED on the plan's own required live throwaway-PR proof — `gh` CLI unauthenticated in this environment, see STATE.md Blockers and `11-02-SUMMARY.md`)
+- [x] 11-02-PLAN.md — Slice 2: all 3 images + PR-tag variant + GHCR cleanup + semver-on-release (fully complete: code, pytest green, trivy gate fixed for all 3 images, and live throwaway-PR #8 proof executed end to end — pr-tag+sign+scan+cleanup chain confirmed, see `11-02-SUMMARY.md`)
 - [ ] 11-03-PLAN.md — Slice 3: Kyverno admission enforcement (chart, policy, live positive+negative proof)
 - [ ] 11-08-PLAN.md — Retention DAG wiring: platform_retention DAG + dagtest proof
 - [ ] 11-10-PLAN.md — Chaos II: malformed_csv + invalid_encoding + oom + task_timeout + duplicate_batch
