@@ -313,10 +313,14 @@ rollback:                        ## D-12: redeploy all three workloads (csv-proc
 	  --wait=hookOnly \
 	  --timeout "$${HELM_INSTALL_TIMEOUT:-5m}" \
 	  --kube-context "$$ctx"; \
-	echo "==> waiting for the three Airflow Deployments and the triggerer StatefulSet to report Ready on the new image"; \
+	echo "==> waiting for the Airflow Deployments/StatefulSets to report Ready on the new image"; \
 	. scripts/wait-for.sh; \
 	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-api-server; \
-	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-scheduler; \
+	if [ "$(PROFILE)" = "ci" ]; then \
+	  KUBECTL_CONTEXT="$$ctx" wait_for_statefulset_ready airflow airflow-scheduler; \
+	else \
+	  KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-scheduler; \
+	fi; \
 	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-dag-processor; \
 	KUBECTL_CONTEXT="$$ctx" wait_for_statefulset_ready airflow airflow-triggerer; \
 	echo "==> rollback to SHA=$(SHA) complete: csv-processor/dbt Variables and the Airflow chart's own image are all genuinely serving"
