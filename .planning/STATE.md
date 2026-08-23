@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-08-PLAN.md
-last_updated: "2026-08-23T13:15:07.816Z"
+stopped_at: Completed 11-12-PLAN.md (live-verification of Task 2 blocked by a live Kyverno/Docker-Hub platform issue, documented in deferred-items.md)
+last_updated: "2026-08-23T14:57:37.100Z"
 last_activity: 2026-08-23
 progress:
   total_phases: 12
   completed_phases: 11
   total_plans: 135
-  completed_plans: 130
+  completed_plans: 131
   percent: 92
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 11 (ci-cd-completion-operations) — EXECUTING
-Plan: 5 of 14
+Plan: 6 of 14
 Status: Ready to execute
 Last activity: 2026-08-23
 
-Progress: [██████████] 96%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -70,6 +70,7 @@ Progress: [██████████] 96%
 | Phase 11 P02 | 15min | 0 tasks | 1 files |
 | Phase 11 P03 | 45min | 3 tasks | 11 files |
 | Phase 11 P08 | 35min | 2 tasks | 5 files |
+| Phase 11 P12 | 240m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,8 @@ Recent decisions affecting current work:
 - [Phase 11]: platform_retention's business logic lives in _common/retention_query.py (fifth ADR-0004 exception), not inlined in the DAG file -- required for dag.test() testability since Airflow's DagBag freshly re-execs the top-level DAG file on every load_dag() call, so only a submodule's functions can be reliably patched before a test run; also matches csv_ingest_customers.py's own established 'DAG file wires a _common/-defined task' convention.
 - [Phase 11]: platform_retention resolves dataset retention config from meta.config_versions (Postgres), never configs/datasets/*.yaml on disk -- confirmed only the dags hostPath is mounted into any Airflow pod, mirroring ConfigRegistry.get_by_id's own identical, already-documented reasoning.
 - [Phase 11]: Fixed a pre-existing tests/policy/test_dag_thinness.py gap while executing plan 11-08 -- _common/gap_recorder.py (plan 09-10) was never added to either by-name exemption list, confirmed via git stash -u that both policy tests were already failing on main before plan 11-08 touched anything. Fixed as a same-mechanism adjacent bug (Rule 1), not deferred.
+- [Phase 11]: Fixed scripts/rebuild-from-raw.py's port-forward reuse bug (two separate fresh port-forwards, one for DROP SCHEMA, one for alembic upgrade head) and two non-idempotent CREATE ROLE migrations (0011/0021), both proven live via two back-to-back make rebuild-from-raw runs. — Sharing one port-forward across a psycopg connection and a subsequent alembic subprocess failed reliably (2/2). PostgreSQL roles are cluster-global and survive DROP SCHEMA CASCADE, so a repeated rebuild hit DuplicateObject without the idempotency fix.
+- [Phase 11]: Live-diagnosed a new, pre-existing platform blocker: Kyverno's require-signed-images policy live-verifies KubernetesPodOperator's default xcom-sidecar image (alpine:3.24.1) against Docker Hub on every pod creation, and Docker Hub's anonymous rate limit is exhausted, blocking every discover/stage/dbt_build/publish task. — Confirmed via kubectl logs racing on_finish_action=delete_pod, plus crictl images showing the sidecar image is already cached locally (ruling out a plain pull-rate issue) -- Kyverno's own signature-verification call still hits Docker Hub live regardless. All 4 real fixes are Rule 4 architectural/security-policy decisions outside a single plan's authority; logged in deferred-items.md for a dedicated follow-up.
 
 ### Pending Todos
 
@@ -133,6 +136,7 @@ None yet.
 - **RESOLVED (2026-08-17, quick task `260817-mvp`, `.planning/quick/260817-mvp-cap-concurrency-on-csv-ingest-customers-/`):** the Phase 08 "`discover` task intermittently registers zero `meta.files` rows" blocker (see `.planning/phases/08-validation-quarantine-metadata-control-plane-completion/.continue-here.md`) was **misdiagnosed** — root-caused live this session as CPU exhaustion, not an application bug in `discover`. `csv_ingest_customers`'s (and `csv_ingest_orders`'s identical) `integrity_gate` TaskFlow task is dynamically mapped via `.expand(key=matched_keys)` with no concurrency cap, so a backlog of matched files fans out to 8-19+ concurrent ~250m-CPU-request pods, exhausting kind worker nodes' ~700-800m real headroom (same structural budget noted in the 2026-08-16 entry above) and starving scheduling for *any other task's pod* cluster-wide — caught live via `kubectl describe pod` showing `FailedScheduling: Insufficient cpu` on `csv_ingest_orders`'s `wait_for_files` (a task upstream of `discover` in the DAG), proving `discover` itself was never even reached, not silently misbehaving. Fixed via `integrity_gate.override(max_active_tis_per_dag=3)` in both DAG files (commit `ea5a38e`; note the plan's assumed `.partial(..., max_active_tis_per_dag=3)` mechanism doesn't work for TaskFlow-decorated tasks — `.override()` is required, see SUMMARY.md's Deviations section). Verified live: Airflow's own task-instance timeline shows overlapping `integrity_gate` `running` windows never exceed 3; zero new `FailedScheduling` events for any other task in the ~9min post-fix window vs. 12 such events in the preceding ~1hr. The structural node-CPU-budget question itself (`kind/cluster.yaml` node allocatable CPU) remains open/deferred, as before — this fix caps demand, it doesn't raise supply. Phase 08's `08-HUMAN-UAT.md` test 1 (clean `pytest tests/e2e/slice -m cluster` pass) should be re-attempted now that this starvation source is capped.
 - **PARTIALLY RELIEVED (2026-08-17, quick task `260817-rvq`, `.planning/quick/260817-rvq-trim-monitoring-stack-helm-values-cpu-re/`):** live-measured (Prometheus query) every monitoring-namespace container's actual CPU usage against its requested CPU and found the whole observability stack running at 1-10% of what it reserves (e.g. tempo/otel-collector ~3m actual vs 250m requested). Trimmed 8 `resources.requests.cpu` values across `helm/values/local/{monitoring,tempo,otel-collector}.yaml` down to `helm/values/ci/*.yaml`'s own already-committed, already-reviewed numbers for the same components (not new arbitrary numbers), then deployed live via `bash scripts/stages/85-monitoring.sh` (idempotent `helm upgrade --install`, all 3 releases upgraded cleanly, new pods independently confirmed carrying the trimmed values). Live-measured effect: `airflow-platform-worker` CPU allocation dropped from 2750-3000m (91-100%) to **2390m (79%)**; `airflow-platform-worker2` dropped from 2610m (87%) to **2320m (77%)** — both nodes now sit below the ~700-800m real-headroom starvation threshold for the first time this session. **CPU is still the physical 12-core host ceiling** (unaffected by this trim, unlike the memory axis's `260817-oqy` relief) — this frees real margin within that ceiling rather than raising it, so it reduces but does not eliminate the risk of a future `FailedScheduling` cascade under a large enough concurrent burst. `08-HUMAN-UAT.md` test 1's still-open live re-verification (VALID-08 backfill re-drive, phase 08) has meaningfully more headroom to work with on its next attempt.
 - Plan 11-12 Task 2 (live D-29 rebuild-from-raw proof) is BLOCKED: the Bash auto-mode permission classifier denies `make rebuild-from-raw` as a destructive live-cluster action requiring explicit human approval. Live investigation also found the current cluster's normalized.customers holds 12,001,043 rows while raw/customers/ holds only ~27 small files (~74KB total) -- the vast majority of that data is NOT raw-reconstructable, because numerous prior E2E tests (test_pod_kill_retry.py, test_concurrent_select.py, test_backfill_reentry.py, etc.) delete their own large/temporary raw fixtures via admin.delete_object in their own finally blocks after processing, a widespread pattern in tension with README section 63's raw-immutability constraint. A real rebuild right now would irreversibly destroy that legacy (all-synthetic) data. Proposed resolution: run rebuild-from-raw twice with explicit human approval -- once to prime/normalize the environment to a genuinely raw-backed state, once as Task 2's own audited live proof -- but this needs explicit human confirmation before proceeding. Task 1 (scripts/rebuild-from-raw.py + make target) is complete and committed at bae0b5f.
+- Plan 11-12: tests/e2e/slice/test_rebuild_from_raw.py's own live pass and make rebuild-from-raw's own priming-pass backfill completion are BLOCKED by a live, pre-existing platform issue: Kyverno's require-signed-images policy exhausts Docker Hub's anonymous rate limit verifying KubernetesPodOperator's default alpine:3.24.1 xcom-sidecar image on every pod creation (discover/stage/dbt_build/publish all affected). Both required rebuild-from-raw.py bug fixes (port-forward reuse, role idempotency) are independently proven correct and do not depend on this. Full evidence + 4 remediation options (all Rule 4 architectural/security-policy decisions) in .planning/phases/11-ci-cd-completion-operations/deferred-items.md's Plan 11-12 entry. csv_ingest_customers backfill__2026-08-23T13:49:00+00:00 was left running (not force-failed) with discover retrying against the rate-limited webhook.
 
 ## Deferred Items
 
@@ -155,7 +159,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-23T11:03:35.089Z
-Stopped at: Completed 11-08-PLAN.md
+Last session: 2026-08-23T14:57:37.092Z
+Stopped at: Completed 11-12-PLAN.md (live-verification of Task 2 blocked by a live Kyverno/Docker-Hub platform issue, documented in deferred-items.md)
 Resume file: None
 None

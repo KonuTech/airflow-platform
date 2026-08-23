@@ -153,3 +153,17 @@ None — no external service configuration required by this plan's own changes. 
 ---
 *Phase: 11-ci-cd-completion-operations*
 *Completed: 2026-08-23*
+
+## Self-Check: PASSED
+
+- FOUND: `scripts/rebuild-from-raw.py`
+- FOUND: `migrations/versions/0011_grafana_reader_role.py`
+- FOUND: `migrations/versions/0021_dbt_app_role_staging_silver_grants.py`
+- FOUND: `airflow/dags/csv_ingest_customers.py`
+- FOUND: `tests/e2e/slice/test_rebuild_from_raw.py`
+- FOUND: `.planning/phases/11-ci-cd-completion-operations/deferred-items.md`
+- FOUND commit: `cd8ab15` (fix: port-forward reuse)
+- FOUND commit: `d00d5bd` (fix: role idempotency)
+- FOUND commit: `95c16b8` (fix: discover retries)
+- FOUND commit: `7e4d837` (feat: live D-29/D-34 test)
+- FOUND commit: `d137867` (docs: SUMMARY.md)

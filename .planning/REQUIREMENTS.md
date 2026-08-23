@@ -139,7 +139,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **INCR-04**: Records arriving out of event-time order are handled correctly — *(DoD 48)*
 - [ ] **INCR-05**: Backfills run through the same pipeline as normal ingestion — discovery, inspection, validation, normalization, deduplication, load, lineage — with no simplified bypass path — *(DoD 49)*
 - [ ] **INCR-06**: Backfills are idempotent, use correct historical files, respect historical schema versions and handle missing files explicitly — *(DoD 50)*
-- [ ] **INCR-07**: Analytical data can be rebuilt from the immutable raw layer — *(DoD 114)*
+- [x] **INCR-07**: Analytical data can be rebuilt from the immutable raw layer — *(DoD 114)*
 - [ ] **INCR-08**: Business date is derived from the data, never from wall-clock or `logical_date`, so backfilled rows do not carry today's effective date — *(PITFALLS #8)*
 
 ### SCD — Slowly Changing Dimensions
@@ -357,7 +357,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INCR-04 | Phase 08.1 | Complete |
 | INCR-05 | Phase 9 | Pending |
 | INCR-06 | Phase 9 | Pending |
-| INCR-07 | Phase 11 | Pending |
+| INCR-07 | Phase 11 | Complete |
 | INCR-08 | Phase 4 | Pending |
 | SCD-01 | Phase 10 | Pending |
 | SCD-02 | Phase 10 | Pending |

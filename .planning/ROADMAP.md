@@ -690,7 +690,7 @@ Plans:
 - [x] 11-02-PLAN.md — Slice 2: all 3 images + PR-tag variant + GHCR cleanup + semver-on-release (fully complete: code, pytest green, trivy gate fixed for all 3 images, and live throwaway-PR #8 proof executed end to end — pr-tag+sign+scan+cleanup chain confirmed, see `11-02-SUMMARY.md`)
 - [x] 11-03-PLAN.md — Slice 3: Kyverno admission enforcement (chart, policy, live positive+negative proof)
 - [x] 11-08-PLAN.md — Retention DAG wiring: platform_retention DAG + dagtest proof
-- [ ] 11-10-PLAN.md — Chaos II: malformed_csv + invalid_encoding + oom + task_timeout + duplicate_batch
+- [x] 11-10-PLAN.md — Chaos II: malformed_csv + invalid_encoding + oom + task_timeout + duplicate_batch
 - [ ] 11-14-PLAN.md — Runbooks II: 3 chaos-trailing docs, completes the 18-file §89 set
 
 **Wave 3** *(blocked on Wave 2 completion — moved from Wave 1 during plan-checker revision so its live rollback proof can target a real image published by 11-02)*
@@ -703,7 +703,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion — deliberately placed above its dependency-minimum wave to avoid a same-wave Makefile conflict with 11-04/11-06)*
 
-- [ ] 11-12-PLAN.md — Rebuild-from-raw orchestration script + Make target + live D-29 proof
+- [x] 11-12-PLAN.md — Rebuild-from-raw orchestration script + Make target + live D-29 proof
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
