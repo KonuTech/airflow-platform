@@ -39,6 +39,18 @@ jobs:
     # explicitly means a fork PR's smoke run is a clean, understood skip,
     # not a confusing cluster-up against an image that was never published.
     if: github.event.pull_request.head.repo.full_name == github.repository
+    # Live-verified (plan 11-04 Task 3, bisected against 10 throwaway pushes):
+    # referencing `secrets.*` directly inside a step's own `if:` conditional
+    # makes GitHub's own workflow parser reject this file at PARSE time —
+    # zero jobs, a generic "likely failed because of a workflow file issue"
+    # push-triggered failure, and the workflow never registers for
+    # `pull_request` at all. The safe pattern (also live-confirmed) is to
+    # mirror the secret into a job-level `env:` var first, then gate the
+    # step on `env.*` instead — `secrets.*` stays fine to reference directly
+    # inside a step's `with:` block (also confirmed in the same bisection),
+    # only the `if:` position is affected.
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -58,7 +70,7 @@ jobs:
       # secret being configured at all — never a hard requirement, and
       # never a failure when absent (this plan's own `user_setup` note).
       - name: Docker Hub login (optional, raises anonymous pull-rate limit)
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
