@@ -1,0 +1,91 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. This file and
+# helm/values/ci/kyverno.yaml must otherwise be identical in shape.
+#
+# D-14/D-17: Kyverno is the cluster-wide admission controller enforcing D-16's
+# cosign signature policy (kubernetes/kyverno-policy.yaml). It is an
+# operator/CRD chart exactly like cnpg-operator.yaml (crds + controller
+# Deployments, no data-plane workload of its own), the correct structural
+# analog here, not a workload chart like minio.yaml.
+#
+# cert-manager resolution (Task 1's open question, resolved by inspecting the
+# pulled chart directly — `helm pull kyverno/kyverno --version 3.8.2 --untar`
+# then reading values.yaml/templates/admission-controller/
+# cert-manager-certificates.yaml): Kyverno self-manages its own webhook TLS
+# certs. `admissionController.certManager.enabled` defaults to `false` and
+# `admissionController.createSelfSignedCert` also defaults to `false` — the
+# chart's own comment names this combination "Kyverno-managed certificates":
+# an internal cert-controller issues and rotates the webhook's TLS material
+# without any external dependency. Neither flag is touched here (both stay at
+# their chart defaults), so no cert-manager chart/values-profile/versions.env
+# entry is needed — confirmed NOT a new dependency.
+#
+# crds.install (NOT crds.create — the plan's assumed key name doesn't exist
+# in this chart; verified via direct schema inspection, `crds.install` is
+# the real key, already `true` by chart default): every CRD group this
+# project's own policy needs — most importantly `imagevalidatingpolicies.
+# policies.kyverno.io`, confirmed present via `helm template` — installs
+# unconditionally. Written explicitly, not left implicit, per this project's
+# own "never rely on an unstated chart default for something load-bearing"
+# convention (02-RESEARCH.md Pitfall 5).
+crds:
+  install: true
+
+# No CleanupPolicy/ClusterCleanupPolicy resource exists anywhere in this
+# repository (11-RESEARCH.md Pitfall 3) — the cleanup controller would be a
+# fourth running Deployment with nothing to reconcile. Disabled in both
+# profiles.
+cleanupController:
+  enabled: false
+
+# The chart ships FOUR separate Deployments when cleanupController is
+# enabled; with it disabled here, three remain (admission/background/
+# reports), each sized explicitly below rather than left at the chart's own
+# (already-nonzero, unlike CNPG operator's genuinely-empty `resources: {}`)
+# defaults — explicit beats implicit for anything load-bearing.
+admissionController:
+  initContainer:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 256Mi
+  container:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 384Mi
+  # Third D-06 axis: ServiceMonitor integration stays disabled in both
+  # profiles for now (kube-prometheus-stack's own dashboards are Phase 7
+  # scope, not this plan's) — matches this chart's own default, made
+  # explicit for parity with cnpg-operator.yaml's `monitoring:
+  # podMonitorEnabled: false` precedent.
+  serviceMonitor:
+    enabled: false
+
+backgroundController:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+  serviceMonitor:
+    enabled: false
+
+reportsController:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+  serviceMonitor:
+    enabled: false

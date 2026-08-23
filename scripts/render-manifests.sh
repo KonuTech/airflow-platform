@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
-# Render both Helm values profiles for all eight pinned charts into a
+# Render both Helm values profiles for all nine pinned charts into a
 # gitignored build directory, then validate every rendered document with
 # `kubeconform -strict` against the pinned Kubernetes version (CICD-07).
 #
-# Nine `helm template` calls per profile — the `cluster` chart renders TWICE
-# (airflow metadata + analytical), so "all eight pinned charts" (ingress-nginx,
+# Ten `helm template` calls per profile — the `cluster` chart renders TWICE
+# (airflow metadata + analytical), so "all nine pinned charts" (ingress-nginx,
 # cloudnative-pg, cluster, minio, airflow, otel-collector, tempo — plan 07-03
-# added these two — and monitoring/kube-prometheus-stack, plan 07-07's own
-# addition) produces nine output files. Exactly mirrors
+# added these two — monitoring/kube-prometheus-stack, plan 07-07's own
+# addition, and kyverno, plan 11-03's addition) produces ten output files.
+# Exactly mirrors
 # scripts/stages/*.sh's chart-ref/namespace/values pairing (D-09) — this is
 # the offline analogue of the live cluster-up path, not a second definition
 # of it. (Vault is deployed live by scripts/stages/80-vault.sh but was never
@@ -88,6 +89,7 @@ done
 "${helm_bin}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true
 "${helm_bin}" repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+"${helm_bin}" repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null 2>&1 || true
 "${helm_bin}" repo update >/dev/null
 
 # render_one <profile> <release> <chart-ref> <namespace> <version-var-name> <values-basename>
@@ -124,6 +126,8 @@ for profile in local ci; do
     TEMPO_CHART_VERSION tempo
   render_one "${profile}" monitoring prometheus-community/kube-prometheus-stack monitoring \
     KUBE_PROMETHEUS_STACK_CHART_VERSION monitoring
+  render_one "${profile}" kyverno kyverno/kyverno kyverno \
+    KYVERNO_CHART_VERSION kyverno
 done
 
 echo "==> kubeconform -strict against Kubernetes ${KUBERNETES_VERSION}"

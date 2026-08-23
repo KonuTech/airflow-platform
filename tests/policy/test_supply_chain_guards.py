@@ -469,3 +469,59 @@ def test_a_pinned_tag_is_not_reported() -> None:
     """False-positive control: the real, pinned tags produce no messages."""
     doc = yaml.safe_load((VALUES_LOCAL_DIR / "minio.yaml").read_text(encoding="utf-8")) or {}
     assert not mutable_tag_problems(doc, "scratch")
+
+
+# ===========================================================================
+# Kyverno chart-version pin (plan 11-03) — a chart-only pin, not an image tag
+# ===========================================================================
+# Unlike minio/airflow above, the pulled Kyverno chart (3.8.2, verified via
+# `helm pull kyverno/kyverno --version 3.8.2 --untar`) exposes no
+# `image.tag`-style override in either values profile — every controller
+# floats on the chart's own `appVersion`, matching how `otel-collector.yaml`
+# and `tempo.yaml` already pin by chart version alone. There is therefore no
+# second in-repo source for `KYVERNO_CHART_VERSION` to agree with (the
+# `image_tag_disagreements` shape above has nothing to compare against), so
+# this asserts the narrower, still-load-bearing claim: neither values file
+# re-states the chart-version literal itself. Mirrors this module's own
+# "one declared source" philosophy without inventing a comparison that
+# would always vacuously pass.
+
+_CHART_VERSION_SHAPED = re.compile(r"\b\d+\.\d+\.\d+\b")
+
+
+def test_kyverno_chart_version_is_only_declared_in_versions_env() -> None:
+    pinned = _versions_env_variable("KYVERNO_CHART_VERSION")
+    problems: list[str] = []
+    for path in (VALUES_LOCAL_DIR / "kyverno.yaml", VALUES_CI_DIR / "kyverno.yaml"):
+        text = path.read_text(encoding="utf-8")
+        # Comments are allowed to mention the version in prose (see the
+        # header comment in both files); only a bare, non-comment
+        # chart-version-shaped literal would indicate the pin has been
+        # re-declared as a second source.
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if _CHART_VERSION_SHAPED.search(stripped):
+                problems.append(f"{path.relative_to(REPO_ROOT)}: {stripped!r}")
+    assert not problems, (
+        "helm/versions.env's KYVERNO_CHART_VERSION "
+        f"({pinned!r}) must be the only declared source for this chart's "
+        "version — found a version-shaped literal outside a comment:\n" + "\n".join(problems)
+    )
+
+
+def test_reintroducing_the_chart_version_literal_is_reported() -> None:
+    """Non-vacuity: a scratch copy with a bare version literal must fail."""
+    path = VALUES_LOCAL_DIR / "kyverno.yaml"
+    original = path.read_text(encoding="utf-8")
+    mutated = original + "\nchartVersion: 3.8.2\n"
+    assert mutated != original, "the scratch mutation did not apply — this test proves nothing"
+    problems = [
+        line.strip()
+        for line in mutated.splitlines()
+        if line.strip()
+        and not line.strip().startswith("#")
+        and _CHART_VERSION_SHAPED.search(line.strip())
+    ]
+    assert problems, "a bare chart-version literal appended to kyverno.yaml was not reported"

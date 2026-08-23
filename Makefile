@@ -409,7 +409,7 @@ stage-%:                       ## Run exactly one scripts/stages/<name>.sh (no p
 	set -a; . helm/versions.env; set +a; \
 	PROFILE=$(PROFILE) KUBECTL_CONTEXT="kind-$$CLUSTER_NAME" "$$script"
 
-helm-lint:                      ## CICD-07: helm lint all eight pinned charts against every values profile [plan 02-07, 07-03, 07-07]
+helm-lint:                      ## CICD-07: helm lint all nine pinned charts against every values profile [plan 02-07, 07-03, 07-07, 11-03]
 	# No version literal here — every version comes from helm/versions.env,
 	# the same rule test_the_makefile_scanner_target_defers_to_the_pinned_
 	# installer already enforces for the gitleaks target. `helm lint` wants a
@@ -427,6 +427,7 @@ helm-lint:                      ## CICD-07: helm lint all eight pinned charts ag
 	"$${helm_bin}" repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts >/dev/null 2>&1 || true; \
 	"$${helm_bin}" repo add grafana-community https://grafana-community.github.io/helm-charts >/dev/null 2>&1 || true; \
 	"$${helm_bin}" repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true; \
+	"$${helm_bin}" repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null 2>&1 || true; \
 	"$${helm_bin}" repo update >/dev/null; \
 	workdir="$$(mktemp -d)"; \
 	trap 'rm -rf "$$workdir"' EXIT; \
@@ -451,9 +452,10 @@ helm-lint:                      ## CICD-07: helm lint all eight pinned charts ag
 	lint_chart otel-collector open-telemetry/opentelemetry-collector "$${OTEL_COLLECTOR_CHART_VERSION}" otel-collector; \
 	lint_chart tempo grafana-community/tempo "$${TEMPO_CHART_VERSION}" tempo; \
 	lint_chart monitoring prometheus-community/kube-prometheus-stack "$${KUBE_PROMETHEUS_STACK_CHART_VERSION}" monitoring; \
+	lint_chart kyverno kyverno/kyverno "$${KYVERNO_CHART_VERSION}" kyverno; \
 	exit $$failed
 
-manifests: helm-lint             ## CICD-07/INFRA-10: render + kubeconform -strict, both profiles, all eight charts [plan 02-07, 07-03, 07-07]
+manifests: helm-lint             ## CICD-07/INFRA-10: render + kubeconform -strict, both profiles, all nine charts [plan 02-07, 07-03, 07-07, 11-03]
 	# Installs the two binaries it needs as its own first lines — exactly like
 	# the gitleaks target calls tools/security/install_gitleaks.sh — so this
 	# target (and therefore the CI job that calls it) never assumes a

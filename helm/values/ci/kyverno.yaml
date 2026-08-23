@@ -1,0 +1,60 @@
+# D-06: the local and CI profiles diverge on EXACTLY three axes — replica
+# counts, resource sizing, and monitoring. This file and
+# helm/values/local/kyverno.yaml must otherwise be identical in shape. See
+# that file for the cert-manager and crds.install findings (both apply
+# identically here — chart-level facts, not profile-specific).
+#
+# D-12: CI's rendered manifests are summed by the manifest-resources policy
+# test against the GitHub-hosted runner's 4 CPU / 16 GB budget, so the sizes
+# below are load-bearing, not decorative. Trimmed from local's sizing
+# (minio.yaml's ci-vs-local resource-halving discipline), well within the
+# ~0.5-core / ~8Gi headroom this profile carried before Kyverno's own
+# addition (measured this session: 2.650 cores / 5176Mi against a
+# 3.2-core / 13107Mi effective budget).
+crds:
+  install: true
+
+cleanupController:
+  enabled: false
+
+admissionController:
+  initContainer:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
+  container:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 192Mi
+  serviceMonitor:
+    enabled: false
+
+backgroundController:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+  serviceMonitor:
+    enabled: false
+
+reportsController:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+  serviceMonitor:
+    enabled: false
