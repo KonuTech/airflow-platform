@@ -1,0 +1,92 @@
+# Phase 11 plan 11-04 (CICD-09, D-19/D-20): the PR-gating fast smoke subset.
+# Spins up its own ephemeral kind cluster inside GitHub Actions on every pull
+# request and runs the D-20 4-point proof (via `make smoke-verify`) against
+# the PR's OWN just-published `pr-<number>` images — not main's last merge
+# build (11-RESEARCH.md Pitfall 5). The full local E2E suite (`make
+# cluster-verify`, covering the 2-year sweep and observability) stays
+# reserved for `e2e-full.yml`, gated to merge only (plan 11-05).
+name: E2E smoke (PR)
+
+on:
+  pull_request:
+
+# Least privilege at the workflow level, matching ci.yml/publish.yml's own
+# floor — this job never publishes anything and never needs to widen this.
+# GHCR images `publish.yml` already produced are public, so no `packages:`
+# permission is needed to pull them.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.3"
+
+jobs:
+  smoke:
+    name: Ephemeral-kind fast smoke subset (D-20)
+    runs-on: ubuntu-latest
+    # Cluster boot + a handful of targeted checks (4 D-20 points), materially
+    # faster than cluster-verify's full local suite — measured starting
+    # ceiling, not a guess dressed as a fact (mirrors publish.yml's own
+    # per-matrix-leg timeout comment).
+    timeout-minutes: 30
+    # A pull_request from a FORK never receives a published `pr-<number>`
+    # image at all (publish.yml's own fork guard — GitHub never grants
+    # `packages: write` on fork-originated pull_request runs). Guarding here
+    # explicitly means a fork PR's smoke run is a clean, understood skip,
+    # not a confusing cluster-up against an image that was never published.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # `cluster`-group only (boto3/psycopg): this job never runs `make
+      # check`'s offline gate, only cluster-dependent targets.
+      - run: make install-cluster
+
+      # D-21: raises the runner's Docker Hub pull-rate limit for the
+      # upstream chart images `make cluster-up` pulls (Airflow, MinIO,
+      # Vault, Kyverno, CNPG, ingress-nginx). Conditioned on the repo
+      # secret being configured at all — never a hard requirement, and
+      # never a failure when absent (this plan's own `user_setup` note).
+      - name: Docker Hub login (optional, raises anonymous pull-rate limit)
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # kind and helm are installed by `scripts/cluster-up.sh` itself (its
+      # own first two lines, tools/k8s/install_{kind,helm}.sh) — no separate
+      # install step here, matching D-09's single-entry-point convention
+      # ("no manual kind surgery" outside cluster-up.sh). kubectl needs no
+      # install at all: `actions/runner-images`' own Ubuntu 24.04 image ships
+      # kubectl 1.36.3 pre-installed, within the one-minor version-skew
+      # `scripts/doctor.sh` already requires against this project's pinned
+      # Kubernetes 1.35.5 node image (the same skew this project's own local
+      # host, kubectl 1.36.1, already runs under).
+      - name: Point cluster-up at this PR's own GHCR Airflow image
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "AIRFLOW_IMAGE_OVERRIDE_REPO=ghcr.io/${owner}/airflow" >> "$GITHUB_ENV"
+          echo "AIRFLOW_IMAGE_OVERRIDE_TAG=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_ENV"
+
+      - name: Bring up the ephemeral kind cluster (CI profile)
+        run: PROFILE=ci make cluster-up
+
+      - name: Point csv_processor_image/dbt_image at this PR's own GHCR images
+        run: scripts/ci-set-workload-images.sh pr-${{ github.event.pull_request.number }}
+
+      # The D-20 4-point proof, composed as one Make target so a developer
+      # and this workflow invoke the exact same gate (Makefile's own
+      # `smoke-verify` docstring).
+      - name: Run the D-20 fast smoke subset (make smoke-verify)
+        run: make smoke-verify

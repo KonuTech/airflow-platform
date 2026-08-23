@@ -569,3 +569,50 @@ once — exactly the same operational requirement `make image-csv-processor`/`ma
 already carry for their own Variables, and consistent with this repository's existing
 bootstrap runbook expectations (a fresh cluster is not fully live-usable until its `make
 image-*` targets have been run at least once).
+
+## Plan 11-04
+
+### Pre-existing, local-cluster-only: `analytics_owner` lacks SELECT on `meta.files`/`meta.datasets`
+
+Found while live-verifying the new `smoke-verify` Make target's own `pytest tests/e2e/vault -q
+-m cluster` step (this plan's Task 2, exactly as the plan's own action text specifies — the
+whole `tests/e2e/vault` directory, not a hand-picked subset). One test,
+`tests/e2e/vault/test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs`,
+fails on THIS session's persistent local cluster with:
+
+```
+psycopg.errors.InsufficientPrivilege: permission denied for schema meta
+LINE 1: ...id, f.duplicate_of_file_id, f.content_sha256 FROM meta.files...
+```
+
+against the `analytics_owner` role (via the `analytics_owner_connection` fixture,
+`tests/e2e/slice/conftest.py`). Grepped every migration under `migrations/versions/` for a
+`GRANT ... TO analytics_owner` naming `meta.files`/`meta.datasets` specifically: none exists —
+only `meta.v_customers_lineage` (migration 0013), `meta.validation_results`/`meta.
+rejected_records` (migration 0018), and `normalized.customers`/`normalized.orders` (migration
+0019) are ever granted to this role. This strongly suggests either (a) a genuine, pre-existing
+migration gap (this specific query's own `meta.files`/`meta.datasets` join was never granted),
+or (b) live grant drift on THIS specific long-lived local cluster from earlier sessions' manual
+surgery (the `rebuild-from-raw`/`migrate-analytics` priming work referenced in STATE.md's own
+Blockers/Concerns for plan 11-12) — not disentangled further, since doing so would mean editing
+migration/grant files entirely outside this plan's declared `files_modified`
+(`scripts/helm-install.sh`, `scripts/stages/70-airflow.sh`, `scripts/ci-set-workload-images.sh`,
+`Makefile`, `.github/workflows/e2e-smoke.yml`).
+
+**Why not fixed here:** out of scope by file (a fix would touch a new Alembic migration and/or
+manually re-run a `GRANT` against the live cluster, neither of which this plan's task list
+authorizes) and out of scope by cause (not introduced by anything Task 1 or Task 2 changed —
+confirmed by inspection that neither the `helm_install` extra-args passthrough, the
+`AIRFLOW_IMAGE_OVERRIDE_*` branch, `ci-set-workload-images.sh`, nor `smoke-verify`'s own shell
+assertions touch database roles/grants in any way).
+
+**Why this does not block plan 11-04's own acceptance criterion:** Task 3's real proof runs
+against a completely FRESH ephemeral kind cluster in GitHub Actions, bootstrapped from a clean
+`alembic upgrade head` — not this session's long-lived, drifted local cluster. If this is
+migration gap (a), it would reproduce there too and needs its own follow-up migration; if it is
+local drift (b), a fresh cluster does not carry it forward at all. Either way, Task 3's own live
+run is the authoritative signal, not this local finding.
+
+| Item | Status | Deferred At |
+|------|--------|-------------|
+| `tests/e2e/vault/test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs` fails on the local persistent cluster with `permission denied for schema meta` for role `analytics_owner`. Root cause not fully disentangled (migration gap vs. live grant drift); reproducer: `uv run --group cluster pytest tests/e2e/vault/test_airflow_backend.py -q -m cluster`. | Open | 2026-08-23, plan 11-04 |
