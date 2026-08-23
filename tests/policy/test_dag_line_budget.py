@@ -54,3 +54,26 @@ def test_smoke_kubernetes_pod_stays_under_30_lines() -> None:
     line_count = len(path.read_text(encoding="utf-8").splitlines())
     msg = f"ORCH-06: smoke_kubernetes_pod.py is {line_count} lines, budget is <30"
     assert line_count < 30, msg
+
+
+def test_platform_retention_stays_under_60_lines() -> None:
+    """platform_retention.py (plan 11-08) is a thin `@dag` wrapper, matching smoke's own budget.
+
+    Unlike a first draft that inlined D-35's six-layer MinIO/PostgreSQL
+    query+evaluate+conditional-delete logic directly into the DAG file, the
+    committed shape follows `csv_ingest_customers.py`'s own established
+    convention (`from _common.integrity_gate import integrity_gate,
+    list_matched_keys`): the business logic lives in
+    `_common/retention_query.py` (itself exempt from
+    `tests/policy/test_dag_thinness.py`'s business-logic-import/SQL checks,
+    the same ADR-0004 exception `integrity_gate.py`/`gap_recorder.py`/
+    `run_stage_recorder.py` already use), and `platform_retention.py` itself
+    only builds the `@dag` wrapper and wires the one task. 60 is real
+    headroom over the file's current 46 lines, closer to
+    `smoke_kubernetes_pod.py`'s own <30 budget than to the ingestion DAGs'
+    <=152 -- this file is genuinely thinner than either.
+    """
+    path = REPO_ROOT / "airflow" / "dags" / "platform_retention.py"
+    line_count = len(path.read_text(encoding="utf-8").splitlines())
+    msg = f"ORCH-06: platform_retention.py is {line_count} lines, budget is <=60"
+    assert line_count <= 60, msg
