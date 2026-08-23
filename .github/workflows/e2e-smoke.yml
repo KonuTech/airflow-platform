@@ -220,3 +220,20 @@ jobs:
       # `smoke-verify` docstring).
       - name: Run the D-20 fast smoke subset (make smoke-verify)
         run: make smoke-verify
+
+      # THROWAWAY diagnostic step (CICD-09 live-proof PR only, never lands on
+      # main): only fires if smoke-verify itself failed, so a stuck-queued
+      # DagRun (or any other [2/4]-[4/4] failure) is diagnosable from the
+      # Actions log alone instead of guessed at from a second blind run.
+      - name: DEBUG live scheduler/pod/node state if smoke-verify failed
+        if: failure()
+        run: |
+          set -x
+          kubectl --context kind-airflow-platform -n airflow get pods -o wide || true
+          kubectl --context kind-airflow-platform -n airflow exec deploy/airflow-api-server -- airflow dags list-runs -d smoke_kubernetes_pod -o table || true
+          kubectl --context kind-airflow-platform -n airflow logs deploy/airflow-scheduler -c scheduler --tail=300 || true
+          kubectl --context kind-airflow-platform -n etl get pods -o wide || true
+          kubectl --context kind-airflow-platform -n etl get events --sort-by=.lastTimestamp || true
+          kubectl --context kind-airflow-platform -n airflow get events --sort-by=.lastTimestamp | tail -60 || true
+          kubectl --context kind-airflow-platform get pods -A -o wide || true
+          kubectl --context kind-airflow-platform describe node airflow-platform-control-plane | grep -A30 "^Allocated resources" || true
