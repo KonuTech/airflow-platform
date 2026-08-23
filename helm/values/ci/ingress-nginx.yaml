@@ -21,8 +21,13 @@ controller:
   service:
     type: ClusterIP
 
-  nodeSelector:
-    ingress-ready: "true"
+  # No nodeSelector here (unlike helm/values/local/ingress-nginx.yaml's
+  # `ingress-ready: "true"`): kind/cluster-ci.yaml is genuinely single-node
+  # (post-merge fix, deferred-items.md "Plan 11-04" CRITICAL finding) — the
+  # only node already carries the 80/443 extraPortMappings this controller
+  # needs, and there is no other node it could land on instead. A
+  # nodeSelector against a label that node was never given would leave this
+  # Deployment permanently Pending instead of merely being redundant.
 
   tolerations:
     - key: node-role.kubernetes.io/control-plane

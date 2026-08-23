@@ -35,10 +35,13 @@ cluster:
       cpu: "1"
       memory: 1Gi
 
-  affinity:
-    nodeSelector:
-      airflow-platform/role: analytics
-    topologyKey: kubernetes.io/hostname
+  # No affinity.nodeSelector here (unlike helm/values/local/cnpg-analytics.yaml's
+  # `airflow-platform/role: analytics`): kind/cluster-ci.yaml is genuinely
+  # single-node (post-merge fix, deferred-items.md "Plan 11-04" CRITICAL
+  # finding) — every pod lands on the only node regardless, so a
+  # nodeSelector against a role label that node was never given would leave
+  # this Cluster's instance permanently Pending instead of merely being
+  # redundant.
 
   postgresql:
     # See helm/values/local/cnpg-analytics.yaml — NOT optional, prevents

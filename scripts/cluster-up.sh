@@ -32,11 +32,35 @@ echo "==> ensuring pinned kind and helm binaries"
 "${repo_root}/tools/k8s/install_kind.sh"
 "${repo_root}/tools/k8s/install_helm.sh"
 
+# D-06/PROFILE: `local` selects kind/cluster.yaml (3-node, full sizing,
+# untouched by the CI-portability fix below); `ci` selects kind/cluster-ci.yaml
+# (single-node, trimmed — see that file's own header for the fair-share
+# reservation math). kind/cluster.yaml is NEVER edited or substituted into —
+# it stays exactly as local dev has always run it.
+if [ "${PROFILE}" = "ci" ]; then
+  cluster_config="${repo_root}/kind/cluster-ci.yaml"
+else
+  cluster_config="${repo_root}/kind/cluster.yaml"
+fi
+
 if "${kind_bin}" get clusters | grep -qx "${CLUSTER_NAME}"; then
   echo "==> cluster '${CLUSTER_NAME}' already exists — skipping kind create cluster"
 else
-  echo "==> creating cluster '${CLUSTER_NAME}' from kind/cluster.yaml"
-  "${kind_bin}" create cluster --name "${CLUSTER_NAME}" --config "${repo_root}/kind/cluster.yaml"
+  if [ "${PROFILE}" = "ci" ]; then
+    # kind/cluster-ci.yaml's own DAG hostPath mount carries a literal
+    # __CI_REPO_ROOT__ placeholder (never a real path — see that file's own
+    # comment) because a GitHub Actions checkout path varies per run and
+    # cannot be baked into a static, committed YAML file. Render a throwaway
+    # substituted copy here, at invocation time, and pass THAT to `kind
+    # create cluster --config` — kind/cluster-ci.yaml itself is never
+    # modified on disk.
+    rendered_config="$(mktemp "${TMPDIR:-/tmp}/cluster-ci.XXXXXX.yaml")"
+    trap 'rm -f "${rendered_config}"' EXIT
+    sed "s#__CI_REPO_ROOT__#${repo_root}#g" "${cluster_config}" > "${rendered_config}"
+    cluster_config="${rendered_config}"
+  fi
+  echo "==> creating cluster '${CLUSTER_NAME}' from ${cluster_config} (profile=${PROFILE})"
+  "${kind_bin}" create cluster --name "${CLUSTER_NAME}" --config "${cluster_config}"
 fi
 
 while IFS= read -r stage; do

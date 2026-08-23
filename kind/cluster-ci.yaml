@@ -1,0 +1,121 @@
+# CI profile (D-06/PROFILE=ci) — the "single-node, trimmed" counterpart to
+# ../kind/cluster.yaml's 3-node LOCAL profile. Selected by scripts/cluster-up.sh
+# when PROFILE=ci; kind/cluster.yaml itself is never edited for this (it stays
+# the local-dev source of truth, untouched — see this file's own deferred-items.md
+# "Plan 11-04" CRITICAL finding for why a second file was needed rather than a
+# parameterized single one: the two profiles diverge on node COUNT, which is a
+# `kind create cluster`-time-only field — INFRA-09 — not something a values
+# override could express).
+#
+# Genuinely single-node: one node plays control-plane AND every worker role at
+# once. There is no "storage" or "analytics" node label here (unlike
+# cluster.yaml's two workers) because there is only one node for every pod to
+# land on — kind/cluster.yaml's own `helm/values/ci/*.yaml` nodeSelectors
+# against those labels were the OTHER half of this same CRITICAL finding, fixed
+# alongside this file (they are removed, not re-pointed, for exactly this
+# reason: a nodeSelector is redundant, not merely different, once there is only
+# one node to select).
+#
+# Kubelet reservation sizing — the SAME fair-share formula cluster.yaml's own
+# header derives and re-derives (allocatable_target = (C/N) − headroom;
+# reserved_total = C − allocatable_target), applied here to THIS profile's own
+# capacity, not local's. CLAUDE.md's own CI-runner-sizing constraint states the
+# real figure directly: "GitHub-hosted runners are 4 CPU / 16 GB." So:
+#   C_cpu = 4, N = 1 (this file's whole point) ⇒ C/N = 4, identical in
+#     magnitude to cluster.yaml's own C/N = 12/3 = 4 — reusing that same
+#     file's headroom_cpu = 1 is therefore not an arbitrary re-guess, it is
+#     the same formula landing on the same per-node share by coincidence of
+#     the two profiles' numbers:
+#       allocatable_target_cpu = 4 − 1 = 3 CPU
+#       reserved_total_cpu     = 4 − 3 = 1 CPU
+#     split systemReserved.cpu=500m / kubeReserved.cpu=500m (even split — the
+#     local file's own 5:4 system:kube ratio is not load-bearing at this
+#     small an absolute magnitude, and a clean 500m/500m is easier to verify
+#     at a glance than a proportional split of a single core).
+#   C_mem = 16Gi, N = 1 ⇒ C/N = 16Gi, a much larger per-node share than
+#     local's 28Gi/3 ≈ 9.33Gi. Reusing local's own ABSOLUTE headroom_mem =
+#     1.8Gi (not a re-scaled proportional one) deliberately: this profile's
+#     workload set is already trimmed (single replicas, no monitoring stack —
+#     D-06's three divergence axes), and the point of this file is to fix a
+#     cluster that could not even boot, not to hand back memory that CI's own
+#     `helm/values/ci/*.yaml` resource requests do not need. 16Gi − 1.8Gi =
+#     14.2Gi allocatable, split systemReserved.memory=1Gi /
+#     kubeReserved.memory=800Mi (sums to the 1.8Gi reserved_total above).
+#
+# This is deliberately MORE generous on memory (14.2Gi/16Gi ≈ 89% allocatable)
+# than cluster.yaml's own per-node split (~6.6Gi/9.33Gi ≈ 70%), and reserves
+# proportionally MORE of the CPU budget (1 of 4 = 25%) than it does of memory —
+# CPU was the actual, live-diagnosed failure mode (kubeadm's own "reservation
+# of M exceeds capacity of N" / API-server rate-limiter-timeout crash), so this
+# errs conservative there and generous on memory, which was never implicated.
+# A future revisit, if this 3 CPU/14.2Gi single-node allocatable proves too
+# tight for the full workload set (Airflow's 3 Deployments + triggerer
+# StatefulSet, both CNPG clusters, MinIO, Vault, Kyverno, ingress-nginx, all on
+# ONE node at once, unlike local's 3-way split), belongs in THIS file's own
+# comment block, exactly as cluster.yaml's own revisit history above models —
+# never a silent number change.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: airflow-platform
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
+    kubeadmConfigPatches:
+      # v1beta3 MAP form — see cluster.yaml's own identical comment; same
+      # Kubernetes 1.35 target, same kind translation behavior.
+      - |
+        kind: KubeletConfiguration
+        systemReserved:
+          cpu: "500m"
+          memory: "1Gi"
+        kubeReserved:
+          cpu: "500m"
+          memory: "800Mi"
+        evictionHard:
+          memory.available: "500Mi"
+          nodefs.available: "10%"
+          nodefs.inodesFree: "5%"
+        maxPods: 110
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+    extraMounts:
+      # D-02, CI-portable variant: kind/cluster.yaml hardcodes this session's
+      # own local absolute path — meaningless on a GitHub Actions runner,
+      # whose checkout lives at a per-run path
+      # (/home/runner/work/<repo>/<repo>/...). This file instead carries the
+      # literal placeholder token below, substituted by scripts/cluster-up.sh
+      # at `kind create cluster` invocation time (PROFILE=ci branch only) via
+      # a plain `sed` pass into a throwaway rendered copy — never edited here
+      # by hand, and never touching kind/cluster.yaml's own real path. The
+      # substituted value is this repo's own resolved checkout root
+      # (cluster-up.sh's existing `repo_root`, computed from
+      # `${BASH_SOURCE[0]}`), which is already correct in EVERY environment
+      # (a GitHub Actions runner's checkout root IS `$GITHUB_WORKSPACE`; a
+      # human running `PROFILE=ci make cluster-up` locally gets their own
+      # checkout root the same way) — no dependency on `$GITHUB_WORKSPACE`
+      # being explicitly exported, though it happens to already equal it on
+      # every real CI run.
+      - hostPath: __CI_REPO_ROOT__/airflow/dags
+        containerPath: /mnt/dags
+        readOnly: true
+      # D-01 counterpart: deliberately left UNBOUND here too (nothing reads
+      # from /mnt/persist — see cluster.yaml's own comment on this same
+      # mount). Unlike the DAG mount above, this one does not need to be
+      # checkout-relative at all — any writable path is equally correct for
+      # an ephemeral, single-run CI node, so it is a plain literal, not a
+      # substituted placeholder.
+      - hostPath: /tmp/airflow-platform-ci-persist
+        containerPath: /mnt/persist
+containerdConfigPatches:
+  # Identical to cluster.yaml — scripts/stages/10-registry.sh wires
+  # localhost:5001/hosts.toml into every node it discovers via `kind get
+  # nodes`, with no node-count assumption of its own, so this profile needs
+  # the exact same containerd registry-mirror config path.
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
