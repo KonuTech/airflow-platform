@@ -266,6 +266,60 @@ rebuild-from-raw:                ## D-28..D-33: DROP the ETL-owned schemas + wip
 	# single most destructive operation in this whole platform.
 	$(RUN_CLUSTER) python scripts/rebuild-from-raw.py
 
+# D-12: this recipe IS the rollback runbook (Claude's Discretion, per this
+# phase's own CONTEXT.md grant -- no separate docs/runbooks/ file). Procedure
+# for an operator undoing a bad deploy at 2am:
+#   1. Identify a prior, already-published git SHA (one that went through
+#      .github/workflows/publish.yml on an earlier merge to main -- plan
+#      11-01/11-02). `git log --oneline` against `main` is the source of
+#      truth; a SHA that was never published has no ghcr.io image to pull.
+#   2. `make rollback SHA=<that sha>` against the live cluster. This
+#      repoints all three workloads (csv-processor, dbt, airflow) at that
+#      SHA's already-published GHCR images -- no rebuild, no hand-edited
+#      Helm values.
+#   3. The target blocks until the Airflow chart's Deployments/StatefulSet
+#      genuinely report Ready on the new image (see the --wait=hookOnly
+#      note below) before it reports success -- a non-zero exit means the
+#      rollback did not complete, not merely that it was applied.
+rollback:                        ## D-12: redeploy all three workloads (csv-processor/dbt/airflow) at a prior, already-published git SHA -- the bad-deploy-at-2am runbook [plan 11-06]
+	@if [ -z "$(SHA)" ]; then echo "ERROR: SHA is required, e.g. make rollback SHA=abc1234" >&2; exit 1; fi
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	if ! $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
+	  echo "ERROR: no live cluster reachable at context $$ctx -- a rollback with no cluster to roll back is a silent no-op, refusing to proceed" >&2; \
+	  exit 1; \
+	fi; \
+	owner="$$(git remote get-url origin | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$$#\1#' | tr '[:upper:]' '[:lower:]')"; \
+	if [ -z "$$owner" ]; then \
+	  echo "ERROR: could not resolve the GitHub owner from 'git remote get-url origin'" >&2; \
+	  exit 1; \
+	fi; \
+	echo "==> resolved owner=$$owner, rolling back to SHA=$(SHA)"; \
+	echo "==> registering csv_processor_image=ghcr.io/$$owner/csv-processor:$(SHA)"; \
+	$(KUBECTL) --context "$$ctx" exec -n airflow deploy/airflow-api-server -- \
+	  airflow variables set csv_processor_image "ghcr.io/$$owner/csv-processor:$(SHA)"; \
+	echo "==> registering dbt_image=ghcr.io/$$owner/dbt:$(SHA)"; \
+	$(KUBECTL) --context "$$ctx" exec -n airflow deploy/airflow-api-server -- \
+	  airflow variables set dbt_image "ghcr.io/$$owner/dbt:$(SHA)"; \
+	echo "==> re-running the Airflow chart upgrade at defaultAirflowTag=$(SHA)"; \
+	echo "helm upgrade --install airflow apache-airflow/airflow --version $$AIRFLOW_CHART_VERSION -n airflow -f helm/values/$(PROFILE)/airflow.yaml --set defaultAirflowRepository=ghcr.io/$$owner/airflow --set defaultAirflowTag=$(SHA) --wait=hookOnly --timeout $${HELM_INSTALL_TIMEOUT:-5m}"; \
+	"$(HELM)" upgrade --install airflow apache-airflow/airflow \
+	  --version "$$AIRFLOW_CHART_VERSION" \
+	  --namespace airflow \
+	  -f "helm/values/$(PROFILE)/airflow.yaml" \
+	  --set defaultAirflowRepository="ghcr.io/$$owner/airflow" \
+	  --set defaultAirflowTag="$(SHA)" \
+	  --wait=hookOnly \
+	  --timeout "$${HELM_INSTALL_TIMEOUT:-5m}" \
+	  --kube-context "$$ctx"; \
+	echo "==> waiting for the three Airflow Deployments and the triggerer StatefulSet to report Ready on the new image"; \
+	. scripts/wait-for.sh; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-api-server; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-scheduler; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_deploy_available airflow airflow-dag-processor; \
+	KUBECTL_CONTEXT="$$ctx" wait_for_statefulset_ready airflow airflow-triggerer; \
+	echo "==> rollback to SHA=$(SHA) complete: csv-processor/dbt Variables and the Airflow chart's own image are all genuinely serving"
+
 cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice and tests/e2e/observability against the live cluster [plan 02-02, extended 04-09, 07-07]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
 	# deliberately excluded from `dev` and from every uv default-group set, so
