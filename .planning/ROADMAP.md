@@ -679,11 +679,11 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 11-01-PLAN.md — Slice 1: csv-processor GHCR publish (build, SBOM, cosign sign, trivy scan)
-- [ ] 11-07-PLAN.md — Retention contracts + policy evaluator (TDD) + D-40 verify/ADR-0011
-- [ ] 11-09-PLAN.md — Chaos I: scaffolding + pod_crash + database_unavailable + minio_unavailable + vault_unavailable
-- [ ] 11-11-PLAN.md — Rebuild reconciliation building blocks (_table_checksum columns=, snapshot/compare)
-- [ ] 11-13-PLAN.md — Runbooks I: 15 real-incident/existing-feature/stub docs + structural policy test
+- [x] 11-01-PLAN.md — Slice 1: csv-processor GHCR publish (build, SBOM, cosign sign, trivy scan)
+- [x] 11-07-PLAN.md — Retention contracts + policy evaluator (TDD) + D-40 verify/ADR-0011
+- [x] 11-09-PLAN.md — Chaos I: scaffolding + pod_crash + database_unavailable + minio_unavailable + vault_unavailable
+- [x] 11-11-PLAN.md — Rebuild reconciliation building blocks (_table_checksum columns=, snapshot/compare)
+- [x] 11-13-PLAN.md — Runbooks I: 15 real-incident/existing-feature/stub docs + structural policy test
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
