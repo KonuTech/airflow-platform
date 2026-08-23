@@ -1,0 +1,94 @@
+# D-11: closing a pull request — merged or not — removes that PR's
+# `pr-<number>` GHCR package versions for csv-processor, dbt and airflow.
+# Bounds how long a superseded (or potentially vulnerable) PR-tagged image
+# stays listed in the registry (T-11-08).
+name: GHCR PR cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+# Least privilege at the workflow level; the job below widens it, scoped to
+# itself only.
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Delete pr-<number> package versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # `packages: write` only — this job never checks out repository content
+    # or does anything git-level, only GitHub Packages REST API calls, so
+    # `contents` stays at its implicit `none` default for this job rather
+    # than re-declaring the workflow-level `read` floor unnecessarily.
+    permissions:
+      packages: write
+    strategy:
+      # One image's cleanup failing (e.g. a transient API error) must not
+      # skip the other two — each is an independent package.
+      fail-fast: false
+      matrix:
+        image: [csv-processor, dbt, airflow]
+    steps:
+      # Same lowercasing fix as publish.yml's `publish`/`retag-release` jobs
+      # (GHCR/OCI names must be all-lowercase; this repo's owner login,
+      # `KonuTech`, is not) — kept consistent even though the Packages
+      # user-lookup API itself is case-insensitive, so there is never a
+      # doubt about which casing this workflow used.
+      - name: Resolve lowercased GHCR image owner
+        id: owner
+        run: |
+          echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # actions/delete-package-versions@v5.0.0's `ignore-versions` input is
+      # NOT a tag matcher for container packages — verified by reading its
+      # actual source at the pinned tag (src/version/get-versions.ts,
+      # src/delete.ts): the regex it tests runs against `info.version`,
+      # which is set to `version.name` from the GitHub Packages API
+      # response — for a container package version, `name` is the manifest
+      # DIGEST (`sha256:...`), never one of its tags
+      # (`metadata.container.tags` is a separate field the action's own
+      # filtering logic never reads). A workflow that set
+      # `ignore-versions: '...pr-<N>...'` expecting it to select-by-tag
+      # would match nothing and delete nothing on every run — a D-11
+      # regression that would never fail the build, only silently leave
+      # every pr-<number> package listed forever. This is the scratch-run
+      # verification 11-RESEARCH.md's own Package Legitimacy Audit asked
+      # for, done by reading the pinned v5.0.0 tag's source directly rather
+      # than trusting the README's npm/semver-only examples.
+      #
+      # Correct mechanism for a container package: resolve the specific
+      # version ID(s) whose `metadata.container.tags` contains this PR's
+      # own `pr-<number>` tag via a direct Packages API call, then hand
+      # that exact ID list to the action's `package-version-ids` input —
+      # its one input that unambiguously targets specific versions
+      # (documented and exercised by the action's own README "Delete a
+      # specific version of a package" example).
+      - name: Resolve pr-<number> version id(s) for ${{ matrix.image }}
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="pr-${{ github.event.pull_request.number }}"
+          IDS=$(gh api "/users/${{ steps.owner.outputs.value }}/packages/container/${{ matrix.image }}/versions" \
+            --paginate \
+            --jq "[.[] | select(.metadata.container.tags != null) | select(.metadata.container.tags[]? == \"$TAG\") | .id] | join(\",\")")
+          echo "ids=$IDS" >> "$GITHUB_OUTPUT"
+          if [ -z "$IDS" ]; then
+            echo "::notice::No GHCR version tagged $TAG found for ${{ matrix.image }} — nothing to delete (the image may never have been published for this PR, e.g. a fork PR the publish.yml fork guard skipped)."
+          fi
+
+      # Only invoked when a matching version was actually found — an empty
+      # `package-version-ids` list is an invalid input combination for this
+      # action (`checkInput()` requires at least one selection mechanism),
+      # and "nothing to delete" is an expected, non-error outcome here
+      # (D-11 fires on every PR close, whether or not that PR's images were
+      # ever actually published).
+      - uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        if: steps.resolve.outputs.ids != ''
+        with:
+          owner: ${{ steps.owner.outputs.value }}
+          package-name: ${{ matrix.image }}
+          package-type: container
+          package-version-ids: ${{ steps.resolve.outputs.ids }}

@@ -24,10 +24,17 @@ name: Publish images
 # `needs:` on any ci.yml job — build/publish/scan runs independently and in
 # parallel with ci.yml's check/manifests/integration/secrets jobs, never
 # gated on `make check` passing first.
+#
+# D-03: `release: types: [created]` retags an ALREADY-published SHA image
+# with the release's own semver tag (the `retag-release` job below) — it
+# never rebuilds, so it is not a fourth "build" trigger, just a manifest
+# copy against whatever `push` already built and signed.
 on:
   push:
     branches: [main]
   pull_request:
+  release:
+    types: [created]
 
 # Least privilege at the workflow level, matching ci.yml's floor. The job
 # below widens this, scoped to itself only (see its own `permissions:`).
@@ -220,3 +227,57 @@ jobs:
           severity: "HIGH,CRITICAL"
           exit-code: "1"
           ignore-unfixed: true
+
+  # D-03: a GitHub Release retags the already-published, already-signed,
+  # already-scanned SHA image with the release's own semver — it does NOT
+  # rebuild. `docker buildx imagetools create` copies a manifest reference
+  # to a new tag without pulling/rebuilding any layer, and because cosign
+  # signatures are bound to the image DIGEST (not the tag — see the
+  # `publish` job's own cosign step above), the merge build's existing
+  # signature remains valid for the new semver tag with zero new signing
+  # work (T-11-09: this is a documented property of digest-bound
+  # signatures, not a shortcut around scanning — the retagged manifest is
+  # byte-identical content already scanned once).
+  retag-release:
+    name: Retag ${{ matrix.image }} with release semver (no rebuild)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'release'
+    # No `id-token: write` here — no new signing happens, only a registry
+    # manifest copy under GHCR's own existing push credential.
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [csv-processor, dbt, airflow]
+    steps:
+      # Same lowercasing fix as the `publish` job above (GHCR/OCI repository
+      # names must be all-lowercase; this repo's owner login, `KonuTech`, is
+      # not) — a fresh job gets a fresh `steps` namespace, so this is
+      # re-derived here rather than reused across jobs.
+      - name: Resolve lowercased GHCR image owner
+        id: owner
+        run: |
+          echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # `docker buildx imagetools create` is a buildx subcommand; setting up
+      # buildx explicitly (rather than relying on whatever ships by default
+      # on the runner image) matches the `publish` job's own convention and
+      # keeps the buildx version consistent across both jobs.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Fresh job, fresh login (D-04 — no new secret, same ephemeral
+      # job-scoped GITHUB_TOKEN pattern as the `publish` job).
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag ${{ matrix.image }}:${{ github.sha }} as :${{ github.event.release.tag_name }}
+        run: |
+          docker buildx imagetools create \
+            --tag "ghcr.io/${{ steps.owner.outputs.value }}/${{ matrix.image }}:${{ github.event.release.tag_name }}" \
+            "ghcr.io/${{ steps.owner.outputs.value }}/${{ matrix.image }}:${{ github.sha }}"
