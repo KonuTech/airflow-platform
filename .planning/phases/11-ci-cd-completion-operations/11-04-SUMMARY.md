@@ -141,3 +141,23 @@ None for this session's own work. The plan's own `user_setup` note (optional `DO
 ---
 *Phase: 11-ci-cd-completion-operations*
 *Completed: 2026-08-23 (Tasks 1-2 fully verified; Task 3 partially complete — 2 real bugs found and fixed, 1 deep pre-existing infrastructure gap found and deferred)*
+
+## Self-Check: PASSED
+
+- FOUND: `scripts/helm-install.sh`
+- FOUND: `scripts/stages/70-airflow.sh`
+- FOUND: `scripts/ci-set-workload-images.sh`
+- FOUND: `Makefile`
+- FOUND: `.github/workflows/e2e-smoke.yml`
+- FOUND: `tests/policy/test_offline_gate_stays_offline.py`
+- FOUND: `tests/policy/test_workflow_secrets.py`
+- FOUND: `.planning/phases/11-ci-cd-completion-operations/deferred-items.md`
+- FOUND: `.planning/phases/11-ci-cd-completion-operations/11-04-SUMMARY.md`
+- FOUND: commit `db72ce6` (Task 1)
+- FOUND: commit `c61cbad` (Task 2)
+- FOUND: commit `e99d813` (Task 3 fix 1)
+- FOUND: commit `24ad7f9` (Task 3 fix 2)
+- FOUND: commit `df6a4dc` (Task 3 documentation)
+- FOUND: commit `29d64d8` (SUMMARY.md)
+
+No missing items.
