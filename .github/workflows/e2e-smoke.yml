@@ -108,6 +108,22 @@ jobs:
           DOCTOR_MIN_MEM_GB: "14"
         run: PROFILE=ci make cluster-up
 
+      # THROWAWAY diagnostic step (CICD-09 live-proof PR only, never lands on
+      # main): dump cluster/node state unconditionally so a cluster-up
+      # failure or slowness is diagnosable from the Actions log alone.
+      - name: DEBUG dump cluster state
+        if: always()
+        run: |
+          set -x
+          kubectl --context kind-airflow-platform get nodes -o wide || true
+          kubectl --context kind-airflow-platform describe nodes || true
+          kubectl --context kind-airflow-platform get pods -A -o wide || true
+          kubectl --context kind-airflow-platform -n data get cluster,pods,pvc,events --sort-by=.lastTimestamp || true
+          kubectl --context kind-airflow-platform -n data describe cluster/airflow-db || true
+          kubectl --context kind-airflow-platform -n cnpg-system get pods,events --sort-by=.lastTimestamp || true
+          kubectl --context kind-airflow-platform -n cnpg-system logs -l app.kubernetes.io/name=cloudnative-pg --tail=200 || true
+          docker stats --no-stream || true
+
       - name: Point csv_processor_image/dbt_image at this PR's own GHCR images
         run: scripts/ci-set-workload-images.sh pr-${{ github.event.pull_request.number }}
 
