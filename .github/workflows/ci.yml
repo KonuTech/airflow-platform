@@ -46,6 +46,24 @@ jobs:
       # the single definition of the gate, and plan 01-05 adds the policy test
       # that enforces it.
       - run: make check
+      # CICD-05/D-23: report coverage without gating on it. `make check`'s own
+      # `test` target already ran pytest with `--cov` (pyproject.toml's
+      # [tool.coverage.run] scopes to dataplat/csv_processor); this step only
+      # reports the data that step already collected, via two different
+      # surfaces — no coverage is re-measured here, and no percentage-based
+      # exit-code gate is introduced (pyproject.toml's [tool.coverage.report]
+      # deliberately declares no minimum: "a threshold over a tree that is
+      # mostly configuration is a number people game").
+      - name: Coverage report
+        run: |
+          uv run coverage html
+          echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
+          uv run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage HTML artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-html
+          path: htmlcov/
 
   # CICD-07 / INFRA-10. Offline of any cluster (D-12): `helm template` both
   # values profiles for all five pinned charts, `kubeconform -strict` against
@@ -98,6 +116,31 @@ jobs:
           cache-dependency-glob: "uv.lock"
       - run: make install
       - run: make test-integration
+
+  # CICD-05 (closing a pre-existing gap, not new scope): `tests/dagtest` has
+  # existed since Phase 8 (dag.test() proof of DAG-level backfill mechanics
+  # against a real, testcontainers-provided Airflow metadata DB) but was
+  # never wired into continuous CI until now — every DAG-mechanics test in
+  # this tier ran only when a developer happened to invoke it locally. This
+  # phase's own new dagtest module (plan 11-08, platform_retention) makes
+  # that gap concrete: without this job it would ship with zero continuous
+  # coverage from day one, the same blind spot this job now closes for the
+  # whole tier at once. Structurally identical to `integration` above
+  # (offline of any live cluster, needs only a local Docker daemon for its
+  # own throwaway testcontainers PostgreSQL).
+  dagtest:
+    name: dag.test() suite (testcontainers, offline of any cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: make install
+      - run: make test-dagtest
 
   # SEC-02 / SEC-11. This job holds the claim that no credential has ever been
   # committed to this repository, which is the claim that has to be true before

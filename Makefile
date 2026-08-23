@@ -56,9 +56,9 @@ FILE ?=
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
-        minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
+        minio-creds helm-lint manifests manifest-policy test-integration test-dagtest image-csv-processor \
         image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
-        migrate-analytics rebuild-from-raw
+        migrate-analytics rebuild-from-raw rollback
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -299,6 +299,20 @@ test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — mig
 	# .github/workflows/ci.yml's `integration` job) — separated from `check`
 	# for local-dev speed and Docker-optionality, not exempted from CI.
 	$(RUN_CLUSTER) pytest tests/integration -q
+
+test-dagtest:                    ## CICD-05: dag.test() suite (testcontainers Airflow metadata DB) — closes a pre-existing never-CI'd gap [plan 11-06]
+	# $(RUN_CLUSTER), NOT $(RUN): tests/dagtest/test_run_stage_recorder.py and
+	# test_gap_recorder.py both `import psycopg` directly (checked against
+	# tests/dagtest/conftest.py's own import list per this plan's own
+	# instruction, not guessed) — psycopg lives in the `cluster` dependency
+	# group, deliberately excluded from `dev`/every uv default-group set, the
+	# SAME reason test-integration above needs $(RUN_CLUSTER). Otherwise
+	# structurally identical to test-integration: needs a local Docker
+	# daemon (a throwaway testcontainers PostgreSQL for the Airflow metadata
+	# DB, never the analytical one — tests/dagtest/conftest.py's own T-08-22
+	# separation), reachable from NEITHER `check` nor `ci`'s `check` job —
+	# runs as its own CI job (.github/workflows/ci.yml's `dagtest` job).
+	$(RUN_CLUSTER) pytest tests/dagtest -q
 
 # GIT_SHA is fixed once per `make` invocation, ahead of the target below, so
 # `docker tag`/`docker push`/the Airflow Variable registration all reference
