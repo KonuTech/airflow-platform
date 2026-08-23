@@ -73,3 +73,54 @@ inspection this session: every one of 42 findings here was one of those two
 shapes, none traceable to any committed configuration.
 """
 paths = ['''^build/manifests/''']
+
+[[allowlists]]
+description = """
+Phase 11 planning prose (11-12-PLAN.md) referencing the `ALEMBIC_DSN=...` shell-
+recipe naming convention used by `migrate-analytics` and `rebuild-from-raw` — an
+environment-variable NAME followed by a literal three-dot placeholder, never a
+value. `generic-api-key` fires on the backtick-quoted `NAME=...` shape itself.
+Scoped to this one file and this one literal placeholder string, not to
+`.planning/` generally: a real value pasted into this file under a different
+variable name is still reported.
+"""
+paths = ['''^\.planning/phases/11-ci-cd-completion-operations/11-12-PLAN\.md$''']
+regexTarget = "line"
+regexes = ['''ALEMBIC_DSN=\.\.\.''']
+condition = "AND"
+
+[[allowlists]]
+description = """
+Phase 11's deferred-items.md (plan 11-09's live bug writeup) cites a real
+DagRun's `idempotency_key` — a SHA-256 hex digest, not a credential — as part
+of reproducing a live-diagnosed data-loss bug for a future fix session.
+`generic-api-key` fires on the 64-hex-character value next to the word `key`.
+Regex requires the exact `idempotency_key=` label AND a 64-lowercase-hex-digit
+value, so a real secret assigned to any other name in this file is still
+reported.
+"""
+paths = ['''^\.planning/phases/11-ci-cd-completion-operations/deferred-items\.md$''']
+regexTarget = "line"
+regexes = ['''idempotency_key=`[0-9a-f]{64}`''']
+condition = "AND"
+
+[[allowlists]]
+description = """
+Three test files whose `key=`/`key_suffix=` values are S3 object-store keys
+(filenames like `scenario1_a.csv`) or a plain scenario label
+(`reconciliation_scd2`), not API keys — `generic-api-key` fires on the
+identifier `key` regardless of what it actually names in this codebase's
+domain (object storage). Value charset is restricted to
+`[A-Za-z0-9_.]+` (letters, digits, underscore, dot): real secrets typically
+carry `-`, `+`, `/` or mixed-case entropy outside that set, and even a
+same-charset value must still land on one of these three exact paths under
+the literal `key`/`key_suffix` identifier to be silenced.
+"""
+paths = [
+  '''^tests/integration/test_reconciliation\.py$''',
+  '''^tests/integration/test_schema_resolution\.py$''',
+  '''^tests/unit/test_csv_source_inspect\.py$''',
+]
+regexTarget = "line"
+regexes = ['''key(_suffix)?\s*=\s*"[A-Za-z0-9_.]+"''']
+condition = "AND"
