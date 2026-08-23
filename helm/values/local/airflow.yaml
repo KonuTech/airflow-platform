@@ -51,7 +51,7 @@
 # (see the comment on that key below), not which image is pulled.
 airflowVersion: "3.3.0"
 defaultAirflowRepository: localhost:5001/airflow
-defaultAirflowTag: "cd0d2aa"
+defaultAirflowTag: "9fa4531"
 
 # KubernetesExecutor locally — see the header comment for the argument.
 executor: KubernetesExecutor
