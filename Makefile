@@ -58,7 +58,7 @@ FILE ?=
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
         image-airflow image-dbt ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
-        migrate-analytics
+        migrate-analytics rebuild-from-raw
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -253,6 +253,18 @@ migrate-analytics:               ## 08.1-13: alembic upgrade head against the LI
 	echo "==> running alembic upgrade head against $$db_name"; \
 	ALEMBIC_DSN="postgresql://$${db_user}:$${encoded_pass}@localhost:$${local_port}/$${db_name}" \
 	  $(RUN) alembic -c migrations/alembic.ini upgrade head
+
+rebuild-from-raw:                ## D-28..D-33: DROP the ETL-owned schemas + wipe validated/processed/quarantine + re-backfill from raw -- the disaster-recovery procedure a real operator reaches for, and this phase's own CI capstone test's implementation [plan 11-12]
+	# One reusable implementation, two callers (D-32): a real operator after
+	# an actual disaster invokes this Make target exactly the same way
+	# tests/e2e/slice/test_rebuild_from_raw.py does (subprocess). $(RUN_CLUSTER),
+	# same reasoning as cluster-verify/migrate-analytics above: boto3/psycopg
+	# live in the `cluster` group. scripts/rebuild-from-raw.py itself probes
+	# cluster reachability and fails loudly (non-zero exit) before touching
+	# anything if none is reachable -- mirrors image-csv-processor's own
+	# reachability-probe convention, but fails rather than warns: this is the
+	# single most destructive operation in this whole platform.
+	$(RUN_CLUSTER) python scripts/rebuild-from-raw.py
 
 cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice and tests/e2e/observability against the live cluster [plan 02-02, extended 04-09, 07-07]
 	# $(RUN_CLUSTER), NOT $(RUN): boto3/psycopg live in the `cluster` group,
