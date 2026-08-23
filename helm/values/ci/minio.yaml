@@ -28,8 +28,12 @@ image:
 
 existingSecret: minio-root
 
-nodeSelector:
-  airflow-platform/role: storage
+# No nodeSelector here (unlike helm/values/local/minio.yaml's
+# `airflow-platform/role: storage`): kind/cluster-ci.yaml is genuinely
+# single-node (post-merge fix, deferred-items.md "Plan 11-04" CRITICAL
+# finding) — every pod lands on the only node regardless, so a nodeSelector
+# against a role label that node was never given would leave this Deployment
+# permanently Pending instead of merely being redundant.
 
 # Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
 # other pod the CI job renders.

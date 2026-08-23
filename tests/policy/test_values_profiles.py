@@ -123,6 +123,22 @@ def _is_executor(path: str) -> bool:
     return path == "executor"
 
 
+def _is_node_topology(path: str) -> bool:
+    # Post-merge fix (deferred-items.md "Plan 11-04" CRITICAL finding):
+    # kind/cluster-ci.yaml is genuinely single-node, unlike
+    # kind/cluster.yaml's 3-node local topology (INFRA-01/INFRA-09) — a
+    # nodeSelector pinning a chart to a role label (`airflow-platform/role:
+    # storage`/`analytics`, `ingress-ready: "true"`) that the CI node was
+    # never given leaves that Deployment/Cluster permanently Pending rather
+    # than merely redundant, so CI values drop the selector entirely instead
+    # of re-pointing it at a label that would need to exist on every node.
+    # `cluster.affinity.topologyKey` (CNPG's own pod-anti-affinity spread
+    # key) is dropped alongside its paired nodeSelector for the same reason:
+    # a single instance on a single node has nothing to spread away from.
+    segments = path.split(".")
+    return "nodeSelector" in segments or path.endswith("affinity.topologyKey")
+
+
 # (name, predicate, argument) — every entry MUST carry a non-empty argument
 # (D-06: "any fourth axis needs an argument"), enforced by
 # test_every_permitted_axis_carries_an_argument below rather than left to
@@ -170,6 +186,23 @@ PERMITTED_AXES: tuple[PermittedAxis, ...] = (
             "two pods and two multi-gigabyte image pulls per task, and "
             "values-ci.yaml exists precisely because the full local stack does "
             "not fit that runner — so CI uses LocalExecutor instead."
+        ),
+    ),
+    (
+        "node topology (nodeSelector / affinity.topologyKey)",
+        _is_node_topology,
+        (
+            "The argued fifth axis (post-merge fix, deferred-items.md 'Plan "
+            "11-04' CRITICAL finding, kind/cluster-ci.yaml's own header): CI "
+            "runs a genuinely single-node kind cluster, unlike local's 3-node "
+            "topology with per-role node labels (airflow-platform/role: "
+            "storage/analytics, ingress-ready: true). A nodeSelector against a "
+            "label the single CI node was never given leaves that "
+            "Deployment/Cluster permanently Pending instead of merely being "
+            "redundant, so every chart's own nodeSelector (and CNPG's paired "
+            "affinity.topologyKey, which has nothing to spread a single "
+            "instance away from on a single node) is present in local and "
+            "absent in CI, not merely differently valued."
         ),
     ),
 )
@@ -282,9 +315,9 @@ def test_a_permitted_axis_is_not_reported() -> None:
 
 
 def test_every_permitted_axis_carries_an_argument() -> None:
-    assert len(PERMITTED_AXES) == 4, (
-        f"expected exactly four permitted axes (D-06's three plus the argued "
-        f"fourth), found {len(PERMITTED_AXES)}"
+    assert len(PERMITTED_AXES) == 5, (
+        f"expected exactly five permitted axes (D-06's three plus the argued "
+        f"fourth and fifth), found {len(PERMITTED_AXES)}"
     )
     for name, _predicate, argument in PERMITTED_AXES:
         has_argument = bool(argument and argument.strip())
