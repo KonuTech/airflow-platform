@@ -1,23 +1,33 @@
-# The first real vertical slice of Phase 11's CI/CD track: one image
-# (csv-processor), built, published to GHCR tagged by git SHA, SBOM/
-# provenance-attested, cosign-signed and trivy-scanned, on every merge to
-# main. Deliberately narrow (one image, one trigger) so the mechanism is
-# proven end to end before plan 11-02 generalizes it to three images and a
-# PR-tag variant (D-09).
+# Phase 11's CI/CD image-publishing pipeline, generalized by plan 11-02 from
+# plan 11-01's single-image (csv-processor) proof to all three images this
+# platform ships: csv-processor, dbt, and the custom Airflow[otel] image
+# (D-01 full parity). The same job body now runs once per image via a
+# strategy.matrix, parameterized only by image name and Dockerfile path —
+# every other step (buildx, login, build+push+SBOM+provenance, cosign sign,
+# trivy scan) is byte-identical in shape across all three, matching what
+# `make image-csv-processor`/`image-dbt`/`image-airflow` already do locally.
+#
+# D-09/D-10: a `pull_request:` trigger publishes a `pr-<number>`-tagged
+# image, signed and scanned EXACTLY like a merge-tagged image — plan 11-04's
+# ephemeral-kind PR smoke test needs a real, signed, scanned image to pull,
+# not main's stale last build (11-RESEARCH.md Pitfall 5: an unsigned PR
+# image is denied by plan 11-03's own Kyverno admission policy for what
+# looks like an unrelated pod-scheduling failure).
 name: Publish images
 
-# D-02: this workflow triggers only on push to main, publishing an image
-# tagged with the exact git SHA of the triggering commit — README §78's
-# merge-build-tag-push flow. No `pull_request:` trigger here; PR
-# build-verify-without-push is plan 11-02's D-09 work, not this plan's.
+# D-02: push to main publishes an image tagged by the exact git SHA of the
+# triggering commit (unchanged from plan 11-01). D-09 adds `pull_request:`
+# (unscoped, matching ci.yml's own convention — never `pull_request_target`,
+# which runs in the base repo's context and would expose secrets to a fork).
 #
-# D-06: a separate workflow file from ci.yml, with its own push trigger and
-# no `needs:` on any ci.yml job — the build, publish and scan job runs
-# independently and in parallel with ci.yml's check/manifests/integration/
-# secrets jobs, never gated on `make check` passing first.
+# D-06: still a separate workflow from ci.yml, with its own triggers and no
+# `needs:` on any ci.yml job — build/publish/scan runs independently and in
+# parallel with ci.yml's check/manifests/integration/secrets jobs, never
+# gated on `make check` passing first.
 on:
   push:
     branches: [main]
+  pull_request:
 
 # Least privilege at the workflow level, matching ci.yml's floor. The job
 # below widens this, scoped to itself only (see its own `permissions:`).
@@ -29,13 +39,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  publish-csv-processor:
-    name: Build, sign and scan csv-processor
+  publish:
+    name: Build, sign and scan ${{ matrix.image }}
     runs-on: ubuntu-latest
     # Build + SBOM + sign + scan is heavier than ci.yml's lint/typecheck
-    # jobs; 20 minutes is a measured-once starting ceiling, not a guess
-    # dressed as a fact.
+    # jobs; 20 minutes is a measured-once starting ceiling per image, not a
+    # guess dressed as a fact (each matrix entry gets its own independent
+    # timeout budget, since matrix entries run as separate job instances).
     timeout-minutes: 20
+    # This job only makes sense for push-to-main and pull_request events.
+    # Without this guard, `publish` would still be a candidate job on a
+    # `release: created` event too (job-level `if:` is the only per-job
+    # scoping mechanism GitHub Actions offers — `on:` triggers are
+    # workflow-wide, not job-scoped), and every one of its steps below would
+    # evaluate to "skipped" via the fork-guard condition anyway, leaving a
+    # confusing empty-but-green job in a Release run's UI for no reason.
+    # `release`-triggered retagging is the separate `retag-release` job
+    # plan 11-02 Task 2 adds to this same workflow file.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     # T-11-03: the first job in this repository to widen permissions past
     # `contents: read` — `packages: write` to push to GHCR, `id-token:
     # write` for cosign's keyless GitHub-OIDC signing flow (D-13). Scoped to
@@ -45,16 +66,85 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    strategy:
+      # A failure building/signing/scanning one image must not cancel the
+      # other two in-flight matrix jobs — they are independent artifacts.
+      fail-fast: false
+      matrix:
+        include:
+          - image: csv-processor
+            dockerfile: docker/csv-processor/Dockerfile
+          - image: dbt
+            dockerfile: docker/dbt/Dockerfile
+          - image: airflow
+            dockerfile: docker/airflow/Dockerfile
     steps:
+      # Pitfall 6: a pull_request from a FORK never receives `packages:
+      # write` no matter what this workflow's `permissions:` block asks for
+      # — GitHub forces a read-only GITHUB_TOKEN on fork-originated
+      # pull_request runs, a hard platform restriction this workflow cannot
+      # override (and must not work around via `pull_request_target`, which
+      # would expose secrets to the fork instead — see the `on:` comment
+      # above). This repository is currently single-contributor/direct-push
+      # (no forks in practice today), so this is a documented, low-
+      # probability guard, not exercised by Task 3's own live proof (a
+      # same-repo throwaway branch, not a fork).
+      #
+      # Every substantive step below repeats the identical guard condition
+      # and is skipped cleanly (never failed) when it's false. This step is
+      # the ONLY one that runs in that case, so the run's own log explains
+      # why nothing was built/signed/scanned/pushed instead of leaving a
+      # silent, unexplained empty job.
+      - name: Report fork-PR guard status
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::notice::Skipping build/push/sign/scan for ${{ matrix.image }} — this pull_request originates from a fork (${{ github.event.pull_request.head.repo.full_name }}), which GitHub never grants packages: write on pull_request-triggered runs (a hard platform restriction, not a bug in this workflow). No image is published for fork PRs today."
+
+      # GHCR/OCI repository names must be all-lowercase (Docker's own
+      # `invalid tag ... repository name must be lowercase` rejection) —
+      # live-confirmed the hard way: this repository's owner login is
+      # `KonuTech` (mixed case), and `github.repository_owner` preserves
+      # that exact casing. Both of plan 11-01's real push-to-main runs
+      # (32614234666, 32619730503) failed at this exact `build-push-action`
+      # step with `invalid tag "ghcr.io/KonuTech/csv-processor:...":
+      # repository name must be lowercase` before this fix. Every
+      # image-reference-constructing step below uses this lowercased value,
+      # never the raw `github.repository_owner` context directly.
+      - name: Resolve lowercased GHCR image owner
+        id: owner
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # D-09: on `pull_request`, tag by `pr-<number>` so plan 11-04's
+      # ephemeral-kind smoke test can pull a PR's own code, not main's last
+      # image. On `push`, tag by the exact triggering commit SHA — unchanged
+      # from plan 11-01. Every downstream step (build tags:, trivy
+      # image-ref:) references this SAME computed value; the cosign sign
+      # step signs by DIGEST instead (steps.build.outputs.digest), which is
+      # already tied to whichever tag this run just pushed.
+      - name: Compute image tag for this event
+        id: tag
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "value=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
       # Actions are pinned by commit SHA, not tag: a tag is mutable and can
       # be repointed at malicious code, a SHA cannot. Every SHA below was
       # resolved live via `git ls-remote --tags <repo> refs/tags/<version>`
-      # at execution time, never hand-written from memory.
+      # at execution time (plan 11-01), never hand-written from memory.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -64,39 +154,47 @@ jobs:
           # package inherits this public repository's visibility.
 
       - id: build
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: docker/csv-processor/Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: true
-          # Tagged by the exact, full 40-character git SHA of the
-          # triggering commit — never `:latest`, never the short-SHA form
-          # `make image-csv-processor` uses for local dev (D-05: amd64-only,
-          # no multi-platform/QEMU buildx configuration).
-          tags: ghcr.io/${{ github.repository_owner }}/csv-processor:${{ github.sha }}
+          # Tagged by the computed value above (full git SHA on push,
+          # `pr-<number>` on pull_request) — never `:latest`, never the
+          # short-SHA form `make image-{csv-processor,dbt,airflow}` use for
+          # local dev (D-05: amd64-only, no multi-platform/QEMU buildx
+          # configuration).
+          tags: ghcr.io/${{ steps.owner.outputs.value }}/${{ matrix.image }}:${{ steps.tag.outputs.value }}
           # D-13: buildx-native SBOM (Syft-backed) and provenance
           # attestations, produced by the build itself — not a separate
           # manual step.
           provenance: true
           sbom: true
-          # Same build-arg name the Makefile's image-csv-processor target
-          # passes (docker/csv-processor/Dockerfile's `ARG GIT_SHA`), but
-          # with the full SHA `github.sha` provides — the canonical form —
-          # not the short form the Makefile target uses for local dev. The
-          # image tag above and this build-arg must both use the same full
-          # SHA for this workflow's own runs.
+          # Same build-arg name every Dockerfile's `ARG GIT_SHA` declares,
+          # always the triggering commit's full SHA regardless of event
+          # type (for a pull_request run this is the synthetic merge
+          # commit GitHub Actions checks out by default — a real, traceable
+          # snapshot of the PR's own code, matching the OIDC subject
+          # `.../publish.yml@refs/pull/<N>/merge` cosign later signs under).
           build-args: GIT_SHA=${{ github.sha }}
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         with:
           # Pin cosign itself to >= 3.1.3 (fixes GHSA-fx35-mq7g-6g98, a
           # verification-bypass CVE in legacy bundle handling).
           cosign-release: "v3.1.3"
 
-      # D-13: cosign keyless (GitHub OIDC) signing, no key management
-      # required. Sign by DIGEST (the build step's own output), never by
-      # tag, so the signature is bound to immutable content — a tag can be
-      # repointed after signing, a digest cannot.
+      # D-13/D-10 (Pitfall 5): cosign keyless (GitHub OIDC) signing, no key
+      # management required. Sign by DIGEST (the build step's own output),
+      # never by tag, so the signature is bound to immutable content — a
+      # tag can be repointed after signing, a digest cannot. This step is
+      # gated by the SAME fork-guard condition as the build step above, not
+      # by `github.event_name == 'push'` alone — a `pr-<number>` image must
+      # be signed exactly like a merge-tagged image, or plan 11-03's
+      # Kyverno policy denies it for what looks like an unrelated
+      # scheduling failure.
       #
       # No legacy "experimental keyless" opt-in env var is set anywhere in
       # this workflow: it has been vestigial since cosign v2, keyless is
@@ -104,17 +202,21 @@ jobs:
       # still show it). A policy test enforces this workflow never
       # reintroduces that variable by its literal name.
       - name: cosign sign the published digest
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           cosign sign --yes \
-            ghcr.io/${{ github.repository_owner }}/csv-processor@${{ steps.build.outputs.digest }}
+            ghcr.io/${{ steps.owner.outputs.value }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
 
       # D-07: if this step's first real run finds a pre-existing unfixed
       # HIGH/CRITICAL finding in a base image, add a dated, justified
       # .trivyignore entry AT THAT TIME — do not pre-seed .trivyignore
-      # speculatively before a real finding exists.
+      # speculatively before a real finding exists. Gated identically to
+      # cosign sign above (D-10): a `pr-<number>` image is scanned exactly
+      # like a merge-tagged image, never skipped for PR builds.
       - uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/csv-processor:${{ github.sha }}
+          image-ref: ghcr.io/${{ steps.owner.outputs.value }}/${{ matrix.image }}:${{ steps.tag.outputs.value }}
           severity: "HIGH,CRITICAL"
           exit-code: "1"
           ignore-unfixed: true
