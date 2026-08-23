@@ -389,7 +389,23 @@ smoke-verify:                   ## D-20: fast PR-gating subset (4 checks) agains
 	echo "==> [2/4] smoke_kubernetes_pod DAG run reaches success"; \
 	run_id="smoke-verify-$$(date +%s)-$$$$"; \
 	$(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags unpause smoke_kubernetes_pod >/dev/null; \
-	$(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags trigger smoke_kubernetes_pod --run-id "$$run_id" >/dev/null; \
+	trigger_log="/tmp/smoke-verify-trigger-$$$$.log"; \
+	triggered=0; \
+	for _ in $$(seq 1 24); do \
+	  if $(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags trigger smoke_kubernetes_pod --run-id "$$run_id" >/dev/null 2>"$$trigger_log"; then \
+	    triggered=1; \
+	    break; \
+	  fi; \
+	  echo "    smoke_kubernetes_pod not yet registered in DagModel (dag-processor still parsing) -- retrying"; \
+	  sleep 5; \
+	done; \
+	if [ "$$triggered" != "1" ]; then \
+	  echo "ERROR: airflow dags trigger smoke_kubernetes_pod never succeeded within 120s:" >&2; \
+	  cat "$$trigger_log" >&2; \
+	  rm -f "$$trigger_log"; \
+	  exit 1; \
+	fi; \
+	rm -f "$$trigger_log"; \
 	state=""; \
 	for _ in $$(seq 1 60); do \
 	  state=$$($(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags state smoke_kubernetes_pod "$$run_id" 2>/dev/null | tail -n1 | tr -d '\r'); \
