@@ -13,9 +13,14 @@ Sequencing, in this literal order:
      other database, never the whole instance: the Airflow metadata database lives on a
      physically separate CNPG cluster (INFRA-04) this script never even resolves a connection
      string for.
-  2. `alembic upgrade head` against the now-empty database, over the SAME port-forward the drop
-     just used (no second tunnel) -- reuses `migrations/env.py`'s own `EXPECTED_DATABASE`
-     fail-closed guard for free.
+  2. `alembic upgrade head` against the now-empty database, over its OWN fresh port-forward --
+     mirroring `make migrate-analytics`'s own shell recipe, which always opens a fresh tunnel for
+     its one `alembic upgrade head` call rather than reusing one a prior psycopg connection held
+     open. Reusing a single port-forward across the step-1 psycopg connection and this step's
+     separate `alembic` subprocess was tried and failed reliably (connection refused immediately
+     after `DROP SCHEMA`, 2/2 live runs) -- a fresh tunnel per operation is the proven-reliable
+     shape in this environment, not merely a style preference. This still reuses
+     `migrations/env.py`'s own `EXPECTED_DATABASE` fail-closed guard for free.
   3. Empty MinIO's `validated`/`processed`/`quarantine` buckets via boto3, using the ADMIN
      credential (T-11-32) -- the `etl-app` IAM policy (`helm/values/*/minio.yaml`) grants this
      workload identity no delete/list access to `processed`/`quarantine` at all, and no delete
@@ -340,8 +345,10 @@ def _run_alembic_upgrade(dsn: str) -> None:
     `ALEMBIC_DSN` environment-variable contract exactly.
 
     Args:
-        dsn: The analytics superuser DSN (a bare `postgresql://` URL; `migrations/env.py`
-            rewrites it to `postgresql+psycopg://` itself), over an already-open port-forward.
+        dsn: The analytics superuser DSN, over a FRESH port-forward opened by this call's own
+            caller specifically for this step (never the same tunnel `_drop_etl_schemas` used --
+            see `main()`'s own comment for why reusing one tunnel across a psycopg connection and
+            this subprocess failed reliably in this environment).
 
     Raises:
         RuntimeError: The `alembic upgrade head` subprocess exits non-zero.
@@ -701,9 +708,20 @@ def main() -> int:
     kubectl_context = _kubectl_context()
     _probe_live_cluster(kubectl_context)
 
+    # Two SEPARATE, freshly-opened port-forwards -- one for the DROP SCHEMA psycopg
+    # connection, one for the alembic subprocess -- not one tunnel shared across both.
+    # Reusing a single tunnel across a live psycopg connection and a subsequent, separate
+    # `alembic` subprocess connection failed reliably in this environment (connection refused
+    # immediately after `DROP SCHEMA`, 2/2 live attempts) even though the tunnel process itself
+    # was still running; `make migrate-analytics`'s own shell recipe already establishes the
+    # working pattern of one fresh port-forward per operation, so this mirrors it exactly rather
+    # than inventing a different fix.
     with _port_forwarded_analytics_superuser(kubectl_context) as local_port:
         dsn = _superuser_dsn(kubectl_context, local_port=local_port)
         _drop_etl_schemas(dsn)
+
+    with _port_forwarded_analytics_superuser(kubectl_context) as local_port:
+        dsn = _superuser_dsn(kubectl_context, local_port=local_port)
         _run_alembic_upgrade(dsn)
 
     _wipe_minio_layers(kubectl_context)
