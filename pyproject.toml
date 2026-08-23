@@ -208,6 +208,7 @@ markers = [
   "integration: needs a local Docker daemon (testcontainers PostgreSQL/MinIO); excluded from the offline gate (06-17-PLAN.md)",
   "dagtest: needs a local Docker daemon (testcontainers PostgreSQL for Airflow metadata); excluded from the offline gate",
   "dbt: shells out to a real dbt build against testcontainers PostgreSQL; excluded from the offline gate",
+  "chaos: deliberately breaks a live component to prove recovery; excluded from the offline gate and from make cluster-verify, run via a dedicated CI job",
 ]
 
 [tool.coverage.run]
