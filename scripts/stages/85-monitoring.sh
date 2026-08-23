@@ -56,6 +56,33 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# Post-merge fix (CICD-09 follow-up): CLAUDE.md's own CI-runner-sizing
+# constraint states this explicitly -- "a trimmed single-node CI profile
+# (monitoring disabled, minimal replicas) for ephemeral-kind E2E" -- and
+# tests/policy/test_values_profiles.py's own "monitoring enablement" axis
+# docstring already says "kube-prometheus-stack itself is Phase 7 and is
+# not deployed by this phase's CI job". This stage never actually honoured
+# either: it ran unconditionally regardless of PROFILE, deploying the full
+# kube-prometheus-stack + otel-collector + tempo stack onto the single CI
+# node too. Live-diagnosed (this session, CICD-09's own throwaway-PR proof):
+# with monitoring installed, the CI node's own Allocated-resources showed
+# cpu requests at 2810m/3000m (93%) BEFORE any burst, and airflow-scheduler-0
+# itself was CrashLoopBackOff with its own startup probe (`airflow jobs
+# check --job-type SchedulerJob --local`) timing out at 20s under that
+# contention -- the scheduler never stayed alive long enough to dispatch a
+# single queued task, so smoke-verify's [2/4] DagRun sat in `queued`
+# forever. Skipping this stage entirely on PROFILE=ci is not a new
+# architectural decision -- it is finally implementing what this project's
+# own design already specified. helm/values/ci/{otel-collector,tempo,
+# monitoring}.yaml stay committed and are still rendered/linted by `make
+# manifests`/`helm-lint` (an offline concern, unaffected by skipping the
+# LIVE install here) -- only this stage's live `helm upgrade --install`
+# calls are skipped.
+if [ "${PROFILE:-local}" = "ci" ]; then
+  echo "==> skipping monitoring stage (PROFILE=ci -- CLAUDE.md's own CI profile disables monitoring)"
+  exit 0
+fi
+
 # shellcheck source=/dev/null
 source "${repo_root}/helm/versions.env"
 # shellcheck source=/dev/null
