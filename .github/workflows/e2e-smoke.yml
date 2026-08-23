@@ -111,6 +111,24 @@ jobs:
       - name: Point csv_processor_image/dbt_image at this PR's own GHCR images
         run: scripts/ci-set-workload-images.sh pr-${{ github.event.pull_request.number }}
 
+      # Post-merge fix (CICD-09 follow-up): `make cluster-up` deliberately
+      # leaves Vault sealed and un-bootstrapped -- scripts/stages/80-vault.sh's
+      # own header comment documents this as two separate, scripted steps a
+      # developer runs by hand afterward (D-02, plan 05-01 Task 2). This was
+      # never wired into e2e-smoke.yml at all, so `make smoke-verify`'s own
+      # [1/4] "every Deployment/StatefulSet Ready" check was live-diagnosed
+      # (this session) failing on vault/StatefulSet/vault (expected sealed,
+      # not a real failure) AND monitoring/Deployment/monitoring-grafana
+      # (blocked on the grafana-alert-webhook Secret that ONLY
+      # `make vault-bootstrap` creates, per scripts/stages/85-monitoring.sh's
+      # own header comment) -- neither is a resource-sizing or timing issue;
+      # both are this project's own documented, intentional bootstrap-order
+      # requirement that this workflow simply never satisfied.
+      - name: Unseal and bootstrap Vault
+        run: |
+          make vault-unseal
+          make vault-bootstrap
+
       # The D-20 4-point proof, composed as one Make target so a developer
       # and this workflow invoke the exact same gate (Makefile's own
       # `smoke-verify` docstring).
