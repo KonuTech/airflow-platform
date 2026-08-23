@@ -1,0 +1,165 @@
+# D-14/D-15/D-16/D-18: cluster-wide admission-time cosign signature
+# enforcement. Applied by scripts/stages/26-kyverno-policy.sh via `kubectl
+# apply -f` — the ONE permitted `kubectl apply -f <committed kubernetes/
+# path>` shape (75-etl.sh's own precedent comment; this is a third instance,
+# not a new exception).
+#
+# CEL-based `ImageValidatingPolicy` (`policies.kyverno.io/v1`), NOT the
+# deprecated `kyverno.io/v1 ClusterPolicy` + `verifyImages` shape — the
+# legacy rule-based engine is targeted for removal around Kyverno v1.20/Oct
+# 2026 (11-RESEARCH.md), and CONTEXT.md's own "Claude's Discretion" note on
+# exact policy shape explicitly grants this correction.
+#
+# Two corrections to CONTEXT.md's own literal wording, both discovered by
+# pulling the pinned chart (`helm pull kyverno/kyverno --version 3.8.2
+# --untar`) and reading its bundled CRD schema directly rather than assuming:
+#
+#   1. `spec.validationActions` accepts exactly `[Deny, Audit, Warn]` per the
+#      CRD's own enum -- NOT `Enforce`, which does not exist in this API
+#      version. `Deny` is the fail-closed equivalent CONTEXT.md's T-11-11
+#      threat-register entry actually calls for.
+#   2. There is NO `spec.skipImageReferences` field anywhere in this CRD
+#      (confirmed absent by grepping the full schema, both `v1` and
+#      `v1alpha1`). The D-16 exception list is instead implemented as a
+#      per-image NOT-IN-list `spec.matchImageReferences[].expression` (below)
+#      -- live-verified this session against the exact pinned chart version
+#      via three throwaway probe ImageValidatingPolicy resources applied to
+#      the real cluster: (a) `ref` is a real, compiling, correctly-bound
+#      per-image CEL string variable in this exact context (confirmed by a
+#      probe whose `matchImageReferences[].expression` selectively populated
+#      `images.containers` only for a chosen image), and (b)
+#      `images.initContainers` is a real, populated field alongside
+#      `images.containers` (confirmed by a probe whose `messageExpression`
+#      printed both sizes for a pod with one of each). An EARLIER draft of
+#      this policy used a whole-pod `spec.matchConditions` exemption instead
+#      (the shape Kyverno's own `test/cli/sample-policy-exclusion/ivpol.yaml`
+#      reference example uses) -- live-tested and REJECTED after it proved a
+#      real bypass: a pod mixing one exempted container (any image on the
+#      list below) with one unexempted, unsigned container was WRONGLY
+#      admitted in its entirety, because `matchConditions` only sees whether
+#      ANY container in the pod matches, not each container independently.
+#      Scoping the exemption inside `matchImageReferences` instead means each
+#      container's image is judged on its own -- confirmed live: the same
+#      mixed pod that bypassed the `matchConditions` draft is correctly
+#      denied under this final version.
+#
+# D-16 exception-list accuracy (T-11-12): every entry below was read from
+# this session's own freshly rendered `build/manifests/{local,ci}/*.yaml`
+# (via `make manifests`, then a walk over every rendered `image:`/
+# `imageName:` key) plus a live `kubectl -n vault get pods -o
+# jsonpath=...image` query for Vault (whose chart is not part of
+# render-manifests.sh's loop -- a pre-existing, documented gap, see that
+# script's own header comment). This is the actual, complete image set every
+# infrastructure chart in this repository resolves to today, not a
+# hand-guessed list from reading values files alone -- values files alone
+# would have missed every image a chart pulls from its OWN default (CNPG's
+# `ghcr.io/cloudnative-pg/postgresql`, ingress-nginx's controller image,
+# Vault's own server image, and every kube-prometheus-stack sub-image, none
+# of which are overridden in this repository's values files).
+#
+# `localhost:5001/` (this project's own local dev registry) is matched by
+# PREFIX, not by exact reference, and deliberately covers this project's OWN
+# images (csv-processor, dbt, airflow) too -- NOT because they are
+# "third-party", but because the `make image-*` local-dev build/push path
+# has never been wired to cosign-sign anything (only the separate,
+# GHCR-published copies from `.github/workflows/publish.yml` are signed).
+# The real, currently-deployed Airflow chart (`helm/values/*/airflow.yaml`'s
+# `defaultAirflowRepository: localhost:5001/airflow`) and the real, currently
+# -running KubernetesPodOperator task pods (Airflow Variable
+# `csv_processor_image`, confirmed live this session to read
+# `localhost:5001/csv-processor:917e45c`) BOTH resolve to this registry today
+# -- exempting it is what keeps D-15's "including the platform's own core
+# components on a normal cluster build" truth actually true, rather than
+# breaking every real DAG run the moment this policy goes live. This is a
+# genuine, deliberate scope limitation, recorded here rather than hidden:
+# local dev/CI images are not held to the same signature bar as a
+# GHCR-published release. Pointing local dev at the signed GHCR images
+# instead is future work (a local-workflow change, out of this plan's
+# declared file scope), not silently done here.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: require-signed-images
+spec:
+  failurePolicy: Fail
+
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        # D-15: no namespaceSelector/objectSelector anywhere in this spec --
+        # cluster-wide, every namespace, no exemption for this project's own
+        # namespaces.
+
+  # Per-image exemption (D-16): `ref` is the full image reference of the
+  # SINGLE image currently being considered, bound by Kyverno's own
+  # `matchImageReferences` CEL environment for this exact chart version
+  # (live-confirmed, see the header comment above). An image matches this
+  # rule -- and is therefore added to `images.containers`/
+  # `images.initContainers` below, i.e. REQUIRES verification -- only when
+  # it is NEITHER a local-dev-registry image NOR literally one of the
+  # pinned third-party references. Every entry is the exact reference this
+  # session's own `make manifests` render (plus a live Vault pod query, see
+  # the header comment) produced -- read, not guessed.
+  matchImageReferences:
+    - expression: >-
+        !(ref.startsWith('localhost:5001/') || ref in [
+          'alpine:3.17',
+          'docker.io/curlimages/curl:8.21.0',
+          'docker.io/grafana/grafana:13.1.3',
+          'docker.io/grafana/tempo:2.10.8',
+          'docker.io/library/busybox:1.38.0',
+          'ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0',
+          'ghcr.io/cloudnative-pg/postgresql:17',
+          'ghcr.io/cloudnative-pg/postgresql:18',
+          'ghcr.io/jkroepke/kube-webhook-certgen:1.8.5',
+          'hashicorp/vault:2.0.3',
+          'otel/opentelemetry-collector-contrib:0.158.0',
+          'pgsty/minio:RELEASE.2026-08-04T00-00-00Z',
+          'quay.io/kiwigrid/k8s-sidecar:2.10.1',
+          'quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z',
+          'quay.io/prometheus-operator/prometheus-operator:v0.93.0',
+          'quay.io/prometheus/node-exporter:v1.12.1-distroless',
+          'quay.io/prometheus/prometheus:v3.13.2-distroless',
+          'quay.io/prometheus/statsd-exporter:v0.30.0',
+          'registry.k8s.io/ingress-nginx/controller:v1.15.1@sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1',
+          'registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9@sha256:01038e7de14b78d702d2849c3aad72fd25903c4765af63cf16aa3398f5d5f2dd',
+          'registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1'
+        ])
+
+  validationActions: [Deny]
+
+  attestors:
+    - name: cosign
+      cosign:
+        keyless:
+          identities:
+            # Matches both the merge-triggered subject
+            # (.../publish.yml@refs/heads/main) and the PR-triggered subject
+            # (.../publish.yml@refs/pull/<N>/merge) -- live-verified against
+            # plan 11-02's own PR #8 cosign verify call and this session's
+            # own re-verification against the real merge-tagged
+            # csv-processor image (commit f0e439e, digest sha256:374415...).
+            # Getting this regex wrong denies every PR's own smoke test in
+            # plan 11-04 (Pitfall 5).
+            - issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: >-
+                ^https://github\.com/KonuTech/airflow-platform/\.github/workflows/publish\.yml@refs/(heads/main|pull/[0-9]+/merge)$
+
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyImageSignatures(image, [attestors.cosign])).all(e, e > 0)
+      message: >-
+        container image failed cosign keyless signature verification against
+        this repository's publish.yml OIDC identity, and is not on the
+        pinned-upstream/local-dev exception list -- see
+        kubernetes/kyverno-policy.yaml
+    - expression: >-
+        images.initContainers.map(image, verifyImageSignatures(image, [attestors.cosign])).all(e, e > 0)
+      message: >-
+        init container image failed cosign keyless signature verification
+        against this repository's publish.yml OIDC identity, and is not on
+        the pinned-upstream/local-dev exception list -- see
+        kubernetes/kyverno-policy.yaml

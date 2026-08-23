@@ -18,6 +18,9 @@
 #                kube-prometheus-stack (Grafana + Prometheus); infrastructure-
 #                only, holds no data-correctness state (ROADMAP Phase 7
 #                framing)
+# kyverno        the cluster-wide admission controller (D-14/D-17, plan
+#                11-03) enforcing kubernetes/kyverno-policy.yaml's cosign
+#                signature policy on every pod, every namespace
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -52,3 +55,8 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
