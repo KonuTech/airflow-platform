@@ -355,3 +355,88 @@ alone (LOAD-10's `integrity_gate.py`), but never generalized to this newer, wide
 Not an ADR-0004 reversal or a call to build the ADR's own migration-trigger "third tiny
 distribution": this closes the gap between 11-08's already-reviewed, already-documented exception
 and its actual deployment, nothing more.
+
+## Plan 11-12
+
+### CRITICAL — Kyverno's `require-signed-images` policy live-verifies the KubernetesPodOperator xcom-sidecar image (`alpine:3.24.1`) against Docker Hub on EVERY pod creation, and Docker Hub's anonymous rate limit is exhausted
+
+Found live during this plan's Task 2 preparation (repeatedly triggering/clearing `csv_ingest_
+customers`' `discover` task while chasing what first looked like the documented
+KubernetesJobWatcher "Succeeded pod, watcher misses the event" race — `stage`/`publish`'s own
+`retries=6`/`retries=3` precedent). After ~19 consecutive `discover` failures (across both the
+original `retries=2` and this plan's own `retries=6` bump, commit `95c16b8`), caught a pod-creation
+attempt's own exception via a tight polling loop (racing `on_finish_action=delete_pod`'s near-
+instant cleanup):
+
+```
+ApiException: (400) Reason: Bad Request
+HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",
+"message":"admission webhook \"ivpol.validate.kyverno.svc-fail\" denied the request: Policy
+require-signed-images error: failed to evaluate policy: GET
+https://index.docker.io/v2/library/alpine/manifests/3.24.1: unexpected status code 429 Too Many
+Requests","code":400}
+```
+
+**Root cause, confirmed live:**
+- Every `KubernetesPodOperator` child pod this project's `common_kpo_kwargs()` builds
+  (`do_xcom_push=True`, `_common/kpo.py`) gets the `cncf.kubernetes` provider's own DEFAULT
+  `airflow-xcom-sidecar` container — `alpine:3.24.1`, pulled from Docker Hub. This is upstream
+  provider default behavior, not something this codebase's own values files configure (grepped
+  `airflow/dags/_common/kpo.py` and every `helm/values/*/*.yaml` — no `alpine`/`xcom_sidecar_image`
+  override anywhere).
+- Kyverno's `require-signed-images` `ImageValidatingPolicy` (plan 11-07/11-?, D-16's own exception
+  list) verifies EVERY container image in a pod spec at admission time — including this sidecar.
+  D-16's exception list covers this project's own `localhost:5001/*` local-dev-registry images
+  (STATE.md's own decision log), but a public, upstream-default Docker Hub image like
+  `alpine:3.24.1` was never added to that list, because nobody anticipated the PROVIDER injecting
+  an un-configurable third-party image into every KPO pod.
+- Signature verification requires a LIVE registry API call (`GET .../manifests/3.24.1`) regardless
+  of whether the image is already cached locally — confirmed via `docker exec <node> crictl images`
+  on both `airflow-platform-worker`/`-worker2`: `alpine:3.24.1` IS already pulled and cached on
+  both nodes, yet Kyverno's own verification call still hits Docker Hub fresh, every single pod
+  creation, and is now getting `429 Too Many Requests` (Docker Hub's anonymous/unauthenticated
+  rate limit — no registry credentials are configured for Kyverno's own outbound verification
+  client anywhere in this cluster).
+- This affects EVERY `KubernetesPodOperator`-based task in the platform (`discover`, `stage`,
+  `dbt_build`, `publish` — every ingestion DAG's real work), not just `discover` — `stage`/`publish`
+  merely have larger existing retry budgets (`retries=6`/`retries=3`, pre-dating this discovery,
+  originally attributed entirely to the separate KubernetesJobWatcher race) that happen to absorb
+  more of these failures by chance. `discover`'s own `retries=2→6` bump (commit `95c16b8`, this
+  plan) is a real, valid, independently-justified fix for the KubernetesJobWatcher race it was
+  intended for, but is NOT sufficient against an actively-exhausted Docker Hub rate limit — no
+  retry count fixes a 429 if every retry itself re-triggers the SAME rate-limited call. **This
+  session's own repeated `airflow tasks clear ... -t discover` cycles (chasing what was believed
+  to be a low-probability race) likely materially contributed to exhausting whatever rate-limit
+  budget was left — each clear is itself a fresh pod-creation attempt and therefore a fresh Kyverno
+  verification call.**
+
+**Why not fixed here:** the only real fixes are all Rule-4 architectural/security-policy decisions
+outside this plan's own scope and this executor's own authority to decide unilaterally:
+1. Add `docker.io/library/alpine*` (or the exact sidecar image) to Kyverno's D-16 exception list —
+   weakens the `require-signed-images` control for a real, if low-risk, upstream-default image;
+   needs a deliberate, reviewed decision, not a mid-plan patch.
+2. Configure a registry pull-through cache/mirror (or authenticated Docker Hub credentials) for
+   Kyverno's own outbound verification calls — new infrastructure, a real architectural addition.
+3. Override `KubernetesPodOperator`'s xcom-sidecar image to something already in the exempt
+   `localhost:5001/*` registry — plausible, but requires confirming the `cncf.kubernetes` provider
+   actually exposes a sidecar-image override knob, and re-tagging/hosting that image locally; not
+   verified this session.
+4. Wait out Docker Hub's anonymous rate-limit window (commonly ~6h) — impractical within a single
+   plan-execution session, and does not prevent recurrence.
+
+**Blast radius:** every live E2E/chaos test in this repository that triggers a real DAG run through
+`discover`/`stage`/`dbt_build`/`publish` is exposed to this same failure mode whenever the shared
+cluster's cumulative KPO-pod-creation rate (across ALL concurrent sessions/users of this cluster,
+not just this plan) exhausts Docker Hub's anonymous rate limit — this is very plausibly a
+contributing, previously-unidentified factor in SOME of this phase's other sessions' own documented
+"unusually severe KubernetesJobWatcher flakiness" (plan 11-10's own deferred-items.md entry above
+explicitly named that flakiness as "today ... unusually severe" without a root cause) and Plan
+11-09's own repeated `publish`/`stage` retry exhaustion episodes.
+
+**Recommended next step:** a dedicated `/gsd:debug` session (or a properly-scoped follow-up plan)
+with explicit human sign-off on which of the 4 options above to take — this is a real, security-
+policy-adjacent architectural decision, not a code bug.
+
+| Item | Status | Deferred At |
+|------|--------|-------------|
+| `tests/e2e/slice/test_rebuild_from_raw.py`'s live Task 2 proof, and `make rebuild-from-raw`'s own priming-pass backfill, both remain blocked mid-run on `csv_ingest_customers`'s `discover` task failing to create its KPO child pod under the exhausted Docker Hub rate limit described above. Neither test file's own code, nor `scripts/rebuild-from-raw.py`, nor the two migration idempotency fixes (commits `cd8ab15`/`d00d5bd`) are implicated — all three are independently verified correct (see `11-12-SUMMARY.md`). | Open — CRITICAL, blocks live completion | 2026-08-23, plan 11-12 |
