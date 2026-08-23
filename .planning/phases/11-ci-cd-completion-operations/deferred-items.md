@@ -49,3 +49,148 @@ docstring ("expected to grow in Phase 11"). Fixed in the same commit as
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
 | Pre-existing bug | `tests/integration/test_reconciliation.py`'s four `raw_bronze` tests (`test_clean_staging_pass_writes_one_raw_bronze_row_with_zero_discrepancy` and 3 siblings) fail with `psycopg.errors.InvalidTextRepresentation: invalid input syntax for type bigint` on the `_source_row_number` column during `COPY INTO staging.customers__r<N>` — the value being written looks like a `_record_hash` hex string, suggesting a column-count/ordering mismatch in `StagingLoader`'s `COPY` column list vs. its value tuples (`packages/dataplat/src/dataplat/load/staging.py`), unrelated to `stage_ingest`'s reconciliation-writing step. Confirmed pre-existing and out of scope for plan 11-11: `_table_checksum`/`_compute_silver_gold_reconciliation` (the only functions plan 11-11 touches) are called exclusively from `publish_ingest`, never from `stage_ingest` (the function these 4 failing tests exercise) — this plan's diff makes no change reachable from that code path. Reproducer: `uv run --group cluster pytest tests/integration/test_reconciliation.py -q`. | Open | 2026-08-22 (plan 11-11) |
+
+## Plan 11-09
+
+### CRITICAL — silent data loss when a connection outage (DB/Vault) coincides with a DagRun's own start (`_common/run_stage_recorder.py`)
+
+Found live while executing and independently verifying `test_database_unavailable.py`'s own
+acceptance criterion ("recovers cleanly ... never a silent hang or corrupted state"). **Not a bug
+in this plan's own test code** — the test correctly triggered the fault and correctly detected
+the resulting bad state; the bug lives entirely in pre-existing, shared DAG-orchestration code
+this plan does not modify.
+
+**Root cause (two compounding defects), reproduced and diagnosed live against the real cluster,
+run_id=50071, idempotency_key=`680b47fef083e6d25a336cc118020eeb0e3fdcbdbaee2c165f61ea5c1bd89879`:**
+
+1. **`_common/run_stage_recorder.py`'s `wire_dbt_build_tracking`** wires
+   `stage >> mark_dbt_build_running >> dbt_build >> resolve_dbt_build_status >>
+   mark_dbt_build_done >> publish`. `list_run_ids_pending_dbt_build(dataset_name=...)` (the task
+   `mark_dbt_build_running` consumes as its `run_ids` argument) has **no upstream dependency at
+   all** — it runs essentially at DagRun-start, in parallel with `wait_for_files`/`discover`, and
+   has Airflow's default `retries=0`. When the analytical DB (or Vault, which backs the
+   `analytics_db_default` Connection this task resolves via `BaseHook.get_connection` — confirmed
+   live: `airflow connections get analytics_db_default` returns `"id": null`, i.e. VaultBackend-
+   resolved, not metadata-DB-stored) is unavailable at that exact moment,
+   `list_run_ids_pending_dbt_build` fails permanently for this DagRun (no retry). Airflow's
+   `all_success` trigger rule short-circuits `mark_dbt_build_running` (and cascades through
+   `dbt_build`) to `upstream_failed` **immediately, without waiting for `stage` to even start** —
+   live-observed: `mark_dbt_build_running`/`dbt_build` reached `upstream_failed` at 23:01:29-30,
+   while `stage` (blocked behind `discover`'s own retries) did not start until 23:11:43, ten
+   minutes later. `resolve_dbt_build_status`/`mark_dbt_build_done` both carry
+   `trigger_rule="all_done"` (deliberately, to record dbt_build's outcome even on failure), so
+   they proceed regardless — and **`publish`'s only real gate is `mark_done`, not `stage`
+   directly**, so `publish` ran (try 2, 23:10:51-23:11:02) and exited "successfully" as a
+   no-op — a full 41 seconds *before* `stage` (23:11:43-23:12:14) had even started, let alone
+   produced anything to publish. The module's own docstring confirms this is a regression: it
+   says this wiring "replaces the old `stage >> dbt_build >> publish` edge" — the direct
+   `stage >> publish` dependency that would have prevented this exact race was dropped when the
+   dbt-build-tracking sub-chain was inserted (09-09).
+2. **A second, independent defect**: once `stage` genuinely completed afterward (`rows_read=20`
+   in `meta.ingestion_runs`), the run sat in `status='STAGED'` — `publish` had already run and
+   would not automatically re-run for this same DagRun. The run was only unstuck by an unrelated,
+   later trigger of the same DAG (`test_minio_unavailable.py`'s own manual trigger, run 2) whose
+   own `publish --dataset orders` invocation is dataset-wide (no run-id scoping in its CLI
+   arguments) and swept it up — but that second, delayed `publish` pass recorded
+   `status='SUCCEEDED'` with **`rows_loaded=0`** (`rows_read` stayed `20`), and
+   `normalized.orders` independently confirmed **zero rows** for that run's own order_id window
+   (`SELECT count(*) ... WHERE order_id BETWEEN 2210322252 AND 2210322271` → `0`, verified via a
+   direct `kubectl exec ... psql` query, not through any test-owned connection). A run that read
+   20 real rows was marked terminally `SUCCEEDED` with none of them ever reaching the target
+   table — a genuine, silent violation of this project's own Core Value statement ("no data is
+   ever silently dropped, duplicated or corrupted"), not merely a delayed-but-eventually-correct
+   outcome.
+
+**Two further, independent live confirmations of the same root cause (defect 1), found while
+executing `test_minio_unavailable.py` — neither involves the analytical DB/Vault being
+unavailable at all, confirming defect 1 is a general `publish`-gating bug, not specific to a
+DB/Vault outage:**
+
+- A `csv_ingest_orders` run whose `list_matched_keys` genuinely, permanently `failed` (MinIO
+  scaled to 0, `retries=0`) still had its `publish` task **start and independently retry** (its
+  own `retries=3`, hitting the same pre-existing KubernetesJobWatcher race), because `publish`'s
+  gate (`mark_dbt_build_done`) never depends on `list_matched_keys`/`gate`/`discover`/`stage` at
+  all — every other task in the graph reached a terminal state (`failed`/`upstream_failed`)
+  within seconds, but the DagRun itself stayed `running` for several additional minutes waiting
+  out `publish`'s own unrelated retry backoff before finally reaching `failed`.
+- A separate run (the orphaned first attempt at re-verifying `test_database_unavailable.py`'s own
+  scenario) had `publish` exhaust all 4 of its own attempts (retries=3) against the same
+  KubernetesJobWatcher race, taking ~36 minutes for `publish`'s own exhaustion sequence alone —
+  on top of ~20-25 minutes `dbt_build` already needed earlier in the same run — for a combined
+  ~86 minutes observed end-to-end for what should be a simple recovery. This pre-existing,
+  independently-tracked flakiness (plan 10-08) is not new, but this session is the first
+  live evidence that it can compound severely enough, combined with defect 1's `publish`-gate
+  decoupling, to make even a generous (3600s) test timeout insufficient — `tests/e2e/chaos/
+  test_minio_unavailable.py`'s own `_RECOVERY_TIMEOUT_SECONDS`/`_DAGRUN_FAILED_TIMEOUT_SECONDS`
+  were bumped (5400s/900s) in this plan's own commit to accommodate the observed worst case; this
+  is a legitimate, narrow, in-scope timeout adjustment (Rule 1), not a fix for defect 1 itself.
+
+**A fourth, independent confirmation — via Vault, not the analytical DB — closes the loop on
+defect 1's breadth:** `test_vault_unavailable.py`'s own fault (sealing `vault-0`, via a real pod
+delete/restart — see that file's own module docstring for why this replaced a broken
+`vault operator seal` CLI call, a SEPARATE, narrower bug in the test's own sealing mechanism,
+fixed in this plan's commit) makes `list_run_ids_pending_dbt_build`'s OWN `BaseHook.get_
+connection("analytics_db_default")` call fail too, since that Connection is ALSO Vault-backed
+(confirmed live: `airflow connections get analytics_db_default` returns `"id": null`, i.e.
+VaultBackend-resolved, not metadata-DB-stored) — live-observed against a real triggered
+`csv_ingest_orders` run: `list_run_ids_pending_dbt_build` reached `failed`,
+`mark_dbt_build_running`/`dbt_build` cascaded to `upstream_failed`, while `discover`/`stage`
+(gated on Vault being unsealed again, which happened before they were scheduled) genuinely
+succeeded — the exact same "downstream `publish`-gate decoupling" shape as the other three
+confirmations above, this time via the Vault-backed-connection path specifically. This makes
+defect 1 the single root cause behind ALL FOUR of this plan's own scenarios failing to reliably
+reach a clean, honest `SUCCEEDED` state, not a coincidence of four unrelated flaky tests.
+
+**Separately, an operational near-miss worth recording:** `scripts/vault-unseal.py`'s own
+`.finally` safety net (this test's own last line of defense) reads `.secrets/vault-init.json`
+relative to `repo_root`, which resolves to THIS WORKTREE's own path — and `.secrets/` is
+gitignored, worktree-local, and by this project's own established convention (STATE.md, Phase 05
+decision log) is deliberately written ONLY to the main tree, never an ephemeral worktree. The
+first live run of `test_vault_unavailable.py` in this session genuinely sealed the SHARED
+cluster's Vault and then could not unseal it from this worktree (`ERROR: Vault is already
+initialized, but .../.secrets/vault-init.json does not exist`) — a real, if temporary, outage of
+a component every OTHER concurrent worktree/user of this shared cluster also depends on. Resolved
+immediately by copying (read-only, from the main tree, never written back) `.secrets/vault-init.
+json` into this worktree's own gitignored `.secrets/` directory, then re-running `scripts/
+vault-unseal.py` successfully (confirmed via the unchanged `Cluster ID 243eafb8-...`: genuine
+recovery, no data loss, no re-initialization). **This is a genuine hazard for ANY chaos-test
+plan that seals Vault, run from an isolated worktree, and is worth flagging explicitly for
+plan 11-10/11-05's own execution**: either ensure `.secrets/vault-init.json` is copied into the
+worktree BEFORE running `test_vault_unavailable.py` (as this session ultimately did), or execute
+Vault-sealing chaos tests from the main tree specifically, never a disposable worktree.
+
+**Why not fixed here:** (a) `_common/run_stage_recorder.py` is shared by both
+`csv_ingest_customers.py` and `csv_ingest_orders.py` and is entirely outside this plan's
+`files_modified`; (b) this worktree's DAGs are hostPath-mounted from the **main repository
+tree** (`kind/cluster.yaml`: `hostPath: /home/konutec/projects/airflow-platform/airflow/dags`),
+**not** this worktree's own copy — any edit made here to a DAG-folder file cannot be live-verified
+against the real cluster from an isolated worktree, and this executor's mandate is to verify
+every fix against the real cluster before claiming it works; (c) defect 2 most plausibly lives in
+`dataplat`'s own staging/publish CLI (`packages/dataplat/src/dataplat/load/...`), which is baked
+into the `csv-processor` image — a correct fix there needs an image rebuild and redeploy, a much
+heavier, higher-blast-radius operation than a single chaos-test-authoring plan should perform
+unilaterally against a cluster shared with other concurrent work.
+
+**Recommended fix for defect 1** (high confidence, not yet live-verified): add a direct
+`stage >> publish` edge in `wire_dbt_build_tracking` (`_common/run_stage_recorder.py`), in
+addition to the existing chain — restores the original "publish always waits for stage" guarantee
+the module's own docstring says the dbt-tracking sub-chain was meant to preserve, without
+requiring changes to the sub-chain's own `trigger_rule="all_done"` semantics (which are correct
+and needed for recording `dbt_build`'s own retry/failure history). Defect 2 needs its own
+dedicated investigation into `dataplat`'s publish/merge path for a run whose staging artifact may
+already be gone by the time a second `publish` pass reaches it.
+
+**Blast radius:** not orders-specific — `wire_dbt_build_tracking` is called identically from
+`csv_ingest_customers.py`. Any transient DB or Vault outage overlapping a DagRun's own start,
+for either dataset, can trigger the same silent-data-loss sequence; this is not contingent on
+chaos-test fault injection, only on timing that a real production outage could reproduce.
+
+**Recommended next step:** a dedicated `/gsd:debug` session (or a properly-scoped follow-up
+plan) with the ability to edit and redeploy against the main tree, starting from this entry's
+own live evidence.
+
+| Item | Status | Deferred At |
+|------|--------|-------------|
+| `tests/e2e/chaos/test_database_unavailable.py` cannot pass live until defect 1 (and likely defect 2) above are fixed — the fault window this test must hold (upload → trigger → wait for `discover` to fail) deterministically overlaps `list_run_ids_pending_dbt_build`'s own DagRun-start-time execution, so this is not a rare flake to retry past. | Open — CRITICAL | 2026-08-22, plan 11-09 |
+| `tests/e2e/chaos/test_vault_unavailable.py` — same root cause as the row above, via Vault instead of the DB directly (both back the same `analytics_db_default` Connection `list_run_ids_pending_dbt_build` needs); this file's OWN sealing mechanism (pod-delete restart, replacing a separately-broken `vault operator seal` CLI call — see this file's own module docstring) is fixed and live-confirmed working in this plan's own commit, but a full live pass of the test's recovery assertions remains blocked on defect 1. | Open — CRITICAL (same root cause) | 2026-08-23, plan 11-09 |
+| `tests/e2e/chaos/test_minio_unavailable.py` — NOT blocked by defect 1's primary DB/Vault trigger (a MinIO-only fault does not touch `list_run_ids_pending_dbt_build`'s own connection), but IS affected by defect 1's secondary symptom (`publish`'s gate-decoupling extends how long the DagRun takes to reach a clean `failed` state after `list_matched_keys` itself already failed) compounding with today's unusually severe pre-existing KubernetesJobWatcher flakiness (plan 10-08); this file's own timeouts were bumped (`_RECOVERY_TIMEOUT_SECONDS` 3600→5400s, `_DAGRUN_FAILED_TIMEOUT_SECONDS` 180→900s) to accommodate the live-observed worst case, in this plan's own commit. A full clean live pass was not achieved this session (two attempts: one killed by a harness-level background-task limit unrelated to this test's own correctness, one still in flight when this session's own time budget was reached) but nothing observed contradicts the fault-injection mechanism itself being correct. | Open — not a defect-1 blocker, needs one more clean live attempt | 2026-08-23, plan 11-09 |
