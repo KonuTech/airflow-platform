@@ -287,3 +287,71 @@ execution against this cluster (this plan's own remaining work: live-verifying a
 `test_oom.py`/`test_task_timeout.py` in particular, which themselves add MORE load via a real
 `chaos_probe_oom_publish_customers`/`chaos_probe_timeout_publish_customers` trigger), confirm
 `airflow-scheduler` reaches a genuine, sustained `2/2 Ready` first.
+
+## Plan 11-08 post-merge fix
+
+### `docker/airflow/Dockerfile` never installed `dataplat` — the documented ADR-0004 exception never actually worked live
+
+Found live, post-merge (2026-08-23, after plan 11-08 had already merged and after plan 11-10's own
+CPU-starvation episode above had cleared): `airflow/dags/_common/retention_query.py` (built by
+plan 11-08, D-35/D-38) imports `dataplat.config.model.DatasetConfig` and
+`dataplat.retention.policy` directly at DAG-parse time. That module's own docstring — and
+11-08-PLAN.md's own Interfaces section — documents this as a deliberate, FIFTH ADR-0004 exception:
+both submodules are pure, I/O-free evaluator/contract modules with no CSV-parsing or
+database-writing side effects, unlike ADR-0004's blanket "never a `dataplat` import" for the
+DB-writing exceptions (`kpo.py`/`tracing_kpo.py`/`integrity_gate.py`/`run_stage_recorder.py`/
+`gap_recorder.py`). The reasoning was sound; the wiring to make it actually work was never done.
+`kubectl exec deploy/airflow-api-server -- airflow dags list-import-errors` confirmed live:
+
+```
+dags-folder | platform_retention.py      | ModuleNotFoundError: No module named 'dataplat'
+dags-folder | _common/retention_query.py | ModuleNotFoundError: No module named 'dataplat'
+```
+
+No prior plan (11-08 itself, nor any plan since) ever added `dataplat` to
+`docker/airflow/Dockerfile` — the same gap `020d0c2` (plan 08) already closed once for `psycopg`
+alone (LOAD-10's `integrity_gate.py`), but never generalized to this newer, wider import.
+
+**Fix (this session, two commits):**
+1. `docker/airflow/Dockerfile` (`9fa4531`): `COPY --chown=airflow:0` the `dataplat` package's
+   `pyproject.toml`/`src/` into the image, then `pip install --no-cache-dir --no-deps
+   packages/dataplat/ && rm -rf packages/`. Deliberately `--no-deps`, not a full
+   `pip install packages/dataplat`: `packages/dataplat/pyproject.toml` declares
+   `boto3>=1.43.68`/`opentelemetry-sdk>=1.44`/`opentelemetry-exporter-otlp-proto-http>=1.44`
+   among its dependencies, all of which sit BELOW this image's own already-installed versions
+   (`boto3` 1.43.0 from `apache-airflow-providers-amazon`; both `opentelemetry-*` packages 1.43.0
+   from the `[otel]` extra) — a dependency-resolving install would upgrade them past whatever
+   Airflow's own providers/extras actually pin, reintroducing exactly the uncontrolled-drift
+   problem ADR-0004 exists to prevent. Verified directly (`pip list` inside
+   `apache/airflow:3.3.0-python3.12`) that every import the two used submodules actually reach —
+   `pydantic` 2.13.4, `structlog` 26.1.0 — is already present and within `dataplat`'s own declared
+   ranges, so `--no-deps` needed nothing further. `--chown=airflow:0` was required because the
+   base image runs as the already-non-root `airflow` user (uid 50000, gid 0) and a plain `COPY`
+   defaults to root ownership, which made the cleanup `rm -rf packages/` fail with `Permission
+   denied` (caught in a scratch build before committing).
+2. `helm/versions.env` + `helm/values/{local,ci}/airflow.yaml` (`9542791`): synced
+   `AIRFLOW_IMAGE_TAG`/`defaultAirflowTag` to `9fa4531`, the built-and-pushed image's own tag —
+   identical two-commit shape to plan 07-04's original `8b01cc1` → `dd8ba51` pattern.
+
+**Deployment, live-verified this session:**
+- `make image-airflow` built and pushed `localhost:5001/airflow:9fa4531`.
+- `helm upgrade --install airflow apache-airflow/airflow ... --force-conflicts --server-side=true`
+  (the plain `helm_install` wrapper's default SSA failed with a field-manager conflict — an
+  unrelated `kubectl-patch` field manager still owned `airflow-scheduler`'s CPU
+  limits/requests, a leftover of a manual live mitigation from the plan 11-10 CPU-starvation
+  episode above. Since that incident had cleared by this session's own dispatch, reasserting the
+  Helm-declared values via `--force-conflicts` was the correct fix, not a new workaround —
+  confirmed after: `airflow-scheduler`'s resources read back as the Helm-declared `{limits:
+  {cpu: "1", memory: 1Gi}, requests: {cpu: 500m, memory: 512Mi}}`, not the patched `2`/`1`).
+- All three Deployments (`airflow-api-server`, `airflow-scheduler`, `airflow-dag-processor`) and
+  the `airflow-triggerer` StatefulSet reached Ready on `localhost:5001/airflow:9fa4531`.
+- `airflow dags list-import-errors` returned `No data found` — zero import errors.
+- `airflow dags list-import-errors` (verbose bundle view) showed
+  `platform_retention.py` and `_common/retention_query.py` both parsing with `# Errors: 0`.
+- `uv run --frozen pytest tests/dagtest/test_platform_retention_dagrun.py -q` — **2 passed**
+  (plan 11-08's own `dag.test()` proof, re-run against the real fix, not only the mocked local
+  environment it was originally written against).
+
+Not an ADR-0004 reversal or a call to build the ADR's own migration-trigger "third tiny
+distribution": this closes the gap between 11-08's already-reviewed, already-documented exception
+and its actual deployment, nothing more.
