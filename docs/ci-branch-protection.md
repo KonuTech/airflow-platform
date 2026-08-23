@@ -245,3 +245,7 @@ observation, using exactly the procedure this section previously prescribed:
 silently un-require a check while leaving this document looking correct.
 
 Recorded in `01-VALIDATION.md` § Manual-Only Verifications as `01-09/T2`.
+
+<!-- Throwaway comment-only edit, plan 11-02's own live-PR proof (same pattern as PR #1 above):
+     opened to prove publish.yml's pr-<N> tag + sign + scan + ghcr-cleanup.yml chain live,
+     end to end. Closed without merging; not part of main's real history once closed. -->
