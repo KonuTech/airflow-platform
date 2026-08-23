@@ -259,6 +259,21 @@ the reason they don't pass is a genuine, independently-reproduced platform bug o
 plan's own scope"), this plan's 5 test files and the new `chaos_probe.py` DAG are committed as
 correct, live-verification-blocked code — see `11-10-SUMMARY.md` for the full accounting.
 
+**Further evidence (same session, after the "sustained" update above):** a final, patient,
+background-run `kubectl exec deploy/airflow-api-server -- airflow dags list-import-errors`
+(intended only as a read-only check of whether the new `chaos_probe.py` DAG parses cleanly)
+eventually returned after several minutes with `command terminated with exit code 137` — the
+exec'd process itself was `SIGKILL`'d inside the pod, not merely slow. This is stronger evidence
+than the earlier probe-timeout observations: an ordinary, read-only Airflow CLI query could not
+complete inside the `api-server` container at all. Whether this specific kill was cgroup-level
+memory pressure on that one pod (plausible; `docker stats`' per-node aggregate figures cannot
+rule out one container being tight even when the node's own `MemoryPressure` condition reads
+`False`) or a side effect of this session's own repeated `kubectl exec` diagnostic attempts
+stacking up concurrently is not fully disentangled — flagged honestly rather than asserted either
+way. `chaos_probe.py`'s own live DAG-processor registration therefore remains UNCONFIRMED this
+session (static verification only: `py_compile`, `ruff`, and the `tests/policy/test_dag_thinness.py`/
+`test_dag_line_budget.py` suites all pass clean against the file).
+
 **Recommended follow-up:** a dedicated `/gsd:debug` session, starting from this entry's own live
 evidence, once the shared cluster's ambient load has genuinely settled enough to attempt
 diagnosis without the diagnosis itself further starving an already-CPU-saturated node. The
