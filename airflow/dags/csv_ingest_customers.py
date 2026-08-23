@@ -104,11 +104,14 @@ def csv_ingest_customers() -> None:
         .partial(bucket="raw", dataset_name="customers")
         .expand(key=matched_keys)
     )
+    # retries=6 (not 2): live-observed (plan 11-12) discover's own short pod runtime hits the
+    # SAME KubernetesJobWatcher race documented below at `stage` (Succeeded pod, watcher misses
+    # the event) far more often than 2 retries can absorb -- matches stage's own retries=6 fix.
     discover = KubernetesPodOperator(
         task_id="discover",
         cmds=["dataplat"],
         arguments=["discover", "--dataset", "customers"],
-        retries=2,
+        retries=6,
         retry_exponential_backoff=True,
         **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
     )
