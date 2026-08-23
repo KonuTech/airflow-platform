@@ -179,6 +179,42 @@ jobs:
           make vault-unseal
           make vault-bootstrap
 
+      # Post-merge fix (CICD-09 follow-up): scripts/stages/85-monitoring.sh's
+      # own header comment names the exact recovery for this -- "run
+      # make vault-bootstrap once, then helm upgrade this release again (or
+      # just wait for Kubernetes' own Deployment controller to retry the pod
+      # once the Secret exists -- no re-install needed)". Grafana's pod was
+      # admitted and scheduled BEFORE grafana-alert-webhook existed (it
+      # started failing with CreateContainerConfigError back during
+      # `make cluster-up`'s own 85-monitoring.sh stage), so kubelet is on its
+      # own CrashLoopBackOff-style retry schedule, not a fixed short delay --
+      # `make smoke-verify`'s own [1/4] check is a single point-in-time
+      # `kubectl get`, not a poll, so it can run before that retry happens.
+      # An explicit `rollout restart` forces an immediate retry against the
+      # Secret that now exists, instead of leaving it to kubelet's own
+      # schedule.
+      - name: Restart Grafana now that its Secret exists
+        run: |
+          . scripts/wait-for.sh
+          kubectl --context kind-airflow-platform -n monitoring rollout restart deployment/monitoring-grafana
+          KUBECTL_CONTEXT=kind-airflow-platform wait_for_deploy_available monitoring monitoring-grafana
+
+      # THROWAWAY diagnostic step (CICD-09 live-proof PR only, never lands on
+      # main): only fires if the Grafana restart above still leaves
+      # smoke-verify's [1/4] check red, so the real reason (not a guess) is
+      # visible in the Actions log.
+      - name: DEBUG describe grafana pod if still not ready
+        if: failure()
+        run: |
+          set -x
+          kubectl --context kind-airflow-platform -n monitoring get pods -o wide || true
+          kubectl --context kind-airflow-platform -n monitoring describe deployment/monitoring-grafana || true
+          for p in $(kubectl --context kind-airflow-platform -n monitoring get pods -l app.kubernetes.io/name=grafana -o name); do
+            kubectl --context kind-airflow-platform -n monitoring describe "$p" || true
+          done
+          kubectl --context kind-airflow-platform -n monitoring get events --sort-by=.lastTimestamp || true
+          kubectl --context kind-airflow-platform describe node airflow-platform-control-plane | grep -A20 "^Allocated resources" || true
+
       # The D-20 4-point proof, composed as one Make target so a developer
       # and this workflow invoke the exact same gate (Makefile's own
       # `smoke-verify` docstring).
