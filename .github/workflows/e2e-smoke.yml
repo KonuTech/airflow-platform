@@ -178,6 +178,8 @@ jobs:
         run: |
           make vault-unseal
           make vault-bootstrap
+          . scripts/wait-for.sh
+          KUBECTL_CONTEXT=kind-airflow-platform wait_for_statefulset_ready vault vault
 
       # Post-merge fix (CICD-09 follow-up, superseded): monitoring is no
       # longer installed live in CI at all (scripts/stages/85-monitoring.sh
