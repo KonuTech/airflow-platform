@@ -39,7 +39,7 @@ Scope is the full platform — every DoD item is v1. The v2 section holds only c
 - [x] **INFRA-08**: Container images are reproducible and versioned by git SHA, never deployed as `:latest` — *(DoD 8)*
 - [x] **INFRA-09**: Kubelet reservations, `maxPods` and `extraMounts` are set in the kind config at creation time, because changing them later requires destroying the cluster — *(PITFALLS #10, #11)*
 - [x] **INFRA-10**: Two Helm values profiles (`values-local.yaml`, `values-ci.yaml`) exist from the first infrastructure commit, since the full stack does not fit a 4 CPU / 16 GB CI runner — *(PROJECT.md constraint)*
-- [ ] **INFRA-11**: Configurable retention policies are enforced for raw files, processed files, quarantine, validation reports, ingestion metadata and logs, separately from processing logic — *(Gap 11)*
+- [x] **INFRA-11**: Configurable retention policies are enforced for raw files, processed files, quarantine, validation reports, ingestion metadata and logs, separately from processing logic — *(Gap 11)*
 
 ### SEC — Secrets Management and Workload Identity
 
@@ -281,7 +281,7 @@ Each v1 requirement maps to exactly one phase in `.planning/ROADMAP.md`.
 | INFRA-08 | Phase 3 | Complete |
 | INFRA-09 | Phase 2 | Complete |
 | INFRA-10 | Phase 2 | Complete |
-| INFRA-11 | Phase 11 | Pending |
+| INFRA-11 | Phase 11 | Complete |
 | SEC-01 | Phase 5 | Complete |
 | SEC-02 | Phase 1 | Complete |
 | SEC-03 | Phase 5 | Complete |

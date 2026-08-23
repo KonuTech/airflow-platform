@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: Plan 11-03 fully complete — Kyverno admission-time cosign enforcement live and verified against the real cluster (positive+negative D-18 proof passing)
-last_updated: "2026-08-23T10:24:26.554Z"
+stopped_at: Completed 11-08-PLAN.md
+last_updated: "2026-08-23T11:03:35.218Z"
 last_activity: 2026-08-23
 progress:
   total_phases: 12
   completed_phases: 11
   total_plans: 135
-  completed_plans: 128
+  completed_plans: 129
   percent: 92
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 ## Current Position
 
 Phase: 11 (ci-cd-completion-operations) — EXECUTING
-Plan: 3 of 14
+Plan: 4 of 14
 Status: Ready to execute
 Last activity: 2026-08-23
 
-Progress: [██████████] 95%
+Progress: [██████████] 96%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [██████████] 95%
 | Phase 08 P09 | 10min | 2 tasks | 4 files |
 | Phase 11 P02 | 15min | 0 tasks | 1 files |
 | Phase 11 P03 | 45min | 3 tasks | 11 files |
+| Phase 11 P08 | 35min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,9 @@ Recent decisions affecting current work:
 - [Phase 11]: The D-16 exception list is implemented via a per-image spec.matchImageReferences[].expression, NOT spec.skipImageReferences (which does not exist in this CRD) and not a whole-pod spec.matchConditions -- an earlier matchConditions draft was live-tested and found to have a real admission bypass (a mixed pod with one exempted + one unexempted container was wrongly admitted in full), fixed and re-verified live.
 - [Phase 11]: validationActions: [Deny], not the plan's assumed [Enforce] -- the real CRD enum is exactly Deny/Audit/Warn, discovered by pulling and reading the pinned Kyverno chart's schema directly rather than assuming.
 - [Phase 11]: D-16's exception list also covers this project's own local-dev-registry images (localhost:5001/*) by design: the real, currently-deployed Airflow chart and real KubernetesPodOperator task pods both resolve to unsigned localhost:5001 images today (confirmed live) -- exempting that registry is what keeps 'core components admitted on a normal cluster build' true rather than breaking every real DAG run; documented as a deliberate, disclosed scope limitation.
+- [Phase 11]: platform_retention's business logic lives in _common/retention_query.py (fifth ADR-0004 exception), not inlined in the DAG file -- required for dag.test() testability since Airflow's DagBag freshly re-execs the top-level DAG file on every load_dag() call, so only a submodule's functions can be reliably patched before a test run; also matches csv_ingest_customers.py's own established 'DAG file wires a _common/-defined task' convention.
+- [Phase 11]: platform_retention resolves dataset retention config from meta.config_versions (Postgres), never configs/datasets/*.yaml on disk -- confirmed only the dags hostPath is mounted into any Airflow pod, mirroring ConfigRegistry.get_by_id's own identical, already-documented reasoning.
+- [Phase 11]: Fixed a pre-existing tests/policy/test_dag_thinness.py gap while executing plan 11-08 -- _common/gap_recorder.py (plan 09-10) was never added to either by-name exemption list, confirmed via git stash -u that both policy tests were already failing on main before plan 11-08 touched anything. Fixed as a same-mechanism adjacent bug (Rule 1), not deferred.
 
 ### Pending Todos
 
@@ -150,7 +154,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-23T10:24:26.479Z
-Stopped at: Plan 11-03 fully complete — Kyverno admission-time cosign enforcement live and verified against the real cluster (positive+negative D-18 proof passing)
+Last session: 2026-08-23T11:03:35.089Z
+Stopped at: Completed 11-08-PLAN.md
 Resume file: None
 None
