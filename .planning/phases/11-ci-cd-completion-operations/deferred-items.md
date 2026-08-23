@@ -613,6 +613,126 @@ migration gap (a), it would reproduce there too and needs its own follow-up migr
 local drift (b), a fresh cluster does not carry it forward at all. Either way, Task 3's own live
 run is the authoritative signal, not this local finding.
 
+### CRITICAL — `kind/cluster.yaml` (and its CI Helm-values counterparts) were never actually built to be CI-portable, despite CLAUDE.md's own stated intent
+
+Found live during Task 3's own required throwaway-PR proof (PR #9, branch
+`throwaway/11-04-live-pr-proof`) — this is the actual, root reason `e2e-smoke.yml`'s live run
+does not reach `success` this session, and it is **not** a bug in any file this plan's own task
+list touches.
+
+**Two genuine bugs in `e2e-smoke.yml` itself were found and fixed in the process (both properly
+in-scope, both committed):**
+
+1. **[Rule 1] `secrets.*` referenced directly inside a step's own `if:` conditional makes
+   GitHub's workflow parser reject the entire file at PARSE time.** Isolated via 10 bisected
+   throwaway pushes to PR #9: a workflow with `if: ${{ secrets.DOCKERHUB_USERNAME != '' }}` on
+   any step (even a trivial `run: echo` step, even using the built-in `secrets.GITHUB_TOKEN`
+   instead of a custom secret) never registers for its own `pull_request` trigger at all — every
+   push instead produces a synthetic, zero-job `push`-event run with conclusion `failure` and
+   the generic message "This run likely failed because of a workflow file issue," and
+   `gh workflow list` shows the workflow's display name falling back to its raw file path
+   (`.github/workflows/e2e-smoke.yml`), the standard signature of GitHub never successfully
+   parsing the file's `name:` key. `secrets.*` referenced directly inside a step's `with:` block
+   (not `if:`) works fine — confirmed in the same bisection. Fixed by mirroring the secret into
+   a job-level `env:` var first (`env: DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}`)
+   and gating the step on `env.DOCKERHUB_USERNAME != ''` instead — the documented-safe pattern.
+   Committed `e99d813`.
+2. **[Rule 3] `scripts/doctor.sh`'s `DOCTOR_MIN_CPUS=8`/`DOCTOR_MIN_MEM_GB=20` defaults (the
+   local-WSL2 floor, `docs/wsl/wslconfig.example`) are not CI-appropriate** — this project's own
+   CLAUDE.md already documents "GitHub-hosted runners are 4 CPU / 16 GB," and the real runner
+   this session measured exactly that (4 CPUs, ~15GiB). Both thresholds are explicitly
+   documented as overridable via env vars in `doctor.sh`'s own header comment. Fixed by setting
+   `DOCTOR_MIN_CPUS=4`/`DOCTOR_MIN_MEM_GB=14` in the `e2e-smoke.yml` step that calls
+   `make cluster-up` — CI-specific workflow configuration, not a change to the local-dev
+   default. Committed `24ad7f9`.
+
+**The blocking finding, once both of the above were fixed and `make cluster-up` actually reached
+`kind create cluster`:** the control-plane node's `kubeadm init` failed with `error execution
+phase wait-control-plane: cannot obtain client without bootstrap: could not bootstrap the admin
+user in file admin.conf: unable to create ClusterRoleBinding: client rate limiter Wait returned
+an error: context deadline exceeded` — the API server never became responsive enough for kubeadm
+to complete its own RBAC bootstrap, well before any Helm chart or Airflow component was even
+attempted.
+
+Root cause, confirmed by direct inspection of `kind/cluster.yaml` (this plan's own scope does
+NOT include this file — read-only inspection, no edit made):
+
+- **The kubelet reservation numbers are hardcoded for a 12-CPU/28GiB local development host,
+  not a 4-CPU/16GiB CI runner.** Every one of the THREE nodes' `KubeletConfiguration` patches
+  sets `systemReserved.cpu: "5"` + `kubeReserved.cpu: "4"` = **9 CPU reserved per node** — but
+  every kind node reports the HOST's own full capacity as its own `status.capacity` (the file's
+  own extensive header comment already documents this exact "not statically partitioned"
+  characteristic, computed correctly for a 12-CPU host). On this session's real 4-CPU CI runner,
+  9 CPU reserved **exceeds** the reported 4-CPU capacity outright — the same
+  `"invalid Node Allocatable configuration: capacity of N but reservation of M"` class of
+  failure this file's own comments already document happening once before on an under-provisioned
+  local host (`capacity of 12 but reservation of 21`), now recurring on a CI runner nobody sized
+  for.
+- **The DAG hostPath mount is an absolute, host-specific path**
+  (`/home/konutec/projects/airflow-platform/airflow/dags`, all three nodes) — this exact path
+  does not exist on a GitHub Actions runner (the real checkout there is
+  `/home/runner/work/airflow-platform/airflow-platform/...`). Even if cluster creation somehow
+  succeeded, Docker's own bind-mount-of-a-missing-path behavior would silently produce an EMPTY
+  mount, meaning the DAG processor would never discover `smoke_kubernetes_pod` at all (D-20 point
+  2 would then fail for an unrelated, confusing reason).
+- **`helm/values/ci/{minio,ingress-nginx,cnpg-airflow,cnpg-analytics}.yaml` all carry hard
+  `nodeSelector`s against the SAME three node-role labels `kind/cluster.yaml` assigns**
+  (`ingress-ready: "true"` on the control-plane; `airflow-platform/role: storage` /
+  `airflow-platform/role: analytics` on the two workers) — meaning the CI Helm values were
+  ALSO authored assuming this exact 3-node topology, not the "trimmed single-node CI profile"
+  CLAUDE.md's own STACK.md analysis calls for. A naive single-node collapse of `kind/cluster.yaml`
+  alone would leave these `nodeSelector`s unsatisfiable and every affected component permanently
+  `Pending`.
+
+**Why not fixed here — three independent, compounding reasons, each individually sufficient:**
+1. **Scope.** `kind/cluster.yaml` and `helm/values/ci/*.yaml` are entirely outside this plan's
+   declared `files_modified` (`scripts/helm-install.sh`, `scripts/stages/70-airflow.sh`,
+   `scripts/ci-set-workload-images.sh`, `Makefile`, `.github/workflows/e2e-smoke.yml`).
+2. **Cause.** None of this is caused by plan 11-04's own Task 1/2 changes — `kind/cluster.yaml`
+   has been byte-identical (aside from the documented, unrelated memory-floor quick task
+   `260817-oqy`) since Phase 2, long before this plan existed.
+3. **Magnitude — genuine Rule 4 territory, not a tunable-number fix.** A real fix needs at
+   minimum: (a) a new, genuinely single-node (or otherwise CI-appropriate) kind cluster
+   topology with kubelet reservations sized for a 4-CPU/16GiB host, (b) a generalized (non-
+   hardcoded, checkout-relative) DAG hostPath, and (c) either dropping or relaxing the three CI
+   Helm values files' hard `nodeSelector`s to match whatever the new topology actually provides
+   — a multi-file, cross-cutting infrastructure design decision, not a parameter this plan's own
+   file scope can safely absorb as a same-session auto-fix. `scripts/doctor.sh`'s
+   `DOCTOR_MIN_CPUS`/`DOCTOR_MIN_MEM_GB` had a SANCTIONED override mechanism (documented env
+   vars) this plan could legitimately use from within `e2e-smoke.yml` alone; `kind/cluster.yaml`
+   has no equivalent escape hatch — it is consumed literally, verbatim, by `kind create cluster
+   --config`.
+
+**What IS proven working, live, this session (PR #9, all independently confirmed against real
+GitHub Actions runs, not simulated):**
+- `publish.yml` builds, signs (cosign) and scans all three `pr-9` images cleanly on this PR.
+- `e2e-smoke.yml` now correctly registers as a `pull_request`-triggered workflow (both parser
+  bugs above fixed) and its job runs, in order: checkout, `astral-sh/setup-uv`, `make
+  install-cluster`, the Docker Hub login step correctly SKIPPING (`env.DOCKERHUB_USERNAME`
+  correctly evaluates empty since the secret is unconfigured — D-21's graceful-degradation path,
+  live-confirmed), the `AIRFLOW_IMAGE_OVERRIDE_REPO`/`AIRFLOW_IMAGE_OVERRIDE_TAG` env-writing
+  step, then genuinely invokes `PROFILE=ci make cluster-up` with the corrected
+  `DOCTOR_MIN_CPUS`/`DOCTOR_MIN_MEM_GB` overrides, which genuinely passes `doctor` and reaches
+  real `kind create cluster` / `kubeadm init` execution on the live runner before failing on the
+  node-sizing issue documented above.
+- `ghcr-cleanup.yml` correctly deleted all three `pr-9` GHCR package versions on PR close,
+  independently re-confirmed via a post-cleanup `gh api` re-query (all three: "no version
+  tagged `pr-9` found").
+
+**Recommended next step:** a dedicated, properly-scoped follow-up plan (or `/gsd:debug` session)
+owning: a genuinely CI-sized `kind/cluster.yaml` variant (single-node, or a multi-node layout
+with kubelet reservations actually computed for a 4-CPU/16GiB host using this same file's own
+already-established fair-share formula), a checkout-relative DAG hostPath (`${{
+github.workspace }}/airflow/dags` resolved at `kind create cluster` time, not a literal), and
+the three CI Helm values files' `nodeSelector`s adjusted to match whatever topology that plan
+settles on. `e2e-smoke.yml` itself needs no further change once that lands — its own
+`AIRFLOW_IMAGE_OVERRIDE_*`/`ci-set-workload-images.sh`/`smoke-verify` wiring is already proven
+correct up to the exact point this gap blocks it.
+
+| Item | Status | Deferred At |
+|------|--------|-------------|
+| `e2e-smoke.yml`'s live run cannot reach `success` until `kind/cluster.yaml` (+ its 3 dependent CI Helm values files' `nodeSelector`s) is rebuilt as genuinely CI-sized/CI-portable — a real, multi-file infrastructure design decision, not a same-plan auto-fix. Both actual bugs in `e2e-smoke.yml` itself (parser-breaking `if: secrets.*`, wrong-profile doctor floors) are already found and fixed in this plan's own commits. | Open — CRITICAL, blocks D-19/D-20's own live proof | 2026-08-23, plan 11-04 |
+
 | Item | Status | Deferred At |
 |------|--------|-------------|
 | `tests/e2e/vault/test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs` fails on the local persistent cluster with `permission denied for schema meta` for role `analytics_owner`. Root cause not fully disentangled (migration gap vs. live grant drift); reproducer: `uv run --group cluster pytest tests/e2e/vault/test_airflow_backend.py -q -m cluster`. | Open | 2026-08-23, plan 11-04 |
