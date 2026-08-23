@@ -57,6 +57,30 @@
 # Vault's own server image, and every kube-prometheus-stack sub-image, none
 # of which are overridden in this repository's values files).
 #
+# Post-merge fix (CICD-09 follow-up, kind/cluster-ci.yaml): the two
+# `docker.io/kindest/local-path-*` entries below were MISSING from every
+# prior audit of this list because they are not part of ANY Helm chart's
+# rendered manifest at all -- `local-path-provisioner` is bundled directly
+# into every kind node image (kindest/node:v1.35.5) and its Deployment is
+# created by `kind create cluster` itself, before `scripts/stages/26-kyverno-
+# policy.sh` ever runs, so `make manifests`' chart-by-chart walk structurally
+# cannot see it. The controller image is created early enough to predate
+# Kyverno and was never actually re-validated by it -- but the "helper pod"
+# it dynamically launches PER PVC (to `mkdir`/`rmdir` the hostPath backing
+# each PersistentVolume) is created on-demand, long after Kyverno is live,
+# and was found live-DENIED during this session's own CICD-09 throwaway-PR
+# proof: a genuinely fresh ephemeral-kind cluster's first-ever CNPG PVC
+# provision failed with `ProvisioningFailed ... admission webhook
+# "ivpol.validate.kyverno.svc-fail-finegrained-require-signed-images" denied
+# the request`. This gap existed on the LOCAL profile too (the shared local
+# cluster simply never happened to provision a genuinely NEW PVC since
+# Kyverno went live, so the code path was latent, not absent) -- confirmed by
+# reading the live `local-path-config` ConfigMap's `helperPod.yaml` key and
+# the provisioner Deployment's own image directly off this session's real
+# cluster (`kubectl -n local-path-storage get configmap local-path-config -o
+# jsonpath='{.data.helperPod\.yaml}'` / `get deploy local-path-provisioner -o
+# jsonpath='{.spec.template.spec.containers[0].image}'`), not guessed.
+#
 # `localhost:5001/` (this project's own local dev registry) is matched by
 # PREFIX, not by exact reference, and deliberately covers this project's OWN
 # images (csv-processor, dbt, airflow) too -- NOT because they are
@@ -132,6 +156,8 @@ spec:
           'docker.io/curlimages/curl:8.21.0',
           'docker.io/grafana/grafana:13.1.3',
           'docker.io/grafana/tempo:2.10.8',
+          'docker.io/kindest/local-path-helper:v20260131-7181c60a',
+          'docker.io/kindest/local-path-provisioner:v20260521-9fb22683',
           'docker.io/library/busybox:1.38.0',
           'ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0',
           'ghcr.io/cloudnative-pg/postgresql:17',
