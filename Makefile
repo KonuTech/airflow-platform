@@ -284,6 +284,7 @@ rebuild-from-raw:                ## D-28..D-33: DROP the ETL-owned schemas + wip
 rollback:                        ## D-12: redeploy all three workloads (csv-processor/dbt/airflow) at a prior, already-published git SHA -- the bad-deploy-at-2am runbook [plan 11-06]
 	@if [ -z "$(SHA)" ]; then echo "ERROR: SHA is required, e.g. make rollback SHA=abc1234" >&2; exit 1; fi
 	@set -a; . helm/versions.env; set +a; \
+	set -e; \
 	ctx="kind-$$CLUSTER_NAME"; \
 	if ! $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
 	  echo "ERROR: no live cluster reachable at context $$ctx -- a rollback with no cluster to roll back is a silent no-op, refusing to proceed" >&2; \
