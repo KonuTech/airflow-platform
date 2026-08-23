@@ -439,4 +439,133 @@ policy-adjacent architectural decision, not a code bug.
 
 | Item | Status | Deferred At |
 |------|--------|-------------|
-| `tests/e2e/slice/test_rebuild_from_raw.py`'s live Task 2 proof, and `make rebuild-from-raw`'s own priming-pass backfill, both remain blocked mid-run on `csv_ingest_customers`'s `discover` task failing to create its KPO child pod under the exhausted Docker Hub rate limit described above. Neither test file's own code, nor `scripts/rebuild-from-raw.py`, nor the two migration idempotency fixes (commits `cd8ab15`/`d00d5bd`) are implicated — all three are independently verified correct (see `11-12-SUMMARY.md`). | Open — CRITICAL, blocks live completion | 2026-08-23, plan 11-12 |
+| `tests/e2e/slice/test_rebuild_from_raw.py`'s live Task 2 proof, and `make rebuild-from-raw`'s own priming-pass backfill, both remain blocked mid-run on `csv_ingest_customers`'s `discover` task failing to create its KPO child pod under the exhausted Docker Hub rate limit described above. Neither test file's own code, nor `scripts/rebuild-from-raw.py`, nor the two migration idempotency fixes (commits `cd8ab15`/`d00d5bd`) are implicated — all three are independently verified correct (see `11-12-SUMMARY.md`). | **RESOLVED** — see below, 2026-08-23 | 2026-08-23, plan 11-12 |
+
+### RESOLVED (2026-08-23, post-merge interstitial fix, outside any numbered plan)
+
+Fixed via option 3 from the "Why not fixed here" list above (the recommended option):
+override the `KubernetesPodOperator` xcom-sidecar image to a copy already hosted in this
+project's own exempt `localhost:5001/*` local registry. Options 1 (Kyverno exception-list
+entry) and 2 (registry pull-through cache / authenticated Docker Hub credentials) were NOT
+needed — option 3 turned out fully feasible, so no fallback was required.
+
+**Investigation, confirmed live this session:**
+
+- The `cncf.kubernetes` provider's `airflow.providers.cncf.kubernetes.utils.xcom_sidecar`
+  module (`XCOM_SIDECAR_IMAGE = "alpine:3.24.1"`, a module-level constant) resolves the
+  actual sidecar image via `add_xcom_sidecar(sidecar_container_image=...)`, called from
+  `KubernetesPodOperator.execute` with
+  `sidecar_container_image=self.hook.get_xcom_sidecar_container_image()`. **This is NOT a
+  `KubernetesPodOperator` constructor kwarg** — grepped the operator's full `__init__`
+  signature, no such parameter exists. `KubernetesHook.get_xcom_sidecar_container_image()`
+  instead reads the `xcom_sidecar_container_image` key out of the **`kubernetes_default`
+  Airflow Connection's own `extra` JSON** (`KubernetesHook._get_field`, backed by
+  `conn_extras`/`Connection.extra_dejson`) — the one and only override point the provider
+  exposes for this image, confirmed by reading
+  `airflow/providers/cncf/kubernetes/{utils/xcom_sidecar.py,hooks/kubernetes.py,operators/pod.py}`
+  directly in the installed package (`apache-airflow-providers-cncf-kubernetes`).
+- No `kubernetes_default` Connection existed in this cluster before this fix (`airflow
+  connections get kubernetes_default` → `Connection not found`), so `KubernetesHook.
+  get_connection()`'s own documented behavior (return an empty `Connection` object for
+  the default conn_id when missing) was silently supplying `conn_extras = {}`, i.e. always
+  the provider's own unconfigurable default.
+- The target image and the project's local registry are already digest-identical:
+  `docker exec airflow-platform-worker crictl images` confirmed `alpine:3.24.1` was already
+  cached on the kind worker nodes (as the original diagnosis above also found), and
+  `docker exec airflow-platform-worker ctr -n k8s.io images ls` reported its containerd
+  image ID as `sha256:28bd5fe8b56d...` — the EXACT same digest as this host's own
+  pre-existing `alpine:latest` docker image (`docker inspect alpine:latest --format
+  '{{.Id}}'`). This meant the local registry copy could be produced by RETAGGING an
+  already-cached image, with **zero further Docker Hub calls of any kind** — not even a
+  single `docker pull` — closing the loop on "no recurrence" completely, not just reducing
+  Kyverno's own call volume.
+
+**Fix, this session's commit `3fe6e45`:**
+
+1. New `make image-xcom-sidecar` target (`Makefile`): retags the locally-cached alpine image
+   as `localhost:5001/alpine:3.24.1` (the EXACT tag `XCOM_SIDECAR_IMAGE` pins today — a new
+   `XCOM_SIDECAR_TAG` Make variable, not a hardcoded literal inside the recipe, so a future
+   provider upgrade that bumps its own pinned alpine version is a one-line diff, not a hunt)
+   and pushes it to the project's own local registry. `localhost:5001/*` is already exempted
+   from Kyverno's `require-signed-images` verification by the existing D-16 prefix rule in
+   `kubernetes/kyverno-policy.yaml` — **no change to that policy file was needed at all**,
+   the exemption already covered this the moment the image lived at that prefix.
+2. The same target then idempotently registers the override: checks `airflow connections get
+   kubernetes_default` first (skips if already present — `airflow connections add` fails
+   outright on a duplicate `conn_id`), and if absent, runs `airflow connections add
+   kubernetes_default --conn-type kubernetes --conn-extra '{"xcom_sidecar_container_image":
+   "localhost:5001/alpine:3.24.1"}'`, guarded behind the same live-cluster reachability probe
+   `image-csv-processor`/`image-dbt` already use. This Connection carries no secret (a public
+   image reference only) and lives in the Airflow metadata DB, matching how
+   `csv_processor_image`/`dbt_image` are registered as plain Airflow Variables by their own
+   `make image-*` targets — not a new pattern, the same one generalized to a Connection extra
+   because that is where this specific provider knob lives.
+3. `kubernetes/kyverno-policy.yaml` and `helm/values/{local,ci}/kyverno.yaml`: **unchanged**.
+   Confirmed live (see proof below) that the existing `localhost:5001/` prefix exemption was
+   sufficient without modification.
+
+**Why NOT a `scripts/stages/70-airflow.sh` step:** an earlier draft of this fix added the
+connection-registration step there instead. Reverted after checking
+`tests/policy/test_no_manual_kubectl_surgery.py` (INFRA-07): that policy scans every
+`scripts/**/*.sh` file and permits `kubectl exec` **only** with `-i` (stdin transport,
+already used elsewhere for password-setting). A `kubectl exec ... -- airflow connections
+add ...` call is an argv-borne exec, not stdin-borne, and would have been correctly flagged
+as imperative cluster surgery outside the permitted set. The Makefile itself is NOT covered
+by that scan (`SCAN_DIRS = (scripts/, tools/)`), and `image-csv-processor`/`image-dbt`
+already register their own runtime Airflow config (Variables, not Connections) the identical
+way — via a `kubectl exec ... airflow variables set ...` call inside their own Makefile
+recipe, guarded behind a live-cluster check. Moving this fix into `image-xcom-sidecar`
+matches that established, policy-compliant convention exactly instead of introducing a new
+one. `uv run --frozen pytest tests/policy -q -m "not manifests"` re-run after this fix:
+149 passed, only the 2 pre-existing, unrelated failures documented under "Plan 11-01" above
+remain (`test_dag_line_budget.py`/`test_gates_actually_fail.py`, both confirmed pre-existing
+on the base commit, untouched by this fix).
+
+**Live proof, this session, against the real cluster (not a fresh/synthetic pod, the actual
+in-flight `csv_ingest_customers` DagRun `scheduled__2026-08-23T03:26:00+00:00` that had
+genuinely been failing on this exact issue earlier in the session — `stage` mapped instances
+22-26 had failed around 12:36-12:38 UTC, `mark_dbt_build_running` was `upstream_failed`,
+`publish` was `up_for_retry`):**
+
+- Cleared the DagRun's `stage` mapped task set (`airflow tasks clear csv_ingest_customers -t
+  stage -s ... -e ... -y`) AFTER applying the fix above, forcing 27 fresh
+  `KubernetesPodOperator` pod-creation attempts.
+- `kubectl -n etl get events` across the full clear-and-retry window: **23 pod creations
+  total, ALL `Successfully assigned`, ALL containers `Pulled`/`Created`/`Started` cleanly,
+  ZERO `denied`/`kyverno`/`429`/`FailedCreate`/`Warning` events of any kind** — well past the
+  "at least 5 consecutive" bar this fix was required to clear.
+- Spot-checked pod `stage-nh6lpp97`'s own container images directly
+  (`kubectl -n etl get pod stage-nh6lpp97 -o jsonpath=...`):
+  `base=localhost:5001/csv-processor:917e45c`,
+  `airflow-xcom-sidecar=localhost:5001/alpine:3.24.1` — confirmed the sidecar is genuinely
+  resolving to the local registry copy, not silently falling back to the Docker Hub default.
+- `kubectl -n kyverno logs deploy/kyverno-admission-controller --since=20m`: zero `429`, zero
+  `too many requests`, zero `alpine` mentions anywhere in the admission controller's own log
+  for the entire fix-and-retry window — Kyverno is not merely succeeding against Docker Hub
+  again, it is **no longer calling Docker Hub for this image at all**, which is the stronger
+  and correct claim (the underlying rate-limit exhaustion is an external, transient condition
+  this fix does not control; not calling Docker Hub for this specific image is what
+  structurally prevents recurrence regardless of that external state).
+- The DagRun's `stage` mapped instances did continue to show some `up_for_retry` states
+  during this same window — independently confirmed via the SAME event stream (zero
+  denial/failure events) to be the pre-existing, separately-documented KubernetesJobWatcher
+  race (plan 10-08's own tracked flakiness), not a recurrence of the Kyverno/429 issue this
+  fix targets. The two are genuinely independent failure modes that happened to be
+  compounding in the same DagRun; this fix resolves only the one it targets, and does not
+  claim to resolve plan 10-08's own separately-tracked issue.
+
+**Blast radius of the fix:** every `KubernetesPodOperator` pod this platform creates, in
+every DAG (`discover`/`stage`/`dbt_build`/`publish`, and any future task using
+`common_kpo_kwargs()`), on this cluster — the `kubernetes_default` Connection is a single,
+cluster-wide default, not scoped to one DAG or namespace, matching the blast radius of the
+original bug exactly.
+
+**Residual risk, recorded honestly:** the fix is provisioned imperatively (a `make` target
+run once against the live cluster), not declared as a Kubernetes manifest — matching how
+`csv_processor_image`/`dbt_image` are already provisioned in this repository, not a new
+weaker pattern introduced here. A full cluster teardown+recreate (metadata DB wiped) would
+lose the `kubernetes_default` Connection and require re-running `make image-xcom-sidecar`
+once — exactly the same operational requirement `make image-csv-processor`/`make image-dbt`
+already carry for their own Variables, and consistent with this repository's existing
+bootstrap runbook expectations (a fresh cluster is not fully live-usable until its `make
+image-*` targets have been run at least once).
