@@ -35,26 +35,26 @@ key-files:
 key-decisions:
   - "dbt-core bumped 1.12.2 -> 1.12.3 (not .trivyignore'd) because a real upstream fix path existed: 1.12.3 relaxes its own sqlparse pin from <0.6.0 to <0.7.0, making the already-fixed sqlparse 0.6.0 installable"
   - "airflow image's 53 HIGH/CRITICAL findings (Java jackson-databind/httpcore5 inside ray_dist.jar, Python GitPython/aiohttp/cryptography/litellm/pyasn1/sqlparse, Rust quinn-proto inside uv/uvx, Go stdlib inside the bundled docker CLI) are 100% inherited from the untouched apache/airflow:3.3.0-python3.12 base image (verified via a direct scan of the bare upstream image showing byte-identical finding counts) — recorded as a dated, justified .trivyignore entry per D-07 rather than deviating from Airflow's own officially pinned constraints file"
-  - "Live throwaway-PR end-to-end proof (plan's own Task 3 <verify> requirement) could NOT be executed this session: the environment's `gh` CLI has no authenticated GitHub host and no GH_TOKEN/GITHUB_TOKEN is set, so PR creation, Actions-run watching, and GHCR package-version querying/cleanup confirmation are all unavailable. SSH git push/fetch works (already used to push this session's own commits) but that alone cannot open/close a PR or query the REST API. This is a genuine authentication gate, not a design decision — see 'Blocked: Live PR Proof' below."
+  - "Live throwaway-PR end-to-end proof executed successfully once gh CLI authentication was available: PR #8 (branch throwaway/11-02-live-pr-proof, a comment-only edit to docs/ci-branch-protection.md) proved the full pr-tag + sign + scan + cleanup chain live, end to end — see 'Live PR Proof — RESOLVED' below for the complete evidence trail"
 
-requirements-completed: []  # CICD-06/CICD-08 remain incomplete — see Blocked section. Not marked complete pending the live PR proof.
+requirements-completed: [CICD-06, CICD-08]
 
 # Metrics
-duration: ~55min (this session's residual-verification work only — Tasks 1-3's own implementation was already committed by prior sessions)
+duration: ~55min (prior session's residual-verification work) + ~15min (this session's live-PR proof)
 completed: 2026-08-23
 ---
 
-# Phase 11 Plan 02: 3-Image Matrix Publish Pipeline (dbt/airflow Trivy Fixes) Summary — PARTIALLY VERIFIED, BLOCKED ON LIVE PR PROOF
+# Phase 11 Plan 02: 3-Image Matrix Publish Pipeline (dbt/airflow Trivy Fixes) Summary — FULLY VERIFIED
 
-**Matrixed `publish.yml` across csv-processor/dbt/airflow with PR-tag parity and a `release`-triggered semver retag, plus `ghcr-cleanup.yml` for PR-close teardown — all three images now pass the trivy HIGH/CRITICAL gate cleanly, but the plan's own required live-PR end-to-end proof is blocked by missing `gh` CLI authentication in this environment.**
+**Matrixed `publish.yml` across csv-processor/dbt/airflow with PR-tag parity and a `release`-triggered semver retag, plus `ghcr-cleanup.yml` for PR-close teardown — all three images pass the trivy HIGH/CRITICAL gate cleanly, and the plan's own required live-PR end-to-end proof (PR #8) confirmed the entire pr-tag + sign + scan + cleanup chain works in production, including verified teardown.**
 
 ## Performance
 
-- **Duration:** ~55 min (this session; Tasks 1-3's code was already committed by two prior, host-restart-interrupted sessions)
+- **Duration:** ~55 min (trivy fix session) + ~15 min (this session: live-PR proof)
 - **Started:** 2026-08-23 (continuation session)
-- **Completed:** 2026-08-23 (partial — see Blocked section)
-- **Tasks:** 3/3 code tasks already committed pre-session; this session's own residual work: trivy investigation + fix (done), live PR proof (blocked)
-- **Files modified:** 2 (this session: `docker/dbt/Dockerfile`, `.trivyignore` created)
+- **Completed:** 2026-08-23 (fully verified — see "Live PR Proof — RESOLVED")
+- **Tasks:** 3/3 code tasks committed by prior sessions; trivy investigation + fix done in the intermediate session; live PR proof completed this session — plan fully done
+- **Files modified:** 2 (`docker/dbt/Dockerfile`, `.trivyignore`, prior session) + 0 repo-content files this session (the throwaway PR's commit was discarded by design; only planning docs updated)
 
 ## Accomplishments
 
@@ -73,10 +73,13 @@ Prior sessions (already on `main` before this session began):
 1. **Task 1: Matrix publish.yml across 3 images, PR-tag parity, fork guard** — `e885618` (feat)
 2. **Task 2: release-semver retag job + GHCR PR-tag cleanup workflow** — `82d0893` (feat)
 3. **Task 3: policy guard tests for 3-image matrix/PR-tag parity/cleanup** — `a30740e` (test)
+4. **Trivy investigation + fix (dbt version bump, airflow .trivyignore)** — `d5a3ec0` (fix)
+5. **Blocker documentation (gh auth gate)** — `cf5f306`, `e601f99` (docs)
 
-This session:
+This session (continuation, `gh` now authenticated):
 
-4. **Trivy investigation + fix (dbt version bump, airflow .trivyignore)** — `d5a3ec0` (fix) — pushed to `origin/main`.
+6. **Live PR proof** — no repo-content commit; the throwaway commit `68b626b` (branch `throwaway/11-02-live-pr-proof`, PR #8) was pushed, exercised, and permanently discarded along with its branch when the PR closed — it never landed on `main` and is not part of this repository's real history, by design (mirrors `docs/ci-branch-protection.md`'s own PR #1 precedent).
+7. **This SUMMARY.md update + STATE.md/ROADMAP.md/REQUIREMENTS.md finalization** — see commit below.
 
 **Plan metadata:** this SUMMARY's own commit (see below).
 
@@ -93,7 +96,8 @@ This session:
 - **dbt-core version bump over suppression:** confirmed a real fix path existed (1.12.3 relaxes the sqlparse pin) before touching `.trivyignore` at all — per D-07's own instruction not to suppress when a genuine fix is available.
 - **airflow `.trivyignore` scope:** verified against a direct scan of the bare upstream base image (not just inferred) before writing any suppression, to avoid masking a finding this repo's own Dockerfile might have introduced. Confirmed byte-identical counts, so 100% of the airflow findings are pre-existing/upstream.
 - **Did not attempt to patch/pin around GitPython, aiohttp, cryptography, litellm, pyasn1, the Java jars inside `ray_dist.jar`, quinn-proto, or the Go stdlib inside the bundled `/usr/bin/docker` CLI** — none are installed by this repo's own Dockerfile; all come from Airflow's own official image build, pinned by Airflow's own officially published constraints file. Overriding any of them would mean deviating from Airflow's tested/supported dependency set, which the Dockerfile's own header comment already establishes as a deliberate constraint.
-- **Left `requirements-completed` empty** and did **not** run `state advance-plan` / `requirements mark-complete` / `roadmap update-plan-progress` for this plan — the plan's own `<verification>` block requires both the pytest suite AND a real, live throwaway-PR proof to be green; only the former is currently satisfied. Marking the plan complete without the latter would misrepresent verification status for plans 11-03/11-04, which depend on this plan's GHCR image-reference shape actually working live.
+- **Throwaway PR content chosen as a comment-only edit, not a functional test file:** used a `<!-- -->` HTML comment appended to `docs/ci-branch-protection.md` (a file that already documents the same throwaway-PR-proof pattern for PR #1) rather than a change to any production code path, Dockerfile, or workflow file — guarantees the PR's build content is genuinely inert regardless of outcome, and ties this session's proof to the same precedent the docs already establish.
+- **`requirements-completed: [CICD-06, CICD-08]` now set** and `state advance-plan` / `requirements mark-complete CICD-06 CICD-08` / `roadmap update-plan-progress 11` run this session — the plan's own `<verification>` block's second half (the live throwaway-PR proof) is now satisfied per the "Live PR Proof — RESOLVED" section above, alongside the pytest suite already green from the prior session.
 
 ## Deviations from Plan
 
@@ -120,29 +124,57 @@ This session:
 **Total deviations:** 2 auto-fixed (1 bug fix via version bump, 1 D-07-mandated documented suppression)
 **Impact on plan:** Both were necessary for D-10 (PR images scanned identically to merge images) to actually be satisfiable in CI; neither touches this plan's own declared `files_modified` scope beyond what Rule 1/Rule 2 explicitly permit for blocking issues found during the plan's own verification step.
 
-## Issues Encountered
+## Live PR Proof — RESOLVED
 
-**Blocked: Live PR Proof (Task 3's own `<verify>`/`<action>` requirement, plan's own `<verification>` block)**
+**This session's own scope.** The prior session's blocker (`gh` CLI unauthenticated) was resolved externally before this session began — `gh auth status` now reports a logged-in `github.com` account (`KonuTech`, scopes `repo`, `workflow`, `read:packages`, `read:org`, `gist`). This session executed the plan's own required live-PR proof in full, end to end, exactly per the resume steps the prior session's SUMMARY recorded.
 
-The plan's `<verification>` block requires: *"A real throwaway PR proves the pr-tag+sign+scan+cleanup chain live, end to end, including teardown."* This session investigated whether that step could be executed autonomously and found it cannot, in this environment, right now:
+### What was done
 
-- `gh auth status` reports "You are not logged into any GitHub hosts."
-- No `GH_TOKEN` or `GITHUB_TOKEN` environment variable is set in this shell.
-- `git` itself works fine over SSH (`git@github.com`) — this session's own `docker/dbt/Dockerfile`/`.trivyignore` commit was pushed to `origin/main` successfully via SSH — but opening a PR, watching an Actions run to completion, and querying/confirming GHCR package-version deletion all require the GitHub REST/GraphQL API, which needs an authenticated `gh` (or an equivalent bearer token for `curl`/`gh api`). SSH access alone cannot perform any of those three things.
+1. **Branch + PR:** Created throwaway branch `throwaway/11-02-live-pr-proof` off `main` (base commit `e601f99`), with one comment-only, no-op commit `68b626b` (a `<!-- -->` HTML comment appended to `docs/ci-branch-protection.md`, mirroring that same file's own documented PR #1 precedent — no production logic touched). Pushed and opened via `gh pr create`: **PR #8** (`https://github.com/KonuTech/airflow-platform/pull/8`), head SHA `68b626b1276807068c3969ddb840c1d79318a18a`.
 
-This was not silently skipped or faked: per the authentication-gate protocol, this is a genuine "STOP and report" situation, not a design decision or a scope judgment call. **What's needed to unblock:** either (a) run `gh auth login` interactively in this environment once (device-flow: visit a URL, enter a code — a single human action, not a recurring one), or (b) set `GH_TOKEN`/`GITHUB_TOKEN` to a PAT with `repo` + `workflow` + `packages:read`/`delete:packages`-equivalent scope for this session's shell. Once either is done, a continuation agent (or this same session, resumed) can:
+2. **`publish.yml` watched to completion — run `32630879549`** (triggered by `pull_request`, same-repo, not a fork): overall `status: completed`, `conclusion: success`. All three matrix legs individually confirmed `success`:
+   - `Build, sign and scan csv-processor` — 1m23s, every step (checkout, buildx, login, build-push, cosign-installer, cosign sign, trivy scan) green.
+   - `Build, sign and scan dbt` — 1m31s, same shape, green.
+   - `Build, sign and scan airflow` — 2m5s, same shape, green.
+   - `Retag ... with release semver (no rebuild)` job correctly **skipped** (this was a `pull_request` event, not `release` — the job's own `if: github.event_name == 'release'` guard behaved exactly as designed).
 
-1. Push a trivial throwaway branch + open a PR via `gh pr create`.
-2. `gh run watch --exit-status` the triggered `publish.yml` run to `success` for all three matrix legs.
-3. `gh api /users/<owner>/packages/container/<image>/versions` for each of the three images, confirming a `pr-<N>` tag exists (and optionally `cosign verify` against the csv-processor `pr-<N>` digest, per the plan's own acceptance criteria).
-4. `gh pr close <N> --delete-branch`, then watch `ghcr-cleanup.yml` to completion, then re-query the same three package-version endpoints confirming the `pr-<N>` versions are gone.
-5. Update this SUMMARY.md with the PR number, run URLs, and confirmed teardown, and only then run `state advance-plan` / `requirements mark-complete CICD-06 CICD-08` / `roadmap update-plan-progress 11`.
+3. **GHCR `pr-8` package versions confirmed to exist** for all three images via `gh api /users/konutech/packages/container/<image>/versions`:
+   - `csv-processor` — version id `1162158342`, digest `sha256:a4a9b35640e25e6769686b7479f83fb10c5b91403705d16dc8dc43948a694b75`, tags `["pr-8"]`, created `2026-08-23T09:24:34Z`.
+   - `dbt` — version id `1162158490`, digest `sha256:203290e6bafd69f2858c1cc7eed202ce3766f02797055ea6767ec90843624fb0`, tags `["pr-8"]`, created `2026-08-23T09:24:39Z`.
+   - `airflow` — version id `1162158926`, digest `sha256:520d42b385898d3f5d9f8388e74884e346e7b311de6c5f9d655b9bf154a43e32`, tags `["pr-8"]`, created `2026-08-23T09:25:04Z`.
 
-**None of the code-level work is in question** — `publish.yml`'s tag-computation, fork guard, cosign-sign/trivy-scan non-conditioning on `push` alone, and `ghcr-cleanup.yml`'s tag-to-version-ID resolution logic were all read in full this session and match the plan's acceptance criteria exactly (matrix `include` lists exactly the three images with existing Dockerfile paths; `steps.tag.outputs.value` branches on `github.event_name == 'pull_request'` and produces a `pr-`-prefixed value; cosign-sign/trivy-scan steps use the same fork-guard `if:` as the build step, never `github.event_name == 'push'` alone; `docker buildx imagetools create` references both `github.event.release.tag_name` and `github.sha`). What remains unverified is purely the **live, real-GitHub-activity proof** the plan's own `<verification>` block demands — a proof this session's available credentials cannot produce.
+   Confirmed this is a **user-owned** repository (`gh repo view --json owner`: `KonuTech`, not an org), so `/users/konutech/packages/container/...` is the correct endpoint shape (not `/orgs/...`) — matches what `ghcr-cleanup.yml`'s own `Resolve pr-<number> version id(s)` step already assumes.
+
+4. **cosign verify confirmed live** against the csv-processor `pr-8` digest, using the PR-triggered OIDC identity regex the plan's own acceptance criteria specify:
+   ```
+   cosign verify \
+     --certificate-identity-regexp "https://github.com/KonuTech/airflow-platform/\.github/workflows/publish\.yml@refs/pull/8/merge" \
+     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+     ghcr.io/konutech/csv-processor@sha256:a4a9b35640e25e6769686b7479f83fb10c5b91403705d16dc8dc43948a694b75
+   ```
+   Result: **verified** — "The cosign claims were validated", "Existence of the claims in the transparency log was verified offline", "The code-signing certificate was verified using trusted certificate authority certificates". This proves D-10 live: a `pr-<number>` image is signed exactly like a merge-tagged image, under the correct PR-scoped OIDC subject (`.../publish.yml@refs/pull/8/merge`), not skipped or weakened for PR builds.
+
+5. **PR closed:** `gh pr close 8 --delete-branch` — closed (not merged; `merged: false`, `closed_at: 2026-08-23T09:26:43Z`), throwaway branch and its one-off comment-only commit deleted. The comment-only edit to `docs/ci-branch-protection.md` never landed on `main`.
+
+6. **`ghcr-cleanup.yml` watched to completion — run `32631014608`** (triggered by `pull_request: types: [closed]`): overall `status: completed`, `conclusion: success`, all three matrix legs (`Delete pr-<number> package versions (csv-processor|dbt|airflow)`) individually `success`. Verified via the csv-processor job's own log (`gh api .../jobs/97173733417/logs`) that the resolve-then-delete mechanism actually did work, not vacuously: `IDS=` resolved a real version ID (not empty — the `::notice::No GHCR version tagged ... found` fallback line did NOT fire), `actions/delete-package-versions` ran with `package-version-ids` populated, and its own log line reads `Total versions deleted till now: 1`.
+
+7. **GHCR `pr-8` package versions re-queried and confirmed GONE** for all three images, post-cleanup:
+   - `csv-processor` — no version tagged `pr-8` found. CONFIRMED GONE.
+   - `dbt` — no version tagged `pr-8` found. CONFIRMED GONE.
+   - `airflow` — no version tagged `pr-8` found. CONFIRMED GONE.
+
+### What this proves
+
+The full D-01/D-09/D-10/D-11 chain works live, end to end, exactly as `publish.yml`/`ghcr-cleanup.yml` were designed:
+- A same-repo `pull_request` publishes a `pr-<number>`-tagged image for all three matrix legs (D-09).
+- Each is signed by cosign keyless/OIDC and trivy-scanned identically to a merge-tagged image — never conditioned on `push` alone (D-10), confirmed both by reading the run's own step list (cosign-sign and trivy-scan steps present and green on the PR-triggered run) and by an independent `cosign verify` against the live digest.
+- Closing the PR (without merging) triggers `ghcr-cleanup.yml`, which correctly resolves and deletes the specific `pr-<number>` GHCR package version for all three images (D-11), verified by both the workflow's own "Total versions deleted till now: 1" log line and an independent post-hoc GHCR API re-query showing the tag is actually gone, not just reported deleted.
+
+This closes the plan's own `<verification>` requirement ("A real throwaway PR proves the pr-tag+sign+scan+cleanup chain live, end to end, including teardown") in full. **CICD-06 and CICD-08 are marked complete.**
 
 ## GHCR Image Reference Shape (for plans 11-03 and 11-04)
 
-Recorded here per this plan's own `<output>` requirement, independent of the live-PR-proof blocker above (this shape is read directly from `publish.yml`'s own tag-computation and build-tags logic, not from a live-verified artifact):
+Recorded here per this plan's own `<output>` requirement. This shape is read directly from `publish.yml`'s own tag-computation and build-tags logic AND is now live-verified end to end by PR #8 above (both the `pr-<N>` publish path and the cleanup teardown path were exercised against real GHCR state, not just inferred from source):
 
 - **Owner:** `github.repository_owner` lowercased (`KonuTech` → `konutech`) — every image reference MUST use the lowercased form; GHCR/OCI repository names reject mixed case (`invalid tag ... repository name must be lowercase`, live-confirmed in plan 11-01).
 - **Merge-tagged (push to `main`):** `ghcr.io/konutech/{csv-processor,dbt,airflow}:${GIT_SHA}` — full 40-character git SHA of the triggering commit, e.g. `ghcr.io/konutech/csv-processor:d5a3ec0...` (full SHA, not the 7-char short form `make image-*` targets use locally).
@@ -153,14 +185,14 @@ Recorded here per this plan's own `<output>` requirement, independent of the liv
 
 ## User Setup Required
 
-None - no external service configuration required beyond the `gh` authentication documented in "Blocked: Live PR Proof" above, which is a one-time environment setup step, not a per-plan requirement.
+None — `gh` authentication (a one-time environment setup step, not a per-plan requirement) is already in place and was used to complete this plan's live-PR proof.
 
 ## Next Phase Readiness
 
-**Blocked on this plan's own live-PR proof**, not on anything downstream. Once `gh` is authenticated in this (or a successor) session:
-- Plans 11-03 (Kyverno policy) and 11-04 (PR-smoke workflow) can already be planned/written against the GHCR image reference shape documented above — that shape does not depend on the live proof, only on `publish.yml`'s already-committed, already-read source.
-- This plan itself should not be marked complete in STATE.md/ROADMAP.md/REQUIREMENTS.md until the live proof runs and this SUMMARY.md is updated with its results, per the plan's own `<verification>` block.
+**Fully unblocked.** This plan is complete:
+- Plans 11-03 (Kyverno policy) and 11-04 (PR-smoke workflow) can rely on the GHCR image reference shape documented above — it is now both source-verified and live-verified (PR #8's real publish + cleanup cycle).
+- CICD-06 and CICD-08 marked complete in REQUIREMENTS.md; STATE.md and ROADMAP.md updated to reflect plan 11-02 as fully done.
 
 ---
 *Phase: 11-ci-cd-completion-operations*
-*Completed: 2026-08-23 (partial — trivy gate fixed and pushed; live PR proof blocked on `gh` auth)*
+*Completed: 2026-08-23 (fully verified — trivy gate fixed, live PR #8 proved the pr-tag+sign+scan+cleanup chain end to end, including confirmed teardown)*
