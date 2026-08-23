@@ -91,7 +91,21 @@ jobs:
           echo "AIRFLOW_IMAGE_OVERRIDE_REPO=ghcr.io/${owner}/airflow" >> "$GITHUB_ENV"
           echo "AIRFLOW_IMAGE_OVERRIDE_TAG=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_ENV"
 
+      # scripts/doctor.sh's own preflight floors (DOCTOR_MIN_CPUS=8,
+      # DOCTOR_MIN_MEM_GB=20) are calibrated for the documented LOCAL WSL2
+      # dev floor (docs/wsl/wslconfig.example), not this project's own
+      # already-documented CI runner sizing (CLAUDE.md: "GitHub-hosted
+      # runners are 4 CPU / 16 GB"). Live-measured on this exact runner
+      # (plan 11-04 Task 3): 4 CPUs, ~15GiB. Both floors are explicitly
+      # documented as overridable via env vars in scripts/doctor.sh's own
+      # header comment ("lower DOCTOR_MIN_CPUS only if you accept a smaller
+      # cluster") — set here, not edited in doctor.sh itself, since this is
+      # this workflow's own CI-specific environment, not a change to the
+      # local-dev default.
       - name: Bring up the ephemeral kind cluster (CI profile)
+        env:
+          DOCTOR_MIN_CPUS: "4"
+          DOCTOR_MIN_MEM_GB: "14"
         run: PROFILE=ci make cluster-up
 
       - name: Point csv_processor_image/dbt_image at this PR's own GHCR images
