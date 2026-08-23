@@ -57,7 +57,7 @@ FILE ?=
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration image-csv-processor \
-        image-airflow image-dbt ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
+        image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
         migrate-analytics rebuild-from-raw
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
@@ -311,6 +311,15 @@ test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — mig
 # body expecting at least those two literal invocations.
 GIT_SHA := $(shell git rev-parse --short HEAD)
 
+# The EXACT alpine tag apache-airflow-providers-cncf-kubernetes's own
+# xcom_sidecar.py pins as XCOM_SIDECAR_IMAGE today (verified live against the
+# installed package this session, 2026-08-23). Deliberately a separate
+# variable, not reused from anywhere else — nothing else in this repository
+# has a reason to know this value, and a provider upgrade changing it should
+# be a one-line diff here, not a hunt through image-xcom-sidecar's recipe
+# body.
+XCOM_SIDECAR_TAG := 3.24.1
+
 image-csv-processor:            ## INFRA-08/U1: build, tag, push to the local registry, register the image for the DAG [plan 03-07, extended 04-02]
 	# GIT_SHA is computed inline, TWICE — once for the build arg (which
 	# becomes the image's own org.opencontainers.image.revision/.version
@@ -399,6 +408,59 @@ image-airflow:                  ## OBS-10: build, tag, push the custom Airflow[o
 	  -f docker/airflow/Dockerfile .
 	docker tag airflow:$(GIT_SHA) localhost:5001/airflow:$(GIT_SHA)
 	docker push localhost:5001/airflow:$(GIT_SHA)
+
+image-xcom-sidecar:              ## Post-merge fix (deferred-items.md "Plan 11-12"): push a local-registry copy of the cncf.kubernetes provider's default xcom-sidecar image, so Kyverno's per-pod signature verification never calls Docker Hub for it
+	# Every KubernetesPodOperator pod this platform creates gets the
+	# `cncf.kubernetes` provider's own default `airflow-xcom-sidecar`
+	# container — an UNVERSIONED provider constant (XCOM_SIDECAR_IMAGE in
+	# airflow/providers/cncf/kubernetes/utils/xcom_sidecar.py), never
+	# something this repository's own Dockerfiles/values files build or pin.
+	# Kyverno's require-signed-images policy (kubernetes/kyverno-policy.yaml)
+	# live-verifies every container image in every pod spec at admission
+	# time, including this sidecar, against Docker Hub — exhausting its
+	# anonymous rate limit under ordinary DAG traffic and denying pod
+	# creation platform-wide with a 429. Unlike image-csv-processor/-dbt/
+	# -airflow above, this target does NOT `docker build` anything — it
+	# retags whatever `alpine:$(XCOM_SIDECAR_TAG)` is already present in the
+	# local Docker cache (pull it first with `docker pull
+	# alpine:$(XCOM_SIDECAR_TAG)` if this is a genuinely fresh machine with
+	# no cached copy) and pushes it to this project's own Kyverno-exempt
+	# local registry under the EXACT tag the installed provider version
+	# expects — never a floating `:latest`, so a provider upgrade that bumps
+	# XCOM_SIDECAR_IMAGE's own pinned alpine version is a visible, deliberate
+	# re-run of this target, not a silent drift.
+	docker tag alpine:$(XCOM_SIDECAR_TAG) localhost:5001/alpine:$(XCOM_SIDECAR_TAG)
+	docker push localhost:5001/alpine:$(XCOM_SIDECAR_TAG)
+	# Mirrors image-csv-processor's/image-dbt's own live-cluster-registration
+	# shape exactly: guarded behind the same reachability probe, so a
+	# developer with no cluster running still gets a successful build+push,
+	# never a raw connection-refused failure. Unlike those two targets, this
+	# registers a Connection, not a Variable -- the cncf.kubernetes provider
+	# only exposes XCOM_SIDECAR_IMAGE overrides via the `kubernetes_default`
+	# Connection's own `xcom_sidecar_container_image` extra key (verified
+	# live against the installed provider package this session; there is no
+	# KubernetesPodOperator constructor kwarg for it). `airflow connections
+	# add` fails outright if the connection already exists, so this checks
+	# first via `airflow connections get` and only adds when absent -- this
+	# target is safe to re-run on every fresh clone/rebuild, exactly like
+	# image-csv-processor's own idempotent-by-construction `airflow
+	# variables set`.
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	if $(KUBECTL) --context "$$ctx" --request-timeout=5s get nodes -o name >/dev/null 2>&1; then \
+	  if $(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- \
+	       airflow connections get kubernetes_default >/dev/null 2>&1; then \
+	    echo "==> kubernetes_default connection already exists — leaving it untouched"; \
+	  else \
+	    echo "==> registering kubernetes_default connection's xcom_sidecar_container_image=localhost:5001/alpine:$(XCOM_SIDECAR_TAG)"; \
+	    $(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- \
+	      airflow connections add kubernetes_default \
+	      --conn-type kubernetes \
+	      --conn-extra '{"xcom_sidecar_container_image": "localhost:5001/alpine:$(XCOM_SIDECAR_TAG)"}'; \
+	  fi; \
+	else \
+	  echo "WARNING: no live cluster — image pushed but kubernetes_default connection NOT registered; run this target again once the cluster is up, or set it manually" >&2; \
+	fi
 
 # D-09 substitution, recorded rather than silent: D-09 asks for "one target
 # per component, ordered by Make prerequisites". What is built instead is an
