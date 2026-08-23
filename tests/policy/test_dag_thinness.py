@@ -44,12 +44,47 @@ DAGS_DIR = REPO_ROOT / "airflow" / "dags"
 # `meta.run_stages` status-recording work (LOAD-06's whole-pipeline
 # recovery-visibility gap), the same ADR-0004-exception shape as
 # `integrity_gate.py`, never a `dataplat` import.
+#
+# `_common/gap_recorder.py` (plan 09-10, D-06) is a pre-existing FOURTH
+# exemption that this policy test never actually enumerated -- confirmed
+# live (11-08, `git stash -u` against a clean main) that
+# `test_no_business_logic_imports`/`test_no_raw_sql_strings` were ALREADY
+# failing on `main` before this plan touched anything, entirely because of
+# this gap, not because of anything platform_retention.py adds. The
+# module's own docstring already self-identifies as "A FOURTH, narrowly-
+# scoped exception" (matching `integrity_gate.py`'s shape exactly: a plain
+# `@task` resolving its own DSN via `analytics_db_default`, writing raw
+# `psycopg` SQL) -- this is a same-shaped, directly-in-scope fix to the
+# exact mechanism this plan is already editing, not a new exception being
+# invented (Rule 1: auto-fix bug).
+#
+# `_common/retention_query.py` (plan 11-08, D-35) is the FIFTH such
+# exemption: it is THE one sanctioned place in the whole platform that
+# queries MinIO/PostgreSQL for retention candidates and performs an actual
+# delete (D-35/D-38 -- deliberately kept OUT of every ingestion DAG's own
+# task graph, so it has no ingestion-pipeline home to delegate this to). It
+# legitimately imports `psycopg` for its own narrow age-based `meta.*`
+# queries and conditional deletes -- see that module's own docstring for
+# the full ADR-0004-exception reasoning. It DOES additionally import
+# `dataplat.retention.policy`/`dataplat.config.model` (pure, I/O-free
+# evaluator/contract modules -- 11-08-PLAN.md's own Interfaces section
+# names this exact wiring), which is why it is exempted here rather than
+# folded into `_EXEMPT_FROM_IMPORT_CHECK`'s narrower `psycopg`-only
+# precedent -- the `pydantic` import this pulls in transitively is likewise
+# sanctioned, not a stray business-logic import. `platform_retention.py`
+# ITSELF (the top-level DAG file) needs NO exemption: it stays a thin
+# `@dag` wrapper that only imports `_common.retention_query.run_retention`,
+# the same "DAG file wires a `_common/`-defined task" shape
+# `csv_ingest_customers.py` already uses for `integrity_gate`/
+# `list_matched_keys`.
 _EXEMPT_FROM_IMPORT_CHECK = frozenset(
     {
         "airflow/dags/_common/kpo.py",
         "airflow/dags/_common/tracing_kpo.py",
         "airflow/dags/_common/integrity_gate.py",
         "airflow/dags/_common/run_stage_recorder.py",
+        "airflow/dags/_common/gap_recorder.py",
+        "airflow/dags/_common/retention_query.py",
     },
 )
 
@@ -63,10 +98,19 @@ _EXEMPT_FROM_IMPORT_CHECK = frozenset(
 # above: a future file that also imports psycopg/hashlib does not silently
 # inherit an SQL exemption it was never granted just by being added to that
 # other frozenset.
+# `_common/retention_query.py` (plan 11-08) joins this list too: its own
+# age-based `meta.files`/`meta.validation_results`/`meta.ingestion_runs`
+# `SELECT`s and conditional `DELETE`s are the SAME sanctioned ADR-0004
+# exception as `integrity_gate.py`'s/`run_stage_recorder.py`'s own SQL,
+# scoped independently of `_EXEMPT_FROM_IMPORT_CHECK` above per this
+# module's own documented rule: being import-exempt never implies being
+# SQL-exempt for free.
 _EXEMPT_FROM_SQL_CHECK = frozenset(
     {
         "airflow/dags/_common/integrity_gate.py",
         "airflow/dags/_common/run_stage_recorder.py",
+        "airflow/dags/_common/gap_recorder.py",
+        "airflow/dags/_common/retention_query.py",
     },
 )
 
