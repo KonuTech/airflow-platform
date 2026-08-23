@@ -126,6 +126,25 @@ jobs:
       - name: Run analytical DB migrations
         run: make migrate-analytics
 
+      # Post-merge fix (CICD-09 follow-up): scripts/vault-bootstrap.py's
+      # `_ensure_grafana_secrets` deliberately NEVER invents or guesses a
+      # real alerting destination for `.secrets/grafana-webhook-url` (that
+      # file is an operator-provided, gitignored local-dev convenience --
+      # 07-06-PLAN.md's own `user_setup` step, consistent with CLAUDE.md's
+      # "no credential may exist in Git ... runtime injection only"). A
+      # genuinely fresh ephemeral CI checkout never has this file, and
+      # live-diagnosed (this session) `make vault-bootstrap` hard-fails
+      # without it. D-20's own 4-point smoke scope (Helm releases healthy,
+      # one DAG run SUCCEEDED, Vault positive/negative, Kyverno
+      # positive/negative) never exercises Grafana alerting at all, so a
+      # synthetic, non-functional placeholder URL is sufficient here -- CI
+      # never fires a real alert through it, matching this repository's own
+      # synthetic-fixture convention (CLAUDE.md: "No secrets in fixtures").
+      - name: Provide a placeholder Grafana alert webhook (CI has no real one)
+        run: |
+          mkdir -p .secrets
+          echo "https://example.invalid/ci-placeholder-grafana-webhook" > .secrets/grafana-webhook-url
+
       # Post-merge fix (CICD-09 follow-up): `make cluster-up` deliberately
       # leaves Vault sealed and un-bootstrapped -- scripts/stages/80-vault.sh's
       # own header comment documents this as two separate, scripted steps a
