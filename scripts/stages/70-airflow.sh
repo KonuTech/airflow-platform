@@ -29,6 +29,16 @@
 # resources, which lets them complete and unblocks the initContainers — this
 # script then proves the four workloads itself via scripts/wait-for.sh,
 # unaffected by which WaitStrategy Helm used internally.
+#
+# IMAGE OVERRIDE (plan 11-04, D-19/D-20): when BOTH AIRFLOW_IMAGE_OVERRIDE_REPO
+# and AIRFLOW_IMAGE_OVERRIDE_TAG are set, this install is pointed at that
+# GHCR repo/tag via two extra `--set` flags forwarded through
+# scripts/helm-install.sh's own generic extra-args passthrough — this is
+# what lets CI's ephemeral cluster-up install Airflow ONCE, correctly,
+# pointed at the PR's own just-published image, rather than installing at
+# the chart's default image and then re-upgrading afterward. A normal
+# `make cluster-up` (no override vars set) leaves neither variable set, so
+# this falls through to the exact same call as before this plan.
 
 set -euo pipefail
 
@@ -52,8 +62,16 @@ echo "==> deriving the Airflow metadata connection and generating the Fernet/API
 "${helm_bin}" repo add apache-airflow https://airflow.apache.org >/dev/null 2>&1 || true
 "${helm_bin}" repo update apache-airflow >/dev/null
 
-HELM_INSTALL_TIMEOUT="${HELM_INSTALL_TIMEOUT:-15m}" \
-  helm_install airflow apache-airflow/airflow airflow AIRFLOW_CHART_VERSION airflow hookOnly
+if [ -n "${AIRFLOW_IMAGE_OVERRIDE_REPO:-}" ] && [ -n "${AIRFLOW_IMAGE_OVERRIDE_TAG:-}" ]; then
+  echo "==> AIRFLOW_IMAGE_OVERRIDE_REPO/TAG set — installing Airflow at ${AIRFLOW_IMAGE_OVERRIDE_REPO}:${AIRFLOW_IMAGE_OVERRIDE_TAG}"
+  HELM_INSTALL_TIMEOUT="${HELM_INSTALL_TIMEOUT:-15m}" \
+    helm_install airflow apache-airflow/airflow airflow AIRFLOW_CHART_VERSION airflow hookOnly \
+    --set "defaultAirflowRepository=${AIRFLOW_IMAGE_OVERRIDE_REPO}" \
+    --set "defaultAirflowTag=${AIRFLOW_IMAGE_OVERRIDE_TAG}"
+else
+  HELM_INSTALL_TIMEOUT="${HELM_INSTALL_TIMEOUT:-15m}" \
+    helm_install airflow apache-airflow/airflow airflow AIRFLOW_CHART_VERSION airflow hookOnly
+fi
 
 echo "==> waiting for the three Airflow Deployments and the triggerer StatefulSet"
 wait_for_deploy_available airflow airflow-api-server
