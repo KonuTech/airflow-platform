@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 Phase: 11 (ci-cd-completion-operations) — EXECUTING
 Plan: 6 of 14
 Status: Ready to execute
-Last activity: 2026-08-24 - Completed quick task 260824-akz: Fix scheduler resource-kind (Deployment vs StatefulSet) hardcoding in chaos test kubectl exec targets
+Last activity: 2026-08-24 - Completed quick task 260824-ay9: multi_node CI skip marker for 5 topology-shape tests in tests/e2e/cluster
 
 Progress: [██████████] 97%
 
@@ -157,6 +157,7 @@ None yet.
 | 260819-inq | Remove README.md title/operational-note block; wrap Executive Summary in English/Polski `<details>` tabs with a full Polish translation (prose translated, identifiers/data/proper nouns preserved, both Mermaid diagrams duplicated) | 2026-08-19 | 6438520 | [260819-inq-restructure-readme-md-top-remove-title-o](./quick/260819-inq-restructure-readme-md-top-remove-title-o/) |
 | 260819-jal | Swap default-open language tab in README.md Executive Summary: Polski now open by default, English collapsed | 2026-08-19 | f5fdf82 | [260819-jal-swap-default-open-language-tab-in-readme](./quick/260819-jal-swap-default-open-language-tab-in-readme/) |
 | 260824-akz | Fix scheduler resource-kind (Deployment vs StatefulSet) hardcoding in tests/e2e/chaos/test_vault_unavailable.py and test_minio_unavailable.py — live-detect via kubectl instead of hardcoding, since PROFILE never propagates into make chaos-verify (Phase 11 follow-up-1) | 2026-08-24 | 9e82be1 | [260824-akz-fix-scheduler-resource-kind-deployment-v](./quick/260824-akz-fix-scheduler-resource-kind-deployment-v/) |
+| 260824-ay9 | Add multi_node pytest marker (live node-count-detected skip) for 5 tests/e2e/cluster tests that hardcode the local 3-node topology or the full Deployment-name set — disclosed narrowing of make cluster-verify's CI-invoked scope (Phase 11 follow-up-2, part 1 of 2) | 2026-08-24 | adbcc3f | [260824-ay9-add-a-pytest-marker-to-skip-3-node-topol](./quick/260824-ay9-add-a-pytest-marker-to-skip-3-node-topol/) |
 
 ## Session Continuity
 
