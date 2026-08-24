@@ -175,7 +175,14 @@ hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verif
       currently has) and was judged out of scope for this round's time budget rather than adopted
       on unverified faith. Not live-tested in this sandbox (no live cluster reproduces CI's
       LocalExecutor topology here) -- the live push-and-wait below is the real test."
-  next_action: "Fix committed (b1ef8e2) and pushed to main -- no queue this time (the prior
+  next_action: "(environment note, mid-wait: this continuation's first background poller process
+    was killed by the sandbox partway through the live wait -- confirmed this does NOT affect the
+    actual GitHub Actions run, which executes independently of local polling; re-confirmed via a
+    fresh direct `gh run view` immediately after the kill notification that 32755940740 was still
+    `in_progress`, and a second background poller plus other already-running monitoring processes
+    -- apparently a separate concurrent tracker of this same run, PIDs 312171/312746, not started
+    by this continuation -- were still alive at that point. Still waiting; not abandoning.)
+    Fix committed (b1ef8e2) and pushed to main -- no queue this time (the prior
     instrumented run 32743870344 had already completed before this push), triggered run
     32755940740 immediately (`in_progress` at push+15s). cp-monitor.sh instrumentation (from
     commit 931c198) deliberately LEFT IN PLACE and reused for this run rather than trimmed out --
