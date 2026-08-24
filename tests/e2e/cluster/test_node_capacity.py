@@ -102,12 +102,14 @@ def _host_memory_bytes() -> float:
     return float(match.group(1)) * 1024
 
 
+@pytest.mark.multi_node
 def test_exactly_three_nodes(kubectl_json: Callable[..., Any]) -> None:
     nodes = kubectl_json("get", "nodes")["items"]
     names = sorted(n["metadata"]["name"] for n in nodes)
     assert len(nodes) == 3, f"expected 3 nodes, found {len(nodes)}: {names}"
 
 
+@pytest.mark.multi_node
 def test_every_node_allocatable_is_positive_and_within_its_declared_ceiling(
     kubectl_json: Callable[..., Any],
 ) -> None:

@@ -100,6 +100,7 @@ def _run_make(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.multi_node
 def test_doctor_live_passes_on_the_real_host() -> None:
     """Positive control: the real, currently-running cluster reports healthy."""
     proc = _run_make("doctor-live-check")

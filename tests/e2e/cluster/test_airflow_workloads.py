@@ -52,6 +52,7 @@ EXPECTED_DEPLOYMENTS = frozenset(
 EXPECTED_STATEFULSETS = frozenset({"airflow-triggerer"})
 
 
+@pytest.mark.multi_node
 def test_four_workloads_are_ready(kubectl_json: Callable[..., Any]) -> None:
     """Exactly three Deployments Available, exactly one StatefulSet Ready — not four Deployments."""
     deployments = kubectl_json("-n", NAMESPACE, "get", "deployment")["items"]

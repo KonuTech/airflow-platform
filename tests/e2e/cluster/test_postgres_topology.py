@@ -220,6 +220,7 @@ def test_analytics_is_pg18(analytics_connection: psycopg.Connection[Any]) -> Non
     )
 
 
+@pytest.mark.multi_node
 def test_two_distinct_clusters_no_shared_storage(
     kubectl_json: Callable[..., Any],
 ) -> None:
