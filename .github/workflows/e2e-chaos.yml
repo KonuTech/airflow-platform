@@ -1,0 +1,122 @@
+# Phase 11 plan 11-05 (QUAL-15, D-25/D-26/D-27): the merge-triggered, wholly
+# separate chaos suite. Covers all 11 QUAL-15 scenarios (the 9 new files from
+# plans 11-09/11-10, plus the 2 already-proven tests/e2e/vault scenarios plan
+# 11-10 deliberately did not duplicate) against its OWN dedicated ephemeral
+# kind cluster — never the same runner or cluster as e2e-full.yml (D-25), so
+# a chaos test that leaves a component deliberately broken can never
+# interleave with or contaminate the happy-path suite. Triggers on the
+# identical push-to-main event as e2e-full.yml (D-26 — not a schedule), with
+# no `needs:` coupling between the two workflow files (D-27) — GitHub Actions
+# already runs two independently-triggered workflows on separate runners in
+# parallel by default.
+name: E2E chaos (merge)
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.3"
+
+jobs:
+  chaos:
+    name: Full QUAL-15 chaos suite (dedicated cluster)
+    runs-on: ubuntu-latest
+    # 11-RESEARCH.md Pitfall 9's own reasoning extended to chaos: 11
+    # scenarios, each doing real fault injection (pod kills, DB/MinIO/Vault
+    # outages, OOM, execution_timeout) with bounded waits, on top of kind
+    # boot + Helm installs. 90 is a documented starting ceiling, mirroring
+    # e2e-full.yml's own timeout-comment convention.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - run: make install-cluster
+
+      - name: Docker Hub login (optional, raises anonymous pull-rate limit)
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Point cluster-up at this commit's own GHCR Airflow image
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "AIRFLOW_IMAGE_OVERRIDE_REPO=ghcr.io/${owner}/airflow" >> "$GITHUB_ENV"
+          echo "AIRFLOW_IMAGE_OVERRIDE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+
+      # D-27: this job's own, entirely independent ephemeral kind cluster —
+      # a fresh `kind create cluster` invocation on this job's own separate
+      # runner, never shared with e2e-full.yml's cluster.
+      - name: Bring up this job's own ephemeral kind cluster (CI profile)
+        env:
+          DOCTOR_MIN_CPUS: "4"
+          DOCTOR_MIN_MEM_GB: "14"
+        run: PROFILE=ci make cluster-up
+
+      - name: Point csv_processor_image/dbt_image at this commit's own GHCR images
+        run: scripts/ci-set-workload-images.sh ${{ github.sha }}
+
+      - name: Run analytical DB migrations
+        run: make migrate-analytics
+
+      - name: Provide a placeholder Grafana alert webhook (CI has no real one)
+        run: |
+          mkdir -p .secrets
+          echo "https://example.invalid/ci-placeholder-grafana-webhook" > .secrets/grafana-webhook-url
+
+      - name: Unseal and bootstrap Vault
+        run: |
+          make vault-unseal
+          make vault-bootstrap
+          . scripts/wait-for.sh
+          KUBECTL_CONTEXT=kind-airflow-platform wait_for_statefulset_ready vault vault
+
+      # All 11 QUAL-15 scenarios in one invocation, through `make` (CICD-02 —
+      # a workflow must never invoke pytest directly, so a developer and CI
+      # run the identical gate): the 9 new chaos files (plans 11-09/11-10)
+      # plus the 2 already-proven Vault scenarios (secret rotation,
+      # unauthorized access) plan 11-10 deliberately did not duplicate.
+      - name: Run the full QUAL-15 chaos suite
+        run: make chaos-verify
+
+      # D-22, same idempotent pattern as e2e-full.yml, distinct title prefix
+      # so a chaos failure and a full-suite failure never collide into the
+      # same tracked issue.
+      - name: File or update failure issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE_PREFIX="Chaos suite failure on main"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" \
+            --search "in:title \"$TITLE_PREFIX\"" --state open \
+            --json number --jq '.[0].number // empty')
+          BODY="Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Commit: ${{ github.sha }}"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$TITLE_PREFIX: ${{ github.sha }}" --body "$BODY"
+          fi

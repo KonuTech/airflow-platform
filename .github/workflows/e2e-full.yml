@@ -1,0 +1,149 @@
+# Phase 11 plan 11-05 (CICD-09, D-19/D-24/D-27/D-30): the merge-triggered full
+# E2E suite. Runs the existing local cluster/slice(incl. 2-year sweep)/
+# observability suite unchanged (`make cluster-verify`), then `make
+# rebuild-from-raw` as the very next step on the SAME already-populated
+# cluster (D-30 — no data-seeding between them), reusing that suite's own
+# multi-dataset history as rebuild-from-raw's pre-drop baseline. Runs
+# entirely independently of `e2e-chaos.yml` (D-27 — two separate GitHub-
+# hosted runners, no `needs:` coupling, both triggered by the identical
+# push-to-main event).
+name: E2E full (merge)
+
+on:
+  push:
+    branches: [main]
+
+# Least privilege at the workflow level; `issues: write` is granted only at
+# the job level below, scoped to the D-22 failure-notification step.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.3"
+
+jobs:
+  e2e-full:
+    name: Full local E2E suite + rebuild-from-raw capstone
+    runs-on: ubuntu-latest
+    # 11-RESEARCH.md Pitfall 9: tests/e2e/observability alone measured ~8min
+    # on an ALREADY-WARM cluster (STATE.md's own resolved-incident log). This
+    # job additionally runs cluster+slice (incl. the 2-year sweep), kind
+    # boot, 6+ Helm installs, AND a second full historical reprocessing pass
+    # for rebuild-from-raw — plausibly 45-90+ minutes. 120 is a documented
+    # starting ceiling (not a guess dressed as a fact), to be tuned down
+    # after real runs, mirroring e2e-smoke.yml's own timeout-comment
+    # convention.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - run: make install-cluster
+
+      # D-21: raises the runner's Docker Hub pull-rate limit for the
+      # upstream chart images `make cluster-up` pulls. Never a hard
+      # requirement; never a failure when the secret is unconfigured.
+      - name: Docker Hub login (optional, raises anonymous pull-rate limit)
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # publish.yml (triggered by the same push-to-main event) tags every
+      # image with the full `github.sha` on `push` (confirmed by reading
+      # publish.yml's own tag-selection step) — mirrors e2e-smoke.yml's
+      # identical pr-<number> override, substituting the SHA tag scheme
+      # `push` actually uses.
+      - name: Point cluster-up at this commit's own GHCR Airflow image
+        run: |
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "AIRFLOW_IMAGE_OVERRIDE_REPO=ghcr.io/${owner}/airflow" >> "$GITHUB_ENV"
+          echo "AIRFLOW_IMAGE_OVERRIDE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+
+      # scripts/doctor.sh's local-WSL2 floors (8 CPU/20GiB) need the same
+      # CI-specific override e2e-smoke.yml already established (this
+      # project's own documented CI runner sizing: 4 CPU/16GB).
+      - name: Bring up the ephemeral kind cluster (CI profile)
+        env:
+          DOCTOR_MIN_CPUS: "4"
+          DOCTOR_MIN_MEM_GB: "14"
+        run: PROFILE=ci make cluster-up
+
+      - name: Point csv_processor_image/dbt_image at this commit's own GHCR images
+        run: scripts/ci-set-workload-images.sh ${{ github.sha }}
+
+      # Same bootstrap-order requirement e2e-smoke.yml already established
+      # live (plan 11-04's CI-portability follow-up): dbt_app (and every
+      # staging/silver GRANT) only exists after Alembic migrations run, and
+      # vault-bootstrap's `_ensure_dbt_secret` needs that role to already
+      # exist.
+      - name: Run analytical DB migrations
+        run: make migrate-analytics
+
+      # Same as e2e-smoke.yml: a genuinely fresh ephemeral checkout never
+      # has the operator-provided, gitignored `.secrets/grafana-webhook-url`
+      # local-dev convenience file. This suite's own D-19 scope does not
+      # exercise Grafana alerting, so a synthetic placeholder is sufficient.
+      - name: Provide a placeholder Grafana alert webhook (CI has no real one)
+        run: |
+          mkdir -p .secrets
+          echo "https://example.invalid/ci-placeholder-grafana-webhook" > .secrets/grafana-webhook-url
+
+      - name: Unseal and bootstrap Vault
+        run: |
+          make vault-unseal
+          make vault-bootstrap
+          . scripts/wait-for.sh
+          KUBECTL_CONTEXT=kind-airflow-platform wait_for_statefulset_ready vault vault
+
+      # The unchanged, existing full local suite (D-19): cluster, slice
+      # (incl. the 2-year sweep), observability — called by name per this
+      # plan's own interfaces contract, not re-listed as inline pytest
+      # target paths.
+      - name: Run the full local E2E suite (make cluster-verify)
+        run: make cluster-verify
+
+      # D-24/D-30: runs strictly after cluster-verify above, on the SAME
+      # cluster, with no data-seeding step between them — reusing
+      # cluster-verify's own already-populated multi-dataset history as the
+      # pre-drop baseline.
+      - name: Run rebuild-from-raw (D-24 capstone)
+        run: make rebuild-from-raw
+
+      # D-22: an idempotent, commit-tagged failure issue in addition to the
+      # red status check — since main already has this commit by
+      # definition. Distinct title prefix from e2e-chaos.yml's own step so
+      # the two suites never collide into one tracked issue.
+      - name: File or update failure issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE_PREFIX="E2E full suite failure on main"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" \
+            --search "in:title \"$TITLE_PREFIX\"" --state open \
+            --json number --jq '.[0].number // empty')
+          BODY="Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Commit: ${{ github.sha }}"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$TITLE_PREFIX: ${{ github.sha }}" --body "$BODY"
+          fi

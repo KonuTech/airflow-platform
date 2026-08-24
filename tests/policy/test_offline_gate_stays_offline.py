@@ -87,6 +87,18 @@ ARGUED_TESTS_E2E_TARGETS: tuple[tuple[str, str], ...] = (
             "different preconditions and a different (faster) budget."
         ),
     ),
+    (
+        "chaos-verify",
+        (
+            "QUAL-15 (plan 11-05): e2e-chaos.yml's own dedicated-cluster "
+            "suite -- all 11 chaos scenarios (tests/e2e/chaos's 9 files plus "
+            "tests/e2e/vault's 2 already-proven scenarios). A separate "
+            "target from cluster-verify/vault-verify/smoke-verify for the "
+            "same reason those three are separate from each other: "
+            "different scope (destructive fault injection, never mixed "
+            "with the happy-path suite) and a much longer budget."
+        ),
+    ),
 )
 
 # A target line: `name: prereq1 prereq2  ## comment`. The negative lookahead

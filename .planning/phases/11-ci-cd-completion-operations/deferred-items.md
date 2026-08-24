@@ -788,3 +788,78 @@ real capacity wall. If that doesn't resolve it, the next diagnostic step is a li
 | Item | Status | Deferred At |
 |------|--------|-------------|
 | `tests/e2e/vault/test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs` fails on the local persistent cluster with `permission denied for schema meta` for role `analytics_owner`. Root cause not fully disentangled (migration gap vs. live grant drift); reproducer: `uv run --group cluster pytest tests/e2e/vault/test_airflow_backend.py -q -m cluster`. | Open | 2026-08-23, plan 11-04 |
+
+## Plan 11-05
+
+### Task 3 (live-verify on a real merge to main) could not be executed from a worktree-isolated wave
+
+`.github/workflows/e2e-full.yml` and `.github/workflows/e2e-chaos.yml` (Tasks 1-2) are written,
+policy-clean, and locally YAML/structure-verified, but both trigger `on: push: branches: [main]`
+only — there is no `pull_request` path to exercise them, unlike `e2e-smoke.yml`'s throwaway-PR
+proof pattern plans 11-02/11-04 both used. Genuinely observing either workflow run requires a real
+push to `main`. This session's own dispatch is an isolated git worktree (`isolation="worktree"`)
+whose branch the ORCHESTRATOR merges into `main` after this wave completes — pushing to `main`
+directly from inside the worktree would race the orchestrator's own merge step and is explicitly
+outside a worktree-isolated executor's authority (see `gsd-executor.md`'s worktree-branch-check
+and destructive-git-prohibition sections: only the orchestrator's post-merge flow is permitted to
+advance `main`). Task 3's own literal instructions ("commit both workflow files and push to
+main... this repository's established direct-push workflow") assume a non-worktree, direct-to-main
+execution mode that does not match how this plan was actually dispatched this session.
+
+**Recommended next step:** once this plan's worktree branch is merged into `main` by the
+orchestrator, the next real push to `main` (this merge itself, or the following commit) will
+trigger both workflows for the first time — watch that run (`gh run watch --exit-status` /
+`gh run list --branch=main --limit=2`) as Task 3's own live-verification step. Budget for likely
+failure on the first attempt (see the two findings below) rather than expecting a clean green run
+immediately.
+
+### Known risk carried forward: e2e-full.yml will likely hit the same CI-portability wall e2e-smoke.yml hit
+
+Plan 11-04's own "PARTIALLY RESOLVED" entry above (2026-08-24) documents `kind/cluster-ci.yaml`
+now genuinely booting on a real GitHub Actions runner, with 8 real bugs fixed — but the LAST
+observed live blocker was `airflow dags trigger` itself timing out at its own 120s ceiling
+(`Makefile`'s `smoke-verify` target, `seq 1 24` × 5s), on an already-CPU-contended single CI node.
+`e2e-full.yml` does not call `smoke-verify` at all (it calls `make cluster-verify` then
+`make rebuild-from-raw`, per this plan's own interfaces contract), so that EXACT hardcoded 120s
+loop is not literally reused here — but `tests/e2e/cluster`/`tests/e2e/slice`'s own pytest-level
+DAG-trigger/poll fixtures, running a materially heavier suite (the full 2-year sweep, plus a SECOND
+full historical pass for `rebuild-from-raw`) on the identical single-node CI topology, are highly
+likely to hit the same underlying capacity ceiling in some form. Not pre-emptively fixed here:
+`kind/cluster-ci.yaml`, `helm/values/ci/*.yaml`, and every `tests/e2e/*` fixture's own timeout
+constants are all outside this plan's declared `files_modified`, and the specific failure mode
+(if any) cannot be known until Task 3's own real run is observed post-merge.
+
+### New finding: `tests/e2e/observability` cannot pass on the CI profile as currently built — monitoring is unconditionally disabled
+
+Found while designing `e2e-full.yml`'s bootstrap steps: `scripts/stages/85-monitoring.sh` now
+unconditionally skips itself under `PROFILE=ci` (`if [ "${PROFILE:-local}" = "ci" ]; then echo
+"==> skipping monitoring stage..."`) — a genuine, deliberate fix from plan 11-04's own
+CI-portability follow-up (finding 7 in the "PARTIALLY RESOLVED" entry above), needed to keep the
+single CI node from being pushed over its own CPU ceiling. There is no override mechanism (unlike
+`scripts/doctor.sh`'s documented `DOCTOR_MIN_*` env-var escape hatch) — the skip is unconditional.
+This plan's own `must_haves.truths` requires `e2e-full.yml` to run "the existing local E2E suite
+(cluster, slice incl. the 2-year sweep, **observability**)" via `make cluster-verify` UNCHANGED
+(this plan's own interfaces section explicitly forbids re-listing `cluster-verify`'s component
+directories inline in the workflow, i.e. forbids silently dropping `tests/e2e/observability` from
+the invocation) — but `tests/e2e/observability` needs a live Prometheus/Grafana/Tempo stack that
+the CI profile's own cluster never has. This is a genuine, structural tension between two
+already-committed decisions (D-19's "run the unchanged full suite" vs. plan 11-04's own
+CPU-necessitated "monitoring disabled in CI"), not something `e2e-full.yml`'s own file scope can
+resolve — `scripts/stages/85-monitoring.sh` and `kind/cluster-ci.yaml`/`helm/values/ci/*.yaml` are
+all outside this plan's declared `files_modified`. `e2e-full.yml` was written per the plan's own
+literal instruction (call `cluster-verify` by name, unmodified) despite this known, live-untested
+risk, rather than silently narrowing the invocation to dodge it.
+
+**Two Rule-4 remediation options for a future session, neither attempted here:**
+1. Add a narrow, CI-scoped monitoring override (e.g. a trimmed single-pod Prometheus/Grafana/Tempo
+   profile enabled ONLY for `e2e-full.yml`'s own heavier 120-minute budget, never for
+   `e2e-smoke.yml`'s tighter 30-minute one) — new infrastructure, needs deliberate sizing.
+2. Accept that `tests/e2e/observability` genuinely cannot run in CI and carve it out of
+   `cluster-verify`'s own definition for the CI-invoked path specifically (a new, CI-scoped target,
+   or an env-gated skip inside the suite itself) — a real, disclosed narrowing of D-19's "unchanged
+   full suite" promise, needing explicit review before landing.
+
+| Item | Status | Deferred At |
+|------|--------|-------------|
+| `e2e-full.yml`/`e2e-chaos.yml`'s own live run on a real merge to `main` (Task 3's literal acceptance criterion) has NOT been observed this session — the workflow files are written, policy-clean and locally verified, but live proof requires a push to `main` this worktree-isolated executor cannot perform. | Open | 2026-08-24, plan 11-05 |
+| `tests/e2e/observability`'s own dependency on a live monitoring stack conflicts with the CI profile's unconditional monitoring-disabled skip (`scripts/stages/85-monitoring.sh`) — `e2e-full.yml`'s `make cluster-verify` step will very likely fail on this specific sub-suite the first time it actually runs in CI, for a reason unrelated to anything this plan's own files control. | Open | 2026-08-24, plan 11-05 |

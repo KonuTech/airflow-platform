@@ -224,6 +224,23 @@ ALLOWED_PERMISSION_WIDENING: dict[tuple[str, str], dict[str, str]] = {
     ("ghcr-cleanup.yml", "cleanup"): {
         "packages": "write",  # list + delete package versions via gh api
     },
+    # Phase 11 plan 11-05 (D-22): the merge-triggered full E2E suite files or
+    # updates a tracked GitHub issue on failure, since main already has the
+    # failing commit by definition. `issues: write` is scoped to exactly
+    # that step (`if: failure()`) via `gh issue create`/`gh issue comment`,
+    # both job-level here (no narrower per-step permissions block exists in
+    # the Actions permission model).
+    ("e2e-full.yml", "e2e-full"): {
+        "contents": "read",
+        "issues": "write",  # D-22 gh issue create/comment on failure
+    },
+    # Phase 11 plan 11-05 (D-22), same reasoning as e2e-full.yml above,
+    # applied to the wholly separate chaos suite's own failure-notification
+    # step (distinct title prefix, same mechanism).
+    ("e2e-chaos.yml", "chaos"): {
+        "contents": "read",
+        "issues": "write",  # D-22 gh issue create/comment on failure
+    },
 }
 
 
