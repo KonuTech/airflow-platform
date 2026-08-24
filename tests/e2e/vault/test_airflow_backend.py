@@ -78,21 +78,84 @@ NAMESPACE = "airflow"
 _CUSTOMERS_DATASET = "customers"
 _DAG_ID = "csv_ingest_customers"
 
-# The three Deployments and one StatefulSet that carry their own pod spec in
-# this chart's rendering (matching tests/e2e/cluster/test_airflow_workloads.
-# py's own EXPECTED_DEPLOYMENTS/EXPECTED_STATEFULSETS) -- the fourth
-# identity this plan's Vault role binds, airflow-worker, has no persistent
-# object of its own (KubernetesExecutor task-instance pods are ephemeral);
-# it is checked separately below, via the rendered pod_template_file.yaml.
-_DEPLOYMENTS = ("airflow-api-server", "airflow-scheduler", "airflow-dag-processor")
+# These two tuples list only the components whose object kind is FIXED
+# across both profiles (matching tests/e2e/cluster/test_airflow_workloads.
+# py's own EXPECTED_DEPLOYMENTS/EXPECTED_STATEFULSETS). airflow-scheduler is
+# deliberately absent from both: the official Airflow chart renders it as a
+# Deployment under local's KubernetesExecutor profile but as a StatefulSet
+# under CI's LocalExecutor profile, so it is checked separately below via
+# the live-detection helper `_scheduler_kind` -- mirroring the sibling fix
+# in tests/e2e/chaos/test_vault_unavailable.py's own `_scheduler_resource_ref`.
+# A `PROFILE` environment-variable read is not used instead: `PROFILE` never
+# propagates from `make cluster-up` into `make chaos-verify`'s pytest
+# process, so reading it here would silently default to "local" even on a
+# genuinely CI-profile cluster. The fourth identity this plan's Vault role
+# binds, airflow-worker, has no persistent object of its own (KubernetesExecutor
+# task-instance pods are ephemeral); it is checked separately below, via the
+# rendered pod_template_file.yaml.
+_DEPLOYMENTS = ("airflow-api-server", "airflow-dag-processor")
 _STATEFULSETS = ("airflow-triggerer",)
+
+# The single source of truth for the scheduler's object name -- referenced by
+# `_scheduler_kind`'s two probes and by the test's own follow-up
+# `kubectl_json` call below, so the literal is written exactly once in this
+# module.
+_SCHEDULER_NAME = "airflow-scheduler"
 
 _DISCOVERY_TIMEOUT_SECONDS = 180
 _INGEST_TIMEOUT_SECONDS = 180
 
 
+def _scheduler_kind(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+) -> str:
+    """Live-probe which object kind the connected cluster actually rendered for airflow-scheduler.
+
+    Returns a bare kind string (`"deployment"` or `"statefulset"`), not a
+    `kind/name` ref, because this module's own loop
+    (`test_airflow_conn_minio_default_is_absent_from_every_component`)
+    already keys on `kind` and `name` as separate positional arguments to
+    `kubectl_json`. Contrast this with `tests/e2e/chaos/
+    test_vault_unavailable.py`'s own `_scheduler_resource_ref`, which
+    returns a combined `"deploy/airflow-scheduler"` / `"statefulset/
+    airflow-scheduler"` ref string for a different call shape (`kubectl exec
+    <ref>`).
+
+    Args:
+        kubectl_fn: The `kubectl` fixture callable.
+
+    Returns:
+        `"deployment"` if a Deployment named `airflow-scheduler` exists in
+        the `airflow` namespace, else `"statefulset"` if a StatefulSet of
+        that name exists instead.
+
+    Raises:
+        AssertionError: neither a Deployment nor a StatefulSet named
+            `airflow-scheduler` exists in the `airflow` namespace on this
+            cluster.
+    """
+    deploy_probe = kubectl_fn(
+        "-n", NAMESPACE, "get", "deployment", _SCHEDULER_NAME,
+        "-o", "name", "--ignore-not-found",
+    )
+    if deploy_probe.returncode == 0 and deploy_probe.stdout.strip():
+        return "deployment"
+    sts_probe = kubectl_fn(
+        "-n", NAMESPACE, "get", "statefulset", _SCHEDULER_NAME,
+        "-o", "name", "--ignore-not-found",
+    )
+    if sts_probe.returncode == 0 and sts_probe.stdout.strip():
+        return "statefulset"
+    msg = (
+        "airflow-scheduler exists as neither a Deployment nor a StatefulSet in the airflow "
+        "namespace on this cluster"
+    )
+    raise AssertionError(msg)
+
+
 def test_airflow_conn_minio_default_is_absent_from_every_component(
     kubectl_json: Callable[..., Any],
+    kubectl: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     """D-01/SEC-05: no live Airflow component still carries the retired secretKeyRef env var."""
     offending: list[str] = []
@@ -103,6 +166,13 @@ def test_airflow_conn_minio_default_is_absent_from_every_component(
             env_names = {e["name"] for c in containers for e in c.get("env", [])}
             if "AIRFLOW_CONN_MINIO_DEFAULT" in env_names:
                 offending.append(f"{kind}/{name}")
+
+    scheduler_kind = _scheduler_kind(kubectl)
+    scheduler_obj = kubectl_json("-n", NAMESPACE, "get", scheduler_kind, _SCHEDULER_NAME)
+    scheduler_containers = scheduler_obj["spec"]["template"]["spec"]["containers"]
+    scheduler_env_names = {e["name"] for c in scheduler_containers for e in c.get("env", [])}
+    if "AIRFLOW_CONN_MINIO_DEFAULT" in scheduler_env_names:
+        offending.append(f"{scheduler_kind}/{_SCHEDULER_NAME}")
 
     # airflow-worker's own pod TEMPLATE (no persistent Deployment/
     # StatefulSet of its own) lives inside the airflow-config ConfigMap's
