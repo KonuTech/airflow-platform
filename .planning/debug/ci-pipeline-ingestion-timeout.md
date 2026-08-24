@@ -509,6 +509,41 @@ next_action: "Scheduler memory fix applied to helm/values/ci/airflow.yaml and of
     is orthogonal to any resource-sizing change. Does not confirm or refute the scheduler memory
     fix either way. Retrying with a fresh push to get past this flake and reach the actual test.
 
+- timestamp: 2026-08-24 (continuation session 2, round 2 attempt 2 -- SAME flake recurs, now fixed)
+  checked: >
+    Retried (empty-ish docs commit, fresh push) -- run 32727171300 / job 97430967352 hit the
+    EXACT SAME `Error from server (NotFound): pods "vault-0" not found` failure again, in direct
+    succession (2/2). Read `scripts/stages/80-vault.sh` (calls `wait_for_pod_running vault
+    vault-0`) and its helper `wait_for_pod_running` in `scripts/wait-for.sh`: a NAMED (not
+    label-selector) `kubectl wait --for=jsonpath=...=Running pod/vault-0`, called immediately
+    after `helm upgrade --install vault` returns "STATUS: deployed". Confirmed
+    `wait_for_pod_running` has exactly ONE production caller (`80-vault.sh`) via `grep -rn` across
+    the whole repo -- a narrow, well-understood blast radius. This is the IDENTICAL race class
+    already fully diagnosed earlier this same debug session for
+    tests/e2e/vault/test_unseal_survives_restart.py's own raw `kubectl wait` call (see Eliminated
+    below): `kubectl wait` on a named resource fails FAST with NotFound if the object does not
+    exist yet, rather than polling for its creation. Verified via web research that `kubectl wait
+    --for=create` (kubectl 1.23+, this project pins 1.36.1) is the kubectl-native fix -- succeeds
+    immediately if the object already exists, polls for creation otherwise -- confirmed this
+    works correctly for NAMED resources specifically (the documented `--for=create` limitation,
+    kubernetes/kubectl#1675, applies only to label selectors, not this case).
+  found: >
+    Two failures in direct succession (not "hit once" as the prior handoff notes characterized
+    it) indicates this race is hit often enough to meaningfully obstruct this debug session's own
+    live-verification work, not a rare curiosity. Fixed `wait_for_pod_running` in
+    `scripts/wait-for.sh` (the ONLY place this exact bug pattern has a single, shared, easily-
+    fixed helper -- unlike the test file's own inline `kubectl wait`, which is a separate,
+    already-out-of-scope fix): chained a `--for=create` wait (30s budget) before the existing
+    `--for=jsonpath=...Running` wait. `bash -n` syntax-checked clean.
+  implication: >
+    A THIRD incidentally-discovered, pre-existing regression fixed alongside the two root-cause
+    memory fixes -- same "cheap, blocking, discovered while verifying" precedent as the
+    ARGUED_TESTS_E2E_TARGETS gap and the CI CPU-budget regression earlier this session. Directly
+    unblocks live verification of the scheduler memory fix, which is the actual reason this fix
+    was made now rather than deferred (mirroring this debug session's own established
+    discipline: fix small, clearly-scoped, incidentally-found blockers; defer genuinely
+    unrelated/larger ones). Retrying again with this fix in place.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 

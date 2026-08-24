@@ -68,6 +68,30 @@ wait_for_statefulset_ready() {
 wait_for_pod_running() {
   local namespace="$1"
   local pod="$2"
+  # Debug session ci-pipeline-ingestion-timeout, continuation session 2
+  # (2026-08-24): a NAMED (non-label-selector) `kubectl wait` fails FAST
+  # with NotFound if the object does not exist yet at call time -- it does
+  # NOT poll for the object's creation, only for its condition once it
+  # exists. This is a documented kubectl behavior (kubernetes/kubectl#1516),
+  # not a bug in this script, but it produced a real, recurring cluster-up
+  # flake here: `scripts/stages/80-vault.sh` calls `helm upgrade --install
+  # vault` then immediately calls this function, and the StatefulSet
+  # controller can take a moment after Helm reports "STATUS: deployed" to
+  # actually create the vault-0 Pod object -- hit twice in direct
+  # succession live this session (`Error from server (NotFound): pods
+  # "vault-0" not found` -> `cluster-up` exits 2). The EXACT SAME race class
+  # was already independently diagnosed this same debug session for
+  # tests/e2e/vault/test_unseal_survives_restart.py's own raw `kubectl
+  # wait` call (see that debug session's Eliminated section) -- this is the
+  # first fix for it, scoped to this shared helper's only production caller.
+  # `--for=create` (kubectl 1.23+, this project pins 1.36.1) is the
+  # kubectl-native solution: it succeeds immediately if the object already
+  # exists (the common, fast-Helm case) and polls for its creation
+  # otherwise -- verified against a NAMED resource (not a label selector,
+  # where this flag has documented limitations per kubernetes/kubectl#1675,
+  # not applicable here).
+  _kubectl_wait -n "${namespace}" wait --for=create \
+    --timeout="${WAIT_POD_CREATE_TIMEOUT:-30s}" "pod/${pod}"
   _kubectl_wait -n "${namespace}" wait --for=jsonpath='{.status.phase}'=Running \
     --timeout="${WAIT_POD_TIMEOUT:-180s}" "pod/${pod}"
 }
