@@ -116,7 +116,21 @@ def _is_monitoring_enablement(path: str) -> bool:
     # control (cnpg-airflow.yaml's `cluster.initdb.owner`) is unrelated to
     # both branches added here and keeps proving a genuinely unrelated leaf
     # difference is still caught.
-    return path == "env" or path.startswith("config.traces")
+    if path == "env" or path.startswith("config.traces"):
+        return True
+    # Quick task 260824-ayw: kube-prometheus-stack's own top-level subchart
+    # enable/disable toggles -- camelCase-spelled by the chart itself rather
+    # than a bare `metrics`/`monitoring` segment, so neither branch above can
+    # see them. Verified this session that no file under
+    # tests/e2e/observability/ references kube-state-metrics or
+    # node-exporter; disabling both in CI only is now meaningful because the
+    # chart is genuinely installed live in CI for the staggered
+    # tests/e2e/observability window (cross-reference helm/values/ci/
+    # monitoring.yaml's own updated header comment). Restricted to the
+    # `.enabled` leaf specifically, so a hypothetical future unrelated key
+    # nested under kubeStateMetrics/nodeExporter would still be caught as an
+    # unclassified divergence.
+    return segments[0] in {"kubeStateMetrics", "nodeExporter"} and path.endswith("enabled")
 
 
 def _is_executor(path: str) -> bool:

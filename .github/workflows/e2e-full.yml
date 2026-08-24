@@ -1,12 +1,13 @@
 # Phase 11 plan 11-05 (CICD-09, D-19/D-24/D-27/D-30): the merge-triggered full
 # E2E suite. Runs the existing local cluster/slice(incl. 2-year sweep)/
-# observability suite unchanged (`make cluster-verify`), then `make
-# rebuild-from-raw` as the very next step on the SAME already-populated
-# cluster (D-30 — no data-seeding between them), reusing that suite's own
-# multi-dataset history as rebuild-from-raw's pre-drop baseline. Runs
-# entirely independently of `e2e-chaos.yml` (D-27 — two separate GitHub-
-# hosted runners, no `needs:` coupling, both triggered by the identical
-# push-to-main event).
+# observability suite -- staggered since quick task 260824-ayw into
+# `cluster-slice-verify` followed by `observability-verify-ci` (see those
+# steps below for why) -- then `make rebuild-from-raw` as the very next step
+# on the SAME already-populated cluster (D-30 — no data-seeding between
+# them), reusing that suite's own multi-dataset history as
+# rebuild-from-raw's pre-drop baseline. Runs entirely independently of
+# `e2e-chaos.yml` (D-27 — two separate GitHub-hosted runners, no `needs:`
+# coupling, both triggered by the identical push-to-main event).
 name: E2E full (merge)
 
 on:
@@ -111,12 +112,21 @@ jobs:
           . scripts/wait-for.sh
           KUBECTL_CONTEXT=kind-airflow-platform wait_for_statefulset_ready vault vault
 
-      # The unchanged, existing full local suite (D-19): cluster, slice
-      # (incl. the 2-year sweep), observability — called by name per this
-      # plan's own interfaces contract, not re-listed as inline pytest
-      # target paths.
-      - name: Run the full local E2E suite (make cluster-verify)
-        run: make cluster-verify
+      # Quick task 260824-ayw: the former single combined verify step is now
+      # staggered into two steps, per CONTEXT.md's locked decision --
+      # tests/e2e/cluster/tests/e2e/slice (unchanged D-19 local suite, minus
+      # observability) run first, then monitoring is installed only for the
+      # tests/e2e/observability window and torn down again before
+      # rebuild-from-raw runs, to keep the trimmed monitoring stack's own
+      # CPU footprint off the node for the rest of this ~120-minute job.
+      # The shared `cluster-verify` Makefile target itself (used identically
+      # by local devs) is untouched -- this staggering is CI-workflow-specific
+      # orchestration only.
+      - name: Run cluster + slice E2E suite (observability deferred, staggered below)
+        run: make cluster-slice-verify
+
+      - name: Install trimmed monitoring, run tests/e2e/observability, tear down
+        run: make observability-verify-ci
 
       # D-24/D-30: runs strictly after cluster-verify above, on the SAME
       # cluster, with no data-seeding step between them — reusing

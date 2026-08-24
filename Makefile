@@ -58,7 +58,7 @@ FILE ?=
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration test-dagtest image-csv-processor \
         image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
-        migrate-analytics rebuild-from-raw rollback smoke-verify
+        migrate-analytics rebuild-from-raw rollback smoke-verify cluster-slice-verify observability-verify-ci
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -344,6 +344,55 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice 
 	# other suite collected here needs too, so a second target would just
 	# duplicate this one's own invocation shape for no reason.
 	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice tests/e2e/observability -q
+
+# Quick task 260824-ayw: exists ONLY because e2e-full.yml's staggering
+# strategy needs tests/e2e/observability to run in its own separate window
+# (monitoring installed only for that window -- see observability-verify-ci
+# below). `cluster-verify` above is unmodified and stays the single target
+# a local developer runs for the full cluster+slice+observability suite
+# against the persistent 3-node profile, which has no CPU-contention
+# problem. This is a disclosed, CI-workflow-specific narrowing, not a
+# replacement -- mirroring smoke-verify's own "deliberately narrower"
+# precedent above.
+cluster-slice-verify:           ## Quick task 260824-ayw: cluster+slice only, no observability -- exists ONLY for .github/workflows/e2e-full.yml's CONTEXT.md-locked staggering strategy
+	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice -q
+
+# Quick task 260824-ayw: CONTEXT.md's locked CPU-contention decision -- the
+# CI node has ~3 allocatable CPU shared by Airflow, 2x Postgres, MinIO,
+# Vault and Kyverno for the whole job -- the monitoring stack's own CPU
+# footprint is modest but was still enough (running for the FULL job
+# duration) to CrashLoopBackOff airflow-scheduler-0 (see
+# scripts/stages/85-monitoring.sh's own header comment for the live
+# diagnosis). Keeping monitoring live only for this target's own window --
+# installed here, torn down again immediately after -- keeps the trimmed
+# stack's CPU footprint off the node for the rest of the ~120-minute
+# e2e-full.yml job.
+#
+# `set -e` (its own line, mirroring `rollback`'s shape, not
+# `migrate-analytics`'s manual if/exit checks): without it, a
+# semicolon/backslash-chained shell command list does NOT abort on an
+# intermediate nonzero exit -- the chain's own exit status (this recipe's
+# exit status, hence `make`'s) would be only the LAST command's
+# (monitoring-teardown.sh's) exit status, silently swallowing a failing
+# `pytest tests/e2e/observability` run and reporting a false-green CI job
+# regardless of whether the observability suite actually passed. With
+# `set -e` in effect, teardown runs only after a successful pytest run,
+# and this recipe aborts (leaving monitoring installed) if either the
+# install or the pytest step itself fails -- an accepted trade-off given
+# the whole ephemeral kind cluster is destroyed at job end regardless, not
+# a bug to fix here. This is about honest CI failure signal (a real
+# regression in tests/e2e/observability must fail this `make` target, not
+# be silently swallowed by a later command's own success) -- not about
+# protecting `make rebuild-from-raw` from a leftover install, since that
+# later step has no `if: always()` and never runs in this failure branch
+# anyway (see scripts/monitoring-teardown.sh's own header comment).
+observability-verify-ci:        ## Quick task 260824-ayw: install trimmed monitoring, run tests/e2e/observability alone, tear down -- the CI-only staggered half of cluster-verify's suite
+	@set -a; . helm/versions.env; set +a; \
+	set -e; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	PROFILE=ci KUBECTL_CONTEXT="$$ctx" scripts/monitoring-install.sh; \
+	$(RUN_CLUSTER) pytest tests/e2e/observability -q; \
+	KUBECTL_CONTEXT="$$ctx" scripts/monitoring-teardown.sh
 
 smoke-verify:                   ## D-20: fast PR-gating subset (4 checks) against the live cluster — distinct from cluster-verify's full suite [plan 11-04]
 	# D-19/D-20: e2e-smoke.yml's own 4-point proof, composed as ONE target so

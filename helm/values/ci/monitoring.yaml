@@ -1,12 +1,17 @@
-# D-16: this file and helm/values/local/monitoring.yaml diverge on EXACTLY
-# the already-permitted "resource sizing" axis (test_values_profiles.py) --
-# the CI profile is deliberately smaller because it shares a 4 CPU / 16 GB
-# GitHub-hosted runner with every other pod the CI job renders, and this
-# chart is never deployed live in CI (D-16: `make manifests` renders and
-# lints this file; nothing in scripts/stages/85-monitoring.sh's CI path
-# actually installs it). Every other key below is IDENTICAL in shape to the
-# local profile -- see helm/values/local/monitoring.yaml's header comments
-# for the full argument behind each structural choice.
+# D-16: this file and helm/values/local/monitoring.yaml diverge on the
+# already-permitted "resource sizing" and "monitoring enablement" axes
+# (test_values_profiles.py) -- the CI profile is deliberately smaller
+# because it shares a 4 CPU / 16 GB GitHub-hosted runner with every other
+# pod the CI job renders. Every other key below is IDENTICAL in shape to
+# the local profile -- see helm/values/local/monitoring.yaml's header
+# comments for the full argument behind each structural choice.
+#
+# Quick task 260824-ayw: this chart IS now installed live in CI, but only
+# for the staggered tests/e2e/observability window via
+# `make observability-verify-ci` (which calls scripts/monitoring-install.sh
+# then scripts/monitoring-teardown.sh), not for the whole CI job. `make
+# manifests` still separately renders/lints this same file offline as
+# before, unrelated to the live install path.
 
 alertmanager:
   enabled: false
@@ -669,23 +674,22 @@ grafana:
               annotations:
                 summary: "meta.v_run_recovery reports a stage stuck in retry-needed state for 5m+."
 
-kube-state-metrics:
-  resources:
-    requests:
-      cpu: 20m
-      memory: 32Mi
-    limits:
-      cpu: 100m
-      memory: 64Mi
+# Quick task 260824-ayw: kube-prometheus-stack's own top-level subchart
+# enable/disable toggles (distinct from the per-subchart `kube-state-metrics:`
+# / `prometheus-node-exporter:` resources keys these replace -- those become
+# dead configuration once the subcharts below are disabled). Verified this
+# session that no file under tests/e2e/observability/ references
+# kube-state-metrics or node-exporter metrics/targets (only
+# analytics-postgres, prometheus, tempo datasources are exercised) --
+# disabling both is a free CPU/pod-count saving with zero test-coverage
+# loss, now that this stack is genuinely installed live in CI for the
+# staggered tests/e2e/observability window (see observability-verify-ci /
+# scripts/monitoring-install.sh).
+kubeStateMetrics:
+  enabled: false
 
-prometheus-node-exporter:
-  resources:
-    requests:
-      cpu: 20m
-      memory: 16Mi
-    limits:
-      cpu: 50m
-      memory: 32Mi
+nodeExporter:
+  enabled: false
 
 prometheusOperator:
   resources:
