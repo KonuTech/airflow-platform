@@ -102,6 +102,42 @@ def _require_cluster(kubectl_context: str) -> None:
         )
 
 
+@pytest.fixture(autouse=True)
+def _skip_multi_node_tests_on_single_node_clusters(
+    request: pytest.FixtureRequest,
+    kubectl_json: Callable[..., Any],
+) -> None:
+    """Skip `multi_node`-marked tests when the live cluster reports fewer than 3 nodes.
+
+    This is a LIVE `kubectl get nodes` probe, not a `PROFILE` environment
+    variable read. `.github/workflows/e2e-full.yml`'s "Bring up the
+    ephemeral kind cluster (CI profile)" step sets `PROFILE=ci` only as an
+    inline prefix on its own `make cluster-up` command line — it is never
+    written to `$GITHUB_ENV`, so it does not persist into the later "Run the
+    full local E2E suite (make cluster-verify)" step. An env-var read here
+    would therefore silently default wrong even when running against a
+    genuinely CI-profile (single-node) cluster — the same propagation gap
+    quick task 260824-akz already found and avoided for `make
+    chaos-verify`'s `kubectl exec` target selection. `kind/cluster.yaml`
+    (local profile) always declares 3 nodes; `kind/cluster-ci.yaml` (CI
+    profile) always declares exactly 1 — making live node count a
+    structural, always-correct, zero-configuration signal regardless of how
+    or where the test process was launched.
+
+    Function-scoped (not session-scoped) because `request.node` — and
+    therefore which marker, if any, applies — differs per test.
+    """
+    if request.node.get_closest_marker("multi_node") is None:
+        return
+    nodes = kubectl_json("get", "nodes")["items"]
+    if len(nodes) < 3:
+        pytest.skip(
+            f"live cluster reports {len(nodes)} node(s), fewer than the 3 this test "
+            "asserts about the local persistent cluster's own topology — structurally "
+            "inapplicable to a single-node (CI) profile",
+        )
+
+
 @pytest.fixture(scope="session")
 def kubectl(kubectl_context: str) -> Callable[..., subprocess.CompletedProcess[str]]:
     """Session-scoped kubectl helper: kubectl("get", "nodes") -> CompletedProcess.

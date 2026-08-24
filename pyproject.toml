@@ -204,6 +204,7 @@ markers = [
   "slow: generates or reads a large fixture",
   "regression: permanent test for a specific fixed bug (QUAL-07)",
   "cluster: requires a live kind cluster",
+  "multi_node: requires the live cluster's real 3-node topology (node count, primary-pod node placement, node-name list, full Deployment set); auto-skipped when the live cluster reports fewer than 3 nodes (CI's single-node profile)",
   "manifests: requires rendered manifests under build/ and the pinned helm and kubeconform binaries; excluded from the offline gate",
   "integration: needs a local Docker daemon (testcontainers PostgreSQL/MinIO); excluded from the offline gate (06-17-PLAN.md)",
   "dagtest: needs a local Docker daemon (testcontainers PostgreSQL for Airflow metadata); excluded from the offline gate",
