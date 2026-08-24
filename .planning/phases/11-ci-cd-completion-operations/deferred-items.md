@@ -861,5 +861,58 @@ risk, rather than silently narrowing the invocation to dodge it.
 
 | Item | Status | Deferred At |
 |------|--------|-------------|
-| `e2e-full.yml`/`e2e-chaos.yml`'s own live run on a real merge to `main` (Task 3's literal acceptance criterion) has NOT been observed this session — the workflow files are written, policy-clean and locally verified, but live proof requires a push to `main` this worktree-isolated executor cannot perform. | Open | 2026-08-24, plan 11-05 |
-| `tests/e2e/observability`'s own dependency on a live monitoring stack conflicts with the CI profile's unconditional monitoring-disabled skip (`scripts/stages/85-monitoring.sh`) — `e2e-full.yml`'s `make cluster-verify` step will very likely fail on this specific sub-suite the first time it actually runs in CI, for a reason unrelated to anything this plan's own files control. | Open | 2026-08-24, plan 11-05 |
+| `e2e-full.yml`/`e2e-chaos.yml`'s own live run on a real merge to `main` (Task 3's literal acceptance criterion) has NOT been observed this session — the workflow files are written, policy-clean and locally verified, but live proof requires a push to `main` this worktree-isolated executor cannot perform. | Resolved below | 2026-08-24, plan 11-05 |
+| `tests/e2e/observability`'s own dependency on a live monitoring stack conflicts with the CI profile's unconditional monitoring-disabled skip (`scripts/stages/85-monitoring.sh`) — `e2e-full.yml`'s `make cluster-verify` step will very likely fail on this specific sub-suite the first time it actually runs in CI, for a reason unrelated to anything this plan's own files control. | Confirmed below | 2026-08-24, plan 11-05 |
+
+### Live-run results (2026-08-24, orchestrator's merge-to-main push)
+
+Both workflows triggered for real for the first time and actually reached their test suites (past
+plan 11-04's own cluster-up blocker — that work paid off). Neither reached `success`, but both
+produced real, informative failures rather than hanging/crash-looping:
+
+**`e2e-chaos.yml`**: cluster came up cleanly, chaos suite ran in ~2 minutes: **21 passed, 11
+failed**. All 11 failures fall into two already-understood categories, no new root causes:
+- 7 failures: `normalized.customers has fewer than N rows` / `no CURRENT config_versions row for
+  dataset='customers'` — the dedicated ephemeral chaos cluster starts with zero prior data, and
+  several chaos scenarios assume customers were already ingested. Needs a priming/seed step before
+  the chaos suite runs, or those scenarios need to self-seed.
+- 4 failures: `deployments.apps "airflow-scheduler" not found` (the SAME chart-rendered-resource-
+  kind issue plan 11-04 fixed in `scripts/stages/70-airflow.sh` — a second code path,
+  `tests/e2e/vault/conftest.py`, does its own raw `kubectl get deployment` check and was never
+  updated) and `permission denied for schema meta` for `analytics_owner` (the pre-existing grant
+  gap already logged above under plan 11-04).
+
+**`e2e-full.yml`**: cluster came up cleanly, `make cluster-verify` ran for ~32 minutes: **21
+passed, 24 failed, 1 skipped, 5 errors**. Confirms the risk flagged above, plus one new pattern —
+failures cluster into three independent causes, none of them mysterious:
+1. **5 failures — hardcoded 3-node topology assumptions**: `test_exactly_three_nodes`,
+   `test_every_node_allocatable_is_positive_and_within_its_declared_ceiling`,
+   `test_two_distinct_clusters_no_shared_storage` (expects the two Postgres primaries on different
+   nodes — impossible with one node), `test_doctor_live_mount_detection` (expects a `worker` node
+   label), and `test_four_workloads_are_ready` (expects `airflow-scheduler` as a literal Deployment
+   name, same root cause as the chaos-suite finding above). These tests were written for — and
+   correctly test — the local persistent 3-node cluster; they are structurally inapplicable to a
+   genuinely single-node CI profile and were never carved out of `cluster-verify`'s CI-invoked path.
+2. **~15 failures — cascading from ingestion never completing in time**: `meta.files has no row...
+   discovery never registered it within 180s`, `airflow backfill create ... failed`, `did not reach
+   a terminal state within 180s (last observed state: 'running')`. One shared shape: real work is
+   happening (tasks are `running`, not crashed) but not finishing inside the fixed 180s windows
+   these tests assume — the same "everything is slower under real CI contention than a quiet local
+   host" theme underlying every fix in the "PARTIALLY RESOLVED" section above, now surfacing as
+   test-level timeouts instead of pod crash-loops.
+3. **2 failures — `permission denied for schema meta`** in `tests/e2e/observability` — confirms the
+   flagged monitoring-disabled-in-CI conflict exactly as predicted, though the actual error is the
+   `analytics_owner` grant gap manifesting through that path rather than a missing-monitoring-stack
+   error specifically.
+
+**Recommended next step**: this is now squarely Rule-4 territory — a deliberate decision, not a
+same-session auto-fix. Three independent threads to pick up, in likely priority order:
+1. Fix the pre-existing `analytics_owner` grant gap (a new Alembic migration granting
+   `SELECT` on `meta.files`/`meta.datasets`) — cheap, well-understood, resolves failures in both
+   workflows plus the local-cluster finding already logged under plan 11-04.
+2. Update `tests/e2e/vault/conftest.py`'s scheduler-Deployment check to match plan 11-04's own
+   chart-rendered-kind fix in `70-airflow.sh` — small, mechanical.
+3. Decide, deliberately, whether `cluster-verify` needs a CI-scoped test selection (skip/mark the
+   3-node-topology-specific tests and `tests/e2e/observability` when `PROFILE=ci`) versus raising
+   every fixed timeout further and/or seeding priming data before the suite runs — this is the real
+   architectural call, not a quick patch.
