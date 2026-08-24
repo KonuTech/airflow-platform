@@ -75,12 +75,15 @@ def aggregate_receipts(receipts: list[dict]) -> None:
 
 
 # schedule=[customers_asset] (D-15): this DAG only runs after customers' own publish lands GOLD.
+# dagrun_timeout=45min: same debug/ci-pipeline-ingestion-timeout ROUND 3 fix as
+# csv_ingest_customers.py's own @dag() (see that file's comment for the full rationale).
 @dag(
     dag_id="csv_ingest_orders",
     schedule=[customers_asset],
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
+    dagrun_timeout=pendulum.duration(minutes=45),
     tags=["vertical-slice", "orders"],
 )
 def csv_ingest_orders() -> None:

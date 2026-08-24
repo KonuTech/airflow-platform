@@ -74,12 +74,18 @@ def aggregate_receipts(receipts: list[dict]) -> None:
 
 
 # */1 * * * *: short interval keeps sensing prompt; max_active_runs=1 (D-03) caps concurrency.
+# dagrun_timeout=45min (debug/ci-pipeline-ingestion-timeout ROUND 3): a scheduler-pod OOM mid-task
+# leaves the interrupted TI reset (not failed) by adopt_or_reset_orphaned_tasks, which never
+# checks retries -- without this, a DagRun can occupy max_active_runs=1 forever, blocking every
+# later DagRun of this dag_id. 45min reuses this file's own established 2700s backfill-settle
+# precedent (see test_backfill_2year_sweep.py); Airflow force-SKIPs unfinished TIs on timeout.
 @dag(
     dag_id="csv_ingest_customers",
     schedule="*/1 * * * *",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
+    dagrun_timeout=pendulum.duration(minutes=45),
     tags=["vertical-slice", "customers"],
 )
 def csv_ingest_customers() -> None:
@@ -141,7 +147,7 @@ def csv_ingest_customers() -> None:
     # retries=6 (not the DAG's usual 2): same KubernetesJobWatcher request-timeout race as
     # `stage` above (see that task's own comment) -- live-confirmed 2026-08-22 during plan
     # 10-08's concurrency test to also hit dbt_build, recovering via resolve_dbt_build_status's
-    # own resilience but still needing more than 2 attempts under this DAG's max_active_tis_per_dag=1
+    # own resilience but still needing more than 2 attempts under this max_active_tis_per_dag=1
     # cap's idle-gap-heavy scheduling.
     dbt_build = KubernetesPodOperator(
         task_id="dbt_build",

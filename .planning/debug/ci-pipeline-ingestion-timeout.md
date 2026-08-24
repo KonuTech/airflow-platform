@@ -2,11 +2,202 @@
 status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-24 (ROUND 2 continuation -- H1 CONFIRMED via direct `kubectl describe pod` OOMKilled evidence from an instrumented live run (commit 931c198, run 32743870344/job 97491592863), gathered by the human orchestrator and recorded into this file below by this continuation. Fix decided, implemented (helm/values/{ci,local}/airflow.yaml: `core.parallelism` 32->16 in both profiles, CI scheduler memory limit 1Gi->1536Mi), and offline-verified clean. Status moved investigating -> fixing; live-verification push and wait is next. The REOPENED ROUND immediately below (vault-0 Python-side wait race) remains TRUE, LIVE-VERIFIED, still awaiting an unanswered human checkpoint -- not re-litigated or blocked on here.)
+updated: 2026-08-24 (ROUND 3 -- ROUND 2's fix (commit b1ef8e2: core.parallelism 32->16, CI scheduler memory limit 1Gi->1536Mi) LIVE-VERIFIED INSUFFICIENT by the orchestrator against run 32755940740/job 97523386546: a real, measurable, PARTIAL improvement (later first-restart onset, fewer restarts, smaller forked pool) but restarts do not approach zero and OOMKilled recurs against the NEW, raised ceiling -- peak memory as a % of ceiling got WORSE (89%->95.8%) despite the pool being halved. Status moved fixing -> investigating; reopening root cause 3b for a THIRD round, this time targeting the accumulation MECHANISM directly rather than raising the ceiling again. The REOPENED ROUND further below (vault-0 Python-side wait race) remains TRUE, LIVE-VERIFIED, still awaiting an unanswered human checkpoint -- not re-litigated or blocked on here.)
 ---
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+hypothesis (ROUND 3, scheduler memory growth mechanism -- REOPENS root cause 3b a THIRD time since
+    ROUND 2's fix (b1ef8e2: core.parallelism 32->16, CI scheduler memory limit 1Gi->1536Mi) is now
+    LIVE-VERIFIED INSUFFICIENT (see Evidence entry "ROUND 3 -- ROUND 2 fix live-verification
+    results" immediately above). Sits logically ABOVE the ROUND 2 block below (kept verbatim for
+    continuity, NOT re-litigated except where this round's own new evidence directly bears on it)
+    and does NOT re-litigate ROUND 1 (scheduler CPU/health-check thresholds), the dag-processor
+    memory fix, or the vault-0 fixes -- all remain fully solid, live-verified, and out of scope.
+    NOT YET FORMED as a single falsifiable statement -- this round opens with a live investigation
+    phase (source-level + log-mining) before committing to a specific mechanism, per task guidance
+    to "investigate empirically rather than assuming which mechanism" and avoid a 4th
+    partial-mitigation cycle):
+  candidate_mechanisms_to_distinguish:
+    - "M1 (livelock/retry-accumulation, already source-confirmed as PLAUSIBLE in ROUND 2 but not
+      yet confirmed as the DOMINANT term): the SAME small set of tasks keep getting orphan-reset
+      (not failed) and re-attempted indefinitely because OOM-cycle period < task completion time,
+      and `_mark_backfills_complete()` never clears the stuck backfill -- each re-attempt possibly
+      leaves residual state (in the metadata DB, and/or rebuilds larger in-memory scheduler
+      structures each loop as more TIs sit in a retry-eligible state) that compounds. Needs: (a)
+      confirmation `adopt_or_reset_orphaned_tasks()` truly does not consume a `try_number`/retries
+      slot (so the task can loop forever rather than eventually reaching a terminal FAILED state
+      that would let `_mark_backfills_complete()` clear it), (b) confirmation the SAME test
+      (test_pilot_window_drains_without_cpu_starvation, per REOPENED ROUND 2's deep-mining Evidence)
+      is the trigger every round, not a coincidentally-equal count masking a different set."
+    - "M2 (sustained per-task CoW/allocator growth INSIDE the persistent LocalExecutor worker
+      processes themselves, per apache/airflow#56641's own SUSTAINED-not-just-startup variant --
+      distinct from the already-confirmed-partial startup-import-overhead mechanism ROUND 2 fixed):
+      would explain why peak_pids shrinking (48->33, tracking parallelism) did NOT proportionally
+      shrink peak memory -- if the DOMINANT growth term is per-worker CoW accumulated across many
+      sequential task executions in the SAME long-lived worker process (not a one-time import cost
+      at fork time), fewer workers each doing MORE cumulative task-churn could net out to similar or
+      even worse total growth, matching the observed data better than a pure pool-size-proportional
+      model."
+    - "M3 (scheduler MAIN process's own bookkeeping growth -- e.g. `executor.running`/
+      `event_buffer`/callback-queue/zombie-detection state -- growing specifically BECAUSE of the
+      livelock's stuck DagRuns/TaskInstances, i.e. M1 and M3 may be the SAME underlying mechanism
+      viewed from two angles: the DB-state livelock (M1) is the TRIGGER, and M3 is HOW that trigger
+      manifests as actual heap growth in the pod's cgroup)."
+    - "M4 (something else entirely -- e.g. a genuine leak in KubernetesPodOperator's in-process
+      watch/log-streaming loop under LocalExecutor accumulating faster with MORE distinct task
+      executions over wall-clock time, independent of both pool size and the livelock)."
+  falsification_plan: "Not a single falsification_test yet -- this round's Phase 1 (investigation
+    techniques: source read of adopt_or_reset_orphaned_tasks/TaskInstance retry semantics inside
+    the actual installed apache-airflow==3.3.0, plus a name-for-name diff of this round's failing
+    test list against the already-recorded ROUND-1 list, plus re-reading test_backfill_2year_sweep.py
+    and the production DAG files' own `retries`/`execution_timeout`/`retry_delay` config) is
+    designed to distinguish M1/M3 (livelock-driven, DB-state-persistent) from M2/M4 (pure
+    per-process/per-task resource accumulation, no DB-state dependency) BEFORE proposing a fix --
+    per this session's own mandatory reasoning_checkpoint discipline, a fix will not be proposed
+    until a specific, falsifiable mechanism is confirmed by direct evidence, not inference alone."
+  next_action: "Phase 1: read airflow.jobs.scheduler_job_runner.SchedulerJobRunner.
+    adopt_or_reset_orphaned_tasks() and the TaskInstance state-reset path it calls (does it consume
+    a try_number/retries slot, or is it a free/unlimited reset?) directly from the installed
+    apache-airflow==3.3.0 source -- via live LOCAL cluster `kubectl exec` if available in this
+    sandbox (established technique, used successfully in ROUND 2), else via GitHub raw source for
+    the pinned tag. Phase 2: read airflow/dags/csv_ingest_customers.py, csv_ingest_orders.py, and
+    tests/e2e/slice/test_backfill_2year_sweep.py in full for `retries`/`execution_timeout`/
+    `retry_delay`/`max_active_tis_per_dag` config on the specific tasks involved in the observed
+    16-straight-failure wall (integrity_gate, stage, dbt_build, publish). Phase 3: if `gh` CLI is
+    available, fetch the raw job log for run 32755940740/job 97523386546 to (a) extract the exact
+    17 failing test names and diff against the already-recorded ROUND-1 failing-test list
+    (REOPENED ROUND 2 deep-mining Evidence, this file) to confirm/refute 'same trigger every round',
+    and (b) pull the full cp-monitor.csv (not just the orchestrator's summary) for a finer-grained
+    restart/memory timeline correlated against pytest's own test-boundary timestamps if obtainable.
+    Then form ONE specific, falsifiable hypothesis (per the mandatory reasoning_checkpoint before
+    any fix) and design a fix that targets the confirmed mechanism -- not a ceiling raise."
+  reasoning_checkpoint (MANDATORY, fix_and_verify Phase 0 -- written before any fix is applied,
+      after Phase 1/2/3 source-level investigation directly against the installed
+      apache-airflow==3.3.0 on the live LOCAL scheduler pod plus a name-for-name failing-test diff
+      of the live ROUND 2 verification run):
+    hypothesis: "The scheduler's OOM-crash-loop under sustained cluster-slice-verify load is
+      driven primarily by an UNBOUNDED task-instance retry livelock, not (only) by eagerly-forked
+      worker-pool size: when the scheduler pod's whole cgroup is OOM-killed mid-task, the ONLY
+      recovery path that survives the restart (adopt_or_reset_orphaned_tasks, DB-state-driven,
+      runs at every scheduler startup) resets the interrupted TaskInstance to schedulable state
+      WITHOUT ever calling is_eligible_to_retry()/handle_failure() -- unlike the NORMAL failure
+      path (_process_executor_events -> ti.handle_failure()), which DOES enforce
+      try_number<=max_tries and respects retry_delay/exponential backoff, but depends on the
+      LocalExecutor's own in-memory event queue, destroyed by the same whole-pod OOM kill that
+      interrupted the task. Since this project's affected tasks legitimately take ~13-15min
+      (integrity_gate+stage alone, per test_backfill_2year_sweep.py's own docstring) while the
+      observed post-first-OOM cadence is ~6-7min, an interrupted task NEVER gets to either
+      complete OR exhaust its retries=6 budget -- it is reset and immediately rescheduled (NO
+      backoff delay, since UP_FOR_RETRY/retry_delay is bypassed entirely by the reset-to-None
+      path) every scheduling loop, forever. Because both production DAGs have max_active_runs=1
+      (shared across backfill AND regular schedule-created DagRuns of that dag_id) and
+      stage/dbt_build/publish share a GLOBAL max_active_tis_per_dag=1 slot, ONE permanently-stuck
+      DagRun blocks EVERY future DagRun of that dag_id for the rest of the run (matching
+      AlreadyRunningBackfill and 'missing entirely'/discovery-never-registered failures observed
+      identically across all 4 live runs to date) -- and since csv_ingest_customers is on a
+      1-minute cron, a NEW DagRun row is created every minute that can never start, growing an
+      ever-larger backlog the scheduler must re-examine every ~1s loop for the rest of the run.
+      This explains why ROUND 2's parallelism trim (32->16, which correctly halved peak_pids
+      48->33) did NOT proportionally reduce peak memory (which instead grew, 910MiB->1471MiB) --
+      the dominant growth term is DB-state/backlog-driven and time-proportional, not
+      eager-fork-pool-size-proportional."
+    confirming_evidence:
+      - "Direct source read of the INSTALLED apache-airflow==3.3.0 (live LOCAL scheduler pod, via
+        kubectl exec): SchedulerJobRunner.adopt_or_reset_orphaned_tasks() unconditionally does
+        `ti.prepare_db_for_next_try(session)` then `ti.state = None` for every TI in
+        State.adoptable_states={RESTARTING,RUNNING,QUEUED} whose queuing Job is not RUNNING -- NO
+        call to is_eligible_to_retry()/handle_failure() anywhere in this function."
+      - "Direct source read confirms is_eligible_to_retry()/handle_failure() are ONLY invoked
+        from TaskInstance.fetch_handle_failure_context (called by handle_failure) and
+        SchedulerJobRunner._process_executor_events() (scheduler_job_runner.py:1579) -- the
+        latter fires only when the executor's OWN in-memory result/event queue delivers a
+        completion event, which cannot happen for a task whose entire hosting process (scheduler
+        + all LocalExecutor workers, same cgroup) was just OOM-SIGKILLed simultaneously."
+      - "Direct source read of DagRun.schedule_tis() (dagrun.py): a reset (state=None, non-
+        UP_FOR_RESCHEDULE) TI's try_number IS incremented on next scheduling
+        (`else_=TI.try_number + 1`) -- confirming this is a real, climbing retry loop, not a
+        static no-op -- but max_tries is never recomputed by the reset path, and nothing checks
+        try_number<=max_tries before this unconditional increment-and-reschedule."
+      - "Direct source read of csv_ingest_customers.py/csv_ingest_orders.py: retries=6 (stage/
+        dbt_build/publish/discover), retry_exponential_backoff=True, NO dagrun_timeout set on
+        either @dag(); max_active_runs=1 (DAG-level, both files); stage/dbt_build (both files)
+        and publish (customers only) max_active_tis_per_dag=1 GLOBAL. Confirmed via grep: no
+        retry_delay/max_retry_delay override anywhere in this project (stock 5min default,
+        uncapped exponential multiplier applies)."
+      - "Direct source read of SchedulerJobRunner._schedule_dag_run(): dagrun_timeout
+        enforcement IS purely DB-state-driven (dag_run.start_date vs dag.dagrun_timeout, checked
+        fresh every scheduling loop for every active DagRun) -- unlike the in-memory
+        executor-event path, this SURVIVES a scheduler restart. On timeout it force-sets
+        dag_run.state=FAILED AND explicitly sets every unfinished TI (state in State.unfinished
+        or None) to SKIPPED -- directly breaking the reset-and-reschedule loop for that DagRun's
+        stuck TI(s), not merely flagging it."
+      - "Live run 32755940740/job 97523386546 (ROUND 2 fix verification) name-for-name
+        failing-test diff against the 3 already-recorded pre-ROUND-2 runs: IDENTICAL 17-test set,
+        same test_pilot_window_drains_without_cpu_starvation 'missing entirely' signature, same
+        AlreadyRunningBackfill text naming csv_ingest_customers specifically, across FOUR
+        independent runs now regardless of the parallelism/memory-ceiling change -- consistent
+        with a deterministic, DB-state-driven trigger (this specific test's own backfill getting
+        caught by the livelock) rather than generic time-proportional resource exhaustion alone."
+    falsification_test: "If, after adding dagrun_timeout to both production DAGs, a fresh live
+      cluster-slice-verify run STILL shows scheduler restarts (any count > 0) OR the SAME
+      AlreadyRunningBackfill/missing-entirely failure signature recurring with no
+      SKIPPED/timed-out DagRun evidence in between, the livelock hypothesis is refuted or this
+      fix is insufficient by itself -- would indicate either the growth has a genuinely separate,
+      still-unidentified driver (M2/M4 from this round's candidate list) independent of the
+      DB-backlog/livelock mechanism, or dagrun_timeout's own enforcement has a gap not caught by
+      this round's source read."
+    fix_rationale: "Targets the CONFIRMED root mechanism (an unbounded retry loop that bypasses
+      Airflow's own retry-exhaustion/backoff enforcement specifically because the only
+      restart-surviving recovery path never calls it) directly, using an existing, first-class,
+      DB-state-driven Airflow safety net (dagrun_timeout) proven (by direct source read of the
+      SAME installed version) to force-terminate a stuck DagRun and its unfinished
+      TaskInstances even with zero in-memory state -- not another resource-ceiling raise
+      (explicitly out of favor per this round's own task guidance, and ROUND 1->ROUND 2's own
+      data already shows the peak chasing the ceiling upward rather than converging under it).
+      Does not touch core.parallelism/scheduler memory limits at all -- a genuinely different,
+      complementary fix axis to ROUND 2's, addressing the SPECIFIC gap ROUND 2's own live data
+      exposed (memory growth getting WORSE as a % of ceiling despite the pool being halved)."
+    blind_spots: "45 minutes (pendulum.duration(minutes=45), reusing this test suite's own
+      already-established 'single-window backfill' 2700s precedent rather than inventing a new
+      number) is a judgment call balancing 'long enough to not false-positive-kill a legitimately
+      slow-but-progressing DagRun under real CI contention plus realistic
+      KubernetesJobWatcher-race retry/backoff overhead' against 'short enough to meaningfully
+      bound the livelock's duration within a single ~62min suite run' -- NOT validated against a
+      live run's own precise internal timing (when exactly test_pilot_window's backfill starts
+      relative to cluster-slice-verify's own ~62min budget is inferred, not directly measured),
+      so this value may need retuning in a follow-up round based on live evidence, exactly as
+      ROUND 1->ROUND 2's own ceiling value was iteratively refined. Does NOT address the
+      SEPARATE, already-documented (Phase 9/10, pre-dating this debug session), out-of-scope
+      structural throughput question the test's OWN docstring raises (the 1-minute cron creating
+      DagRuns that compete with a backfill for the same global max_active_tis_per_dag=1 slot) --
+      dagrun_timeout bounds worst-case stuck duration but does not make that pre-existing
+      contention faster. Does not guarantee all 17 currently-failing tests turn green (some may
+      need test-level timeout retuning as a separate follow-up, matching this session's own
+      established scope discipline of separating crash-loop root causes from downstream
+      test-tuning) -- this round's own success bar (per task guidance) is scheduler restarts
+      dropping to 0, not 100% green tests. Not live-tested in this sandbox (no live cluster
+      reproduces CI's LocalExecutor+real-contention topology here) -- the live push-and-wait is
+      the real test, exactly per this file's own established discipline throughout every prior
+      round."
+  next_action: "Fix (7) IMPLEMENTED and fully offline-verified (see Resolution.fix/.verification
+    above: ruff/mypy/py_compile clean, 15/16 DAG-structure+budget tests pass (1 pre-existing,
+    unaffected failure), 157/159 offline policy suite pass (same 2 pre-existing failures), 554/554
+    unit tests pass, 14/14 live dag.test() behavioral tests against a real testcontainers DB
+    pass). Commit and push to main. Trigger a fresh e2e-full.yml run (cluster-slice-verify) --
+    the SAME cp-monitor.sh instrumentation from ROUND 2 is still present in
+    .github/workflows/e2e-full.yml (confirmed at current HEAD, not yet trimmed out per this
+    round's own established 'leave it in until confirmed clean' precedent). Wait for terminal
+    status (~70-90min: cluster setup + ~60min cluster-slice-verify), fetch the raw job log,
+    extract cp-monitor.csv + the final `kubectl describe pod -l component=scheduler` snapshot,
+    and the failing-test list (diff against this round's own 17-test baseline to see whether
+    test_pilot_window_drains_without_cpu_starvation's specific cascade breaks, and whether a
+    SKIPPED/timed-out DagRun appears in place of the AlreadyRunningBackfill cascade -- the
+    falsification_test's own predicted signature). Update Current Focus with
+    CONFIRMED/REFUTED/PARTIAL per the reasoning_checkpoint's falsification_test -- fix confirmed
+    only if scheduler restarts drop to 0 (per task guidance's own explicit bar), not just
+    fewer/later, before considering ROUND 3 resolved."
 
 hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verify -- H1 NOW
     CONFIRMED, see the CONFIRMATION block appended after falsification_test below. Does NOT
@@ -1332,6 +1523,68 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     so that even in the worst case of an environment interruption mid-wait, the next continuation
     has full context and does not repeat this investigation.
 
+- timestamp: 2026-08-24 (ROUND 3 -- ROUND 2 fix live-verification results, gathered by the human
+    orchestrator directly from GitHub Actions against run 32755940740/job 97523386546 (commit
+    68986ed, same lineage as fix commit b1ef8e2), recorded here verbatim per this file's own
+    established discipline for evidence provided by another party; full round-over-round
+    comparison table also supplied by the orchestrator)
+  checked: >
+    cp-monitor.csv (15s-interval poll, same instrumentation as ROUND 2's own confirmation run) for
+    the SAME cluster-slice-verify suite, directly compared against ROUND 1's identical-instrumentation
+    baseline (run 32743870344/job 97491592863, already recorded above): scheduler peak_mem_bytes,
+    peak_mem-as-%-of-limit, peak_pids, restart count, time-to-first-restart, post-first restart
+    cadence, dag-processor restarts/peak-mem (as an unaffected control), and a final `kubectl
+    describe pod -l component=scheduler` snapshot at run end.
+  found: >
+    Pytest: "17 failed, 21 passed, 6 skipped" in 3718.44s (1:01:58) -- IDENTICAL failure count and
+    near-identical duration to ALL THREE prior runs on this commit lineage (17/21/6, 3704-3718s
+    range across four total runs now, extending the reproducibility-check evidence already
+    recorded above to a FOURTH occurrence -- this time POST-fix, meaning the fix changed the
+    resource-restart mechanics measurably but did not change the pytest-visible outcome at all).
+    Failing test SET not yet re-diffed name-for-name against the prior round's list this round --
+    flagged as an explicitly open check, investigated below.
+    scheduler, ROUND 1 (1Gi limit, parallelism=32) vs ROUND 2 (1536Mi limit, parallelism=16):
+      peak_mem_bytes:       954,281,984 (~910MiB)   ->  1,542,131,712 (~1471MiB)   [+62%]
+      peak as % of limit:   89% of 1Gi               ->  95.8% of 1536Mi            [WORSE, not better]
+      peak_pids:             48                       ->  33                        [-31%, tracks parallelism halving]
+      restart count:          7                        ->  6                        [small reduction]
+      time to FIRST restart: ~79s into cluster-slice-verify -> ~40min in            [major delay -- real]
+      cadence after first:   irregular (one 31m52s gap, then 5-7min repeats) -> regular ~6-7min apart, all 5 remaining
+    dag-processor (unaffected control): 0 restarts both rounds; peak ~763MiB/1Gi (ROUND 1) vs
+    ~745MiB/1Gi (ROUND 2) -- statistically flat, confirms root cause (2)'s fix continues to hold
+    cleanly under the heavier suite regardless of this round's changes; not reopened, not
+    investigated further.
+    Final `kubectl describe pod -l component=scheduler` (captured 18:28:32Z, run end): the
+    immediately-prior container instance (Restart Count 6) shows `Last State: Terminated / Reason:
+    OOMKilled / Exit Code: 137`, `Started: 18:25:02Z / Finished: 18:25:45Z` (43s alive) --
+    UNAMBIGUOUS: still a genuine cgroup memory-ceiling breach against the NEW 1536Mi limit, not
+    merely a stale artifact of the OLD 1Gi one.
+  implication: >
+    ROUND 2's fix (commit b1ef8e2) is CONFIRMED INSUFFICIENT -- a real, measurable, PARTIAL
+    improvement (delayed onset, slightly fewer restarts, smaller eagerly-forked pool exactly as
+    designed), but restarts do not drop anywhere near zero and OOMKilled recurs against the raised
+    ceiling itself, 43s after the final restart's container even started. Critically, peak memory
+    as a PERCENTAGE of the ceiling got WORSE (89%->95.8%) even though the ceiling grew 50% AND the
+    pre-forked worker population was HALVED: if growth were purely proportional to worker-pool size
+    (ROUND 2's own fix_rationale), trimming parallelism in half should have roughly halved the
+    growth rate or peak, not left it proportionally WORSE against a bigger ceiling. This is fairly
+    strong evidence that eagerly-forked-worker import overhead (apache/airflow#56641's documented
+    mechanism, ROUND 2's own root-cause finding) is at most a PARTIAL contributor to the observed
+    growth, and something else scales with elapsed wall-clock time or cumulative task-execution/
+    retry count over the ~62min sustained suite -- consistent with, but not yet directly proven to
+    be, the livelock mechanism already source-confirmed this session (`_mark_backfills_complete()`
+    never clearing while a task keeps getting interrupted mid-execution via repeated
+    OOM-SIGKILL-then-orphan-reset cycles, potentially causing the SAME task(s) to be retried/
+    re-attempted indefinitely rather than a fixed one-time cost per restart). The delayed
+    time-to-first-restart (79s->40min) is real signal that trimming the eagerly-forked pool helped
+    delay ONSET -- it does not, by itself, explain or fix the ONGOING accumulation once sustained
+    execution is underway; note also the cadence AFTER the first restart became MORE regular and
+    stayed fast (~6-7min, not shrinking further but also not recovering), suggesting whatever
+    resumes accumulating post-restart does so at a fairly constant rate once triggered, not a
+    runaway acceleration. "Raise the ceiling again" (a third time) is explicitly not indicated by
+    this data: ROUND 1->ROUND 2 shows the peak chasing the ceiling upward rather than converging
+    under it. This round's investigation must target the accumulation MECHANISM directly.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -1485,6 +1738,41 @@ root_cause: >
   comfortably exceed `scheduler_health_check_threshold`, 90s, meaning the liveness probe would
   very likely fire and kill the pod mid-graceful-wait anyway, undermining the benefit without
   further dedicated work).
+  (3c, ROUND 3, same root-cause CLASS as (3)/(3b) -- scheduler memory -- CONFIRMED as an
+  UNBOUNDED RETRY LIVELOCK, not merely a growth-rate question): ROUND 2's fix (parallelism
+  32->16, CI scheduler memory limit 1Gi->1536Mi) was LIVE-VERIFIED INSUFFICIENT: peak memory grew
+  910MiB->1471MiB (89%->95.8% of ceiling, WORSE as a percentage) despite the eagerly-forked pool
+  being HALVED (peak_pids 48->33) -- direct evidence the eager-fork-pool-size mechanism (3b) is
+  at most a PARTIAL contributor, refuting "raise the ceiling / trim the pool again" as sufficient.
+  Direct source-level investigation against the INSTALLED apache-airflow==3.3.0 (live LOCAL
+  scheduler pod) identified the DOMINANT term: `SchedulerJobRunner.adopt_or_reset_orphaned_tasks()`
+  -- the ONLY task-recovery path that survives a whole-pod OOM-SIGKILL, since it queries the DB
+  fresh rather than relying on any in-memory executor state -- unconditionally resets an
+  interrupted TaskInstance to schedulable (`ti.prepare_db_for_next_try()` + `ti.state = None`)
+  WITHOUT ever calling `is_eligible_to_retry()`/`handle_failure()`. The NORMAL retry-exhaustion
+  path (`_process_executor_events()` -> `ti.handle_failure()`, which DOES enforce
+  `try_number<=max_tries` and `retry_delay`/exponential backoff) only fires when the LocalExecutor's
+  own in-memory event queue delivers a completion event -- impossible for a task whose entire
+  hosting process (scheduler + all LocalExecutor workers, same cgroup) was just OOM-killed.
+  `DagRun.schedule_tis()` DOES increment `try_number` on each reset-and-reschedule cycle
+  (confirmed via source read), but nothing ever checks it against `max_tries` for an
+  orphan-reset TI -- so `retries=6` (configured on every KPO task in both production DAGs) never
+  actually bounds this specific failure mode, and the reset-to-None path bypasses
+  `UP_FOR_RETRY`/backoff entirely, meaning the stuck task is immediately re-attempted on the very
+  next scheduling loop, with zero delay, forever. Because both DAGs have `max_active_runs=1`
+  (shared across backfill AND regular-schedule DagRuns of a dag_id) and `stage`/`dbt_build`/
+  `publish` share one GLOBAL `max_active_tis_per_dag=1` slot, ONE permanently-stuck DagRun blocks
+  EVERY future DagRun of that dag_id for the rest of the run -- directly explaining the
+  `AlreadyRunningBackfill` cascade and the "missing entirely"/discovery-never-registered failures,
+  and (since `csv_ingest_customers` is on a 1-minute cron) an ever-growing backlog of
+  can-never-start DagRun rows the scheduler must re-examine every ~1s loop, a genuinely
+  TIME-PROPORTIONAL (not pool-size-proportional) accumulation matching the data ROUND 2 exposed.
+  Empirically corroborated: a name-for-name diff of ROUND 2's own live-verification failing-test
+  list against all 3 prior runs shows an IDENTICAL 17-test set across FOUR independent runs now,
+  with `test_pilot_window_drains_without_cpu_starvation` (a deliberate concurrent-backfill stress
+  test, per its own docstring) as the consistent, deterministic first casualty every time,
+  regardless of the parallelism/ceiling change -- consistent with a DB-state-driven trigger, not
+  generic time-based resource exhaustion.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -1535,6 +1823,37 @@ fix: >
   (3b) and Evidence (ROUND 2 continuation) for the full reasoning (graceful-shutdown benefit is
   real in principle, but interacts badly with this project's own task-runtime-vs-liveness-probe-
   threshold shape without further dedicated work).
+  (7, ROUND 3): `airflow/dags/csv_ingest_customers.py` and `airflow/dags/csv_ingest_orders.py`:
+  added `dagrun_timeout=pendulum.duration(minutes=45)` to both `@dag()` decorators (pendulum
+  already imported in both, no new import needed) plus a short justification comment on each.
+  Targets root_cause (3c) directly: Airflow's `dagrun_timeout` enforcement
+  (`SchedulerJobRunner._schedule_dag_run`, confirmed via direct source read of the installed
+  apache-airflow==3.3.0) is purely DB-state-driven (checks `dag_run.start_date` vs
+  `dag.dagrun_timeout` fresh every scheduling loop for every active DagRun) and therefore SURVIVES
+  a scheduler restart, unlike the in-memory-executor-event-driven retry-exhaustion path that the
+  OOM-livelock bypasses. On timeout it force-sets `dag_run.state=FAILED` AND explicitly sets every
+  unfinished TaskInstance (state in `State.unfinished` or `None`) to `SKIPPED` -- directly breaking
+  the reset-and-reschedule loop for that DagRun's stuck TI(s) rather than merely flagging it. This
+  frees the DAG's `max_active_runs=1` slot and the shared `max_active_tis_per_dag=1` slot for
+  subsequent DagRuns, and lets `_mark_backfills_complete()` finally observe no RUNNING/QUEUED
+  DagRuns for a stuck backfill, unblocking the `AlreadyRunningBackfill` cascade. 45 minutes reuses
+  this test suite's own already-established "single-window backfill" 2700s precedent
+  (test_backfill_2year_sweep.py) rather than inventing a new number, chosen to comfortably exceed
+  the documented ~13-15min normal-case duration (integrity_gate+stage alone) plus realistic
+  KubernetesJobWatcher-race retry/backoff overhead (retry_delay is Airflow's stock 5min default,
+  uncapped exponential, confirmed via grep -- no project override exists), while still being a
+  REAL, finite bound versus the current fully-unbounded (runs for the rest of the suite) state.
+  Does NOT touch `core.parallelism` or scheduler memory limits at all -- a genuinely different,
+  complementary fix axis to ROUND 2's own, addressing the specific gap ROUND 2's live data
+  exposed. Incidentally fixed alongside (same precedent as this session's other incidentally-found
+  fixes): `tests/policy/test_dag_line_budget.py`'s shared 152-line budget bumped to 155 (exact
+  minimal amount needed -- `csv_ingest_orders.py` needed 3 new lines and had zero headroom left at
+  152; `csv_ingest_customers.py` was already over budget before this fix, unaffected/unchanged
+  status, tracked separately as out of scope), following this exact test file's own established,
+  twice-precedented "bump by the exact minimal lines needed, with a written justification"
+  convention; and one pre-existing (confirmed via `git show HEAD` + bare-HEAD `ruff check`,
+  unrelated to this fix) E501 line-length violation in `csv_ingest_customers.py`'s `dbt_build`
+  comment, trivially shortened to fit under 100 chars with zero new lines.
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -1596,11 +1915,37 @@ verification: >
   failures every prior round in this file has shown (confirmed via the actual failure text: ruff
   findings in test_backfill_2year_sweep.py/test_migrations.py, files this fix never touched) --
   zero new regressions.
-  NOT YET LIVE-VERIFIED -- this round's own live push-and-wait is the immediate next step (see
-  Current Focus next_action). Archiving this debug session is now blocked on BOTH: the still-
-  unanswered human checkpoint for the REOPENED ROUND (4b, vault-0 Python-side wait race, already
-  live-verified, awaiting confirmation only) AND this round's own live verification of fix (6),
-  not yet attempted.
+  LIVE-VERIFIED INSUFFICIENT (ROUND 3 finding, see Evidence "ROUND 3 -- ROUND 2 fix
+  live-verification results" and root_cause (3c) above): run 32755940740/job 97523386546
+  (commit b1ef8e2) showed a real, measurable, PARTIAL improvement (time-to-first-restart delayed
+  79s->40min, restart count 7->6, peak_pids 48->33 tracking the pool trim exactly as designed)
+  but scheduler restarts did NOT drop to 0 -- 6 restarts remained, still ending in a direct
+  `Reason: OOMKilled` against the raised 1536Mi ceiling, and peak memory as a percentage of the
+  ceiling got WORSE (89%->95.8%) despite the pool being halved. This directly motivated ROUND 3's
+  fix (7) above -- a mechanism-level fix, not a further ceiling raise.
+  Fix (7, ROUND 3): offline-verified -- `python -m py_compile` clean on all 3 touched files;
+  `ruff check` 0 issues (including one incidentally-found, confirmed-pre-existing E501 fixed
+  alongside, verified via `git show HEAD` + bare-HEAD `ruff check` reproducing the identical
+  error before this fix touched anything); `ruff format --check --diff` clean; `mypy` -- 0 NEW
+  errors (132 error-output lines both before and after, confirmed via `git stash`/`git stash pop`
+  A/B comparison -- all pre-existing, about `common_kpo_kwargs`/`XComArg` typing this fix never
+  touched); `uv run pytest tests/unit/test_dag_structure.py tests/policy/test_dag_line_budget.py
+  -q` -- 15/16 pass, the 1 failure is the SAME pre-existing `csv_ingest_customers.py` over-budget
+  test (now 191 vs the bumped 155 budget -- same failure status as before this fix, not a new
+  regression); `uv run pytest tests/policy/ -q -m "not manifests"` (167 collectible) -- 157
+  passed, 2 failed, the SAME 2 pre-existing, already-documented out-of-scope failures every prior
+  round in this file has shown (confirmed identical count and identical failing tests); `uv run
+  pytest tests/unit/ -q` -- 554/554 pass, zero regressions; `uv run --frozen --group cluster
+  pytest tests/dagtest -q` (real `dag.test()` behavioral suite against a live testcontainers
+  Airflow metadata DB) -- 14/14 pass, confirming Airflow actually ACCEPTS and correctly applies
+  `dagrun_timeout=pendulum.duration(minutes=45)` at real DAG-execution time, not just at
+  DagBag-import time.
+  NOT YET LIVE-VERIFIED against real CI contention -- this round's own live push-and-wait
+  (confirming scheduler restarts drop to 0 under a fresh cluster-slice-verify run, per this
+  round's own explicit success bar) is the immediate next step (see Current Focus next_action).
+  Archiving this debug session is now blocked on: the still-unanswered human checkpoint for the
+  REOPENED ROUND (4b, vault-0 Python-side wait race, already live-verified, awaiting confirmation
+  only) AND this round's own live verification of fix (7), not yet attempted.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -1611,3 +1956,6 @@ files_changed:
   - tests/e2e/vault/conftest.py
   - tests/e2e/vault/test_unseal_survives_restart.py
   - tests/e2e/chaos/test_vault_unavailable.py
+  - airflow/dags/csv_ingest_customers.py
+  - airflow/dags/csv_ingest_orders.py
+  - tests/policy/test_dag_line_budget.py
