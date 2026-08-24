@@ -123,6 +123,18 @@ def _is_executor(path: str) -> bool:
     return path == "executor"
 
 
+def _is_probe_timeout(path: str) -> bool:
+    # Post-merge fix (CICD-09 follow-up): scheduler/dagProcessor
+    # livenessProbe/startupProbe.timeoutSeconds raised in CI only --
+    # live-diagnosed this session, the chart's 20s default was too tight
+    # for the probe subprocess itself to spawn/execute under real 4-CPU
+    # runner contention, unrelated to actual process health.
+    segments = path.split(".")
+    return ("livenessProbe" in segments or "startupProbe" in segments) and path.endswith(
+        "timeoutSeconds",
+    )
+
+
 def _is_node_topology(path: str) -> bool:
     # Post-merge fix (deferred-items.md "Plan 11-04" CRITICAL finding):
     # kind/cluster-ci.yaml is genuinely single-node, unlike
@@ -203,6 +215,21 @@ PERMITTED_AXES: tuple[PermittedAxis, ...] = (
             "affinity.topologyKey, which has nothing to spread a single "
             "instance away from on a single node) is present in local and "
             "absent in CI, not merely differently valued."
+        ),
+    ),
+    (
+        "probe timeoutSeconds (livenessProbe/startupProbe)",
+        _is_probe_timeout,
+        (
+            "The argued sixth axis (post-merge fix, CICD-09 follow-up): "
+            "live-diagnosed this session against a genuinely fresh CI "
+            "cluster under real contention -- the chart's 20s default "
+            "livenessProbe/startupProbe.timeoutSeconds was too tight for "
+            "the probe subprocess itself (`airflow jobs check ...`) to "
+            "spawn/execute on a shared 4-CPU runner, not evidence of an "
+            "actually unhealthy process. Raised in CI only "
+            "(scheduler/dagProcessor); local's dedicated host never sees "
+            "this contention."
         ),
     ),
 )
@@ -315,9 +342,9 @@ def test_a_permitted_axis_is_not_reported() -> None:
 
 
 def test_every_permitted_axis_carries_an_argument() -> None:
-    assert len(PERMITTED_AXES) == 5, (
-        f"expected exactly five permitted axes (D-06's three plus the argued "
-        f"fourth and fifth), found {len(PERMITTED_AXES)}"
+    assert len(PERMITTED_AXES) == 6, (
+        f"expected exactly six permitted axes (D-06's three plus the argued "
+        f"fourth, fifth and sixth), found {len(PERMITTED_AXES)}"
     )
     for name, _predicate, argument in PERMITTED_AXES:
         has_argument = bool(argument and argument.strip())

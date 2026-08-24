@@ -177,6 +177,21 @@ scheduler:
     limits:
       cpu: 500m
       memory: 512Mi
+  # Post-merge fix (CICD-09 follow-up): live-diagnosed this session against a
+  # genuinely fresh single-node CI cluster under real contention --
+  # scheduler-0's own startup/liveness probe (`airflow jobs check
+  # --job-type SchedulerJob --local`) was timing out at the chart's default
+  # 20s ceiling purely because the probe SUBPROCESS itself couldn't spawn/
+  # execute fast enough under CPU contention, not because the scheduler was
+  # actually unhealthy -- this produced a CrashLoopBackOff that starved every
+  # queued task of a live scheduler to dispatch it. Raised well past the
+  # 4 CPU/16GB runner's worst observed contention; a genuinely hung
+  # scheduler still gets caught by failureThreshold, just with more slack
+  # per attempt.
+  livenessProbe:
+    timeoutSeconds: 60
+  startupProbe:
+    timeoutSeconds: 60
   logGroomerSidecar:
     resources:
       requests:
@@ -214,6 +229,10 @@ dagProcessor:
     limits:
       cpu: 500m
       memory: 512Mi
+  # Same live-diagnosed contention race as scheduler.livenessProbe above --
+  # dag-processor's own liveness check timed out at the chart's 20s default.
+  livenessProbe:
+    timeoutSeconds: 60
   logGroomerSidecar:
     resources:
       requests:
