@@ -91,14 +91,13 @@ jobs:
           . scripts/wait-for.sh
           KUBECTL_CONTEXT=kind-airflow-platform wait_for_statefulset_ready vault vault
 
-      # All 11 QUAL-15 scenarios in one invocation: the 9 new chaos files
-      # (plans 11-09/11-10) plus the 2 already-proven Vault scenarios (secret
-      # rotation, unauthorized access) plan 11-10 deliberately did not
-      # duplicate. Both directories carry `pytestmark = pytest.mark.cluster`
-      # (confirmed by reading each module directly), so `-m cluster` selects
-      # every test in both trees with no further marker expression needed.
+      # All 11 QUAL-15 scenarios in one invocation, through `make` (CICD-02 —
+      # a workflow must never invoke pytest directly, so a developer and CI
+      # run the identical gate): the 9 new chaos files (plans 11-09/11-10)
+      # plus the 2 already-proven Vault scenarios (secret rotation,
+      # unauthorized access) plan 11-10 deliberately did not duplicate.
       - name: Run the full QUAL-15 chaos suite
-        run: uv run --frozen --group cluster pytest tests/e2e/chaos tests/e2e/vault -q -m cluster
+        run: make chaos-verify
 
       # D-22, same idempotent pattern as e2e-full.yml, distinct title prefix
       # so a chaos failure and a full-suite failure never collide into the

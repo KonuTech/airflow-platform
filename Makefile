@@ -423,6 +423,18 @@ smoke-verify:                   ## D-20: fast PR-gating subset (4 checks) agains
 	$(RUN_CLUSTER) pytest tests/e2e/cluster/test_kyverno_admission.py -q -m cluster
 	@echo "==> smoke-verify: all 4 D-20 checks passed"
 
+chaos-verify:                   ## QUAL-15: all 11 chaos scenarios (tests/e2e/chaos + tests/e2e/vault) against the live cluster [plan 11-05]
+	# D-25: e2e-chaos.yml's own dedicated-cluster suite, invoked through make
+	# (not a direct pytest call in the workflow — test_ci_invokes_make_only.py's
+	# CICD-02 gate) so a developer and e2e-chaos.yml run the identical
+	# command. Deliberately a separate target from cluster-verify/vault-verify/
+	# smoke-verify for the same reason those three are separate from each
+	# other: this one covers all 11 QUAL-15 scenarios (the 9 files under
+	# tests/e2e/chaos plus the 2 already-proven tests/e2e/vault scenarios
+	# plan 11-10 deliberately did not duplicate), a different scope and a
+	# different (much longer) budget than any of the three existing targets.
+	$(RUN_CLUSTER) pytest tests/e2e/chaos tests/e2e/vault -q -m cluster
+
 test-integration:               ## D-04: testcontainers PostgreSQL+MinIO — migrations, dataplat [plan 03-02]
 	# $(RUN_CLUSTER), same reasoning as cluster-verify above: testcontainers
 	# is what makes this target need the `cluster` group at all now (boto3/
