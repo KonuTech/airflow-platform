@@ -733,6 +733,58 @@ correct up to the exact point this gap blocks it.
 |------|--------|-------------|
 | `e2e-smoke.yml`'s live run cannot reach `success` until `kind/cluster.yaml` (+ its 3 dependent CI Helm values files' `nodeSelector`s) is rebuilt as genuinely CI-sized/CI-portable — a real, multi-file infrastructure design decision, not a same-plan auto-fix. Both actual bugs in `e2e-smoke.yml` itself (parser-breaking `if: secrets.*`, wrong-profile doctor floors) are already found and fixed in this plan's own commits. | Open — CRITICAL, blocks D-19/D-20's own live proof | 2026-08-23, plan 11-04 |
 
+### PARTIALLY RESOLVED (2026-08-24) — CI-portable kind cluster built; 8 real bugs found and fixed; one blocker remains
+
+A dedicated follow-up session took on the CI-portability gap above directly, via a real throwaway
+PR (`throwaway/cicd-09-live-pr-proof`, #10) iterated against live GitHub Actions runs — not
+simulated. Every fix below is committed on `main` and independently live-verified working before
+the next blocker surfaced:
+
+1. **`kind/cluster-ci.yaml`** (new, additive — `kind/cluster.yaml` for local dev is untouched) — a
+   genuinely single-node CI topology sized for a 4-CPU/16GiB runner, following the same
+   fair-share reservation formula the local file already established. `scripts/cluster-up.sh` now
+   selects it via `PROFILE=ci`.
+2. The 3 CI Helm values files' hard 3-node `nodeSelector`s were removed — redundant on a
+   single-node topology.
+3. Kyverno's own `require-signed-images` policy was ALSO blocking kind's built-in
+   `local-path-provisioner` helper pod for the same live-Docker-Hub-verification-exhausts-rate-
+   limit reason as the earlier xcom-sidecar finding — exempted.
+4. `scripts/stages/70-airflow.sh` was waiting on `airflow-scheduler` as a `Deployment`; the chart
+   actually renders it as a different resource kind under this profile — fixed to wait on the
+   chart's real rendered kind.
+5. Vault unseal/bootstrap was never wired into `e2e-smoke.yml`'s ephemeral-cluster path at all
+   (the local persistent cluster never exposed this gap, since it stays unsealed/bootstrapped
+   across sessions) — added, then iteratively fixed for CI-specific issues: analytical-DB
+   migrations were running AFTER vault-bootstrap instead of before (`dbt_app` role didn't exist
+   yet), a local-only `.secrets/grafana-webhook-url` convenience file doesn't exist on a fresh
+   runner (now a CI placeholder), and Grafana's own pod needed a restart after vault-bootstrap
+   creates the Secret it mounts (it started before the Secret existed).
+6. `smoke-verify`'s DAG-trigger call didn't retry across the real window where the dag-processor
+   is still parsing a freshly-deployed DAG file — added a retry loop.
+7. **The monitoring stack was never actually disabled for the CI profile**, despite CLAUDE.md's
+   own explicit design intent ("trimmed single-node CI profile (monitoring disabled...)") —
+   `scripts/cluster-up.sh` now genuinely skips it for `PROFILE=ci`.
+8. The Airflow chart's default scheduler/dag-processor liveness/startup probe timeouts (20s) are
+   too aggressive for a real, contended 4-CPU CI runner — both pods were observed crash-looping
+   with `airflow jobs check` timing out at exactly 20s under load, not because the process was
+   actually unhealthy. Raised for the CI profile specifically.
+
+**What's still blocking**: even after all 8 fixes, the final live run's failure mode changed again
+— `airflow dags trigger smoke_kubernetes_pod` itself did not return within its own 120s timeout
+(a different symptom than the earlier scheduler crash-loop, which the probe-timeout fix appears to
+have resolved). This suggests the single CI node, even trimmed as far as steps 1-8 above take it,
+is still operating close to its real capacity ceiling under GitHub Actions' actual runner
+performance — plausibly needing either a further-raised trigger-call timeout (120s may simply be
+too tight, mirroring the probe-timeout lesson from fix 8), a bigger GitHub-hosted runner tier, or
+one more round of resource trimming across the component set. Genuinely unresolved as of this
+entry — CICD-09 is NOT marked complete.
+
+**Recommended next step:** resume against the same `throwaway/cicd-09-live-pr-proof` PR pattern
+(or open a fresh one) with a longer trigger-call timeout as the next thing to try, since every
+other symptom this session hit turned out to be a timeout tuned for a quiet host rather than a
+real capacity wall. If that doesn't resolve it, the next diagnostic step is a live
+`kubectl top pod`/`describe node` snapshot taken at the exact moment of the stuck trigger call.
+
 | Item | Status | Deferred At |
 |------|--------|-------------|
 | `tests/e2e/vault/test_airflow_backend.py::test_dag_still_resolves_its_connection_and_runs` fails on the local persistent cluster with `permission denied for schema meta` for role `analytics_owner`. Root cause not fully disentangled (migration gap vs. live grant drift); reproducer: `uv run --group cluster pytest tests/e2e/vault/test_airflow_backend.py -q -m cluster`. | Open | 2026-08-23, plan 11-04 |
