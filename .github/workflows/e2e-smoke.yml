@@ -178,3 +178,23 @@ jobs:
       # `smoke-verify` docstring).
       - name: Run the D-20 fast smoke subset (make smoke-verify)
         run: make smoke-verify
+
+      # THROWAWAY diagnostic step (ci-pipeline-ingestion-timeout live-proof
+      # PR only, never lands on main): captures live scheduler/dag-processor
+      # RESTARTS counts and node CPU allocation regardless of smoke-verify's
+      # own outcome, to directly confirm or refute whether the
+      # scheduler/dag-processor CPU+threshold fix (commit a73282e,
+      # .planning/debug/ci-pipeline-ingestion-timeout.md) actually stopped
+      # the crash-loop this debug session diagnosed.
+      - name: DEBUG live scheduler/pod/node state (always, for live-proof PR)
+        if: always()
+        run: |
+          set -x
+          kubectl --context kind-airflow-platform -n airflow get pods -o wide || true
+          kubectl --context kind-airflow-platform -n airflow get deploy,statefulset -o wide || true
+          kubectl --context kind-airflow-platform -n airflow exec deploy/airflow-api-server -- airflow dags list-runs -d smoke_kubernetes_pod -o table || true
+          kubectl --context kind-airflow-platform -n airflow logs deploy/airflow-scheduler -c scheduler --tail=100 --previous || true
+          kubectl --context kind-airflow-platform -n airflow logs deploy/airflow-dag-processor -c dag-processor --tail=100 --previous || true
+          kubectl --context kind-airflow-platform -n airflow get events --sort-by=.lastTimestamp | tail -60 || true
+          kubectl --context kind-airflow-platform get pods -A -o wide || true
+          kubectl --context kind-airflow-platform describe node airflow-platform-control-plane | grep -A30 "^Allocated resources" || true
