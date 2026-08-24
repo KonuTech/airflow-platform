@@ -118,6 +118,53 @@ def _build_orders_csv(*, order_ids: list[int], customer_ids: list[int]) -> bytes
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def _scheduler_resource_ref(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+) -> str:
+    """Live-probe which object kind the connected cluster actually rendered for `airflow-scheduler`.
+
+    `scripts/stages/70-airflow.sh` (its own "Post-merge fix (CICD-09 follow-up...)" comment)
+    already established that the official Airflow chart renders `<release>-scheduler` as a
+    **StatefulSet** under CI's LocalExecutor profile and as a **Deployment** under local's
+    KubernetesExecutor profile. This helper does NOT mirror that fix by branching on a
+    `PROFILE` environment variable read, because `PROFILE` is never exported into this pytest
+    process's own environment (`.github/workflows/e2e-chaos.yml` sets it only as an inline
+    prefix on the separate `make cluster-up` step, and `Makefile`'s `chaos-verify` target never
+    threads it through) -- reading it here would silently default to `"local"` even on a
+    genuinely CI-profile cluster, reproducing this exact bug under a different mechanism.
+    Querying the live cluster is authoritative regardless of what the calling process's
+    environment does or doesn't carry.
+
+    Args:
+        kubectl_fn: The `kubectl` fixture callable.
+
+    Returns:
+        `"deploy/airflow-scheduler"` if a Deployment exists, else `"statefulset/airflow-scheduler"`
+        if a StatefulSet exists.
+
+    Raises:
+        AssertionError: neither a Deployment nor a StatefulSet named `airflow-scheduler` exists
+            in the `airflow` namespace.
+    """
+    deploy_probe = kubectl_fn(
+        "-n", "airflow", "get", "deployment", "airflow-scheduler",
+        "-o", "name", "--ignore-not-found",
+    )
+    if deploy_probe.returncode == 0 and deploy_probe.stdout.strip():
+        return "deploy/airflow-scheduler"
+    sts_probe = kubectl_fn(
+        "-n", "airflow", "get", "statefulset", "airflow-scheduler",
+        "-o", "name", "--ignore-not-found",
+    )
+    if sts_probe.returncode == 0 and sts_probe.stdout.strip():
+        return "statefulset/airflow-scheduler"
+    msg = (
+        "airflow-scheduler exists as neither a Deployment nor a StatefulSet in the airflow "
+        "namespace on this cluster"
+    )
+    raise AssertionError(msg)
+
+
 def _poll_task_instance_state(  # noqa: PLR0913 -- one keyword per genuinely distinct input; see test_pod_kill_retry.py's own _write_u3_spike_doc precedent for the same carve-out reasoning
     kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
     *,
@@ -158,6 +205,7 @@ def _poll_task_instance_state(  # noqa: PLR0913 -- one keyword per genuinely dis
         "    ).first()\n"
         "    print(ti.state if ti else 'NONE')\n"
     )
+    scheduler_ref = _scheduler_resource_ref(kubectl_fn)
     deadline = time.monotonic() + timeout
     last_state = "NONE"
     while time.monotonic() < deadline:
@@ -165,7 +213,7 @@ def _poll_task_instance_state(  # noqa: PLR0913 -- one keyword per genuinely dis
             "-n",
             "airflow",
             "exec",
-            "deploy/airflow-scheduler",
+            scheduler_ref,
             "-c",
             "scheduler",
             "--",
