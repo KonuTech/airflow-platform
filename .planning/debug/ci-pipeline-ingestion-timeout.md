@@ -281,6 +281,59 @@ next_action: "RE-ANALYZED, STILL NEEDS ONE MORE LIVE DATA POINT -- deeper log an
     available live-run evidence -- only e2e-smoke.yml's dedicated "DEBUG live scheduler/pod/node
     state" step can produce it, and that workflow has not been re-run since the fix landed.
 
+- timestamp: 2026-08-24 (orchestrator, after 3 throwaway-PR attempts — 2 hit unrelated cluster-up
+    flakes (Kyverno webhook timeout, a vault-0 pod-not-found race in 80-vault.sh), 3rd reached
+    smoke-verify cleanly)
+  checked: >
+    Re-added a throwaway diagnostic step to e2e-smoke.yml (mirroring the earlier session's own
+    "never to be merged" pattern, this time `if: always()` rather than `if: failure()` so it
+    captures state regardless of outcome) on PR #13, run 32718898648 / job 97405917287. This run
+    got past cluster-up cleanly and smoke-verify actually reached [2/4] (the DAG-trigger check),
+    which then failed identically to the pre-fix baseline: 24 retries over 5 minutes,
+    "smoke_kubernetes_pod not yet registered in DagModel", then DagNotFound at the 120s-times-out
+    boundary. The diagnostic step's live kubectl snapshot, captured immediately after, gives the
+    DIRECT answer the falsification_test asked for:
+      - airflow-dag-processor: 1/2 CrashLoopBackOff, 5 restarts, most recent 2m7s before the
+        snapshot (pod age 8m38s) -- STATISTICALLY IDENTICAL to the pre-fix baseline (5 restarts in
+        8m45s, run 32675592471). The fix's CPU/threshold changes for dag-processor had NO
+        measurable effect on its own restart rate.
+      - airflow-scheduler-0: 2/2 Running, only 1 restart, 81s before the snapshot (pod age 8m30s)
+        -- a REAL, measurable improvement over the pre-fix baseline's "1+ restarts, 1/2 Ready (not
+        fully healthy)". The scheduler-side fix appears to have genuinely helped.
+      - Live events confirm the SAME root mechanism recurring post-fix: "Startup probe failed: No
+        alive jobs found." (scheduler, 7m18s ago) and "Liveness probe failed:" (dag-processor,
+        6m42s ago), PLUS a live "Back-off restarting failed container dag-processor" event only
+        23s before the snapshot -- dag-processor was actively mid-crash-loop AT the moment of
+        capture, not just historically.
+      - dag-processor's own log shows a completed DAG-file-processing cycle
+        (2026-08-24T11:02:14Z) whose stats table lists `smoke_kubernetes_pod.py` processed in
+        0.09s with 0 errors but 0 DAGs registered -- consistent with the parse subprocess being
+        killed mid-cycle (before its DagModel sync commits) by the SAME restart the events show,
+        not a code-level parse failure in the DAG file itself.
+      - Node CPU allocation: 2780m (92%) requests -- up from the pre-fix baseline's 2480m (82%),
+        exactly matching the fix's own predicted +300m (scheduler +200m, dagProcessor +100m). The
+        arithmetic was accurate, but 92% is a TIGHTER margin than before, and Limits show 7700m
+        (256%) -- severe overcommit if multiple pods burst CPU simultaneously.
+  found: >
+    The falsification_test is now directly answered, not merely inferred: RESTARTS>0 on BOTH pods
+    post-fix, and dag-processor's own restart count is statistically unchanged from the pre-fix
+    baseline. The hypothesis is REFUTED for dag-processor specifically (the fix did not stop its
+    crash-loop) while PARTIALLY CONFIRMED for scheduler (measurably fewer restarts, and it now
+    stays 2/2 Ready). Since dag-processor is the component that must stay alive to register
+    csv_ingest_customers/orders/smoke_kubernetes_pod in DagModel at all, its continued crash-loop
+    fully explains why the E2E timeout failures persist unchanged after this fix.
+  implication: >
+    The fix was directionally correct (CPU sizing + internal health-check thresholds ARE the right
+    mechanism class -- scheduler's improvement proves this) but dag-processor's own allocation
+    (300m request/1200m limit, raised from 200m/500m) was insufficient, OR dag-processor has an
+    additional bottleneck the scheduler does not share (e.g. its own `dag_file_processor_timeout`
+    interacting with the 30s "process each file at most once every 30 seconds" cadence across the
+    11 real DAG files scanned each cycle, or memory pressure, or a liveness-probe timeoutSeconds
+    that's still too tight for dag-processor specifically even though it was raised for scheduler
+    at the same commit). Needs further targeted investigation on dag-processor specifically before
+    another live-CI round -- raising its CPU further and/or re-examining its own probe/threshold
+    values is the natural next hypothesis, not a full restart of the investigation.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
