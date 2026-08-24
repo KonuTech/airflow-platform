@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 Phase: 11 (ci-cd-completion-operations) — EXECUTING
 Plan: 6 of 14
 Status: Ready to execute
-Last activity: 2026-08-23
+Last activity: 2026-08-24 - Completed quick task 260824-akz: Fix scheduler resource-kind (Deployment vs StatefulSet) hardcoding in chaos test kubectl exec targets
 
 Progress: [██████████] 97%
 
@@ -156,6 +156,7 @@ None yet.
 | 260819-hsw | Add Executive Summary with a real row-journey example (raw -> bronze -> quarantine -> silver -> gold -> lineage) and two collapsible Mermaid architecture diagrams to README.md | 2026-08-19 | 8114d69 | [260819-hsw-add-executive-summary-with-row-journey-e](./quick/260819-hsw-add-executive-summary-with-row-journey-e/) |
 | 260819-inq | Remove README.md title/operational-note block; wrap Executive Summary in English/Polski `<details>` tabs with a full Polish translation (prose translated, identifiers/data/proper nouns preserved, both Mermaid diagrams duplicated) | 2026-08-19 | 6438520 | [260819-inq-restructure-readme-md-top-remove-title-o](./quick/260819-inq-restructure-readme-md-top-remove-title-o/) |
 | 260819-jal | Swap default-open language tab in README.md Executive Summary: Polski now open by default, English collapsed | 2026-08-19 | f5fdf82 | [260819-jal-swap-default-open-language-tab-in-readme](./quick/260819-jal-swap-default-open-language-tab-in-readme/) |
+| 260824-akz | Fix scheduler resource-kind (Deployment vs StatefulSet) hardcoding in tests/e2e/chaos/test_vault_unavailable.py and test_minio_unavailable.py — live-detect via kubectl instead of hardcoding, since PROFILE never propagates into make chaos-verify (Phase 11 follow-up-1) | 2026-08-24 | 9e82be1 | [260824-akz-fix-scheduler-resource-kind-deployment-v](./quick/260824-akz-fix-scheduler-resource-kind-deployment-v/) |
 
 ## Session Continuity
 
