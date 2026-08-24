@@ -175,27 +175,22 @@ hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verif
       currently has) and was judged out of scope for this round's time budget rather than adopted
       on unverified faith. Not live-tested in this sandbox (no live cluster reproduces CI's
       LocalExecutor topology here) -- the live push-and-wait below is the real test."
-  next_action: "COMPLETE: fix implemented (helm/values/ci/airflow.yaml + helm/values/local/
-    airflow.yaml: config.core.parallelism 32->16 in both; CI scheduler.resources.limits.memory
-    1Gi->1536Mi, CI-only). Offline-verified clean: `make manifests` (0 lint failures, kubeconform
-    0 invalid/0 errors, 540 resources), `test_manifest_resources.py -m manifests` (5/5 pass,
-    test_ci_profile_fits_runner at 3.180/3.200 cores -- unaffected, this change touches zero CPU
-    requests and the memory-limit raise does not count toward the requests-only budget sum),
-    `test_values_profiles.py` (6/6 pass -- core.parallelism correctly classified as non-divergent
-    behavioral config, identical in both profiles), full `tests/policy/ -m \"not manifests\"`
-    (157 passed, 2 failed -- the SAME 2 pre-existing, already-documented out-of-scope failures
-    every prior round in this file has shown, zero new regressions). NEXT: commit
-    (helm/values/{ci,local}/airflow.yaml + this debug file together, matching commits
-    a73282e/8681d69/103829e/c23d120's own established bundling precedent), push to main, then
-    background-wait for the resulting e2e-full.yml run via `gh run watch <id> --exit-status` or
-    periodic `gh run view <id> --json status,conclusion` polling (expect a long queue behind any
-    in-flight run in the same non-cancelling concurrency group, and ~60+ min for
-    cluster-slice-verify alone once started -- do not abandon the wait early). On completion:
-    fetch the job's raw log, check scheduler restart count/OOMKilled status directly (the
-    cp-monitor.sh instrumentation already in e2e-full.yml at commit 931c198 may be reused or
-    trimmed back out -- note the choice either way), and update this Current Focus with
-    CONFIRMED/REFUTED per the reasoning_checkpoint's own falsification_test above before declaring
-    this round resolved."
+  next_action: "Fix committed (b1ef8e2) and pushed to main -- no queue this time (the prior
+    instrumented run 32743870344 had already completed before this push), triggered run
+    32755940740 immediately (`in_progress` at push+15s). cp-monitor.sh instrumentation (from
+    commit 931c198) deliberately LEFT IN PLACE and reused for this run rather than trimmed out --
+    still the right diagnostic for confirming/refuting the fix; will trim it back out in a
+    follow-up once this round confirms clean, not before. Now background-polling run 32755940740
+    to terminal status (`gh run view 32755940740 --json status,conclusion` every few minutes --
+    NOT abandoning the wait early, per explicit task instruction; expect ~70-90+ min total: cluster
+    setup + cluster-slice-verify's own ~60min). On terminal: fetch job's raw log via `gh api
+    repos/KonuTech/airflow-platform/actions/jobs/<id>/logs`, extract the cp-monitor.csv block
+    (search for '===== cp-monitor.csv' / '===== peak' markers, per the workflow's own `if:
+    always()` dump step), check scheduler restart count and whether any `Reason: OOMKilled`
+    appears in the final `kubectl describe pod` snapshot, and update this Current Focus with
+    CONFIRMED/REFUTED per the reasoning_checkpoint's own falsification_test above (fix confirmed
+    only if scheduler restarts drop to 0, or peak memory sits with real headroom under 1536Mi and
+    restarts genuinely stop, not just move later) before declaring this round resolved."
 
 reasoning_checkpoint (REOPENED ROUND, vault-0 Python-side wait race -- supersedes the round below,
     which remains true and is NOT re-litigated):
