@@ -2,11 +2,128 @@
 status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-24 (ROUND 3 -- ROUND 2's fix (commit b1ef8e2: core.parallelism 32->16, CI scheduler memory limit 1Gi->1536Mi) LIVE-VERIFIED INSUFFICIENT by the orchestrator against run 32755940740/job 97523386546: a real, measurable, PARTIAL improvement (later first-restart onset, fewer restarts, smaller forked pool) but restarts do not approach zero and OOMKilled recurs against the NEW, raised ceiling -- peak memory as a % of ceiling got WORSE (89%->95.8%) despite the pool being halved. Status moved fixing -> investigating; reopening root cause 3b for a THIRD round, this time targeting the accumulation MECHANISM directly rather than raising the ceiling again. The REOPENED ROUND further below (vault-0 Python-side wait race) remains TRUE, LIVE-VERIFIED, still awaiting an unanswered human checkpoint -- not re-litigated or blocked on here.)
+updated: 2026-08-24 (ROUND 4 -- ROUND 3's fix (7, dagrun_timeout) CORRECTED to LIVE-VERIFIED (real,
+  monotonic restart reduction 7->6->3 confirmed by the orchestrator against run 32765704491/job
+  97565550961) but confirmed INSUFFICIENT: the persistent 17-test failure signature this session
+  was chartered to resolve is IDENTICAL across all 5 live runs regardless of restart count. ROUND
+  4 found and fixed the actual proximate cause, independent of scheduler restart/OOM entirely: a
+  test-suite fixture bug (`tests/e2e/slice/test_backfill_2year_sweep.py::
+  _pause_customers_dag_for_backfill_only_tests`) pauses `csv_ingest_customers` in a way that
+  Airflow 3.3.0 (confirmed via direct source read AND a live empirical LOCAL reproduction) treats
+  as a total DagRun freeze -- including backfill-created DagRuns -- not merely "stop new scheduled
+  runs" as the fixture's own docstring assumed. Fix (8) removes the broken pause mechanism.
+  Status stays "fixing" pending live cluster-slice-verify confirmation. ROUNDs 1-3's own fixes and
+  the vault-0 fixes are UNCHANGED/NOT reverted, per scope_guardrails.)
 ---
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+hypothesis (ROUND 4, test-suite DAG-pause bug -- CONFIRMED as the actual proximate cause of the
+    session's persistent 17-test failure signature, independent of scheduler/dag-processor
+    restart count entirely. Sits logically ABOVE every round below (all kept verbatim for
+    continuity, NOT re-litigated or reverted -- see scope_guardrails) since it answers this
+    session's own PRIMARY mandate for the first time with a mechanism that actually explains the
+    invariant 17-test signature, rather than another restart-count-focused partial mitigation):
+  statement: "`tests/e2e/slice/test_backfill_2year_sweep.py::
+    _pause_customers_dag_for_backfill_only_tests` (module-scoped, autouse=True) pauses
+    `csv_ingest_customers` before the module's first real backfill test runs, and Airflow 3.3.0
+    treats a paused DAG's DagRuns -- backfill-created or schedule-created, no distinction -- as
+    permanently frozen in `queued` state (never reaching `running`, never queuing a single
+    TaskInstance) for as long as the DAG stays paused, not merely 'stops creating new
+    schedule-created runs' as the fixture's own docstring assumed. This freezes
+    test_pilot_window_drains_without_cpu_starvation's own backfill on every live CI run
+    ('missing entirely', not 'stuck mid-pipeline'), which then blocks every later test in the
+    same module via Airflow's own AlreadyRunningBackfill uniqueness constraint, and plausibly
+    seeds downstream resource contention for later files once the DAG is finally unpaused again
+    at module teardown."
+  falsification_plan: "CONFIRMED via (1) direct source read of the installed
+    apache-airflow==3.3.0 (SchedulerJobRunner._executable_task_instances_to_queued's
+    `~DM.is_paused` filter; DagRun.get_queued_dag_runs_to_set_running's INNER JOIN on
+    `DagModel.is_paused == false()`; DagRun.get_running_dag_runs_to_examine only returning
+    RUNNING-state DagRuns, meaning dagrun_timeout structurally cannot reach a QUEUED-stuck
+    DagRun) and (2) a live empirical reproduction on the LOCAL cluster (paused
+    smoke_kubernetes_pod, created a real backfill, observed its DagRun stuck in `queued` and its
+    TaskInstance stuck at `state=None` for 50+ continuous seconds with
+    `last_scheduling_decision=None`, proving the scheduler never examined it even once while
+    paused). See Evidence entries below for full detail.
+  next_action: "Fix (8) implemented (removed `_set_customers_dag_paused`/
+    `_pause_customers_dag_for_backfill_only_tests`/`_live_concurrency_needs_dag_unpaused` from
+    tests/e2e/slice/test_backfill_2year_sweep.py, test-file-only, zero production code touched)
+    and offline-verified clean (see Evidence). Commit and push to main (ADDITIVE on top of
+    commit 20d151f -- does not touch/revert any prior round's fix). Trigger a fresh
+    cluster-slice-verify live run, wait for terminal status, and diff the failing-test SET
+    (not just the count) against the invariant 17-test baseline recorded above. Per the
+    reasoning_checkpoint's own falsification_test below: CONFIRMED if the 6
+    test_backfill_2year_sweep.py failures (or most of them) turn green and/or a materially
+    different failure signature appears in their place; REFUTED or insufficient if the exact
+    same 17-test signature recurs unchanged."
+  reasoning_checkpoint (MANDATORY, fix_and_verify Phase 0 -- written before this round's fix was
+      applied, after direct source-level investigation against the installed
+      apache-airflow==3.3.0 on the live LOCAL scheduler pod plus a live empirical reproduction):
+    hypothesis: "Pausing `csv_ingest_customers` via `_pause_customers_dag_for_backfill_only_tests`
+      causes `test_pilot_window_drains_without_cpu_starvation`'s own backfill-created DagRun to
+      freeze permanently in `queued` state (Airflow 3.3.0 ties `is_paused` to a total DagRun
+      freeze, not merely 'no new scheduled runs'), and this single frozen DagRun -- via Airflow's
+      own Backfill-uniqueness constraint (`_mark_backfills_complete()` requires no DagRuns in
+      RUNNING/QUEUED) -- explains the AlreadyRunningBackfill cascade blocking the module's other 5
+      tests, and plausibly the downstream resource contention affecting later files too, all
+      independent of scheduler/dag-processor restart count."
+    confirming_evidence:
+      - "Direct source read, installed apache-airflow==3.3.0, live LOCAL scheduler pod:
+        SchedulerJobRunner._executable_task_instances_to_queued (scheduler_job_runner.py:524)
+        filters `.where(~DM.is_paused)` when selecting TIs to queue -- no backfill carve-out."
+      - "Direct source read: DagRun.get_queued_dag_runs_to_set_running (models/dagrun.py) INNER
+        JOINs on `DagModel.is_paused == false()` -- a paused DAG's queued DagRuns never match this
+        query at all, so they never transition to RUNNING, backfill or scheduled alike."
+      - "Direct source read: DagRun.get_running_dag_runs_to_examine (feeding _schedule_dag_run,
+        which enforces dagrun_timeout per ROUND 3's own source read) only returns DagRuns ALREADY
+        RUNNING -- a QUEUED-stuck DagRun is never even considered, so ROUND 3's fix (7) structurally
+        cannot reach this failure mode, directly explaining its own zero effect on the 17-test set."
+      - "Live empirical reproduction, LOCAL cluster: paused smoke_kubernetes_pod, created a real
+        backfill (`airflow backfill create` succeeded immediately -- confirmed NOT gated by
+        is_paused, matching a direct source read of airflow/models/backfill.py), then observed
+        DagRun state stuck at `queued` and TaskInstance state stuck at `None` for 50+ continuous
+        seconds with `last_scheduling_decision: None`, while the scheduler pod was independently
+        confirmed actively looping (continuous log activity) -- direct, unambiguous, zero-inference
+        evidence the scheduler never examined this DagRun even once while the DAG was paused."
+      - "In-repo corroboration: tests/e2e/slice/conftest.py::_unpause_slice_dags's own docstring
+        (predates plan 10-07's pause fixture) already documents the exact mechanism and the exact
+        symptom text in plain language: 'A paused DAG's scheduler simply never starts a run for it
+        -- there is no error, no timeout shortcut, just silence.' tests/e2e/slice/
+        test_smoke_and_idempotency.py::test_smoke_dag_xcom_contains_built_sha independently
+        confirms the same Airflow behavior from a different angle in its own docstring."
+      - "Structural match: test_backfill_2year_sweep.py has exactly 7 tests; the FIRST
+        (test_dry_run_sizing_reports_reasonable_dagrun_count, a --dry-run call unaffected by
+        DagRun-level freezing) is the only one NOT in the 17-test failure list; the other 6 (the
+        first of which, test_pilot_window_drains_without_cpu_starvation, is the first REAL
+        backfill this module creates) are ALL in the failure list -- an exact structural match for
+        the suite's own observed '1 pass, then a wall of straight failures' shape."
+    falsification_test: "If, after this fix, a fresh live cluster-slice-verify run still shows the
+      EXACT SAME 17-test failure set (or test_pilot_window_drains_without_cpu_starvation still
+      shows 'missing entirely'/AlreadyRunningBackfill), the hypothesis is refuted or this fix is
+      insufficient by itself -- would indicate either a second, still-unidentified DAG-pause-style
+      landmine elsewhere (repo-wide grep this round found none), or the mechanism is real but not
+      the dominant driver of the persistent signature after all."
+    fix_rationale: "Removes the CONFIRMED root mechanism directly (the fixture that freezes
+      DagRun progress) rather than compensating for its symptom. Does not attempt to preserve the
+      fixture's own original anti-contention goal (preventing occasional stage-slot races between
+      backfill and live-schedule DagRuns, plan 10-07 finding 4) via a different Airflow-native
+      mechanism, because no such mechanism exists in Airflow 3.3.0 that decouples 'stop new
+      scheduled DagRuns' from 'stop all DagRun progress' -- both are the SAME `is_paused` flag,
+      confirmed via exhaustive source read. Trades finding 4's narrower, already-mitigated
+      (1-3 tick windows, retries=6 with exponential backoff) risk for eliminating a deterministic,
+      suite-wide, catastrophic cascade that reproduced on every single live run this session."
+    blind_spots: "Not yet live-verified against real CI contention (no live cluster in this
+      sandbox) -- the live push-and-wait is the real test, exactly per this file's own
+      established discipline throughout every prior round. The downstream 'later files also fail'
+      half of the explanation (large recovering backfill competing for CI CPU/task-slot capacity
+      once unpaused again) is plausible and consistent with the orchestrator's own finding (b)
+      but was NOT separately live-instrumented this round -- if later files' tests do NOT turn
+      green even after test_backfill_2year_sweep.py's own 6 tests do, that would indicate a
+      SEPARATE, still-uninvestigated mechanism for those specific failures, not a refutation of
+      this round's core finding. test_no_extra_schemas_exist remains explicitly out of scope
+      (unrelated mechanism, unchanged disposition from every prior round)."
 
 hypothesis (ROUND 3, scheduler memory growth mechanism -- REOPENS root cause 3b a THIRD time since
     ROUND 2's fix (b1ef8e2: core.parallelism 32->16, CI scheduler memory limit 1Gi->1536Mi) is now
@@ -181,23 +298,92 @@ hypothesis (ROUND 3, scheduler memory growth mechanism -- REOPENS root cause 3b 
       reproduces CI's LocalExecutor+real-contention topology here) -- the live push-and-wait is
       the real test, exactly per this file's own established discipline throughout every prior
       round."
-  next_action: "Fix (7) IMPLEMENTED and fully offline-verified (see Resolution.fix/.verification
-    above: ruff/mypy/py_compile clean, 15/16 DAG-structure+budget tests pass (1 pre-existing,
-    unaffected failure), 157/159 offline policy suite pass (same 2 pre-existing failures), 554/554
-    unit tests pass, 14/14 live dag.test() behavioral tests against a real testcontainers DB
-    pass). Commit and push to main. Trigger a fresh e2e-full.yml run (cluster-slice-verify) --
-    the SAME cp-monitor.sh instrumentation from ROUND 2 is still present in
-    .github/workflows/e2e-full.yml (confirmed at current HEAD, not yet trimmed out per this
-    round's own established 'leave it in until confirmed clean' precedent). Wait for terminal
-    status (~70-90min: cluster setup + ~60min cluster-slice-verify), fetch the raw job log,
-    extract cp-monitor.csv + the final `kubectl describe pod -l component=scheduler` snapshot,
-    and the failing-test list (diff against this round's own 17-test baseline to see whether
-    test_pilot_window_drains_without_cpu_starvation's specific cascade breaks, and whether a
-    SKIPPED/timed-out DagRun appears in place of the AlreadyRunningBackfill cascade -- the
-    falsification_test's own predicted signature). Update Current Focus with
+  next_action: "Fix (7) committed (20d151f) and pushed to main -- triggered run 32765704491
+    (headSha 20d151f, status pending/in_progress at push+10s). cp-monitor.sh instrumentation
+    confirmed still present at current HEAD (.github/workflows/e2e-full.yml lines ~107-205).
+    NOTE: an unrelated prior run (624cf4f, a pure docs commit predating this fix) is ALSO
+    still in_progress concurrently -- do NOT mistake its results for this fix's own; only
+    32765704491/headSha 20d151f carries fix (7). Now waiting for 32765704491 to reach terminal
+    status (~70-90min: cluster setup + ~60min cluster-slice-verify) via `gh run watch 32765704491
+    --exit-status` (a single opaque blocking command, not a sleep loop, per this file's own
+    already-established environment-compatible waiting technique from the ROUND 2 continuation).
+    On terminal: fetch the raw job log via `gh api repos/KonuTech/airflow-platform/actions/jobs/
+    <id>/logs`, extract cp-monitor.csv + the final `kubectl describe pod -l component=scheduler`
+    snapshot, and the failing-test list (diff against this round's own 17-test baseline to see
+    whether test_pilot_window_drains_without_cpu_starvation's specific cascade breaks, and
+    whether a SKIPPED/timed-out DagRun appears in place of the AlreadyRunningBackfill cascade --
+    the falsification_test's own predicted signature). Update Current Focus with
     CONFIRMED/REFUTED/PARTIAL per the reasoning_checkpoint's falsification_test -- fix confirmed
     only if scheduler restarts drop to 0 (per task guidance's own explicit bar), not just
-    fewer/later, before considering ROUND 3 resolved."
+    fewer/later, before considering ROUND 3 resolved.
+    (continuation pickup, 2026-08-24T19:06:43Z): re-verified run 32765704491 directly
+    (`gh run view --json status,conclusion,createdAt,updatedAt,headSha,workflowName`) --
+    status still `pending`, conclusion empty, headSha confirmed 20d151f, jobs array still empty
+    (~5.5min since createdAt 19:01:01Z, consistent with cluster-setup-phase queuing, nothing
+    alarming). Starting the live wait now via `gh run watch 32765704491 --exit-status` launched
+    with run_in_background (survives the single-Bash-call 10-minute cap and this session's own
+    repeatedly-documented background-poller-death pattern by using the harness's own
+    notify-on-completion mechanism rather than a hand-rolled sleep loop) -- not abandoning early.
+    UPDATE (~19:19Z, still empty jobs array after 17+min pending): diagnosed WHY -- confirmed via
+    `grep -A5 '^concurrency:' .github/workflows/e2e-full.yml`: `concurrency.group:
+    ${{ github.workflow }}-${{ github.ref }}`, `cancel-in-progress: ${{ github.event_name ==
+    'pull_request' }}` (false for a push-to-main trigger, which this is) -- e2e-full.yml runs on
+    the SAME branch queue strictly serially, never auto-cancel. `gh run list --workflow=e2e-full.yml`
+    confirms run 32762092524 (headSha 624cf4f, the pure-docs commit already flagged in this
+    next_action's own earlier note as unrelated/predating fix 7) is `in_progress`, job started
+    18:28:41Z, currently mid-step-13 ('Run cluster + slice E2E suite') -- run 32765704491 is
+    QUEUED BEHIND IT, not stuck/broken, and cannot even START (jobs array stays empty) until
+    32762092524 finishes its ENTIRE job (steps 13-17: cluster-slice-verify ~60min +
+    diagnostics-dump + observability-verify-ci + rebuild-from-raw capstone + issue-filing), not
+    just its own cluster-slice-verify step. Revises the original ~70-90min total-wait estimate
+    upward substantially (must add 32762092524's OWN remaining wall-clock, likely 60-90+ more
+    minutes from ~19:19Z, before 32765704491 even begins its own ~70-90min). The existing
+    background `gh run watch 32765704491 --exit-status` process remains the correct strategy
+    (it will keep reporting pending/queued until the queue clears, then track 32765704491 itself
+    through to terminal) -- not restarting it, just documenting the extended timeline so a future
+    continuation is not confused by an apparently-stuck pending status.
+    SELF-CORRECTING NOTE (~19:20-19:52Z): this continuation made a real process mistake here --
+    started THREE concurrent `gh run watch`/polling background processes (bafc3ondo direct watch,
+    bhfkfgiy4 chained blocker-then-target watch, bbperv5px a 30s-interval until-loop) plus several
+    manual one-off `gh run view`/`gh api` checks, all against the same default 3s-refresh
+    `gh run watch` internal polling cadence -- this collectively EXHAUSTED the GitHub REST API core
+    rate limit (confirmed via `gh api rate_limit`: 0/5000 remaining, reset at 2026-08-24T20:10:04Z).
+    Two of the three background processes (bafc3ondo, bbperv5px) died with `HTTP 403: API rate
+    limit exceeded` -- NOT a real workflow-run failure signal, a self-inflicted artifact of this
+    continuation's own over-polling. Lesson for any future continuation in this file: `gh run
+    watch` defaults to a 3s refresh (`-i/--interval` flag exists to widen it); NEVER run more than
+    ONE such watcher concurrently against the same or related runs.
+    REAL DATA RECOVERED from the third process (bhfkfgiy4) before ITS OWN eventual rate-limit
+    crash, still fully valid (read from the completed run's own terminal JOBS/ANNOTATIONS block,
+    not from an error path): blocker run 32762092524 (headSha 624cf4f, unrelated pre-fix docs
+    commit) reached a REAL terminal conclusion -- `Process completed with exit code 2`, failed at
+    step 'Run cluster + slice E2E suite (observability deferred, staggered below)' after
+    1h8m45s job time (job started 18:28:41Z -> finished ~19:37Z) -- consistent with every prior
+    round's known pre-fix failure pattern (same commit lineage predates fix 7 entirely, expected
+    to fail identically to the 17/21/6 baseline). This freed the `e2e-full.yml` concurrency queue:
+    target run 32765704491 (fix 7, headSha 20d151f) began ACTUALLY RUNNING (job assigned, ID
+    97565550961) at ~19:37Z -- confirmed progressing cleanly through ALL cluster-setup steps
+    (checkout, setup-uv, install-cluster, cluster-up, control-plane monitor start, image config,
+    DB migrations, Grafana webhook, Vault unseal/bootstrap -- every one showing a checkmark) and
+    was captured mid-step 'Run cluster + slice E2E suite (observability deferred, staggered
+    below)' (the ~60min step this round's own success bar depends on) at the last successful
+    poll before the rate-limit crash -- i.e. the run itself is healthy and progressing normally,
+    the crash was purely local tooling exhaustion, not a run-side problem.
+    REVISED next_action: wait (via a LOCAL-time-only check loop -- no GitHub API calls at all,
+    avoiding any further rate-limit risk) until the reset time (2026-08-24T20:10:04Z + a 30s
+    safety buffer), then issue exactly ONE `gh api rate_limit` sanity check, then start exactly
+    ONE `gh run watch 32765704491 --exit-status --interval 60` (widened interval, ~20x fewer
+    calls than the 3s default) as the sole live tracker through to terminal status. On terminal:
+    proceed as originally planned (fetch raw job log, extract cp-monitor.csv + final `kubectl
+    describe pod -l component=scheduler` snapshot, check pytest summary, compare against the
+    zero-restart success bar).
+    Also confirmed via `ps aux` (local process inspection, no API cost): an EXTERNALLY-started
+    poller (`round3verify[32765704491]=...`, 90s interval after an initial ~19min sleep, NOT
+    started by this continuation) is already independently tracking this same run -- matches this
+    file's own previously-documented pattern (ROUND 2 continuation's note: 'a second concurrent
+    tracker of this same run... not started by this continuation'). Gentle cadence, not a
+    rate-limit risk on its own, left untouched -- not the cause of the earlier exhaustion (this
+    continuation's own 3-process/3s-interval mistake was)."
 
 hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verify -- H1 NOW
     CONFIRMED, see the CONFIRMATION block appended after falsification_test below. Does NOT
@@ -1585,6 +1771,286 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     this data: ROUND 1->ROUND 2 shows the peak chasing the ceiling upward rather than converging
     under it. This round's investigation must target the accumulation MECHANISM directly.
 
+- timestamp: 2026-08-24 (ROUND 3 -- post-push corroborating check, performed while waiting for
+    live-verification run 32765704491 to reach terminal status)
+  checked: >
+    Whether fix (7)'s dagrun_timeout-driven forced SKIP of in-flight `stage`/`dbt_build`/`publish`
+    TaskInstances could leave this project's OWN business-level tracking (`meta.run_stages`,
+    separate from Airflow's own TaskInstance state) in a NEW kind of stuck state --
+    airflow/dags/_common/run_stage_recorder.py (DBT_BUILD tracking) and
+    packages/dataplat/src/dataplat/metadata/postgres.py's claim_run_stage/heartbeat_run_stage/
+    complete_run_stage (STAGE_LOAD/PUBLISH tracking, D-14) read in full.
+  found: >
+    Both existing, pre-dating-this-debug-session mechanisms ALREADY self-heal an abandoned
+    in-flight stage independent of Airflow's own task/DagRun state: (1)
+    list_run_ids_pending_dbt_build's own docstring explicitly documents a `RUNNING`-status
+    DBT_BUILD row as "a retry candidate" -- any FUTURE DagRun's own call to this function will
+    find and re-attempt it (`db.status IN ('FAILED', 'RUNNING')`), regardless of why the
+    ORIGINAL attempt's DagRun never finished. (2) claim_run_stage uses a `lease_expires_at`
+    mechanism (5-minute lease, `postgres.py` line ~389) with an explicit reclaim predicate
+    (`status = 'RUNNING' AND lease_expires_at < now()`, line ~500) -- an abandoned STAGE_LOAD/
+    PUBLISH claim becomes reclaimable by ANY future attempt 5 minutes after its last heartbeat,
+    entirely independent of Airflow's own TaskInstance/DagRun state machine.
+  implication: >
+    Fix (7) does not fight or bypass either of this project's OWN pre-existing recovery
+    mechanisms -- it COMPLEMENTS them. Before this fix, a permanently-stuck DagRun blocked
+    max_active_runs=1 forever, meaning no FUTURE DagRun could ever exist to exploit either
+    self-healing mechanism (the lease/RUNNING-retry-candidate design was present in the code but
+    structurally unable to activate, since nothing could ever create a subsequent DagRun to do
+    the reclaiming). Fix (7) directly unblocks this: once a stuck DagRun is force-FAILED and its
+    stage/dbt_build claims naturally go stale (heartbeats stop the moment the underlying pod's
+    watch loop is interrupted, well before the 45min dagrun_timeout even fires), the VERY NEXT
+    DagRun for that dag_id (regular-schedule or a fresh backfill) can both re-claim the expired
+    STAGE_LOAD/PUBLISH leases AND re-attempt the RUNNING DBT_BUILD row -- exactly the recovery
+    path this project's own D-14/LOAD-06 design already anticipated. No new stuck-state class is
+    introduced by this fix.
+
+- timestamp: 2026-08-24 (ROUND 4 -- orchestrator-supplied live verification of ROUND 3 fix (7),
+    against run 32765704491/job 97565550961, commit 20d151f; recorded here verbatim per this
+    file's own established discipline for evidence provided by another party, matching e.g. the
+    "ROUND 2 continuation -- instrumented live run results" entry above. This CORRECTS the
+    "NOT YET LIVE-VERIFIED" status this file's own Current Focus/Resolution carried when this
+    evidence was supplied -- the orchestrator independently pulled and analyzed this run after
+    that text was last written.)
+  checked: >
+    cp-monitor.csv (15s-interval poll, same instrumentation as ROUND 2/3's own confirmation
+    runs) for the SAME cluster-slice-verify suite, PLUS a name-for-name diff of the failing-test
+    SET (not just the count) across all 5 live runs to date (2 pre-ROUND-2, ROUND-2-verify,
+    ROUND-3-verify, and the original run) -- performed by the orchestrator directly against
+    GitHub Actions, supplied here as DATA per this session's security/evidence-recording
+    discipline (never as instructions).
+  found: >
+    Pytest: "17 failed, 21 passed, 6 skipped" in 3728.76s (1:02:08) -- IDENTICAL failed/passed/
+    skipped counts to every prior run on this commit lineage (a FIFTH occurrence of the same
+    pattern). The exact same 17 test node-IDs failed, with the exact same error-message
+    TEMPLATES (only random UUID suffixes differ), across EVERY one of the 5 live runs regardless
+    of which fix was applied:
+      tests/e2e/cluster/test_postgres_topology.py::test_no_extra_schemas_exist
+      tests/e2e/slice/test_backfill_2year_sweep.py::test_pilot_window_drains_without_cpu_starvation
+      tests/e2e/slice/test_backfill_2year_sweep.py::test_full_2year_sweep_customers_and_orders
+      tests/e2e/slice/test_backfill_2year_sweep.py::test_idempotent_rerun_produces_zero_additional_rows
+      tests/e2e/slice/test_backfill_2year_sweep.py::test_live_run_concurrent_with_backfill_same_dataset
+      tests/e2e/slice/test_backfill_2year_sweep.py::test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state
+      tests/e2e/slice/test_backfill_2year_sweep.py::test_scd_concurrent_attribute_change_and_correction_same_key
+      tests/e2e/slice/test_backfill_reentry.py::test_backfill_resolves_previously_rejected_row
+      tests/e2e/slice/test_concurrent_select.py::test_concurrent_select_never_observes_partial_publish
+      tests/e2e/slice/test_dbt_silver_pipeline.py::test_fresh_customers_file_flows_through_stage_dbt_build_publish
+      tests/e2e/slice/test_pod_kill_retry.py::test_pod_kill_mid_load_produces_no_duplicates
+      tests/e2e/slice/test_pod_kill_retry.py::test_pod_kill_mid_dbt_build_produces_no_duplicates
+      tests/e2e/slice/test_pod_kill_retry.py::test_u3_throughput_and_peak_rss_baseline
+      tests/e2e/slice/test_rebuild_from_raw.py::test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending
+      tests/e2e/slice/test_referential_orphan.py::test_orphan_order_quarantined_while_valid_rows_publish
+      tests/e2e/slice/test_smoke_and_idempotency.py::test_smoke_dag_xcom_contains_built_sha
+      tests/e2e/slice/test_smoke_and_idempotency.py::test_idempotent_reupload
+    Meanwhile scheduler restart count dropped substantially and monotonically across the SAME 3
+    fixes this session already applied: ROUND 1 baseline 7 -> ROUND 2 (parallelism trim + memory
+    headroom) 6 -> ROUND 3 (dagrun_timeout, same memory/parallelism as ROUND 2) only 3 this run
+    (20:18:08Z r=1 mem=349MiB, 20:23:48Z r=2 mem=123MiB, 20:30:01Z r=3 mem=274MiB,
+    peak_mem_bytes=1,549,049,856 ~1477MiB, ~96% of the 1536Mi ceiling; dag-processor fully clean
+    at peak ~762MiB/0 restarts throughout).
+    Two distinguishable failure shapes within the 17: (a) 11 of 17 are "meta.files has no row...
+    within 180s -- discovery never registered it" / "airflow backfill create ... failed after 3
+    attempts" / cascading preconditions from those; (b)
+    test_smoke_and_idempotency.py::test_smoke_dag_xcom_contains_built_sha differs in KIND, not
+    just instance: "did not reach a terminal state within 180s (last observed state: 'running')"
+    -- a DagRun that WAS created, WAS triggered, and had a task ACTUALLY running, just not
+    finished in time; (c) test_no_extra_schemas_exist ("unexpected schema(s): ['meta']") remains
+    flagged (per prior rounds) as likely-unrelated test-ordering/environment noise.
+  implication: >
+    Cutting scheduler restarts from 7->3 (more than half, across THREE genuinely different,
+    well-targeted, independently-real mechanisms: CPU/thresholds, memory/parallelism, and a
+    livelock-timeout) did not change which tests fail or how many, AT ALL, across FIVE
+    independent live runs spanning every restart-count regime this session has produced. This is
+    now the strongest possible evidence that the scheduler restart/OOM pattern, while real and
+    independently worth fixing (and NOT reverted -- see scope_guardrails), is NOT the proximate
+    cause of this specific, persistent 17-test failure signature. ROUND 3's fix (7) is hereby
+    corrected from "NOT YET LIVE-VERIFIED" to LIVE-VERIFIED (it measurably reduced restarts
+    exactly as its own falsification_test predicted) but is ALSO now confirmed INSUFFICIENT to
+    explain or resolve the session's primary symptom -- opens ROUND 4 to find the actual
+    proximate cause of the 17-test signature, independent of scheduler restart count entirely,
+    per task guidance.
+
+- timestamp: 2026-08-24 (ROUND 4 -- chronological/structural investigation, independent of
+    scheduler restart count per task guidance)
+  checked: >
+    Chronological pytest collection order for cluster-slice-verify (`grep -n "^def test_"` in
+    file-definition order), cross-referenced against ROUND 2's own deep-mining evidence decoding
+    the suite's progress string: "tests/e2e/cluster ran almost entirely clean... THEN
+    tests/e2e/slice opens with one more pass, then hits a wall and produces 16 STRAIGHT FAILURES
+    ... with ZERO further passes". tests/e2e/slice/test_backfill_2year_sweep.py (alphabetically
+    first in tests/e2e/slice/, and the file whose own tests account for 6 of the 17 failures) has
+    EXACTLY 7 test functions, in this file-definition order: test_dry_run_sizing_reports_
+    reasonable_dagrun_count (a `--dry-run` CLI call, NOT in the failing list), then
+    test_pilot_window_drains_without_cpu_starvation (IN the failing list), then 5 more (all IN
+    the failing list) -- an exact structural match for "1 pass, then 16 straight failures". Read
+    the module's own fixtures (lines 394-639) in full to find what module-level state could
+    explain a wall starting at the SECOND test specifically.
+  found: >
+    `_pause_customers_dag_for_backfill_only_tests` (module-scoped, `autouse=True`) pauses
+    `csv_ingest_customers` via `airflow dags pause` BEFORE the module's first test runs, and only
+    unpauses in a `finally` block firing after the module's LAST test completes (one exception:
+    `test_live_run_concurrent_with_backfill_same_dataset` gets a dedicated
+    `_live_concurrency_needs_dag_unpaused` fixture that unpauses for just that test then
+    re-pauses). Its own docstring states the purpose: prevent this module's 5 backfill-only tests
+    from losing a race for the shared, GLOBAL `max_active_tis_per_dag=1` slot on
+    `stage`/`dbt_build`/`publish` against `csv_ingest_customers`' own live `*/1 * * * *` schedule
+    (a real, previously-fixed bug from plan 10-07, per the module's own docstring finding 4) --
+    implicitly assuming pausing the DAG only stops the scheduler from creating NEW
+    regular-schedule DagRuns, while a backfill's OWN already-created DagRun keeps progressing.
+    `tests/e2e/slice/conftest.py::_unpause_slice_dags` (session-scoped, autouse, written BEFORE
+    plan 10-07's module-scoped pause fixture existed) already documents, in plain language, the
+    opposite: "Discovered live: ... nothing anywhere in this suite unpaused
+    `csv_ingest_customers`, which every test that uploads a file and polls for discovery...
+    depends on actually running on its own schedule/sensor. A paused DAG's scheduler simply never
+    starts a run for it -- there is no error, no timeout shortcut, just silence -- so every one
+    of those tests would poll `meta.files` until its own deadline and fail with a misleading
+    'discovery never registered it' message that looks like a pipeline bug." A verbatim, in-repo
+    description of the EXACT symptom text dominating ROUND 4's own 17-test signature, sitting in
+    the SAME directory as the fixture that (module-scoped, added later) reintroduces exactly what
+    it warns against.
+    `tests/e2e/slice/test_smoke_and_idempotency.py::test_smoke_dag_xcom_contains_built_sha` (one
+    of the 17 failing tests) independently confirms the same mechanism from a different angle:
+    "Unpausing first is required -- a paused DAG's triggered run stays `queued` forever (`airflow
+    dags trigger --help`'s own documented behaviour)" -- and its code correctly unpauses
+    `smoke_kubernetes_pod` before triggering it.
+  implication: >
+    A strong, specific, in-repo-corroborated hypothesis: IF Airflow 3.3.0 treats a paused DAG's
+    backfill-created DagRuns identically to regular-schedule ones (not yet confirmed at this
+    point -- requires direct source read, done next), `test_pilot_window_drains_without_cpu_
+    starvation`'s own backfill -- created by `_invoke_backfill_create` WHILE `csv_ingest_
+    customers` is already paused -- would never progress at all, explaining "missing entirely"
+    (not "stuck mid-pipeline") precisely, and (via Airflow's own Backfill-uniqueness constraint,
+    already source-confirmed this session in ROUND 2/3: a Backfill only completes once none of
+    its DagRuns are RUNNING/QUEUED) would explain the AlreadyRunningBackfill cascade for the rest
+    of this module's own tests too.
+
+- timestamp: 2026-08-24 (ROUND 4 -- direct source read of the installed apache-airflow==3.3.0 on
+    the live LOCAL scheduler pod, PLUS a live empirical reproduction, confirming the hypothesis
+    above with direct evidence rather than inference alone, per this session's own established
+    discipline)
+  checked: >
+    `kubectl -n airflow exec deploy/airflow-scheduler -c scheduler -- python -c "..."` against
+    the LOCAL cluster to read the installed source of `SchedulerJobRunner.
+    _executable_task_instances_to_queued` (selects which TaskInstances move SCHEDULED->QUEUED),
+    `DagRun.get_queued_dag_runs_to_set_running` (selects which QUEUED DagRuns move to RUNNING,
+    called by `_start_queued_dagruns`), and `DagRun.get_running_dag_runs_to_examine` (selects
+    which DagRuns `_schedule_dag_run` -- the function enforcing `dagrun_timeout`, per ROUND 3's
+    own source read -- actually considers). THEN a live empirical test on the LOCAL persistent
+    cluster: NOT against `csv_ingest_customers` (which already carried unrelated stuck DagRuns
+    from earlier work) but against the low-risk, single-task, test-only `smoke_kubernetes_pod`
+    DAG (the same mechanism applies -- the filters found are dag-agnostic): paused it (confirmed
+    via direct DB read: `is_paused=True`), created a real backfill for it (`airflow backfill
+    create --dag-id smoke_kubernetes_pod --from-date <yesterday> --to-date <yesterday>
+    --reprocess-behavior completed`), then polled the resulting DagRun/TaskInstance state
+    directly against the metadata DB every ~10s for ~50s while the DAG remained paused, then
+    unpaused and re-checked.
+  found: >
+    Source: `_executable_task_instances_to_queued` (scheduler_job_runner.py:524) includes
+    `.where(~DM.is_paused)` when selecting TIs to queue -- no backfill-specific carve-out
+    anywhere in the function. `get_queued_dag_runs_to_set_running` (models/dagrun.py) INNER JOINs
+    on `DagModel.is_paused == false()` (and separately `is_stale == false()`) -- an inner join
+    means a DagRun belonging to a paused DAG does not match this query AT ALL, so it can never
+    transition QUEUED->RUNNING while paused, backfill- or schedule-created alike.
+    `get_running_dag_runs_to_examine` (feeding `_schedule_dag_run`, which enforces
+    `dagrun_timeout` per ROUND 3's own source read) only returns DagRuns ALREADY in RUNNING state
+    -- a DagRun stuck in QUEUED is never even considered, meaning `dagrun_timeout` (ROUND 3's fix
+    (7)) structurally CANNOT fire for a DagRun that never left QUEUED.
+    Live empirical test: `airflow backfill create` for the paused `smoke_kubernetes_pod`
+    SUCCEEDED immediately ("Created backfill Dag run", backfill_id=82) -- confirms backfill
+    CREATION is not gated by `is_paused` (matches a direct source read of
+    `airflow/models/backfill.py`: its only `is_paused` reference is an unrelated column on the
+    `Backfill` model itself, never checked against `DagModel.is_paused` anywhere in
+    `_create_backfill`). Immediately after creation: DagRun state `queued`, TaskInstance state
+    `None`. ~50s later, DAG STILL paused: DagRun state STILL `queued`, TaskInstance state STILL
+    `None`, `last_scheduling_decision: None` -- proving the scheduler NEVER examined this DagRun
+    even once in that window, despite the scheduler pod itself confirmed actively looping the
+    whole time (continuous Kubernetes-watch-cycle and orphan-reset activity in its own log).
+    Unpausing did not immediately unstick it in this particular live test -- traced to a
+    SEPARATE, LOCAL-cluster-specific staleness flag (`DagModel.is_stale=True` on all 3 checked
+    DAGs, `last_parsed_time` ~12 hours stale, an artifact of this LOCAL dev cluster's own
+    dag-processor not having freshly re-parsed recently -- unrelated to a fresh-every-run CI
+    cluster where dag-processor is confirmed live-verified healthy with continuous clean parse
+    cycles across ROUNDs 1-3) -- flagged as a separate, out-of-scope LOCAL hygiene observation,
+    not chased further, and does not weaken the "stays stuck while paused" half of this test,
+    which was directly, unambiguously observed with zero confounding factors.
+  implication: >
+    CONFIRMED, by direct source read AND live empirical reproduction: pausing a DAG in Airflow
+    3.3.0 does not merely stop new regular-schedule DagRuns -- it freezes EVERY DagRun of that
+    dag_id, backfill included, in `queued` state indefinitely, with zero TaskInstances ever
+    reaching `scheduled`/`queued`/`running`. This mechanism is COMPLETELY INDEPENDENT of
+    scheduler/dag-processor resource health (CPU, memory, restart count) -- explaining, with a
+    specific confirmed mechanism rather than a coincidence, why THREE independently-real,
+    correctly-targeted, live-verified restart-reducing fixes (ROUNDs 1-3) had ZERO effect on this
+    specific 17-test signature: none touch DAG pause state, and `dagrun_timeout` structurally
+    cannot reach a DagRun that never leaves QUEUED. `test_pilot_window_drains_without_cpu_
+    starvation`'s own backfill -- created while `csv_ingest_customers` is ALREADY paused (the
+    module-scoped autouse fixture runs before every test in the module, including the dry-run one
+    before it) -- is frozen exactly this way on every live CI run: `discover_files` never gets a
+    single TaskInstance queued, so `meta.files` never gets a row ("missing entirely", matching
+    the orchestrator's own finding (a) precisely). Because a Backfill only completes once none of
+    its DagRuns are RUNNING/QUEUED (`_mark_backfills_complete()`, already source-confirmed this
+    session in ROUND 2/3), this single frozen DagRun then blocks every LATER test in the SAME
+    module from creating its own backfill for `csv_ingest_customers` with `AlreadyRunningBackfill`
+    -- explaining test_full_2year_sweep_customers_and_orders, test_idempotent_rerun_produces_
+    zero_additional_rows, test_live_run_concurrent_with_backfill_same_dataset (its own backfill
+    call also races the same stuck Backfill uniqueness constraint), test_mass_delete_snapshot_
+    trips_circuit_breaker_without_mutating_gold_state, and test_scd_concurrent_attribute_change_
+    and_correction_same_key -- all 5 of this module's remaining tests, all 5 in the failing list.
+    Once this module's own fixture teardown finally unpauses `csv_ingest_customers` again (after
+    its last test completes), the original frozen backfill (a 20-day, SCD-anomaly-laden window)
+    finally starts draining for real, plausibly consuming the SAME shared
+    `max_active_tis_per_dag=1` slot and real CI CPU/pod-scheduling capacity deep into the rest of
+    the suite -- a plausible (not separately live-instrumented this round) explanation for why
+    LATER FILES' own tests also fail, including the orchestrator's finding (b):
+    test_smoke_dag_xcom_contains_built_sha's DagRun DOES reach 'running' (the DAG is genuinely
+    unpaused again by the time this, the LAST slice file alphabetically, runs) but doesn't finish
+    within 180s -- a materially different, downstream RESOURCE-CONTENTION signature consistent
+    with a large recovering backfill still competing for constrained CI CPU/task-slot capacity,
+    not a still-paused DAG. test_no_extra_schemas_exist (finding (c)) is unrelated to this
+    mechanism entirely (a schema-existence assertion against `ALLOWED_SCHEMAS = {"pg_catalog",
+    "information_schema", "public", "pg_toast"}`, which does not include `meta` -- `meta`
+    legitimately exists by cluster-up time via Alembic migrations per CLAUDE.md's own
+    architecture, an unrelated, pre-existing test/migration-ordering assumption mismatch already
+    flagged out-of-scope by every prior round) -- kept out of scope, unchanged disposition.
+
+- timestamp: 2026-08-24 (ROUND 4 -- fix implementation and offline verification)
+  checked: >
+    Repo-wide grep confirmed `_pause_customers_dag_for_backfill_only_tests`/
+    `_live_concurrency_needs_dag_unpaused`/`_set_customers_dag_paused` (and the literal `airflow
+    dags pause` invocation) are used NOWHERE else in the repository -- a narrow, single-file
+    blast radius. Removed all three from `tests/e2e/slice/test_backfill_2year_sweep.py` (the
+    fixtures, their 2 `usefixtures` call sites, and updated the 4 docstring/comment locations
+    describing the now-removed behavior), replacing the removed code block with a documented
+    explanation (source-read + live-empirical evidence, matching this session's own established
+    in-code documentation density). `csv_ingest_customers` now simply stays unpaused for this
+    module too, exactly as `conftest.py`'s own session-scoped `_unpause_slice_dags` fixture
+    already guarantees for every other file in `tests/e2e/slice/`. No production DAG file
+    touched.
+    Verified offline: `python -m py_compile` clean; `ruff check` -- 0 new issues (2 pre-existing
+    E501/W505 findings at line ~1038, confirmed identical via `git show HEAD:... | ruff check -`
+    on the unmodified file, in code this fix never touched); `ruff format --check --diff` -- 86
+    diff lines both before and after this fix (byte-identical, confirmed via `git show HEAD:...`
+    on the unmodified file -- pre-existing project-wide formatting drift, none of it in code this
+    fix touched); `mypy` -- 0 errors; `pytest --collect-only` -- all 7 tests in the module still
+    collect cleanly in the identical order; repo-wide grep confirms zero remaining "pause"
+    (non-"unpause") call sites anywhere in `tests/e2e/`; full offline policy suite (`pytest
+    tests/policy/ -q -m "not manifests"`, 159 collectible) -- 157 passed, 2 failed, the SAME 2
+    pre-existing, already-documented out-of-scope failures every prior round in this file has
+    shown (test_dag_line_budget.py's 150-line budget, test_gates_actually_fail.py's lint
+    meta-test) -- zero new regressions.
+  found: >
+    Clean offline verification across every gate this debug session has established as
+    authoritative, with zero new regressions and a confirmed narrow, single-file blast radius.
+  implication: >
+    Offline-complete. This fix is purely test-suite-scoped (one file, zero production code, zero
+    Helm/manifest changes) and purely ADDITIVE to ROUNDs 1-3's own fixes (does not touch
+    scheduler/dag-processor resourcing, `core.parallelism`, `dagrun_timeout`, or any of the
+    vault-0 fixes -- all remain in place per scope_guardrails). Only a live `cluster-slice-verify`
+    run against real CI contention can confirm whether removing this DAG-pause mechanism actually
+    resolves the 17-test failure signature (or the bulk of it) -- per this session's own
+    established discipline, self-verification alone is not sufficient without direct live
+    evidence.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -1773,6 +2239,49 @@ root_cause: >
   test, per its own docstring) as the consistent, deterministic first casualty every time,
   regardless of the parallelism/ceiling change -- consistent with a DB-state-driven trigger, not
   generic time-based resource exhaustion.
+  (8, ROUND 4, the ACTUAL proximate cause of the session's persistent 17-test failure signature --
+  a DIFFERENT root-cause CLASS entirely from (1)/(2)/(3)/(3b)/(3c), unrelated to
+  scheduler/dag-processor resourcing or restart count): ROUND 3's own fix (7) was LIVE-VERIFIED
+  (restart count dropped 7->6->3, monotonically, across ROUNDs 1-3's three genuinely different
+  mechanisms) but the exact same 17-test failure SET recurred unchanged across all 5 live runs to
+  date regardless of restart count -- direct evidence the scheduler OOM/livelock mechanism (3)/
+  (3b)/(3c), while real and independently worth fixing, was never the proximate cause of THIS
+  symptom. The actual cause: `tests/e2e/slice/test_backfill_2year_sweep.py::
+  _pause_customers_dag_for_backfill_only_tests` (module-scoped, autouse=True, added by an earlier
+  plan 10-07 to stop this module's 5 backfill-only tests losing a race for the shared
+  `max_active_tis_per_dag=1` slot against `csv_ingest_customers`' own live schedule) pauses that
+  DAG before the module's first real backfill test runs. Confirmed via direct source read of the
+  installed apache-airflow==3.3.0 AND a live empirical reproduction on the LOCAL cluster:
+  `SchedulerJobRunner._executable_task_instances_to_queued` filters `~DagModel.is_paused` when
+  selecting TaskInstances to queue, and `DagRun.get_queued_dag_runs_to_set_running` INNER JOINs
+  on `DagModel.is_paused == false()` -- together meaning a paused DAG's DagRuns, backfill-created
+  or schedule-created alike, NEVER transition past `queued` and NEVER get a single TaskInstance
+  queued, for as long as the DAG stays paused (not merely "stops new scheduled runs", the
+  fixture's own incorrect assumption). `DagRun.get_running_dag_runs_to_examine` (feeding
+  `_schedule_dag_run`, which enforces `dagrun_timeout`) only returns DagRuns already RUNNING, so
+  fix (7)'s `dagrun_timeout` structurally cannot reach a DagRun stuck in `queued` -- a clean,
+  mechanistic explanation for fix (7)'s own zero effect on this signature. This freezes
+  `test_pilot_window_drains_without_cpu_starvation`'s own backfill on every live CI run
+  (`discover_files` never gets a single TaskInstance queued, so `meta.files` never gets a row --
+  "missing entirely", matching the orchestrator's own ROUND 4 finding (a) precisely), which then
+  blocks every later test in the SAME module via Airflow's own Backfill-uniqueness constraint
+  (`_mark_backfills_complete()`, already source-confirmed in ROUND 2/3, only clears a Backfill
+  once none of its DagRuns are RUNNING/QUEUED) with `AlreadyRunningBackfill` -- explaining all 5
+  of this module's remaining tests. Once the module's own fixture teardown finally unpauses
+  `csv_ingest_customers` again, the original frozen 20-day backfill finally starts draining for
+  real, plausibly consuming the shared `max_active_tis_per_dag=1` slot and real CI CPU/pod-
+  scheduling capacity deep into the rest of the suite -- a plausible (not separately
+  live-instrumented) explanation for later files' own failures too, including the orchestrator's
+  own finding (b) (test_smoke_dag_xcom_contains_built_sha's DagRun DOES reach 'running' -- the
+  DAG is genuinely unpaused again by then -- but doesn't finish within 180s, a materially
+  different, downstream resource-contention signature consistent with a large recovering backfill
+  competing for capacity, not a still-paused DAG). `tests/e2e/slice/conftest.py::
+  _unpause_slice_dags`'s own docstring (predates plan 10-07's pause fixture) already documented
+  this exact mechanism and this exact symptom text in plain language before this round began:
+  "A paused DAG's scheduler simply never starts a run for it -- there is no error, no timeout
+  shortcut, just silence." `test_no_extra_schemas_exist` (finding (c)) remains unrelated to this
+  mechanism (a schema-existence assertion, out of scope, unchanged disposition from every prior
+  round).
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -1854,6 +2363,22 @@ fix: >
   convention; and one pre-existing (confirmed via `git show HEAD` + bare-HEAD `ruff check`,
   unrelated to this fix) E501 line-length violation in `csv_ingest_customers.py`'s `dbt_build`
   comment, trivially shortened to fit under 100 chars with zero new lines.
+  (8, ROUND 4): `tests/e2e/slice/test_backfill_2year_sweep.py` -- removed
+  `_set_customers_dag_paused`/`_pause_customers_dag_for_backfill_only_tests`/
+  `_live_concurrency_needs_dag_unpaused` entirely (the module-scoped autouse fixture that paused
+  `csv_ingest_customers`, its sibling per-test unpause/re-pause fixture, and their shared helper),
+  removed the 2 `@pytest.mark.usefixtures("_live_concurrency_needs_dag_unpaused")` call sites on
+  `test_live_run_concurrent_with_backfill_same_dataset` and
+  `test_scd_concurrent_attribute_change_and_correction_same_key`, and updated the 4 affected
+  docstring/comment locations (module docstring's "Plan 10-07" section finding 4; the removed
+  code's own former location, now a documented explanation of why; both tests' own docstrings/
+  comments referencing the removed fixtures) so nothing in the file still describes behavior that
+  no longer exists. `csv_ingest_customers` now simply stays unpaused for this module too, exactly
+  as `tests/e2e/slice/conftest.py`'s own session-scoped `_unpause_slice_dags` fixture already
+  guarantees for every other file in `tests/e2e/slice/`. Test-file-only change -- zero production
+  DAG code, zero Helm/manifest changes, purely ADDITIVE on top of ROUNDs 1-3's own fixes (does
+  not touch `core.parallelism`, scheduler/dagProcessor resource sizing, `dagrun_timeout`, or any
+  of the vault-0 fixes -- all remain in place per scope_guardrails).
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -1940,12 +2465,33 @@ verification: >
   Airflow metadata DB) -- 14/14 pass, confirming Airflow actually ACCEPTS and correctly applies
   `dagrun_timeout=pendulum.duration(minutes=45)` at real DAG-execution time, not just at
   DagBag-import time.
+  LIVE-VERIFIED (CORRECTED, ROUND 4 -- see Evidence "ROUND 4 -- orchestrator-supplied live
+  verification of ROUND 3 fix (7)"): run 32765704491/job 97565550961 (commit 20d151f) showed
+  scheduler restarts drop 6->3, a real, measurable, monotonic improvement across ROUNDs 1-3's
+  three genuinely different mechanisms -- BUT the exact same 17-test failure SET recurred
+  unchanged, proving fix (7) (and ROUNDs 1-3 collectively) was never sufficient to resolve this
+  debug session's own primary symptom, because that symptom's actual root cause (8, below) is a
+  test-suite bug fully independent of scheduler restart/OOM behavior. See root_cause (8) for the
+  mechanistic explanation of WHY dagrun_timeout structurally cannot reach this specific failure
+  mode (the affected DagRuns never leave `queued`, so `dagrun_timeout` enforcement -- which only
+  examines already-RUNNING DagRuns -- never even considers them).
+  Fix (8, ROUND 4): offline-verified -- `python -m py_compile` clean; `ruff check` 0 new issues
+  (2 pre-existing E501/W505 findings at an untouched line, confirmed identical via `git show
+  HEAD:... | ruff check -` on the unmodified file); `ruff format --check --diff` -- 86 diff lines
+  both before and after this fix (byte-identical, confirmed via `git show HEAD:...` -- pre-
+  existing project-wide formatting drift, none of it in code this fix touched); `mypy` -- 0
+  errors; `pytest --collect-only` -- all 7 tests in the module still collect cleanly in the
+  identical order; repo-wide grep confirms zero remaining "pause" (non-"unpause") call sites
+  anywhere in `tests/e2e/`, and zero remaining references to the removed fixture names outside
+  this one file; `uv run pytest tests/policy/ -q -m "not manifests"` (159 collectible) -- 157
+  passed, 2 failed, the SAME 2 pre-existing, already-documented out-of-scope failures every prior
+  round in this file has shown -- zero new regressions.
   NOT YET LIVE-VERIFIED against real CI contention -- this round's own live push-and-wait
-  (confirming scheduler restarts drop to 0 under a fresh cluster-slice-verify run, per this
-  round's own explicit success bar) is the immediate next step (see Current Focus next_action).
+  (confirming the 17-test failure set shrinks or changes signature under a fresh
+  cluster-slice-verify run) is the immediate next step (see Current Focus next_action).
   Archiving this debug session is now blocked on: the still-unanswered human checkpoint for the
   REOPENED ROUND (4b, vault-0 Python-side wait race, already live-verified, awaiting confirmation
-  only) AND this round's own live verification of fix (7), not yet attempted.
+  only) AND this round's own live verification of fix (8), not yet attempted.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -1959,3 +2505,4 @@ files_changed:
   - airflow/dags/csv_ingest_customers.py
   - airflow/dags/csv_ingest_orders.py
   - tests/policy/test_dag_line_budget.py
+  - tests/e2e/slice/test_backfill_2year_sweep.py

@@ -185,12 +185,20 @@ seeding, so none of the below was exercised until this plan's own live run):
    consistent "near the end of the batch" failure position: the longer a backfill's own tail-end
    tasks sat queued, the more chances a competing scheduled run had to steal the slot first.
    Fixed (Rule 1/2, scoped entirely to this file, `conftest.py`'s own session-wide guarantee left
-   untouched): a module-scoped autouse fixture (`_pause_customers_dag_for_backfill_only_tests`)
-   pauses the DAG for this module's 5 backfill-only tests, with
-   `test_live_run_concurrent_with_backfill_same_dataset` — the one test that genuinely needs the
-   live schedule running concurrently, by design — getting its own explicit, self-healing
-   unpause/re-pause fixture (`_live_concurrency_needs_dag_unpaused`). See both fixtures' own
-   docstrings, just above `_latest_backfill_id`, for the full mechanism.
+   untouched) at the time: a module-scoped autouse fixture
+   (`_pause_customers_dag_for_backfill_only_tests`) paused the DAG for this module's 5
+   backfill-only tests, with `test_live_run_concurrent_with_backfill_same_dataset` — the one test
+   that genuinely needs the live schedule running concurrently, by design — getting its own
+   explicit, self-healing unpause/re-pause fixture (`_live_concurrency_needs_dag_unpaused`).
+
+   **CORRECTED (`.planning/debug/ci-pipeline-ingestion-timeout.md`, ROUND 4): this pause-based
+   mitigation was itself a critical, previously-unnoticed bug and has been REMOVED, not merely
+   patched.** Pausing `csv_ingest_customers` does not just stop the live schedule from creating
+   NEW DagRuns (the assumption above) — in Airflow 3.3.0 it freezes EVERY DagRun of that dag_id,
+   backfill included, in `queued` state forever, with zero TaskInstances ever reaching
+   `scheduled`/`running`. See the (now-removed) DAG-pause-scoping comment block just above
+   `_latest_backfill_id` for the full source-read + live-empirical evidence and the replacement
+   rationale.
 
 D-06's mass-delete circuit-breaker-trip fixture (Task 3) is a SEPARATE, single-day
 `generate_dated_series("customers", ...)` call — same `master_seed`/`rows_per_day` as
@@ -248,7 +256,7 @@ from dataplat.scd.recompute import BronzeRecord, recompute_version_chain
 
 if TYPE_CHECKING:
     import subprocess
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
 
     import psycopg
 
@@ -547,95 +555,53 @@ def _invoke_backfill_create(  # noqa: PLR0913 -- one keyword per D-11-locked CLI
 
 
 # ---------------------------------------------------------------------------
-# DAG-pause scoping (plan 10-07, live-tail-failure fix): keep this module's
-# own backfill-only tests from fighting `csv_ingest_customers`' live
-# `*/1 * * * *` schedule for the SAME global `max_active_tis_per_dag=1` slot
-# on `stage`/`dbt_build`/`publish`.
+# DAG-pause scoping: REMOVED (`.planning/debug/ci-pipeline-ingestion-timeout.md`, ROUND 4).
 #
-# Root cause, confirmed live twice this session (independently): a
-# concurrently-scheduled (non-backfill) DagRun's own map_index 20/21 `stage`
-# tasks succeeded at the EXACT moment a backfill's own map_index 20/21 were
-# failing after exhausting retries -- both genuinely fighting over the same
-# single slot. `tests/e2e/slice/conftest.py::_unpause_slice_dags`
-# (session-scoped, autouse) keeps this DAG permanently unpaused for the
-# WHOLE `tests/e2e/slice/` session because several OTHER files in that
-# directory (`test_idempotent_reupload`, both `test_pod_kill_retry` tests,
-# `test_concurrent_select_never_observes_partial_publish`) genuinely need
-# the live schedule/sensor running -- that guarantee is correct for them and
-# is NOT touched here. Of this module's own 6 tests, only
-# `test_live_run_concurrent_with_backfill_same_dataset` needs the live
-# schedule genuinely running concurrently with a backfill (that IS its own
-# D-12/D-13 proof); the other 5 only exercise explicitly-created backfills
-# and get nothing but self-inflicted queueing contention from the live
-# schedule's own regular DagRuns. Pausing the DAG for those 5 removes that
-# contention entirely.
+# plan 10-07 originally paused `csv_ingest_customers` for this module's 5 backfill-only tests
+# (module docstring, "Plan 10-07" section, finding 4) to stop them fighting the DAG's own live
+# `*/1 * * * *` schedule for the shared global `max_active_tis_per_dag=1` slot on
+# `stage`/`dbt_build`/`publish`: a concurrently-scheduled DagRun's own map_index 20/21 `stage`
+# tasks were observed succeeding at the exact moment a backfill's own map_index 20/21 were
+# failing after exhausting retries, both fighting over the same single slot.
+#
+# That mitigation was itself a critical, previously-unnoticed bug. Confirmed via direct source
+# read of the installed apache-airflow==3.3.0 AND a live empirical reproduction on the LOCAL
+# cluster (pause `smoke_kubernetes_pod`, create a real backfill, observe its DagRun/TaskInstance
+# for 50+ seconds): `DagRun.get_queued_dag_runs_to_set_running()` (airflow/models/dagrun.py)
+# inner-joins its query on `DagModel.is_paused == false()`, and `SchedulerJobRunner.
+# _executable_task_instances_to_queued()` separately filters `~DagModel.is_paused` when selecting
+# TaskInstances to queue. Together these mean a PAUSED DAG's `queued`-state DagRuns -- backfill or
+# scheduled, no distinction -- NEVER transition to `running`, and never get a single TaskInstance
+# past `state=None`, for as long as the DAG stays paused: not "stops new scheduled runs" (the
+# original assumption), a total DagRun-wide freeze indistinguishable from "this DagRun never
+# started". `airflow backfill create` itself is NOT gated by `is_paused` (confirmed via source
+# read of `airflow/models/backfill.py` -- the CLI call always succeeds), so the freeze was
+# invisible at creation time and only showed up as `discover_files` never running.
+#
+# Because `_pause_customers_dag_for_backfill_only_tests` paused the DAG BEFORE the module's first
+# real backfill test (`test_pilot_window_drains_without_cpu_starvation`) ever ran, that test's own
+# backfill froze permanently in `queued` on every live CI run -- `meta.files` never got a row
+# ("missing entirely", not "stuck mid-pipeline"). Because a Backfill only completes once none of
+# its DagRuns are RUNNING/QUEUED, every LATER test in this module that tried to create its own
+# backfill for `csv_ingest_customers` then failed immediately with `AlreadyRunningBackfill` --
+# and the eventual recovery (once this module's own fixture teardown finally unpaused the DAG
+# again) left a large, resource-hungry backfill competing for the same shared task slot deep into
+# the rest of the suite, plausibly explaining downstream contention symptoms in LATER files too.
+# This reproduces `tests/e2e/slice/conftest.py::_unpause_slice_dags`'s own already-documented
+# warning verbatim: "A paused DAG's scheduler simply never starts a run for it -- there is no
+# error, no timeout shortcut, just silence."
+#
+# `_set_customers_dag_paused`/`_pause_customers_dag_for_backfill_only_tests`/
+# `_live_concurrency_needs_dag_unpaused` are removed outright, not patched: there is no Airflow
+# 3.3.0-native way to "stop new scheduled DagRuns without also freezing already-created ones",
+# so `csv_ingest_customers` now simply stays unpaused for this module too, exactly as
+# `conftest.py`'s own session-scoped fixture already guarantees for every other file in this
+# directory. This trades finding 4's narrower, already-mitigated slot-contention risk (backfill
+# windows in this module are deliberately kept to 1-3 ticks, and the affected tasks already carry
+# `retries=6` with exponential backoff) for eliminating a deterministic, suite-wide, catastrophic
+# cascade that reproduced on every single live CI run regardless of scheduler/dag-processor
+# restart count.
 # ---------------------------------------------------------------------------
-
-
-def _set_customers_dag_paused(
-    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
-    *,
-    paused: bool,
-) -> None:
-    """Pause or unpause `csv_ingest_customers` via the same `kubectl exec ... airflow dags ...`
-    shape `tests/e2e/slice/conftest.py::_unpause_slice_dags` already uses (never a second,
-    divergent construction of the same command).
-    """
-    action = "pause" if paused else "unpause"
-    result = _kubectl_airflow(kubectl_fn, "dags", action, _CUSTOMERS_DAG_ID)
-    assert result.returncode == 0, (
-        f"airflow dags {action} {_CUSTOMERS_DAG_ID} failed (exit {result.returncode}):\n"
-        f"{result.stdout}\n{result.stderr}"
-    )
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _pause_customers_dag_for_backfill_only_tests(
-    kubectl: Callable[..., subprocess.CompletedProcess[str]],
-) -> Iterator[None]:
-    """Pause `csv_ingest_customers` for this module's 5 backfill-only tests.
-
-    Runs once, before the first test in this module (module-scoped, autouse), and unpauses again
-    in a `finally` block so the DAG is left unpaused when this module's fixture teardown runs --
-    self-healing regardless of whether any test in this module passed, failed, or errored --
-    matching `_port_forwarded_analytics`/`_port_forwarded_airflow_db`'s own unconditional-teardown
-    discipline (`tests/e2e/slice/conftest.py`) rather than inventing a new pattern. This restores
-    exactly the guarantee `_unpause_slice_dags` originally promised for the whole
-    `tests/e2e/slice/` session, so whatever runs after this module (or, if pytest ever reorders,
-    a later test in this same file) still sees an unpaused DAG.
-
-    `test_live_run_concurrent_with_backfill_same_dataset` is the one exception: its own
-    `_live_concurrency_needs_dag_unpaused` fixture (below) unpauses for the duration of THAT one
-    test and re-pauses in its own `finally` block afterward, so this module-level pause is back
-    in effect for `test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state`,
-    the test immediately after it in this file's own established in-file collection order.
-    """
-    _set_customers_dag_paused(kubectl, paused=True)
-    try:
-        yield
-    finally:
-        _set_customers_dag_paused(kubectl, paused=False)
-
-
-@pytest.fixture
-def _live_concurrency_needs_dag_unpaused(
-    kubectl: Callable[..., subprocess.CompletedProcess[str]],
-) -> Iterator[None]:
-    """Unpause `csv_ingest_customers` for `test_live_run_concurrent_with_backfill_same_dataset`.
-
-    The one test in this module whose whole point is proving live-schedule-concurrent backfill
-    correctness (D-12/D-13) -- exactly the behavior
-    `_pause_customers_dag_for_backfill_only_tests` (module-scoped, above) suppresses for every
-    OTHER test in this module. Re-pauses in a `finally` block on teardown, unconditionally, so the
-    module-level invariant (paused) is restored for
-    `test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state` regardless of
-    this test's own outcome.
-    """
-    _set_customers_dag_paused(kubectl, paused=False)
-    try:
-        yield
-    finally:
-        _set_customers_dag_paused(kubectl, paused=True)
 
 
 def _latest_backfill_id(conn: psycopg.Connection[Any], *, dag_id: str) -> int | None:
@@ -1675,7 +1641,6 @@ def test_idempotent_rerun_produces_zero_additional_rows(
     )
 
 
-@pytest.mark.usefixtures("_live_concurrency_needs_dag_unpaused")
 def test_live_run_concurrent_with_backfill_same_dataset(
     sweep_corpus: _Corpus,  # noqa: ARG001 -- ensures the corpus fixture stays alive
     sweep_state: _SweepState,
@@ -1685,14 +1650,12 @@ def test_live_run_concurrent_with_backfill_same_dataset(
 ) -> None:
     """D-12/D-13: a live customers DagRun runs CONCURRENTLY with an active backfill, no corruption.
 
-    `csv_ingest_customers` is unpaused for the duration of THIS test only (this module's own
-    `_live_concurrency_needs_dag_unpaused` fixture, applied above via `usefixtures` -- every
-    OTHER test in this module keeps it paused, see
-    `_pause_customers_dag_for_backfill_only_tests`'s own docstring for why) and every uploaded
-    file permanently matches its `wait_for_files` sensor, so the DAG's own `*/1 * * * *` live
-    schedule produces ordinary `backfill_id IS NULL` DagRuns throughout this one test's
-    execution -- this test triggers a FRESH backfill window and polls for a live DagRun to be
-    'running' at the SAME sampled instant, rather than assuming architecture guarantees it.
+    `csv_ingest_customers` stays unpaused for this whole module now (see the removed
+    DAG-pause-scoping comment block above `_latest_backfill_id`), so every uploaded file
+    permanently matches its `wait_for_files` sensor and the DAG's own `*/1 * * * *` live schedule
+    produces ordinary `backfill_id IS NULL` DagRuns throughout this one test's execution -- this
+    test triggers a FRESH backfill window and polls for a live DagRun to be 'running' at the SAME
+    sampled instant, rather than assuming architecture guarantees it.
     """
     from_dt, to_dt = _window(offset_minutes=300, span_minutes=2)
     since_id = _latest_backfill_id(airflow_metadata_connection, dag_id=_CUSTOMERS_DAG_ID)
@@ -1924,7 +1887,6 @@ def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("_live_concurrency_needs_dag_unpaused")
 def test_scd_concurrent_attribute_change_and_correction_same_key(  # noqa: PLR0913, PLR0915, PLR0917
     # one param per fixture this test genuinely needs (corpus ordering, cross-test state,
     # kubectl, s3, 2 DB conns) -- mirrors this module's own established lint-exception
@@ -2063,8 +2025,8 @@ def test_scd_concurrent_attribute_change_and_correction_same_key(  # noqa: PLR09
     )
 
     # --- Deliver (b): the live forward attribute change, picked up by the DAG's own live
-    #     `*/1 * * * *` schedule (unpaused for this test only via
-    #     `_live_concurrency_needs_dag_unpaused`, applied above). ---
+    #     `*/1 * * * *` schedule (unpaused for this whole module now -- see the removed
+    #     DAG-pause-scoping comment block above `_latest_backfill_id`). ---
     since_dag_run_pk = _latest_dag_run_pk(airflow_metadata_connection, dag_id=_CUSTOMERS_DAG_ID)
     app.put_object(
         Bucket="raw",
