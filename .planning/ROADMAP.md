@@ -42,7 +42,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 8: Validation, Quarantine & Metadata Control-Plane Completion** - Nothing is silently dropped: structural and quality validation, quarantine with a re-drive path, machine-readable reports, anomaly detection (completed 2026-08-17)
 - [x] **Phase 9: ETL Correctness — Dedup, Incremental, Backfill & Recovery** - Deduplication with audit, committed-cursor watermarks, first-class backfills, partial-failure recovery and reconciliation (completed 2026-08-21)
 - [x] **Phase 10: Slowly Changing Dimensions** - SCD 0/1/2 with database-enforced non-overlapping history and late-arriving corrections repaired by history recomputation (completed 2026-08-22)
-- [ ] **Phase 11: CI/CD Completion & Operations** - Ephemeral kind E2E in CI proving the environment rebuilds from the repo, plus runbooks, retention and rebuild-from-raw
+- [x] **Phase 11: CI/CD Completion & Operations** - Ephemeral kind E2E in CI proving the environment rebuilds from the repo, plus runbooks, retention and rebuild-from-raw (completed 2026-08-24)
 
 ## Phase Details
 
@@ -707,7 +707,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 11-05-PLAN.md — Slice 5: full E2E + rebuild-from-raw capstone + parallel chaos workflow
+- [x] 11-05-PLAN.md — Slice 5: full E2E + rebuild-from-raw capstone + parallel chaos workflow
 
 **Research stage**: S13 + S14. **Skip `--research-phase`** — the CI patterns are standard and `values-ci.yaml` already exists from Phase 2.
 
