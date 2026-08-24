@@ -200,10 +200,29 @@ scheduler:
   resources:
     requests:
       cpu: 400m
-      memory: 256Mi
+      memory: 512Mi
     limits:
       cpu: 1500m
-      memory: 512Mi
+      memory: 1Gi
+  # Debug session ci-pipeline-ingestion-timeout, continuation session 2, ROUND
+  # 2 (2026-08-24): memory raised 256Mi/512Mi->512Mi/1Gi -- a THIRD, newly-
+  # exposed bottleneck, found via the SAME live-verify round that confirmed
+  # dagProcessor's own memory fix (below) worked perfectly (dag-processor:
+  # Restart Count 0 across the whole ~15min run, direct `kubectl describe
+  # pod` confirmation). That same describe-pod output showed
+  # airflow-scheduler-0 with Last State: Terminated / Reason: OOMKilled /
+  # Exit Code: 137, Restart Count: 2 -- scheduler's own memory was NEVER
+  # touched by any fix this session (only its CPU was raised, round 1).
+  # Mechanism: with dag-processor no longer crash-looping, DAGs now actually
+  # register and DagRuns actually trigger -- exposing, for the first time,
+  # the scheduler's REAL in-process LocalExecutor task-execution memory
+  # footprint (unlike CPU contention, this was invisible before because no
+  # task had ever gotten far enough to actually run). Matches local's
+  # already-proven-stable scheduler sizing exactly (512Mi/1Gi -- identical
+  # pattern to local's dagProcessor sizing above), the same "match the one
+  # proven-stable reference point" fix rationale already used for
+  # dagProcessor. NOT yet live-verified -- requires one more live-CI round.
+  #
   # Post-merge fix (CICD-09 follow-up): live-diagnosed this session against a
   # genuinely fresh single-node CI cluster under real contention --
   # scheduler-0's own startup/liveness probe (`airflow jobs check
