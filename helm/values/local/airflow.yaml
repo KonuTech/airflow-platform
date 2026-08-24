@@ -89,6 +89,21 @@ config:
   secrets:
     backend: airflow.providers.hashicorp.secrets.vault.VaultBackend
     backend_kwargs: '{"url": "http://vault.vault.svc.cluster.local:8200", "auth_type": "kubernetes", "kubernetes_role": "airflow", "mount_point": "airflow", "connections_path": "connections", "variables_path": null, "config_path": null, "kv_engine_version": 2}'
+  # Debug session ci-pipeline-ingestion-timeout (2026-08-24): mirrors
+  # helm/values/ci/airflow.yaml's identical keys -- see that file's own
+  # comment for the full live-diagnosed rationale (scheduler/dag-processor
+  # crash-looping under real CI CPU contention because Airflow's internal
+  # scheduler_health_check_threshold/dag_file_processor_timeout, default
+  # 30s/50s, are tighter than the K8s-level probe timeoutSeconds). This
+  # profile has no live-observed instability of its own (KubernetesExecutor
+  # + 3-node cluster gives the scheduler far more real headroom), but this
+  # is behavioral config, not a permitted resource-sizing divergence axis
+  # under tests/policy/test_values_profiles.py's D-06 axis table, so it
+  # stays identical here rather than CI-only.
+  scheduler:
+    scheduler_health_check_threshold: "90"
+  dag_processor:
+    dag_file_processor_timeout: "120"
   # OBS-10, local profile ONLY: CI has no OTel Collector deployed (D-16), so
   # tracing stays off there -- this whole `traces:` block, and the
   # OTEL_EXPORTER_OTLP_ENDPOINT env var below, are a legitimate local/ci

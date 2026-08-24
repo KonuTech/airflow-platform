@@ -99,6 +99,38 @@ ARGUED_TESTS_E2E_TARGETS: tuple[tuple[str, str], ...] = (
             "with the happy-path suite) and a much longer budget."
         ),
     ),
+    (
+        "cluster-slice-verify",
+        (
+            "Quick task 260824-ayw: exists ONLY because e2e-full.yml's "
+            "CONTEXT.md-locked staggering strategy needs tests/e2e/"
+            "observability to run in its own separate window (monitoring "
+            "installed only for that window -- see observability-verify-ci "
+            "below). Runs tests/e2e/cluster and tests/e2e/slice only, no "
+            "observability, no monitoring install. cluster-verify above "
+            "stays unmodified and is still the single target a local "
+            "developer runs for the full cluster+slice+observability suite "
+            "against the persistent 3-node profile, which has no "
+            "CPU-contention problem -- this is a disclosed, CI-workflow-"
+            "specific narrowing, not a replacement."
+        ),
+    ),
+    (
+        "observability-verify-ci",
+        (
+            "Quick task 260824-ayw: the CI-only staggered half of "
+            "cluster-verify's suite -- installs the trimmed CI monitoring "
+            "stack (scripts/monitoring-install.sh), runs tests/e2e/"
+            "observability alone, then tears the stack down (scripts/"
+            "monitoring-teardown.sh) before e2e-full.yml's own "
+            "rebuild-from-raw step. Exists so the trimmed stack's CPU "
+            "footprint is live only for this window, not the whole "
+            "~120-minute CI job (CONTEXT.md's locked CPU-contention "
+            "decision) -- see scripts/stages/85-monitoring.sh's own header "
+            "comment for the live CrashLoopBackOff diagnosis this responds "
+            "to."
+        ),
+    ),
 )
 
 # A target line: `name: prereq1 prereq2  ## comment`. The negative lookahead

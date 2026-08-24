@@ -69,6 +69,33 @@ config:
   secrets:
     backend: airflow.providers.hashicorp.secrets.vault.VaultBackend
     backend_kwargs: '{"url": "http://vault.vault.svc.cluster.local:8200", "auth_type": "kubernetes", "kubernetes_role": "airflow", "mount_point": "airflow", "connections_path": "connections", "variables_path": null, "config_path": null, "kv_engine_version": 2}'
+  # Debug session ci-pipeline-ingestion-timeout (2026-08-24): raised
+  # identically in helm/values/local/airflow.yaml too -- this is behavioral
+  # config, not a permitted resource-sizing divergence axis under
+  # tests/policy/test_values_profiles.py's D-06 axis table, so it stays
+  # non-divergent by that same policy's own rule.
+  #
+  # scheduler_health_check_threshold (default 30s): the actual mechanism
+  # behind the live-observed "Startup probe failed: No alive jobs found."
+  # crash-loop -- `airflow jobs check --job-type SchedulerJob --local` (the
+  # chart's own probe command) reports the scheduler dead once its DB
+  # heartbeat is older than this, independent of and much tighter than
+  # scheduler.livenessProbe/startupProbe.timeoutSeconds above (which only
+  # bounds how long kubelet waits for the probe COMMAND to execute). Raised
+  # 3x so a genuinely CPU-contended-but-alive scheduler is not killed for a
+  # heartbeat gap this node's real contention can produce.
+  #
+  # dag_file_processor_timeout (default 50s, Airflow-3-renamed
+  # [dag_processor] section, was [core] in Airflow 2): kills an individual
+  # DAG file's own parse subprocess if it runs long -- this project's DAG
+  # files import kubernetes.client/hvac, and under real CPU contention a
+  # parse can plausibly exceed 50s. Matches the community-documented
+  # mitigation for this exact "DAGs appear and disappear" failure class
+  # (apache/airflow#44652).
+  scheduler:
+    scheduler_health_check_threshold: "90"
+  dag_processor:
+    dag_file_processor_timeout: "120"
 
 data:
   metadataSecretName: airflow-metadata
@@ -172,10 +199,10 @@ apiServer:
 scheduler:
   resources:
     requests:
-      cpu: 200m
+      cpu: 400m
       memory: 256Mi
     limits:
-      cpu: 500m
+      cpu: 1500m
       memory: 512Mi
   # Post-merge fix (CICD-09 follow-up): live-diagnosed this session against a
   # genuinely fresh single-node CI cluster under real contention --
@@ -188,6 +215,24 @@ scheduler:
   # 4 CPU/16GB runner's worst observed contention; a genuinely hung
   # scheduler still gets caught by failureThreshold, just with more slack
   # per attempt.
+  #
+  # Debug session ci-pipeline-ingestion-timeout (2026-08-24): the
+  # timeoutSeconds:60 raise above did NOT fully solve this -- live-captured
+  # (via e2e-smoke.yml's own DEBUG diagnostic step, run 32675592471, which
+  # already included this exact probe-timeout fix) airflow-scheduler-0 still
+  # restarting with event "Startup probe failed: No alive jobs found.",
+  # which is `airflow jobs check`'s OWN message for a stale SchedulerJob DB
+  # heartbeat (governed by `[scheduler] scheduler_health_check_threshold`,
+  # default 30s, set below in `config:` -- a DIFFERENT mechanism than this
+  # `timeoutSeconds`, which only bounds how long kubelet waits for the probe
+  # COMMAND to execute, not whether the heartbeat itself is fresh). The node
+  # was also observed at 82% of its ~3000m real allocatable CPU committed to
+  # steady-state REQUESTS alone (kind/cluster-ci.yaml's own reservation
+  # math), before any ETL task pod exists -- CPU requests/limits raised here
+  # so this pod (which under LocalExecutor runs ALL task-instance code
+  # in-process, unlike KubernetesExecutor's dispatch-only scheduler) has
+  # real headroom to keep heartbeating under contention, not just more
+  # patience for a probe command that was never the actual bottleneck.
   livenessProbe:
     timeoutSeconds: 60
   startupProbe:
@@ -224,13 +269,24 @@ scheduler:
 dagProcessor:
   resources:
     requests:
-      cpu: 200m
+      cpu: 300m
       memory: 256Mi
     limits:
-      cpu: 500m
+      cpu: 1200m
       memory: 512Mi
   # Same live-diagnosed contention race as scheduler.livenessProbe above --
   # dag-processor's own liveness check timed out at the chart's 20s default.
+  #
+  # Debug session ci-pipeline-ingestion-timeout (2026-08-24): same
+  # incomplete-fix finding as scheduler above -- live-captured 5 restarts on
+  # this pod in under 9 minutes even with timeoutSeconds:60 already applied
+  # (run 32675592471). CPU raised for the same real-headroom reason
+  # (parsing DAG files with heavy imports -- kubernetes.client, hvac -- under
+  # genuine node contention), paired with `[dag_processor]
+  # dag_file_processor_timeout` raised below in `config:` (default 50s,
+  # governs how long a single DAG file's own parse subprocess may run before
+  # being killed as hung -- independent of this timeoutSeconds, which only
+  # bounds the K8s probe command itself).
   livenessProbe:
     timeoutSeconds: 60
   logGroomerSidecar:
