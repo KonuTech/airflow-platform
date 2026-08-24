@@ -866,6 +866,133 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     (1)-(4) as live-confirmed. Per this session's own established discipline, self-verification is
     complete; human confirmation is the remaining gate before archiving.
 
+- timestamp: 2026-08-24 (REOPENED ROUND 2, deep-mining the already-fetched raw job log for
+    97442007494, independent of the orchestrator's own summary)
+  checked: >
+    The full raw log for job 97442007494 was already present in this session's own scratchpad
+    (fetched by an earlier continuation hop, `e2efull2_97442007494.log`, 2968 lines) -- read
+    directly rather than re-fetched. Extracted: (1) exact step-boundary timestamps via `##[group]`
+    markers (`Run make cluster-slice-verify` started 13:12:49Z, not 13:06:00Z as the orchestrator's
+    own summary approximated using the job's overall start); (2) pytest's own reported duration,
+    "17 failed, 21 passed, 6 skipped, 16 warnings in 3704.38s (1:01:44)"; (3) the single-line
+    progress indicator pytest prints in `-q` mode (`s.....s.....s......ss...s.F.FFFFFFFFFFFFFFFF`),
+    decoded position-by-position against the 6/21/17 skip/pass/fail totals; (4) full,
+    non-summarized FAILURES-section text (not just the short one-liners) for
+    `test_pilot_window_drains_without_cpu_starvation` and `test_full_2year_sweep_customers_and_orders`,
+    including their full docstrings (written during earlier, PRE-this-debug-session Phase 9/10
+    work) and complete assertion/traceback text; (5) grepped the full FAILURES section (1055-2765)
+    for connection/5xx/MemoryError/OOM-adjacent keywords; (6) grepped tests/e2e/slice/*.py and
+    tests/e2e/cluster/*.py for any `kubectl delete`/`-n airflow` calls that could confound restart-
+    count monitoring by deleting scheduler/dag-processor pods directly (as opposed to task pods).
+  found: >
+    (1) pytest's stdout is FULLY BUFFERED in this CI invocation -- the entire progress line AND
+    the entire FAILURES section print at the SAME timestamp (14:14:34.58Z, the moment the pytest
+    process itself exits), confirming the new_evidence block's own caveat ("no output at all
+    appeared... pytest's default output buffering") -- NO per-test timing is recoverable from this
+    log alone; a live, independent time-series diagnostic (this round's own monitor) is the ONLY
+    way to get a timeline.
+    (2) Decoding the progress string against file/collection order: tests/e2e/cluster ran almost
+    entirely clean (only ONE failure, `test_no_extra_schemas_exist`, already flagged
+    out-of-scope), THEN tests/e2e/slice opens with one more pass, then hits a wall and produces
+    16 STRAIGHT FAILURES for the rest of the suite with ZERO further passes -- a late-onset,
+    non-self-healing breakage, not scattered/intermittent failures. Consistent with a genuine
+    crash-loop or a persistent stuck state, not isolated flakes.
+    (3) `test_full_2year_sweep_customers_and_orders`'s full traceback reveals its OWN `airflow
+    backfill create` CLI invocation (run via `kubectl exec deploy/airflow-api-server ... airflow
+    backfill create ...`, NOT executed directly from the test runner) failed all 3 retry attempts
+    with `airflow.models.backfill.AlreadyRunningBackfill: Another backfill is running for Dag
+    csv_ingest_customers. There can be only one running backfill per Dag.` -- this is a CASCADE:
+    the PRIOR test in file order, `test_pilot_window_drains_without_cpu_starvation`, itself
+    successfully CREATED a backfill (its own failure is NOT a CLI failure) whose DagRun(s) then
+    never reached a terminal state, so Airflow's own backfill-uniqueness constraint blocks every
+    subsequent backfill-CLI test for the rest of the run with this identical exception (explains 3
+    of the 17 failures structurally, not independently).
+    (4) `test_pilot_window_drains_without_cpu_starvation`'s own failure detail is sharper than the
+    orchestrator's summary conveyed: `missing entirely: ['customers_20240101.csv'], still
+    non-terminal: {}` -- the SECOND field is EMPTY. This means the file was NEVER discovered AT
+    ALL (no `meta.files` row ever appeared) within the full 1800s (30min) budget -- not "discovered
+    but stuck mid-pipeline." Per this same test's own pre-existing docstring (written during
+    Phase 9/10, BEFORE this debug session existed): "this cluster showed CPU starvation at
+    `max_active_runs=3` in every observed run across Phase 9/10 sessions" (already-known,
+    already-mitigated by hardcoding `max_active_runs=1`) and "`integrity_gate` (3 concurrent) +
+    `stage`... together already take ~13-15 min BEFORE `dbt_build`/`publish` even start for this
+    ONE file's own DagRun" -- meaning under NORMAL (even CPU-pressured) conditions, a `meta.files`
+    row should appear well within 1800s. A 30-minute total absence of even the FIRST pipeline
+    stage's own DB write is a materially stronger signal than "slow under contention" -- consistent
+    with either (a) the scheduler being unable to dispatch this DagRun's tasks AT ALL for a
+    sustained period (crash-loop preventing dispatch, H1/H2's shared prediction), or (b) discovery
+    itself silently failing to enqueue -- both distinguishable only by the live restart-count/memory
+    data this round's diagnostic is designed to capture.
+    (5) Zero connection-refused/5xx/MemoryError/OOM-keyword hits anywhere in the FAILURES section's
+    actual assertion/traceback text (the two "killed" hits are test docstring prose about the
+    test's OWN fault-injection semantics, not real error output) -- the test-runner's OWN direct
+    psycopg connections to both Postgres clusters stay healthy and queryable throughout (tests can
+    still run SQL, they just find zero/stale rows) -- weakens (does not eliminate) H3
+    (DB/API-server saturation) as the PRIMARY mechanism, since a saturated DB would more likely
+    surface as connection-level exceptions in the test's own direct queries too.
+    (6) Confirmed via grep: no test in tests/e2e/slice or tests/e2e/cluster ever deletes or
+    otherwise directly targets a pod in the `airflow` namespace -- `test_pod_kill_retry.py`'s two
+    `kubectl delete pod` calls are both scoped `-n etl` (task/worker pods only). This round's own
+    restart-count monitor for `-l component=scheduler`/`-l component=dag-processor` cannot be
+    confounded by test-induced deletion -- any restart count increase it observes is organic
+    (health-probe or OOM driven), not test interference.
+  implication: >
+    Sharpens (does not yet confirm) H1: the failure pattern's specific shape -- early clean run,
+    late onset, ZERO recovery for the remainder, "missing entirely" rather than "stuck partway,"
+    and a structural cascade (AlreadyRunningBackfill) stacked on top of what looks like an
+    independent, more fundamental dispatch failure (the non-backfill "discovery never registered
+    it" failures in test_concurrent_select/test_dbt_silver_pipeline/test_pod_kill_retry(x3)/
+    test_rebuild_from_raw/test_idempotent_reupload, which use the REGULAR 1-minute-scheduled DAG,
+    not the stuck backfill, and STILL never got a `meta.files` row) -- is consistent with H1
+    (sustained memory growth eventually causing a persistent OOM crash-loop that does not
+    self-heal because the SAME growth-driving load keeps running after each restart) and
+    materially less consistent with a purely transient CPU-contention slowdown (which would more
+    plausibly show intermittent/partial recovery, not a hard 16-for-16 wall). Still requires the
+    live growth-curve data to confirm the MECHANISM specifically (memory vs. some other resource)
+    -- this evidence narrows the shape of the failure, not yet its cause.
+
+- timestamp: 2026-08-24 (REOPENED ROUND 2, external research)
+  checked: web research -- Airflow 3.x LocalExecutor scheduler memory-growth behavior, since this
+    round's leading hypothesis (H1) needed to be checked against known upstream issue classes
+    before assuming it is novel (research_vs_reasoning discipline: check for a recognized
+    mechanism before re-deriving one from scratch).
+  found: >
+    A currently OPEN, actively-discussed upstream issue directly on point:
+    apache/airflow#56641 ("Root Cause Investigation: Memory Growth in LocalExecutor Workers
+    (Scheduler Subprocesses)") plus companion discussion #58143 ("Preventing COW in LocalExecutor
+    Workers"). Documented mechanism: Airflow 3.x's LocalExecutor forks a new worker subprocess (a
+    LocalTaskJob) per dispatched task instance; Copy-on-Write means each fork initially shares
+    pages with the parent (scheduler) process, but as BOTH the parent and the growing set of
+    forked children touch memory over time, CoW causes page duplication that accumulates --
+    reported as worker processes growing from ~20-30MB to >100MB over 1-2 hours, and scheduler-side
+    growth on the order of ~4.5MB/hour in some deployments, escalating faster under high task
+    churn. A proposed workaround (eager vs. lazy worker forking) was tested in the upstream
+    discussion and reduced growth, but is NOT a released, stable, upstream fix as of this
+    research -- still in active discussion. This project already independently discovered and
+    fixed a RELATED but distinct fork()-based memory issue this session (dag-processor's own
+    parser-subprocess OOM, a one-time startup burst, see root_cause (2) above, itself
+    corroborated by a DIFFERENT set of upstream issues: apache/airflow#50708/#50097/#58509/#53662)
+    -- #56641 describes the SUSTAINED, TIME-ACCUMULATING variant of the same general "forking
+    under LocalExecutor is memory-expensive in Airflow 3.x" issue class, specific to the
+    SCHEDULER's own LocalTaskJob worker forks rather than the dag-processor's DAG-file-parser
+    forks. The reported 1-2 hour timescale for visible growth is compatible with (same order of
+    magnitude as, though not identical to) this round's own observed ~60min window, though this
+    project's workload (KubernetesPodOperator watch/log-streaming loops held open for the full
+    duration of each real ETL task, not lightweight tasks) plausibly produces a DIFFERENT growth
+    rate than the reports found -- not assumed identical, only directionally relevant.
+  implication: >
+    Provides independent, external corroboration that H1 (LocalExecutor-driven scheduler memory
+    growth under sustained load) is a REAL, currently-unresolved, currently-undocumented-as-fixed
+    upstream issue class -- not a hypothesis invented from scratch, and consistent with this exact
+    project's OWN already-confirmed adjacent finding (dag-processor's fork()-based OOM, root_cause
+    (2)). Also means: IF H1 is confirmed by this round's live data, there is likely NO clean
+    upstream config toggle or version bump that resolves it outright (the upstream fix is still
+    in design/discussion, not released) -- any fix this round proposes would need to be a
+    workaround (e.g., further memory headroom with an explicit "this is a known upstream growth
+    pattern, not a fixed one-time budget" justification, a periodic/scheduled restart mechanism,
+    or reducing sustained task churn) rather than a clean root-cause elimination -- to be decided
+    ONLY after live confirmation, not preemptively.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
