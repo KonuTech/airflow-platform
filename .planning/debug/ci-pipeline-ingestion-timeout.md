@@ -1,14 +1,83 @@
 ---
-status: awaiting_human_verify
+status: verifying
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-24 (continuation session 2, round 3 -- BOTH memory fixes LIVE-CONFIRMED via direct kubectl evidence: dag-processor and scheduler both Restart Count 0 across a full live pipeline run; awaiting human verification)
+updated: 2026-08-24 (REOPENED ROUND -- vault-0 Python-side wait race in test_unseal_survives_restart.py/test_vault_unavailable.py: shared poll_pod_running helper implemented in tests/e2e/vault/conftest.py, offline-verified (mypy/ruff/py_compile/pytest --collect-only/full offline policy suite all clean, zero new regressions), status reverted from awaiting_human_verify to verifying pending a live-CI round. The scheduler+dag-processor OOM mandate this session was originally opened for remains separately closed/live-confirmed, see Resolution -- NOT re-litigated by this round.)
 ---
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-reasoning_checkpoint:
+reasoning_checkpoint (REOPENED ROUND, vault-0 Python-side wait race -- supersedes the round below,
+    which remains true and is NOT re-litigated):
+  hypothesis: "The vault-0 pod-restart-timeout failure recurring in main@c23d120's own post-merge
+    run (test_unseal_survives_restart.py) is a RECURRENCE of the identical kubectl-wait-races-
+    pod-recreation bug this session already fixed once in scripts/wait-for.sh, because commit
+    c23d120's fix only reached scripts/wait-for.sh's wait_for_pod_running (bash) -- it never
+    touched this test file's own independent, inline Python kubectl wait sequence, which
+    duplicates the identical buggy pattern (delete named pod, immediately kubectl wait
+    --for=jsonpath=...Running on that same name, no --for=create/poll pre-step)."
+  confirming_evidence:
+    - "Direct read of scripts/wait-for.sh lines 68-97: wait_for_pod_running DOES chain
+      --for=create (lines 93-94) before the phase=Running wait -- confirmed fixed, matches
+      commit c23d120's claimed fix exactly, matches the already_verified_by_session_manager note."
+    - "Direct read of tests/e2e/vault/test_unseal_survives_restart.py lines 161-183: kubectl
+      delete pod (161) immediately followed by kubectl wait --for=jsonpath={.status.phase}=Running
+      --timeout=180s pod/vault-0 (170-178) -- NO --for=create pre-step, NO retry loop. Confirms
+      the new_evidence block's claim exactly."
+    - "REVISES the reopen_context's 'ONE of TWO places' framing: grep -rn '_VAULT_POD' across
+      tests/ found a THIRD occurrence neither new_evidence nor already_verified_by_session_manager
+      caught: tests/e2e/chaos/test_vault_unavailable.py lines 309-327, whose OWN module docstring
+      explicitly states it copied test_unseal_survives_restart.py's delete+wait pattern believing
+      it 'already-proven-working' -- proof the bug was already propagating by copy-paste before
+      this reopened round began. Exhaustive repo-wide check (grep for '_VAULT_POD', for
+      'delete'+'pod' kubectl calls, and for every remaining kubectl 'wait' call site across
+      tests/e2e/) confirms these are the ONLY two Python occurrences: test_pod_kill_retry.py/
+      test_pod_crash.py's own delete-pod calls use --wait=false and poll for a DIFFERENT
+      Airflow-retry pod NAME via DB-state poll loops -- a structurally different, unaffected
+      pattern; test_audit_log.py references vault-0 only for `kubectl exec -i ... tail`, never
+      delete/wait; test_minio_unavailable.py's two 'wait' calls target a Deployment via
+      --for=condition=Available after `scale`, never deleted/recreated as an object, so cannot
+      hit this NotFound race at all."
+    - "tests/e2e/chaos/conftest.py's own _poll_all_pods_ready (lines 74-141) independently
+      documents and ALREADY fixed the IDENTICAL bug CLASS for a different call shape
+      (label-selector CNPG pods, 11-09-PLAN.md Task 1, pre-dating this debug session entirely)
+      -- direct in-codebase confirmation this exact kubectl-wait limitation is a real,
+      previously-encountered, already-triaged mechanism in this repository, not a novel theory.
+      Its own fix uses a hand-rolled `deadline = time.monotonic() + timeout` Python poll loop,
+      NOT kubectl's --for=create -- the established Python-side idiom for this bug class in this
+      codebase, distinct from the bash-side fix's own technique."
+  falsification_test: "If a fresh live CI run that exercises test_unseal_survives_restart.py
+    and/or test_vault_unavailable.py after the fix still shows 'pods \"vault-0\" not found' from
+    either test's own wait step, the hypothesis is refuted (or the fix implementation itself is
+    broken, e.g. the new poll loop's kubectl get invocation or interval racing incorrectly)."
+  fix_rationale: "Extract ONE shared Python poll helper (poll_pod_running) into
+    tests/e2e/vault/conftest.py -- the vault-owning conftest.py, matching this codebase's own
+    established convention for substantial reusable poll/wait logic (poll_file_discovered/
+    poll_ingestion_run/poll_run_for_file defined once in tests/e2e/slice/conftest.py, imported
+    cross-directory by tests/e2e/chaos/conftest.py and by same-directory test files alike --
+    confirmed via grep that even test_referential_orphan.py/test_smoke_and_idempotency.py, both
+    IN tests/e2e/slice/ alongside conftest.py itself, still explicitly import these as plain
+    functions, since only @pytest.fixture-decorated names are auto-injected) -- rather than
+    inline-duplicating the bash --for=create fix a THIRD time. This addresses the actual root
+    cause (no single source of truth for this wait logic, which is HOW the bug already spread to
+    test_vault_unavailable.py once) rather than the symptom (one file's missing wait step), and
+    structurally prevents a fourth future recurrence by giving the next chaos-test author an
+    obvious, importable, already-correct helper instead of an inline sequence to copy-paste
+    (mis)remembered."
+  blind_spots: "Not yet live-verified (no live cluster in this sandbox). The poll loop's own
+    correctness (kubectl get pod <name> returning non-zero/NotFound treated as 'not yet running,
+    keep polling' rather than a hard failure) is reasoned from documented kubectl behavior and
+    mirrors _poll_all_pods_ready's already-proven pattern, but has not been observed against a
+    real StatefulSet recreation event in this round specifically -- requires a live throwaway-PR
+    round before this can be considered confirmed, per this debug session's own established
+    discipline. Scope deliberately limited to the vault-0 named-pod-restart race -- does NOT
+    touch scheduler/dag-processor OOM fixes (out of scope per task instructions, already
+    live-confirmed in a prior round, not re-litigated) or the still-in-progress e2e-full run
+    mentioned in the handoff (not blocked on, per instructions)."
+
+reasoning_checkpoint (PRIOR ROUND -- scheduler/dag-processor OOM fixes, TRUE, NOT re-litigated
+    this round, kept verbatim for continuity):
   hypothesis: "With dagProcessor's memory fix LIVE-CONFIRMED (Restart Count: 0 across a full ~15min run, direct kubectl describe pod evidence), the SAME memory-starvation mechanism now applies to airflow-scheduler-0: its memory (256Mi/512Mi, never touched by any fix this session -- only its CPU was raised, round 1) was previously masked because dag-processor's own crash-loop meant no DAG ever registered, so the scheduler under LocalExecutor never got far enough to actually execute real in-process task code. Now that dag-processor stays alive and DagRuns actually trigger, the scheduler is doing REAL work for the first time and its own memory ceiling is the next binding constraint."
   confirming_evidence:
     - "Live throwaway PR #14 run (32724094868, job 97421459309), diagnostic step 13, direct `kubectl describe pod -l component=dag-processor`: Restart Count 0, continuously Running since 11:57:18 through the 12:12:10 snapshot (~15 minutes) -- unambiguous, direct confirmation the dagProcessor memory fix (512Mi/1Gi) fully eliminated its crash-loop. This closes the falsification_test from the prior round conclusively in favor of the hypothesis."
@@ -20,10 +89,14 @@ reasoning_checkpoint:
   fix_rationale: "Applies the IDENTICAL evidence-based pattern just confirmed for dagProcessor: match LOCAL's already-proven-stable value (512Mi/1Gi) rather than an arbitrary new number, since local runs the identical codebase with zero scheduler OOM kills. Does not touch CPU (already raised round 1, and this new failure mode is OOMKilled -- a memory signature, not a CPU-starvation signature like 'No alive jobs found' was). Memory has enormous headroom under EFFECTIVE_CI_MEMORY_BUDGET regardless (this is a memory-only change, doesn't affect the CPU budget at all)."
   blind_spots: "Not yet live-verified. Also unconfirmed: whether scheduler's OOM is a ONE-TIME headroom problem (fixed by matching local's static sizing, like dagProcessor's was) or a genuine per-task-execution memory GROWTH pattern under LocalExecutor's in-process KubernetesPodOperator execution (watching/streaming logs for real task pods) that could eventually exceed even 1Gi under sustained load across a full E2E suite (not just one smoke-verify DAG) -- this fix's scope is limited to getting smoke-verify's single-DAG-run proof green, not a guarantee for chaos-verify/cluster-verify's much longer, heavier multi-DAG suites. Flag as a residual risk for a future round if scheduler OOM recurs under those heavier suites even after this fix lands."
 
-hypothesis: "CONFIRMED, both parts: (1) dag-processor's crash-loop was caused by hitting its 512Mi memory limit, fixed by raising to 512Mi/1Gi (matching LOCAL); (2) scheduler's newly-exposed OOM was caused by the same never-raised memory ceiling (256Mi/512Mi) now handling real in-process LocalExecutor task work for the first time, fixed identically. Both live-confirmed via direct kubectl evidence: Restart Count 0 for both components across a full live pipeline execution (registration -> trigger -> dispatch -> task terminal state)."
-test: "COMPLETE. Live-verified via throwaway PR #14, run 32727920639 / job 97433300855: `kubectl get pods -o wide` shows airflow-dag-processor and airflow-scheduler-0 both `2/2 Running 0 restarts` across their full ~8.5min lifetime, spanning cluster-up through a complete DAG lifecycle to a terminal state."
-expecting: "MET: zero restarts on both components; smoke-verify's check [2/4] no longer fails on DagNotFound or a 'queued' stall -- the DagRun now reaches a genuine terminal state ('failed', a SEPARATE downstream/functional issue explicitly out of scope for this debug session, not a timeout/crash-loop symptom)."
-next_action: "Root cause confirmed and fixed for the in-scope mandate (control-plane crash-loop causing ingestion timeouts). Port the confirmed fixes (scheduler memory + the incidentally-found vault-0 wait_for_pod_running race fix, both currently only committed on the throwaway branch) onto main cleanly, run final offline verification, close/cleanup the throwaway PR and branch, then request human verification before archiving this debug session. The DagRun-reaches-'failed' finding is flagged as a new, separate, out-of-scope follow-up -- not chased further here."
+hypothesis (PRIOR ROUND, scheduler+dag-processor OOM, CLOSED -- kept verbatim, NOT re-litigated): "CONFIRMED, both parts: (1) dag-processor's crash-loop was caused by hitting its 512Mi memory limit, fixed by raising to 512Mi/1Gi (matching LOCAL); (2) scheduler's newly-exposed OOM was caused by the same never-raised memory ceiling (256Mi/512Mi) now handling real in-process LocalExecutor task work for the first time, fixed identically. Both live-confirmed via direct kubectl evidence: Restart Count 0 for both components across a full live pipeline execution (registration -> trigger -> dispatch -> task terminal state)."
+test (PRIOR ROUND): "COMPLETE. Live-verified via throwaway PR #14, run 32727920639 / job 97433300855: `kubectl get pods -o wide` shows airflow-dag-processor and airflow-scheduler-0 both `2/2 Running 0 restarts` across their full ~8.5min lifetime, spanning cluster-up through a complete DAG lifecycle to a terminal state."
+expecting (PRIOR ROUND): "MET: zero restarts on both components; smoke-verify's check [2/4] no longer fails on DagNotFound or a 'queued' stall -- the DagRun now reaches a genuine terminal state ('failed', a SEPARATE downstream/functional issue explicitly out of scope for this debug session, not a timeout/crash-loop symptom)."
+
+hypothesis (REOPENED ROUND, vault-0 Python-side wait race, CURRENT): "CONFIRMED via direct source read (see reasoning_checkpoint above) -- test_unseal_survives_restart.py and test_vault_unavailable.py each carried their own inline, un-fixed copy of the exact kubectl-wait-races-pod-recreation pattern already fixed once (bash-side, scripts/wait-for.sh) earlier this same session."
+test (REOPENED ROUND): "FIX IMPLEMENTED, OFFLINE-VERIFIED. Extracted `poll_pod_running` (plain function, hand-rolled `deadline = time.monotonic() + timeout` poll loop mirroring `tests/e2e/chaos/conftest.py`'s `_poll_all_pods_ready` idiom) into `tests/e2e/vault/conftest.py`; both `test_unseal_survives_restart.py` and `tests/e2e/chaos/test_vault_unavailable.py` now import and call it in place of their duplicated bare `kubectl wait --for=jsonpath=...Running pod/vault-0`. Offline: `python -m py_compile` clean on all 3 files; `ruff check` all checks passed (0 issues); `ruff format --check` clean on both files with substantive edits (the one remaining format diff in test_vault_unavailable.py's `_scheduler_resource_ref` is confirmed PRE-EXISTING via `git show HEAD:... | ruff format --check --diff -` reproducing byte-identically on the unmodified HEAD -- untouched by this fix, out of scope); `mypy` 0 errors (after fixing a mistake of my own: `_POD_RESTART_TIMEOUT_SECONDS` needed to change from the string `\"180s\"` to the int `180` in BOTH files since `poll_pod_running`'s `timeout` param is `float`/`int`, not a kubectl CLI duration string -- caught by mypy itself, not missed); `pytest --collect-only` on both modified test files collects cleanly (imports resolve with no live cluster); full offline policy suite (`pytest tests/policy/ -q -m \"not manifests\"`, 159 collectible) -- 157 passed, 2 failed, both the SAME pre-existing, already-documented-out-of-scope failures from earlier in this same debug session (test_dag_line_budget.py, test_gates_actually_fail.py) -- zero new regressions."
+expecting (REOPENED ROUND): "NOT YET LIVE-VERIFIED. Expect: a fresh live CI run exercising test_unseal_survives_restart.py (chaos suite) shows it PASS where it previously failed with `pods \"vault-0\" not found`; ideally test_vault_unavailable.py's own fault-injection scenario also runs clean in the same suite (secondary interest per task guidance, not blocking)."
+next_action: "Commit the fix (tests/e2e/vault/conftest.py, tests/e2e/vault/test_unseal_survives_restart.py, tests/e2e/chaos/test_vault_unavailable.py) directly to main -- matching this session's own established, repeatedly-used precedent (8681d69/103829e/c23d120 were all pushed to main BEFORE live verification, then verified via the resulting live run). This bug's pass/fail signal is fully visible in ordinary pytest output (no throwaway diagnostic-step PR scaffolding needed, unlike the OOM investigation's need for `kubectl describe pod`), and `e2e-chaos.yml` already triggers automatically on push to main (confirmed: that is literally how this round's recurrence was discovered). After pushing, poll the resulting 'E2E chaos (merge)' workflow run via `gh run list`/`gh api` for test_unseal_survives_restart.py's (and ideally test_vault_unavailable.py's) result specifically -- do NOT re-verify the scheduler/dag-processor OOM matrix (separately closed, out of scope this round). On confirmed pass: update Resolution verification + status, then request human verification per protocol before archiving."
 
 ## Symptoms
 
@@ -582,6 +655,64 @@ next_action: "Root cause confirmed and fixed for the in-scope mandate (control-p
     pod details, only airflow-namespace control-plane pods, so root-causing it would need a new,
     differently-scoped investigation).
 
+- timestamp: 2026-08-24 (REOPENED ROUND -- fix implementation + offline verification)
+  checked: >
+    Implemented the REOPENED ROUND checkpoint's fix_rationale (verbatim, no changes needed after
+    re-reading the cited files): extracted `poll_pod_running` as a plain function (not a fixture)
+    into `tests/e2e/vault/conftest.py`, a hand-rolled `deadline = time.monotonic() + timeout` poll
+    loop over `kubectl get pod <name> -o jsonpath={.status.phase}` -- mirroring
+    `tests/e2e/chaos/conftest.py`'s own `_poll_all_pods_ready` idiom, but for a NAMED pod instead
+    of a label selector (the key difference: a label-selector query's "zero matches" is a normal
+    exit-0 result, so `_poll_all_pods_ready` treats non-zero exit as a hard query failure; a
+    NAMED-resource query has NO exit-0 way to represent "does not exist yet" -- `kubectl get pod
+    <name>` on a not-yet-recreated pod exits non-zero with NotFound -- so `poll_pod_running`
+    deliberately treats EVERY non-zero exit as "not there yet, keep polling", surfacing the last
+    error text only in the final timeout message if the deadline is ever actually reached).
+    Rewired both `test_unseal_survives_restart.py` (same directory as conftest.py) and
+    `tests/e2e/chaos/test_vault_unavailable.py` (cross-directory) to `from tests.e2e.vault.conftest
+    import poll_pod_running` and call it in place of their duplicated bare `kubectl wait
+    --for=jsonpath={.status.phase}=Running pod/vault-0` -- explicit imports, not fixture injection,
+    matching the confirmed convention (`tests/e2e/slice/conftest.py`'s `poll_file_discovered` et
+    al. are imported the identical way even by same-directory callers, since pytest only
+    auto-injects `@pytest.fixture`-decorated names). Both files' `_POD_RESTART_TIMEOUT_SECONDS`
+    changed from the CLI-duration string `"180s"` to the int `180` (the new call site needs a
+    plain number, not a kubectl `--timeout=` flag value).
+  found: >
+    Offline verification, run directly in this sandbox (no live cluster available here): `python -m
+    py_compile` clean on all 3 touched files. `ruff check` -- all checks passed, 0 issues. `ruff
+    format --check --diff` -- clean on `tests/e2e/vault/conftest.py` and
+    `test_unseal_survives_restart.py` (the two files with substantive rewrites); one PRE-EXISTING
+    formatting diff remains in `test_vault_unavailable.py`'s `_scheduler_resource_ref` (a function
+    this fix never touched) -- confirmed pre-existing, not introduced by this fix, by piping
+    `git show HEAD:tests/e2e/chaos/test_vault_unavailable.py` (commit c23d120, before any of this
+    round's edits) through the identical `ruff format --check --diff -` and observing the
+    byte-identical diff reproduce on the unmodified file. `mypy` -- 0 errors across all 3 files
+    (caught and fixed one real mistake of my own along the way: an initial edit attempt to change
+    `_POD_RESTART_TIMEOUT_SECONDS` from `"180s"` to `180` in `test_vault_unavailable.py` silently
+    failed a string-match against slightly different comment wording than expected -- mypy's
+    `arg-type` error on the `poll_pod_running(..., timeout=_POD_RESTART_TIMEOUT_SECONDS)` call
+    caught the leftover `str` constant directly, re-verified via `grep` that both files' constants
+    now read `= 180` after the correction). `pytest --collect-only` on both modified test files:
+    both collect cleanly (2 tests collected, 0 errors) -- confirms the new cross-module import
+    (`tests.e2e.chaos.test_vault_unavailable` importing from `tests.e2e.vault.conftest`) resolves
+    correctly with no circular-import or path issue. Full offline policy suite (`pytest tests/policy/
+    -q -m "not manifests"`, 159 collectible): 157 passed, 2 failed -- both the SAME pre-existing,
+    already-documented-out-of-scope failures from earlier in this same debug session
+    (test_dag_line_budget.py's 150-line DAG budget, test_gates_actually_fail.py's lint meta-test) --
+    identical count and identical failing tests as every prior offline-verification round this
+    session, confirming zero new regressions. Also confirmed `tests/policy/
+    test_no_manual_kubectl_surgery.py`'s `SCAN_DIRS = (scripts, tools)` does not include `tests/`,
+    matching the existing module docstring's claim -- this fix's new `kubectl get` calls inside
+    conftest.py raise no policy concern.
+  implication: >
+    The fix is implemented exactly as the REOPENED ROUND checkpoint's fix_rationale specified, with
+    every offline-checkable property (syntax, lint, types, import resolution, no regressions in the
+    broader policy suite) confirmed clean. This matches the checkpoint's own blind_spots note
+    precisely: "not yet live-verified (no live cluster in this sandbox)... requires a live
+    throwaway-PR round before this can be considered confirmed, per this debug session's own
+    established discipline." Offline confirmation is complete; only the live-CI round remains
+    before this REOPENED ROUND can be considered resolved.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -654,6 +785,20 @@ root_cause: >
   tests/e2e/vault/test_unseal_survives_restart.py's own inline `kubectl wait`, see Eliminated).
   Hit twice in direct succession live this session. Fixed and confirmed working (cluster-up
   succeeded cleanly on the very next attempt).
+  (4b, REOPENED ROUND, same root-cause class as (4) but a DIFFERENT code location the original
+  (4) fix never reached): a fresh post-merge live run on main@c23d120 (the commit landing fixes
+  1-3) surfaced a RECURRENCE of the identical kubectl-wait-races-pod-recreation pattern --
+  `tests/e2e/vault/test_unseal_survives_restart.py` and `tests/e2e/chaos/test_vault_unavailable.py`
+  (which copied the former's pattern believing it already-proven-working, per that module's own
+  docstring) each carry their OWN independent, inline `kubectl delete pod vault-0` immediately
+  followed by `kubectl wait --for=jsonpath={.status.phase}=Running pod/vault-0` -- neither ever
+  routed through `scripts/wait-for.sh`'s `wait_for_pod_running` (fix (4) above), so neither
+  received that fix. Confirmed via direct source read as the ONLY two occurrences repo-wide
+  (grep for `_VAULT_POD`, for `delete`+`pod` kubectl calls, and for every remaining kubectl `wait`
+  call site across `tests/e2e/`) -- every other kubectl delete/wait call site (test_pod_kill_retry.py/
+  test_pod_crash.py's Airflow-retry-pod polling, test_audit_log.py's `tail`-only exec,
+  test_minio_unavailable.py's Deployment `--for=condition=Available` waits) is structurally
+  different and unaffected.
   Root cause (2) is what explained the ORIGINAL fixed-timeout E2E failures this debug session was
   opened to investigate (DagNotFound, registration never completing, DagRuns stuck in 'queued').
   All four are now fixed; the control-plane crash-loop this session was chartered to resolve is
@@ -687,6 +832,17 @@ fix: >
   (30s budget) before the existing phase=Running wait -- succeeds immediately if the pod object
   already exists (the common case), polls for its creation otherwise. Single production caller
   (scripts/stages/80-vault.sh), narrow blast radius.
+  (4b, REOPENED ROUND): tests/e2e/vault/conftest.py -- new plain function `poll_pod_running`
+  (hand-rolled `deadline = time.monotonic() + timeout` poll loop over `kubectl get pod <name> -o
+  jsonpath={.status.phase}`, mirroring tests/e2e/chaos/conftest.py's own `_poll_all_pods_ready`
+  idiom, adapted for a NAMED pod query instead of a label selector: every non-zero exit -- NotFound
+  while the pod is still being recreated, in particular -- is treated as "not ready yet, keep
+  polling" rather than a hard failure, since a named-resource query has no exit-0 way to represent
+  "does not exist yet"). tests/e2e/vault/test_unseal_survives_restart.py and
+  tests/e2e/chaos/test_vault_unavailable.py: both now import and call `poll_pod_running` in place
+  of their own duplicated bare `kubectl wait --for=jsonpath=...Running pod/vault-0`
+  (`_POD_RESTART_TIMEOUT_SECONDS` changed from the CLI-duration string `"180s"` to the int `180`
+  in both files to match the new call site's `timeout: float` parameter).
   (5, separate CI-hygiene fix, not part of any root cause above): trimmed CPU requests on
   helm/values/ci/{tempo,otel-collector,monitoring}.yaml -- tempo/otel-collector 100m->10m each
   (confirmed never deployed live in CI, zero behavioral risk); monitoring.yaml's smallest
@@ -714,7 +870,19 @@ verification: >
   dispatch -> task execution to a terminal state). This is the strongest possible confirmation:
   direct, same-run, same-instance evidence, not inference. Fix (5) is offline-verified only (a
   CPU-budget policy gate, not a live-runtime-behavior fix, so no live-verification signal applies
-  to it specifically). REQUIRES human confirmation before this debug session is archived (see
+  to it specifically).
+  Fix (4b, REOPENED ROUND): offline-verified only as of this update -- `python -m py_compile`
+  clean on all 3 touched files; `ruff check` 0 issues; `ruff format --check` clean on both files
+  with substantive edits (one remaining format diff in test_vault_unavailable.py's
+  `_scheduler_resource_ref` confirmed pre-existing via `git show HEAD:...` reproducing
+  byte-identically on the unmodified file, untouched by this fix); `mypy` 0 errors; `pytest
+  --collect-only` collects both modified test files cleanly; full offline policy suite (159
+  collectible) -- 157 pass, 2 fail, the SAME pre-existing out-of-scope failures as every prior
+  round, zero new regressions. NOT YET live-verified -- a fresh live-CI round (push to main, poll
+  the resulting e2e-chaos.yml run) is the next step before this specific fix can be considered
+  confirmed, per this debug session's own established discipline (every prior fix in this session
+  required a live round before being trusted).
+  REQUIRES human confirmation before this debug session is archived (see
   request_human_verification checkpoint) -- self-verification is as strong as this session can
   produce, but a genuinely independent human check (e.g. triggering the real Phase 11 completion
   gates against a clean main, or reviewing the live evidence directly) is the final gate per
@@ -726,3 +894,6 @@ files_changed:
   - helm/values/ci/otel-collector.yaml
   - helm/values/ci/monitoring.yaml
   - scripts/wait-for.sh
+  - tests/e2e/vault/conftest.py
+  - tests/e2e/vault/test_unseal_survives_restart.py
+  - tests/e2e/chaos/test_vault_unavailable.py

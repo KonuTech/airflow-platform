@@ -38,6 +38,8 @@ import hvac
 import hvac.exceptions
 import pytest
 
+from tests.e2e.vault.conftest import poll_pod_running
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
@@ -53,7 +55,7 @@ _RESTART_PROBE_MOUNT = "etl"
 _RESTART_PROBE_PATH = "_restart_probe"
 _RESTART_PROBE_VALUE = {"value": "airflow-platform e2e restart probe (plan 05-01)"}
 
-_POD_RESTART_TIMEOUT_SECONDS = "180s"
+_POD_RESTART_TIMEOUT_SECONDS = 180
 
 
 def _free_local_port() -> int:
@@ -167,19 +169,16 @@ def test_pod_restart_reseals_and_unseal_restores_service(
         # Bounded poll for the StatefulSet-recreated pod to be Running again
         # -- never Ready (Vault's own readinessProbe fails while sealed, the
         # exact reason scripts/wait-for.sh's wait_for_pod_running exists).
-        wait_proc = kubectl(
-            "-n",
-            _VAULT_NAMESPACE,
-            "wait",
-            "--for=jsonpath={.status.phase}=Running",
-            f"--timeout={_POD_RESTART_TIMEOUT_SECONDS}",
-            f"pod/{_VAULT_POD}",
-            timeout=200,
-        )
-        assert wait_proc.returncode == 0, (
-            f"pod/{_VAULT_POD} did not reach Running within "
-            f"{_POD_RESTART_TIMEOUT_SECONDS} after being deleted (exit "
-            f"{wait_proc.returncode}):\n{wait_proc.stderr}"
+        # Uses conftest.py's poll_pod_running, NOT a bare `kubectl wait` --
+        # `kubectl wait` on a NAMED resource fails fast with NotFound if the
+        # StatefulSet controller has not recreated the pod object yet at the
+        # moment `wait` is invoked, rather than polling for its creation
+        # (see poll_pod_running's own docstring for the full mechanism).
+        poll_pod_running(
+            kubectl,
+            namespace=_VAULT_NAMESPACE,
+            pod_name=_VAULT_POD,
+            timeout=_POD_RESTART_TIMEOUT_SECONDS,
         )
 
         # Test 1 (05-01-PLAN.md <behavior>): the restart is real, not a

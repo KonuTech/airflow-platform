@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
+from tests.e2e.vault.conftest import poll_pod_running
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,7 +67,7 @@ _VAULT_POD = "vault-0"
 # `test_unseal_survives_restart.py`'s own already-live-verified figure for how long a
 # StatefulSet-recreated vault-0 pod takes to reach `phase=Running` again (never `condition=Ready`
 # -- Vault's own readinessProbe fails while sealed, exactly the state this test needs).
-_POD_RESTART_TIMEOUT_SECONDS = "180s"
+_POD_RESTART_TIMEOUT_SECONDS = 180
 
 # Disjoint from every sibling chaos/slice module's own order_id range — see test_pod_crash.py's
 # own comment for why this matters on a shared, concurrently-active cluster.
@@ -311,19 +312,19 @@ def test_vault_sealed_stalls_wait_for_files_then_unseal_recovers(
             f"kubectl delete pod/{_VAULT_POD} -n {_VAULT_NAMESPACE} failed "
             f"(exit {delete_proc.returncode}):\n{delete_proc.stderr}"
         )
-        wait_running = kubectl(
-            "-n",
-            _VAULT_NAMESPACE,
-            "wait",
-            "--for=jsonpath={.status.phase}=Running",
-            f"--timeout={_POD_RESTART_TIMEOUT_SECONDS}",
-            f"pod/{_VAULT_POD}",
-            timeout=200,
-        )
-        assert wait_running.returncode == 0, (
-            f"pod/{_VAULT_POD} -n {_VAULT_NAMESPACE} did not reach phase=Running within "
-            f"{_POD_RESTART_TIMEOUT_SECONDS} of being deleted (exit "
-            f"{wait_running.returncode}):\n{wait_running.stderr}"
+        # poll_pod_running (tests/e2e/vault/conftest.py), NOT a bare `kubectl
+        # wait` -- `kubectl wait` on a NAMED resource fails fast with
+        # NotFound if the StatefulSet controller has not recreated the pod
+        # object yet at the moment `wait` is invoked, rather than polling
+        # for its creation (see poll_pod_running's own docstring for the
+        # full mechanism -- the identical fix already applied to
+        # test_unseal_survives_restart.py, whose pattern this module copied
+        # before that fix existed).
+        poll_pod_running(
+            kubectl,
+            namespace=_VAULT_NAMESPACE,
+            pod_name=_VAULT_POD,
+            timeout=_POD_RESTART_TIMEOUT_SECONDS,
         )
         seal_status = kubectl("-n", _VAULT_NAMESPACE, "exec", _VAULT_POD, "--", "vault", "status")
         sealed_after_restart = next(

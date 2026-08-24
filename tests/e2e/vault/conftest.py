@@ -17,6 +17,32 @@ freshly-recreated backing pod — so that module opens its own fresh
 tunnel(s) around the restart, duplicating the same port-forward shape
 locally rather than depending on this fixture's tunnel surviving a pod
 delete.
+
+`poll_pod_running` is a plain function, not a fixture (this repository's
+established convention for substantial reusable poll/wait logic — see
+`tests/e2e/slice/conftest.py`'s `poll_file_discovered`/`poll_ingestion_run`/
+`poll_run_for_file`, which are imported explicitly by name rather than
+auto-injected, since pytest only auto-provides `@pytest.fixture`-decorated
+names even from a same-directory conftest.py). It replaces the bare
+`kubectl wait --for=jsonpath={.status.phase}=Running pod/<name>` pattern
+that both `test_unseal_survives_restart.py` (this directory) and
+`tests/e2e/chaos/test_vault_unavailable.py` (which copied the pattern,
+believing it already-proven-working — see that module's own docstring) used
+to delete `vault-0` and wait for the StatefulSet-recreated replacement.
+`kubectl wait` on a NAMED resource (not a label selector) fails FAST with
+`NotFound` if the object does not exist yet at the moment the command
+starts — it polls the CONDITION of an object that already exists, never the
+object's own (re-)creation — a documented kubectl limitation
+(kubernetes/kubectl#1675 covers the label-selector case; this project
+confirmed live, this same debug session, that a NAMED resource has the
+identical fail-fast-on-NotFound behavior). This is the same bug class
+`tests/e2e/chaos/conftest.py`'s own `_poll_all_pods_ready` already fixed for
+label-selector queries with a hand-rolled `deadline = time.monotonic() +
+timeout` poll loop; `poll_pod_running` is that same established idiom
+applied to a single named pod instead of a label selector, living here
+(not in `tests/e2e/chaos/conftest.py`) because vault-0 restart-and-recreate
+is a vault-owned concern, imported directly by every caller — this
+repository's own convention, not re-exported as a fixture.
 """
 
 from __future__ import annotations
@@ -136,6 +162,79 @@ def _free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+_POD_RUNNING_POLL_INTERVAL_SECONDS = 2.0
+
+
+def poll_pod_running(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    namespace: str,
+    pod_name: str,
+    timeout: float,
+) -> None:
+    """Poll a NAMED pod until it reports `status.phase == "Running"` (see module docstring).
+
+    Tolerates the pod object not existing yet -- the exact race a bare
+    `kubectl wait --for=jsonpath=... pod/<name>` loses when invoked
+    immediately after `kubectl delete pod <name>`: the StatefulSet
+    controller has not necessarily recreated the object by the time `wait`
+    starts, and `kubectl wait` on a NAMED resource fails FAST with
+    `NotFound` instead of polling for the object's own (re-)creation. This
+    function polls a plain `kubectl get pod <name>` instead (mirroring
+    `tests/e2e/chaos/conftest.py`'s own `_poll_all_pods_ready` idiom -- a
+    hand-rolled `deadline = time.monotonic() + timeout` loop, not `kubectl
+    wait`) and treats EVERY non-zero exit (NotFound while the pod is being
+    recreated, or a transient API-server hiccup) as "not there yet, keep
+    polling" rather than a hard failure -- unlike a label-selector query
+    (where a non-zero exit is unambiguously a query error, since "zero
+    matches" is itself a normal, exit-0 result), a NAMED-resource query has
+    no exit-0 way to represent "does not exist yet", so tolerating non-zero
+    here is the only way to survive the exact race this function exists to
+    fix. A genuine, non-transient problem (wrong namespace, wrong context,
+    RBAC denial, ...) still surfaces: its error text is captured as
+    `last_seen` and reported in the timeout message below, rather than
+    silently swallowed.
+
+    Args:
+        kubectl_fn: The `kubectl` fixture callable.
+        namespace: The namespace the pod lives in.
+        pod_name: The pod's name -- a single, named resource, not a label
+            selector.
+        timeout: Maximum seconds to wait.
+
+    Raises:
+        AssertionError: `timeout` elapses without observing `phase=Running`.
+    """
+    deadline = time.monotonic() + timeout
+    last_seen = "no observation yet"
+    while time.monotonic() < deadline:
+        proc = kubectl_fn(
+            "-n",
+            namespace,
+            "get",
+            "pod",
+            pod_name,
+            "-o",
+            "jsonpath={.status.phase}",
+        )
+        if proc.returncode == 0:
+            phase = proc.stdout.strip()
+            last_seen = phase or "pod exists, phase not yet set"
+            if phase == "Running":
+                return
+        else:
+            last_seen = (
+                f"kubectl get pod/{pod_name} failed (exit {proc.returncode}, likely still "
+                f"being recreated): {proc.stderr.strip()}"
+            )
+        time.sleep(_POD_RUNNING_POLL_INTERVAL_SECONDS)
+    msg = (
+        f"pod/{pod_name} in namespace {namespace!r} did not reach phase=Running within "
+        f"{timeout}s (last observed: {last_seen})"
+    )
+    raise AssertionError(msg)
 
 
 @pytest.fixture(scope="session")
