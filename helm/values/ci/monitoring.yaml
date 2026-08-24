@@ -734,11 +734,12 @@ prometheus:
   # `additionalServiceMonitors` lives directly under `prometheus:`, a
   # SIBLING of `prometheusSpec:` above -- see helm/values/local/
   # monitoring.yaml's own header comment on this same key for the full,
-  # live-discovered argument. IDENTICAL structural shape to local --
-  # D-16/monitoring-enablement is about whether this chart is deployed LIVE
-  # in CI (it never is), not about whether its rendered manifests correctly
-  # reflect the same additionalServiceMonitors wiring the local profile
-  # proves live.
+  # live-discovered argument. IDENTICAL structural shape to local -- this
+  # chart IS now installed live in CI (quick task 260824-ayw), but only for
+  # the staggered `tests/e2e/observability` window via `make
+  # observability-verify-ci` (see this file's own top-of-file header
+  # comment), not for the whole CI job the way the local profile's
+  # persistent-cluster install is.
   additionalServiceMonitors:
     - name: otel-collector
       selector:
