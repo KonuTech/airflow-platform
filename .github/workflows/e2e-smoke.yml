@@ -178,3 +178,25 @@ jobs:
       # `smoke-verify` docstring).
       - name: Run the D-20 fast smoke subset (make smoke-verify)
         run: make smoke-verify
+
+      # THROWAWAY diagnostic step (ci-pipeline-ingestion-timeout live-proof
+      # PR only, never lands on main): live-verifies the dagProcessor memory
+      # fix (commit 8681d69) by capturing restart counts AND, new this
+      # round, `kubectl describe pod` for dag-processor/scheduler -- the
+      # earlier throwaway diagnostic step (commit 732d276) never ran
+      # `describe pod`, only `describe node` + `logs --previous`, which left
+      # the OOM hypothesis inferable from timing but not directly confirmed
+      # by a Last State/Reason/Exit Code. This closes that observability gap
+      # regardless of outcome.
+      - name: DEBUG live scheduler/dag-processor restarts + OOM evidence (always, for live-proof PR)
+        if: always()
+        run: |
+          set -x
+          kubectl --context kind-airflow-platform -n airflow get pods -o wide || true
+          kubectl --context kind-airflow-platform -n airflow exec deploy/airflow-api-server -- airflow dags list-runs --dag-id smoke_kubernetes_pod -o table || true
+          kubectl --context kind-airflow-platform -n airflow describe pod -l component=dag-processor || true
+          kubectl --context kind-airflow-platform -n airflow describe pod -l component=scheduler || true
+          kubectl --context kind-airflow-platform -n airflow logs deploy/airflow-dag-processor -c dag-processor --tail=100 --previous || true
+          kubectl --context kind-airflow-platform -n airflow logs deploy/airflow-dag-processor -c dag-processor --tail=100 || true
+          kubectl --context kind-airflow-platform -n airflow get events --sort-by=.lastTimestamp | tail -60 || true
+          kubectl --context kind-airflow-platform describe node airflow-platform-control-plane | grep -A30 "^Allocated resources" || true
