@@ -1,47 +1,49 @@
 {
   "version": "1.0",
-  "timestamp": "2026-08-19T17:21:30.845Z",
-  "phase": "09",
-  "phase_name": "etl-correctness-dedup-incremental-backfill-recovery",
-  "phase_dir": ".planning/phases/09-etl-correctness-dedup-incremental-backfill-recovery",
-  "plan": 11,
-  "task": 0,
-  "total_tasks": 3,
+  "timestamp": "2026-08-24T05:26:32.392Z",
+  "phase": "11",
+  "phase_name": "ci-cd-completion-operations",
+  "phase_dir": ".planning/phases/11-ci-cd-completion-operations",
+  "plan": 14,
+  "task": 14,
+  "total_tasks": 14,
   "status": "paused",
   "completed_tasks": [
-    {"id": "09-01", "name": "Remove vestigial deduplication config block", "status": "done", "commit": "e8d094d"},
-    {"id": "09-02", "name": "Watermark advance + reconciliation_results in publish_ingest", "status": "done", "commit": "01c0a8d"},
-    {"id": "09-03", "name": "Read and thread BATCH_COMPLETE manifest", "status": "done", "commit": "863a120"},
-    {"id": "09-04", "name": "run_stage_recorder.py (3rd ADR-0004 exception, DBT_BUILD)", "status": "done", "commit": "2ee0c1c"},
-    {"id": "09-05", "name": "Dated backfill corpus generator", "status": "done", "commit": "13d0c13"},
-    {"id": "09-06", "name": "meta.v_run_recovery view", "status": "done", "commit": "7b662e7"},
-    {"id": "09-07", "name": "Raw-to-bronze reconciliation + control-total comparison", "status": "done", "commit": "efa6001"},
-    {"id": "09-08", "name": "Bronze-to-silver reconciliation dbt post-hook", "status": "done", "commit": "4d6a99a"},
-    {"id": "09-09", "name": "Wire run_stage_recorder into both DAGs' dbt_build tasks", "status": "done", "commit": "0ae89b5"},
-    {"id": "09-10", "name": "Processing-gap recording (D-06) + live dbt_build pod-kill proof (D-18)", "status": "done", "commit": "8092bc0"}
+    {"id": "11-01", "name": "csv-processor GHCR publish", "status": "done"},
+    {"id": "11-02", "name": "3-image publish + PR-tag + cleanup", "status": "done"},
+    {"id": "11-03", "name": "Kyverno admission signature enforcement", "status": "done"},
+    {"id": "11-04", "name": "PR-gating fast smoke E2E in CI", "status": "done", "note": "code complete + live-verified; CI-portability follow-up ongoing"},
+    {"id": "11-05", "name": "Merge-triggered full E2E + chaos suite", "status": "done", "note": "workflows written and live-triggered; not yet fully green"},
+    {"id": "11-06", "name": "Coverage/dagtest/rollback CI wiring", "status": "done"},
+    {"id": "11-07", "name": "Retention contract + evaluator", "status": "done"},
+    {"id": "11-08", "name": "platform_retention maintenance DAG", "status": "done", "note": "post-merge dataplat-image bug found and fixed"},
+    {"id": "11-09", "name": "Chaos I (infra failures)", "status": "done", "note": "found unfixed silent-data-loss bug in shared DAG code, documented not fixed"},
+    {"id": "11-10", "name": "Chaos II (data/resource failures)", "status": "done"},
+    {"id": "11-11", "name": "Rebuild-reconciliation building blocks", "status": "done"},
+    {"id": "11-12", "name": "rebuild-from-raw.py + live D-29/D-34 proof", "status": "done"},
+    {"id": "11-13", "name": "Runbooks I (15 of 18)", "status": "done"},
+    {"id": "11-14", "name": "Runbooks II (final 3 of 18)", "status": "done"}
   ],
   "remaining_tasks": [
-    {"id": "09-11.1", "name": "Corpus upload + dry-run sizing + pilot window", "status": "not_started"},
-    {"id": "09-11.2", "name": "Full 2-year sweep — both datasets, all correctness properties", "status": "not_started"},
-    {"id": "09-11.3", "name": "Idempotency re-run + live+backfill concurrency proof", "status": "not_started"}
+    {"id": "follow-up-1", "name": "Fix tests/e2e/vault/conftest.py scheduler-Deployment check to match 11-04's chart-rendered-kind fix", "status": "not_started"},
+    {"id": "follow-up-2", "name": "Decide + implement CI-scoping for cluster-verify (skip 3-node-topology tests + tests/e2e/observability under PROFILE=ci, or give e2e-full.yml a narrower target)", "status": "not_started"},
+    {"id": "follow-up-3", "name": "Re-verify e2e-full.yml/e2e-chaos.yml reach genuine success, then mark CICD-09 complete", "status": "not_started"},
+    {"id": "gate-1", "name": "code_review_gate (Skill gsd-code-review)", "status": "not_started"},
+    {"id": "gate-2", "name": "regression_gate", "status": "not_started"},
+    {"id": "gate-3", "name": "verify_phase_goal (spawn gsd-verifier)", "status": "not_started"},
+    {"id": "gate-4", "name": "update_roadmap formal completion + auto_copy_learnings + update_project_md", "status": "not_started"}
   ],
-  "blockers": [
-    {
-      "description": "Windows host C: drive was down to 343MB-1.1GB free during this session. Docker Desktop's docker_data.vhdx (dynamically-expanding, 88GB on disk) does not shrink when Docker-internal data (images/volumes/build cache/per-node containerd caches) is deleted — internal cleanup does not free host disk. User is running wsl --shutdown + Optimize-VHD/diskpart compact from an admin Windows PowerShell to reclaim real host space before resuming.",
-      "type": "external",
-      "workaround": "Verify `df -h /mnt/c` (or Windows drive free space) shows meaningful headroom (several GB+) BEFORE dispatching wave 6 (09-11) — do not trust `docker system df` alone, it only reports Docker-internal usage, not host disk."
-    }
-  ],
+  "blockers": [],
   "human_actions_pending": [
-    {"action": "Run wsl --shutdown then Optimize-VHD (or diskpart compact vdisk) on docker_data.vhdx from an admin Windows PowerShell", "context": "Reclaim real C: drive space before wave 6's heavy live 2-year backfill sweep runs, to avoid ENOSPC failures mid-test", "blocking": true}
+    {"action": "Decide the cluster-verify CI-scoping approach (follow-up-2)", "context": "A disclosed narrowing of D-19's 'unchanged full suite in CI' promise — needs explicit review, not a same-session auto-fix.", "blocking": false},
+    {"action": "Optionally re-authenticate gh with delete:packages scope to clean up 3 leftover pr-10 GHCR images", "context": "Low priority, harmless clutter, not currently possible with this session's gh token scopes.", "blocking": false}
   ],
   "decisions": [
-    {"decision": "Removed the entire unrelated 'Divio' Docker project (15 containers, 4 images, 7 volumes, 1 network) from this host", "rationale": "User explicitly requested removal; confirmed unrelated to airflow-platform and volumes held only ~187MB of real data", "phase": "09"},
-    {"decision": "Pruned stale csv-processor/dbt/airflow git-sha-tagged images from local Docker cache, the local registry mirror, and both kind worker nodes' containerd caches, keeping only the currently-deployed tags (csv-processor:ee240ba, dbt:faa7533, airflow:cd0d2aa)", "rationale": "Project's Makefile image-* targets intentionally never prune old immutable git-sha tags (by design, for traceability per CLAUDE.md §77/§62) but nothing else does either, so ~19 stale csv-processor builds had accumulated across 3 storage locations", "phase": "09"},
-    {"decision": "Did NOT enable delete+GC on the local kind-registry container in this session", "rationale": "Requires a container restart (REGISTRY_STORAGE_DELETE_ENABLED=true) which was deprioritized once it became clear internal Docker cleanup wasn't fixing the actual host-disk blocker", "phase": "09"},
-    {"decision": "LOAD-06 requirement is NOT marked complete for this phase", "rationale": "09-10's Task 2 discovered a genuine, pre-existing production gap while attempting live verification: dataplat's stage_ingest never calls claim_run_stage/complete_run_stage for STAGE_LOAD, so meta.run_stages has zero STAGE_LOAD rows ever, meta.v_run_recovery.stage_load_status is permanently NULL, and list_run_ids_pending_dbt_build (plan 09-04) is silently broken. Documented in deferred-items.md as a Rule 4 architectural decision requiring a new claim mechanism in MetadataRepository + image rebuild/redeploy, out of 09-10's file scope.", "phase": "09"}
+    {"decision": "Built a new additive kind/cluster-ci.yaml rather than modifying kind/cluster.yaml", "rationale": "Zero risk to local dev cluster", "phase": "11"},
+    {"decision": "Disabled monitoring entirely for the CI profile", "rationale": "Matches CLAUDE.md's original stated intent ('trimmed single-node CI profile, monitoring disabled'); fitting it into CI's resource budget was not viable", "phase": "11"},
+    {"decision": "User approved real destructive live-cluster/CI actions this session (rebuild-from-raw, real throwaway PRs, direct pushes to main)", "rationale": "Explicit user approval each time asked; do not assume it carries forward automatically to future sessions", "phase": "11"}
   ],
   "uncommitted_files": [],
-  "next_action": "Once host disk headroom is confirmed real (not just Docker-internal), run /gsd:execute-phase 09 — it will detect the 10 completed plans (09-01 through 09-10, all merged to main with passing post-merge test gates) via their SUMMARY.md files and dispatch Wave 6 (09-11), the live 2-year backfill sweep capstone test.",
-  "context_notes": "Phase 09 wave-based execution (6 waves, 11 plans) was proceeding cleanly through Wave 5 when the host Windows C: drive hit critical disk pressure (Docker daemon actually went down once mid-session from disk exhaustion, recovered after user restarted Docker Desktop). Extensive investigation confirmed the root cause is Docker Desktop's dynamically-expanding docker_data.vhdx never shrinking on internal deletion — only a host-side VHDX compact (wsl --shutdown + Optimize-VHD) actually returns space to C:. Real waste was found and removed (~45GB: an unrelated Divio project stack, stale build history, unused build cache) but ~30-35GB of remaining Docker usage is legitimate infrastructure for the mandated 3-node kind cluster (each worker node independently caches every workload image via containerd, no cross-node dedup) plus live CNPG/MinIO/Vault volumes. Wave 6 (09-11) was deliberately NOT dispatched given the disk risk — it's the heaviest remaining plan (live 2-year corpus, concurrent DagRuns, real MinIO uploads) and a mid-run ENOSPC failure would be both misleading and expensive to diagnose. Do not re-run the Docker-internal cleanup steps expecting further host-disk gains — that lever is exhausted; only the VHDX compact moves the needle further."
+  "next_action": "Read deferred-items.md's 'Plan 11-05' section, then fix tests/e2e/vault/conftest.py's scheduler-Deployment check (mechanical). Bring the cluster-verify CI-scoping decision to the user before implementing. Then re-verify both new workflows reach success, mark CICD-09 complete, and run the standard phase-completion gates.",
+  "context_notes": "Phase 11 is functionally complete (all 14 plans merged/pushed) but the formal GSD verification/code-review/completion gates never ran — context ran out first. This was a very long session with multiple host interruptions and a multi-hour CI-portability debugging marathon; that effort paid off (both new merge-triggered workflows now reach their real test suites in CI, versus never starting before). Two small, well-scoped follow-ups remain before CICD-09 can be honestly marked complete."
 }
