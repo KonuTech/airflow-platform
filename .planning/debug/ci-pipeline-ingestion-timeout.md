@@ -487,6 +487,28 @@ next_action: "Scheduler memory fix applied to helm/values/ci/airflow.yaml and of
     new broken). NOT yet live-verified -- requires one more live-CI round before this debug
     session can be considered resolved.
 
+- timestamp: 2026-08-24 (continuation session 2, round 2 attempt 1 -- NON-INFORMATIVE, pre-existing flake)
+  checked: >
+    Merged the scheduler memory fix into throwaway PR #14's branch, pushed, triggering run
+    32726446239 / job 97428692764. Fetched the full raw job log to see why cluster-up itself
+    failed this time (unlike every prior round, where cluster-up always succeeded and only
+    smoke-verify failed).
+  found: >
+    `Error from server (NotFound): pods "vault-0" not found` -> `make: *** [Makefile:167:
+    cluster-up] Error 1` -> `Process completed with exit code 2`. Cluster-up itself failed during
+    Vault bring-up, BEFORE Airflow/scheduler/dag-processor are even reached -- steps 8-12
+    (image config, migrations, vault bootstrap, smoke-verify) were all SKIPPED as a result. This
+    is the SAME pre-existing `scripts/stages/80-vault.sh` vault-0 pod-not-found race already
+    explicitly documented as "out of scope, not yet filed" in this session's own prior handoff
+    notes (`.planning/phases/11-ci-cd-completion-operations/.continue-here.md`), and already hit
+    "once this session" per that same document, before either memory fix existed.
+  implication: >
+    NON-INFORMATIVE for the scheduler-memory hypothesis -- this failure occurs entirely upstream
+    of Airflow, is a known recurring infra flake (the orchestrator's own earlier notes record
+    needing 3 throwaway-PR attempts to get past similar flakes once already this session), and
+    is orthogonal to any resource-sizing change. Does not confirm or refute the scheduler memory
+    fix either way. Retrying with a fresh push to get past this flake and reach the actual test.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
