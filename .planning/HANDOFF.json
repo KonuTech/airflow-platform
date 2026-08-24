@@ -1,49 +1,34 @@
 {
   "version": "1.0",
-  "timestamp": "2026-08-24T05:26:32.392Z",
+  "timestamp": "2026-08-24T11:15:49.563Z",
   "phase": "11",
   "phase_name": "ci-cd-completion-operations",
   "phase_dir": ".planning/phases/11-ci-cd-completion-operations",
-  "plan": 14,
-  "task": 14,
-  "total_tasks": 14,
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
   "status": "paused",
   "completed_tasks": [
-    {"id": "11-01", "name": "csv-processor GHCR publish", "status": "done"},
-    {"id": "11-02", "name": "3-image publish + PR-tag + cleanup", "status": "done"},
-    {"id": "11-03", "name": "Kyverno admission signature enforcement", "status": "done"},
-    {"id": "11-04", "name": "PR-gating fast smoke E2E in CI", "status": "done", "note": "code complete + live-verified; CI-portability follow-up ongoing"},
-    {"id": "11-05", "name": "Merge-triggered full E2E + chaos suite", "status": "done", "note": "workflows written and live-triggered; not yet fully green"},
-    {"id": "11-06", "name": "Coverage/dagtest/rollback CI wiring", "status": "done"},
-    {"id": "11-07", "name": "Retention contract + evaluator", "status": "done"},
-    {"id": "11-08", "name": "platform_retention maintenance DAG", "status": "done", "note": "post-merge dataplat-image bug found and fixed"},
-    {"id": "11-09", "name": "Chaos I (infra failures)", "status": "done", "note": "found unfixed silent-data-loss bug in shared DAG code, documented not fixed"},
-    {"id": "11-10", "name": "Chaos II (data/resource failures)", "status": "done"},
-    {"id": "11-11", "name": "Rebuild-reconciliation building blocks", "status": "done"},
-    {"id": "11-12", "name": "rebuild-from-raw.py + live D-29/D-34 proof", "status": "done"},
-    {"id": "11-13", "name": "Runbooks I (15 of 18)", "status": "done"},
-    {"id": "11-14", "name": "Runbooks II (final 3 of 18)", "status": "done"}
+    {"id": "260824-akz", "name": "Scheduler resource-kind hardcoding fix (2 chaos test files)", "status": "done", "commit": "9e82be1"},
+    {"id": "260824-ay9", "name": "multi_node CI-skip marker for 5 topology-shape tests", "status": "done", "commit": "adbcc3f"},
+    {"id": "260824-b8i", "name": "Scheduler resource-kind fix, 3rd occurrence (test_airflow_backend.py)", "status": "done", "commit": "9815c7d"},
+    {"id": "260824-ayw", "name": "Staggered CI monitoring stack for tests/e2e/observability", "status": "done", "commit": "a279cc9"},
+    {"id": "debug-ci-pipeline-ingestion-timeout", "name": "Scheduler/dag-processor CPU+threshold fix", "status": "in_progress", "progress": "Fix pushed (a73282e) and live-verified via throwaway PR #13 (closed): scheduler genuinely improved (1 restart, stays 2/2 Ready); airflow-dag-processor STILL crash-loops at the pre-fix rate (5 restarts in ~9min, unchanged). Debug file status: verifying, NOT resolved."}
   ],
   "remaining_tasks": [
-    {"id": "follow-up-1", "name": "Fix tests/e2e/vault/conftest.py scheduler-Deployment check to match 11-04's chart-rendered-kind fix", "status": "not_started"},
-    {"id": "follow-up-2", "name": "Decide + implement CI-scoping for cluster-verify (skip 3-node-topology tests + tests/e2e/observability under PROFILE=ci, or give e2e-full.yml a narrower target)", "status": "not_started"},
-    {"id": "follow-up-3", "name": "Re-verify e2e-full.yml/e2e-chaos.yml reach genuine success, then mark CICD-09 complete", "status": "not_started"},
-    {"id": "gate-1", "name": "code_review_gate (Skill gsd-code-review)", "status": "not_started"},
-    {"id": "gate-2", "name": "regression_gate", "status": "not_started"},
-    {"id": "gate-3", "name": "verify_phase_goal (spawn gsd-verifier)", "status": "not_started"},
-    {"id": "gate-4", "name": "update_roadmap formal completion + auto_copy_learnings + update_project_md", "status": "not_started"}
+    {"id": "debug-continue", "name": "Continue debug session ci-pipeline-ingestion-timeout: diagnose why dag-processor specifically still crash-loops despite the CPU+threshold fix", "status": "not_started"},
+    {"id": "cicd-09-live-green", "name": "Once dag-processor fix lands, get a live e2e-full.yml/e2e-chaos.yml run to actually go green, then mark CICD-09 complete in .planning/REQUIREMENTS.md", "status": "not_started"},
+    {"id": "phase-11-completion-gates", "name": "Standard GSD phase-completion tail for Phase 11, never run this session or the prior one: code_review_gate, regression_gate, verify_phase_goal (gsd-verifier), update_roadmap/auto_copy_learnings/update_project_md", "status": "not_started"}
   ],
-  "blockers": [],
-  "human_actions_pending": [
-    {"action": "Decide the cluster-verify CI-scoping approach (follow-up-2)", "context": "A disclosed narrowing of D-19's 'unchanged full suite in CI' promise — needs explicit review, not a same-session auto-fix.", "blocking": false},
-    {"action": "Optionally re-authenticate gh with delete:packages scope to clean up 3 leftover pr-10 GHCR images", "context": "Low priority, harmless clutter, not currently possible with this session's gh token scopes.", "blocking": false}
+  "blockers": [
+    {"description": "airflow-dag-processor still crash-loops in CI (5 restarts/~9min, unchanged from pre-fix baseline) despite the scheduler/dag-processor CPU+threshold fix (commit a73282e) that measurably fixed the scheduler side", "type": "technical", "workaround": "None yet. Debug file .planning/debug/ci-pipeline-ingestion-timeout.md records the exact next hypotheses to try: raise dag-processor CPU further, re-examine its own liveness probe timeoutSeconds vs the 30s-per-file parse cadence across 11 real DAG files, check for memory pressure/OOM misclassified as a crash."}
   ],
+  "human_actions_pending": [],
   "decisions": [
-    {"decision": "Built a new additive kind/cluster-ci.yaml rather than modifying kind/cluster.yaml", "rationale": "Zero risk to local dev cluster", "phase": "11"},
-    {"decision": "Disabled monitoring entirely for the CI profile", "rationale": "Matches CLAUDE.md's original stated intent ('trimmed single-node CI profile, monitoring disabled'); fitting it into CI's resource budget was not viable", "phase": "11"},
-    {"decision": "User approved real destructive live-cluster/CI actions this session (rebuild-from-raw, real throwaway PRs, direct pushes to main)", "rationale": "Explicit user approval each time asked; do not assume it carries forward automatically to future sessions", "phase": "11"}
+    {"decision": "Kept CICD-09 unchecked in REQUIREMENTS.md and did not run Phase 11's completion gates", "rationale": "The dag-processor crash-loop is the actual root blocker for any DAG completing in CI; marking the requirement done before a live run goes green would be dishonest", "phase": "11"},
+    {"decision": "Used a throwaway PR (#13, closed, branch deleted) with an unconditional (if: always()) diagnostic step to get direct kubectl restart-count evidence, mirroring this project's own established throwaway-PR-proof pattern from earlier phase-11 work", "rationale": "e2e-chaos.yml/e2e-full.yml have no diagnostic step reporting pod restart counts; only e2e-smoke.yml (pull_request-only trigger) can produce this evidence directly", "phase": "11"}
   ],
   "uncommitted_files": [],
-  "next_action": "Read deferred-items.md's 'Plan 11-05' section, then fix tests/e2e/vault/conftest.py's scheduler-Deployment check (mechanical). Bring the cluster-verify CI-scoping decision to the user before implementing. Then re-verify both new workflows reach success, mark CICD-09 complete, and run the standard phase-completion gates.",
-  "context_notes": "Phase 11 is functionally complete (all 14 plans merged/pushed) but the formal GSD verification/code-review/completion gates never ran — context ran out first. This was a very long session with multiple host interruptions and a multi-hour CI-portability debugging marathon; that effort paid off (both new merge-triggered workflows now reach their real test suites in CI, versus never starting before). Two small, well-scoped follow-ups remain before CICD-09 can be honestly marked complete."
+  "next_action": "Run `/gsd:debug continue ci-pipeline-ingestion-timeout` to resume the open debug session. It should investigate airflow-dag-processor specifically (not scheduler, which is already fixed): try raising dag-processor's CPU further in helm/values/ci/airflow.yaml, check whether its own livenessProbe.timeoutSeconds (currently 60s, same commit as scheduler) is actually sufficient given the dag_processor's own 30-second-per-file scan cadence across 11 real DAG files, and check for memory pressure (dag-processor's memory request/limit were NOT raised in the last fix, only CPU was). Once a fix is found, the same throwaway-PR-with-diagnostic-step pattern (see git history: branch throwaway/ci-pipeline-ingestion-timeout-live-proof, now deleted, PR #13, now closed) is the fastest way to get direct live proof before pushing to main.",
+  "context_notes": "This session resumed a paused Phase 11 via /gsd:resume-work, completed 2 scoped follow-ups (scheduler resource-kind hardcoding across 3 files; CI-scoping via multi_node marker + staggered monitoring stack), both fully verified working via live CI. Then opened a debug session for a deeper, previously-uninvestigated issue: no DAG has EVER been observed reaching SUCCEEDED on GitHub's CI runners. Found a real, well-evidenced root cause (scheduler/dag-processor crash-looping because Airflow's internal scheduler_health_check_threshold/dag_file_processor_timeout are tighter than the K8s probe timeoutSeconds that was raised in an earlier session). Verified the fix offline against the project's own authoritative CPU-budget policy gate (test_ci_profile_fits_runner passes), pushed it, then used a throwaway PR to get direct live restart-count evidence. Result: partial success -- scheduler is fixed, dag-processor is not. This is genuinely unresolved, not a false-confidence stopping point. Two unrelated, pre-existing CI flakes were also discovered along the way and documented but NOT chased (out of scope): a Kyverno admission-webhook self-timeout during cluster-up, and a vault-0 pod-not-found race in scripts/stages/80-vault.sh's own post-install wait logic."
 }
