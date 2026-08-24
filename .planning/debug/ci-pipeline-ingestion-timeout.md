@@ -1,17 +1,18 @@
 ---
-status: investigating
+status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-24 (REOPENED ROUND 2 -- PRIMARY MANDATE reopened with new evidence gathered independently by the orchestrator, in parallel with the vault-0 Python-fix round below: a live e2e-full.yml run, 32729560271/job 97442007494, triggered by commit c23d120 (the scheduler+dag-processor memory fix commit -- this run PREDATES commit 0ef5ae6's vault-0 Python-side fix below, confirmed via `gh run view 32729560271` showing headSha=c23d120, so it is unrelated to and not explained by that fix), shows cluster-slice-verify's much heavier/longer multi-DAG suite reproducing control-plane failures this session already fixed and live-confirmed for a lightweight single-DAG smoke run: 17 failed/21 passed/6 skipped in 61m44s (vs a ~32-38min historical norm for this same suite earlier in this debug session). The REOPENED ROUND immediately below (vault-0 Python-side wait race) remains TRUE, LIVE-VERIFIED, and is NOT re-litigated here -- its own awaiting_human_verify checkpoint has NOT been answered by a human and is neither accepted nor rejected by this update, only superseded as the file's ACTIVE investigation focus while this new, higher-priority round (the session's own PRIMARY mandate, per the debug session's own `trigger` field above) is investigated. Status reverted from awaiting_human_verify to investigating for THIS reason only -- see the new reasoning block at the top of Current Focus.)
+updated: 2026-08-24 (ROUND 2 continuation -- H1 CONFIRMED via direct `kubectl describe pod` OOMKilled evidence from an instrumented live run (commit 931c198, run 32743870344/job 97491592863), gathered by the human orchestrator and recorded into this file below by this continuation. Fix decided, implemented (helm/values/{ci,local}/airflow.yaml: `core.parallelism` 32->16 in both profiles, CI scheduler memory limit 1Gi->1536Mi), and offline-verified clean. Status moved investigating -> fixing; live-verification push and wait is next. The REOPENED ROUND immediately below (vault-0 Python-side wait race) remains TRUE, LIVE-VERIFIED, still awaiting an unanswered human checkpoint -- not re-litigated or blocked on here.)
 ---
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verify -- CURRENT,
-    ACTIVE. Does NOT re-litigate or supersede the vault-0 Python-side wait-race round below, which
-    remains TRUE/LIVE-VERIFIED and simply awaits an as-yet-unanswered human checkpoint; this new
-    round sits logically ABOVE it because it re-opens the session's own PRIMARY mandate):
+hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verify -- H1 NOW
+    CONFIRMED, see the CONFIRMATION block appended after falsification_test below. Does NOT
+    re-litigate or supersede the vault-0 Python-side wait-race round below, which remains
+    TRUE/LIVE-VERIFIED and simply awaits an as-yet-unanswered human checkpoint; this new round
+    sits logically ABOVE it because it re-opens the session's own PRIMARY mandate):
   "H1 (leading candidate, NOT yet confirmed): scheduler and/or dag-processor MEMORY grows
   roughly monotonically with sustained real LocalExecutor task execution across
   cluster-slice-verify's ~60+ minute multi-DAG suite (both production DAGs poll every 1 minute
@@ -83,20 +84,118 @@ hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verif
     the established 'kubectl describe pod -l component=X' pattern already used successfully twice
     (PR #14 rounds) -- adapted here from a single end-of-run snapshot to a full time series, since a
     ~60+ minute sustained-load run needs a growth CURVE, not a point sample, to test H1 specifically."
-  next_action: "Push the diagnostic-instrumented .github/workflows/e2e-full.yml directly to main
-    (this workflow has no pull_request trigger at all -- confirmed by reading it in full -- so the
-    'throwaway PR' pattern used for e2e-smoke.yml's own PR-triggered diagnostics does not apply;
-    this session's own established precedent for push-only workflows (e2e-full.yml/e2e-chaos.yml)
-    is to push evidence-gathering commits directly to main instead, exactly as commits
-    8681d69/103829e/c23d120/0ef5ae6 already did). Will queue behind the already in-flight run
-    32738880691 (commit 0ef5ae6, started 14:28:06Z) in the same non-cancelling `concurrency:`
-    group (push events never cancel-in-progress per this workflow's own config) -- expect a long
-    wait (~80-120+ min combined) before this round's own instrumented run even starts. Once
-    terminal, fetch the job's raw log via `gh api .../actions/jobs/<id>/logs`, extract the CSV
-    growth curve, cross-reference restart-count jumps against elapsed time and against the failure
-    list's own apparent onset point, and update this Current Focus with CONFIRMED/REFUTED per the
-    falsification_test above before proposing any fix -- do not skip the mandatory
-    reasoning_checkpoint before any fix is applied (fix_and_verify's own Phase 0 requirement)."
+  CONFIRMATION (ROUND 2 continuation, instrumented run 32743870344/job 97491592863, commit
+    931c198 -- data gathered by the human orchestrator directly from GitHub Actions, recorded here
+    verbatim per this file's own established discipline; full detail also in Evidence below):
+    "H1 CONFIRMED by direct evidence, exactly per the falsification_test's own stated bar.
+    cp-monitor.csv (15s-interval poll, ~62min run): scheduler restarted 7 times, peak_mem_bytes
+    954281984 (~910MiB, 89% of the then-current 1Gi limit), peak_pids 48 (up from an initial ~41).
+    Final `kubectl describe pod -l component=scheduler`: Last State Terminated / Reason OOMKilled /
+    Exit Code 137 -- UNAMBIGUOUS cgroup memory-limit breach, not the CPU/heartbeat-probe signature
+    this session's ORIGINAL root cause (1) showed (which never printed OOMKilled/Exit Code 137).
+    dag-processor: 0 restarts for the entire run, peak 763MiB/1Gi -- confirms root cause (2)'s own
+    fix fully holds under this heavier suite too; not re-opened. H2 (CPU-only) and H3 (DB/API-server
+    saturation) are REFUTED as the PRIMARY mechanism for this specific symptom by the same
+    OOMKilled/Exit-Code-137 evidence (a pure CPU-starvation or DB-saturation restart would show a
+    liveness-probe-failure/BackOff reason, not OOMKilled). H4 (unnamed alternative) has no
+    supporting evidence and is not pursued further."
+  reasoning_checkpoint (MANDATORY, fix_and_verify Phase 0 -- written before any fix is applied,
+    per this session's own established discipline):
+    hypothesis: "CI's scheduler pod OOMs repeatedly under cluster-slice-verify's sustained
+      LocalExecutor task load because (a) Airflow's stock `core.parallelism` default (32, never
+      previously overridden in this project) makes `LocalExecutor.start()` eagerly fork 32 worker
+      processes on every scheduler startup -- vastly more than this project's own DAGs ever need
+      concurrently -- each independently importing the full Airflow module tree (the exact
+      mechanism apache/airflow#56641 documents), and (b) the resulting repeated violent
+      OOM-SIGKILLs interrupt in-flight tasks before they can complete (production tasks take
+      ~13-15 min per test_backfill_2year_sweep.py's own docstring; OOM cycles recur every 5-7min
+      after the first), which -- via Airflow's own `_mark_backfills_complete()`/DagRun-state
+      mechanics, read directly from the installed airflow.jobs.scheduler_job_runner source this
+      round -- leaves DagRuns/Backfills perpetually RUNNING/QUEUED and never completing, a livelock
+      that compounds scheduling overhead across restarts (consistent with the observed
+      shrinking-cycle-time pattern: 31m52s first cycle, then 5-7min repeatedly)."
+    confirming_evidence:
+      - "Direct `kubectl describe pod`: Reason OOMKilled / Exit Code 137, 7 restarts in ~62min
+        (new_evidence block, this round) -- a genuine memory-ceiling breach, not CPU/heartbeat."
+      - "Direct source read, installed apache-airflow==3.3.0 inside the live LOCAL scheduler pod
+        (airflow.executors.local_executor.LocalExecutor.start): 'This creates the maximum number
+        of worker processes (parallelism) at once to minimize gc freeze/unfreeze cycles' --
+        confirms parallelism directly sizes an EAGER fork-at-startup pool, not an on-demand one.
+        `airflow config get-value core parallelism` confirmed CI/local both still at the stock
+        default 32 -- never tuned by any fix this session."
+      - "Direct source read of both production DAG files: integrity_gate.override(
+        max_active_tis_per_dag=3) is the single highest fan-out point either DAG has; stage/
+        dbt_build/publish are each max_active_tis_per_dag=1 GLOBALLY (confirmed via
+        test_backfill_2year_sweep.py's own docstring: shared across every concurrent DagRun of
+        that dag_id, backfill or scheduled alike) -- this project's real worst-case simultaneous
+        concurrency need is a low double digit at most, nowhere near 32."
+      - "Direct source read of airflow.jobs.scheduler_job_runner._run_scheduler_loop: 'Check on
+        start up, then every configured interval' -- adopt_or_reset_orphaned_tasks() DOES run
+        unconditionally on every scheduler startup (task-instance-level self-heal is real), but
+        _mark_backfills_complete() only clears a Backfill once NONE of its DagRuns are in
+        RUNNING/QUEUED state -- a DagRun whose task keeps getting killed mid-execution (OOM cycle
+        period < task completion time) never reaches that state, matching the REOPENED ROUND 2
+        deep-mining Evidence's own observed AlreadyRunningBackfill cascade lasting the rest of a
+        run, not a one-time delay."
+      - "Fresh-process-boundary fact (container restart semantics, not inferred): a K8s container
+        restart after OOMKill creates a genuinely NEW OS process with zero prior heap/CoW state --
+        so a pattern that compounds ACROSS restarts (shrinking cycle time, rising post-restart
+        baseline) cannot be explained by pure in-process CoW/allocator retention alone (that resets
+        to near-zero every restart); the only thing that persists across a scheduler pod restart is
+        the shared metadata DB's own stored state, consistent with the livelock mechanism above
+        rather than a flat per-process leak."
+      - "apache/airflow#56641 (already cited, prior round) explicitly documents '~1GB of total
+        memory allocation across all workers' from independent per-worker imports at the stock
+        parallelism=32 default -- external corroboration of the SAME mechanism, not a
+        project-specific novelty."
+    falsification_test: "If, after this fix, a fresh live cluster-slice-verify run still shows
+      scheduler `Reason: OOMKilled` restarts (any count > 0), the parallelism-trim hypothesis is
+      refuted or insufficient by itself -- would indicate either the sustained per-task-churn CoW
+      growth apache/airflow#56641 separately documents (independent of pool size) is the dominant
+      term, or the livelock mechanism is not the compounding driver assumed above, and a different
+      fix shape (e.g. a much larger ceiling, or breaking the livelock more directly) would be
+      needed."
+    fix_rationale: "Addresses the root cause at its SOURCE (an oversized, never-tuned worker pool
+      this workload does not need) rather than only its symptom (raising the ceiling to tolerate
+      more of the same excess). The paired memory-limit raise is an honest, separately-justified
+      SAFETY MARGIN for the still-open, not-fully-eliminated upstream growth pattern (per prior
+      round's own research: no released stable fix exists) -- not claimed as sufficient alone,
+      which is why it is not scaled arbitrarily large."
+    blind_spots: "The 'peak realistic concurrency is a low double digit' estimate is a hand-count
+      from DAG source + test file greps, not a live-measured peak concurrent-TI count -- could be
+      wrong in either direction. `[scheduler] num_runs` was researched and explicitly NOT adopted
+      this round: LocalExecutor.end() (source-confirmed) gracefully `proc.join()`s in-flight
+      workers rather than killing them, which in principle avoids exactly the livelock-inducing
+      violent interruption above -- but a num_runs-triggered graceful exit stops heartbeating
+      before executor.end()'s blocking wait begins, and this project's own tasks can run
+      ~13-15min, comfortably longer than `scheduler_health_check_threshold` (90s) -- meaning the
+      liveness probe would very likely fire and kill the pod DURING the graceful wait anyway,
+      largely negating the benefit; adopting it safely would need a dedicated follow-up (e.g. a
+      probe exception during known-graceful shutdown, not a feature this project's probe mechanism
+      currently has) and was judged out of scope for this round's time budget rather than adopted
+      on unverified faith. Not live-tested in this sandbox (no live cluster reproduces CI's
+      LocalExecutor topology here) -- the live push-and-wait below is the real test."
+  next_action: "COMPLETE: fix implemented (helm/values/ci/airflow.yaml + helm/values/local/
+    airflow.yaml: config.core.parallelism 32->16 in both; CI scheduler.resources.limits.memory
+    1Gi->1536Mi, CI-only). Offline-verified clean: `make manifests` (0 lint failures, kubeconform
+    0 invalid/0 errors, 540 resources), `test_manifest_resources.py -m manifests` (5/5 pass,
+    test_ci_profile_fits_runner at 3.180/3.200 cores -- unaffected, this change touches zero CPU
+    requests and the memory-limit raise does not count toward the requests-only budget sum),
+    `test_values_profiles.py` (6/6 pass -- core.parallelism correctly classified as non-divergent
+    behavioral config, identical in both profiles), full `tests/policy/ -m \"not manifests\"`
+    (157 passed, 2 failed -- the SAME 2 pre-existing, already-documented out-of-scope failures
+    every prior round in this file has shown, zero new regressions). NEXT: commit
+    (helm/values/{ci,local}/airflow.yaml + this debug file together, matching commits
+    a73282e/8681d69/103829e/c23d120's own established bundling precedent), push to main, then
+    background-wait for the resulting e2e-full.yml run via `gh run watch <id> --exit-status` or
+    periodic `gh run view <id> --json status,conclusion` polling (expect a long queue behind any
+    in-flight run in the same non-cancelling concurrency group, and ~60+ min for
+    cluster-slice-verify alone once started -- do not abandon the wait early). On completion:
+    fetch the job's raw log, check scheduler restart count/OOMKilled status directly (the
+    cp-monitor.sh instrumentation already in e2e-full.yml at commit 931c198 may be reused or
+    trimmed back out -- note the choice either way), and update this Current Focus with
+    CONFIRMED/REFUTED per the reasoning_checkpoint's own falsification_test above before declaring
+    this round resolved."
 
 reasoning_checkpoint (REOPENED ROUND, vault-0 Python-side wait race -- supersedes the round below,
     which remains true and is NOT re-litigated):
@@ -993,6 +1092,235 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     or reducing sustained task churn) rather than a clean root-cause elimination -- to be decided
     ONLY after live confirmation, not preemptively.
 
+- timestamp: 2026-08-24 (REOPENED ROUND 2, reproducibility check -- run 32738880691, commit
+    0ef5ae6, job 97468249331, NO diagnostic instrumentation, fetched via the pre-existing
+    background watcher's own log-fetch step once the run reached terminal status)
+  checked: >
+    Full raw job log for the SAME `cluster-slice-verify` step, on a DIFFERENT commit (0ef5ae6,
+    the vault-0 Python-fix commit -- touches only test files under tests/e2e/vault and
+    tests/e2e/chaos, never scheduler/dagProcessor resourcing), run hours after the original
+    32729560271/97442007494 evidence. Compared short test summary info line-for-line against the
+    original.
+  found: >
+    "17 failed, 21 passed, 6 skipped, 16 warnings in 3716.50s (1:01:56)" -- the EXACT SAME
+    failed/passed/skipped COUNTS as run 32729560271/97442007494 ("17 failed, 21 passed, 6 skipped,
+    16 warnings in 3704.38s (1:01:44)"), and duration within 12 seconds across two fully
+    independent runs, hours apart. Diffing the full list of failing test names between the two
+    runs: IDENTICAL SET, same 17 tests, same error signatures (`test_pilot_window_drains_
+    without_cpu_starvation` again shows `still non-terminal: {}` -- the file was never discovered
+    at all, not stuck mid-pipeline; the same 3 backfill tests again fail with the identical
+    `AlreadyRunningBackfill` cascade; the same 8 tests again fail with `discovery never registered
+    it` for a freshly-uploaded file under the REGULAR 1-minute-scheduled DAG, unrelated to any
+    backfill).
+  implication: >
+    This is now a THIRD independent occurrence of an essentially byte-for-byte identical failure
+    pattern (the original orchestrator-reported run, this reproducibility check, structurally
+    consistent with the earlier live-mining analysis above) -- satisfies the debugging discipline's
+    "reproduce reliably" bar emphatically, and the closeness of both the test SET and the DURATION
+    across independent runs is itself informative: it is much more consistent with a deterministic
+    resource-ceiling being hit at a roughly consistent point in a roughly-consistent workload
+    execution (e.g., a growth curve that reaches a fixed limit at a repeatable elapsed time/task-
+    count) than with random flakiness or a timing coincidence. Does not yet distinguish WHICH
+    resource (H1 memory vs H2 CPU vs other) -- that is what the instrumented run's live time-series
+    data (in flight) is for -- but strongly rules out "this was a one-off fluke" as an explanation
+    for the original new_evidence.
+
+- timestamp: 2026-08-24 (ROUND 2 continuation -- instrumented live run results, gathered by the
+    human orchestrator directly from GitHub Actions, recorded here verbatim per this file's own
+    established discipline for evidence provided by another party)
+  checked: >
+    GitHub Actions run 32743870344 / job 97491592863, commit 931c198e604ff903256b9dbfcdcb7f6a3103c849
+    (the throwaway diagnostic-instrumented e2e-full.yml queued by the prior continuation's own
+    next_action) -- pytest result, cp-monitor.csv (15s-interval poll of cgroup
+    memory.current/pids.current + kubectl restart count from cluster-up ~15:43:59Z through end of
+    cluster-slice-verify ~16:46:18Z, ~62min), and a final `kubectl describe pod -l
+    component=scheduler` snapshot at run end.
+  found: >
+    Pytest: "17 failed, 21 passed, 6 skipped" in 3713.82s (1:01:53) -- essentially identical
+    failure count/duration/signature to the two prior unstrumented runs on this same commit
+    lineage (32729560271, 32738880691), confirming full determinism, not flakiness (a FOURTH
+    independent occurrence of the same pattern, extending the reproducibility-check evidence
+    already recorded above).
+    dag-processor: 0 restarts for the ENTIRE run, peak_mem_bytes=800030720 (~763MiB), peak_pids=7
+    -- confirms root cause (2)'s fix fully holds under this heavier suite; not re-opened.
+    scheduler: 7 restarts over ~62min. peak_mem_bytes=954281984 (~910MiB, 89% of the then-current
+    1Gi limit), peak_pids=48 (up from an initial baseline ~41). Restart timeline (timestamp,
+    cumulative restart count, post-restart-baseline memory AT that 15s-poll sample -- NOT the true
+    pre-kill peak, which happened between samples):
+      15:45:41Z restarts=1 mem=~159MiB   [+~90s after cluster-slice-verify started]
+      16:17:33Z restarts=2 mem=~404MiB   [+31m52s after restart 1]
+      16:22:54Z restarts=3 mem=~59MiB    [+5m21s after restart 2]
+      16:28:47Z restarts=4 mem=~160MiB   [+5m53s after restart 3]
+      16:34:56Z restarts=5 mem=~173MiB   [+6m9s after restart 4]
+      16:41:38Z restarts=6 mem=~252MiB   [+6m42s after restart 5]
+      16:45:00Z restarts=7 mem=~312MiB   [+3m22s after restart 6]
+    Final `kubectl describe pod -l component=scheduler` on the 7th-restart container instance:
+    `Last State: Terminated / Reason: OOMKilled / Exit Code: 137`, `Started: 16:44:52Z / Finished:
+    16:45:17Z` (25s alive before being killed), `Restart Count: 7`, `Limits: cpu 1500m / memory
+    1Gi`, `Requests: cpu 400m / memory 512Mi`, pod-level `Reason: CrashLoopBackOff`.
+  implication: >
+    UNAMBIGUOUS direct confirmation of a genuine cgroup memory-limit breach (Reason: OOMKilled,
+    Exit Code 137), not the CPU/heartbeat-probe signature this session's ORIGINAL root cause (1)
+    showed ("No alive jobs found", never OOMKilled/Exit Code 137) -- H2 (CPU-only) and H3
+    (DB/API-server saturation) are refuted as the PRIMARY mechanism for THIS symptom by this same
+    evidence (a pure CPU-starvation or DB-saturation restart would not print OOMKilled/137). The
+    restart-interval pattern itself is notable and NOT flat: restart 1->2 is +31m52s (a long, slow
+    first climb), but every restart from 2 onward is +5-7min (5m21s/5m53s/6m9s/6m42s/3m22s) --
+    roughly 5-6x faster per cycle than the first, with the post-restart baseline memory reading
+    also trending upward across later restarts (noisy single-sample snapshots, not a clean
+    monotonic proof, but a real directional trend). This pattern-shape question (compounding vs.
+    flat-rate) is investigated directly below rather than assumed either way.
+
+- timestamp: 2026-08-24 (ROUND 2 continuation -- direct source-level investigation of the
+    growth/compounding mechanism, against the ACTUAL deployed apache-airflow==3.3.0 installed
+    inside the live LOCAL cluster's own scheduler pod, not a generic/version-agnostic reading)
+  checked: >
+    `kubectl -n airflow exec deploy/airflow-scheduler -c scheduler -- python -c "..."` against the
+    live LOCAL cluster (available in this sandbox) to read installed-package source directly:
+    airflow.executors.local_executor.LocalExecutor.start()/.end(), airflow.jobs.job.run_job()/
+    execute_job(), airflow.jobs.scheduler_job_runner._execute()/_run_scheduler_loop()/
+    adopt_or_reset_orphaned_tasks()/_mark_backfills_complete(), and airflow's own config.yml
+    template for `core.parallelism`/`scheduler.num_runs`/`scheduler.only_idle`/
+    `scheduler.orphaned_tasks_check_interval` defaults and descriptions. Cross-referenced against
+    this project's own airflow/dags/csv_ingest_{customers,orders}.py source and
+    tests/e2e/slice/test_backfill_2year_sweep.py's own docstrings for real concurrency/runtime
+    shape. Independently corroborated via WebSearch against apache/airflow#56641 and #1389.
+  found: >
+    (1) `LocalExecutor.start()`'s own source comment: "This creates the maximum number of worker
+    processes (parallelism) at once to minimize gc freeze/unfreeze cycles when using fork in
+    multiprocessing" -- `core.parallelism` is not merely a scheduling throttle for LocalExecutor,
+    it directly sizes an EAGERLY-forked worker pool created on every single scheduler startup.
+    `airflow config get-value core parallelism` inside the live pod confirmed this project has
+    NEVER overridden it in either helm/values/ci or helm/values/local/airflow.yaml -- both were
+    still at Airflow's stock default of 32.
+    (2) Direct read of airflow/dags/csv_ingest_customers.py and csv_ingest_orders.py: both DAGs'
+    single highest fan-out point is `integrity_gate.override(max_active_tis_per_dag=3)`
+    (dynamic-mapped over matched_keys); `stage`/`dbt_build`/`publish` are each
+    `max_active_tis_per_dag=1` -- and per test_backfill_2year_sweep.py's own docstring, this cap is
+    GLOBAL (shared across every concurrent DagRun of that dag_id, live-scheduled or backfill
+    alike), not per-DagRun. Cross-checked tests/e2e/slice/test_concurrent_select.py (its
+    "concurrent" activity is a test-side psycopg thread, not an Airflow task) and
+    test_pod_kill_retry.py (explicitly notes the same max_active_runs=1 + max_active_tis_per_dag=1
+    caps) for anything that could push real concurrency higher -- found nothing. This project's
+    own real worst-case simultaneous concurrency need across both production DAGs plus the
+    slice-suite's own test scenarios is a low double digit at most, never remotely close to 32.
+    (3) `LocalExecutor.end()`'s own source: "Shutting down LocalExecutor; waiting for running tasks
+    to finish. Signal again if you don't want to wait" -- then `proc.join()` (no timeout) on every
+    live worker. `airflow.jobs.scheduler_job_runner._execute()`'s own `finally` block calls
+    `executor.end()` for every executor on ANY clean exit from `_run_scheduler_loop()` (including
+    a `[scheduler] num_runs`-triggered `break`), and `airflow.jobs.job.execute_job()` sets
+    `job.state = JobState.SUCCESS` on a clean return -- a graceful, blocking, in-flight-task-
+    preserving shutdown, categorically different from a cgroup OOM SIGKILL (which kills the entire
+    pod cgroup -- scheduler process AND every forked LocalExecutor worker -- with zero draining,
+    zero DB bookkeeping, mid-task, unconditionally).
+    (4) BUT: during that graceful `executor.end()` wait, the scheduler has already exited its main
+    loop and stopped heartbeating (the `perform_heartbeat()` call lives INSIDE the loop that has
+    already `break`-ed out) -- so a long `proc.join()` wait (this project's own `stage`/`dbt_build`
+    tasks take ~13-15min per test_backfill_2year_sweep.py's own docstring: "integrity_gate (3
+    concurrent) + stage... together already take ~13-15 min BEFORE dbt_build/publish even start")
+    would very plausibly exceed `scheduler_health_check_threshold` (currently 90s, this session's
+    own earlier fix) and trigger the K8s liveness probe to kill the pod DURING the graceful wait
+    anyway -- undermining the very benefit a `num_runs`-triggered recycle would otherwise offer.
+    (5) `airflow.jobs.scheduler_job_runner._run_scheduler_loop()`'s own source, verbatim comment:
+    "Check on start up, then every configured interval" immediately precedes an unconditional call
+    to `self.adopt_or_reset_orphaned_tasks()` BEFORE the main loop begins -- confirmed this runs on
+    EVERY scheduler startup (including after an OOM-kill restart), not merely periodically. This
+    self-heals orphaned TASK INSTANCES (resets them to a schedulable state). BUT
+    `_mark_backfills_complete()` (a separate method) only marks a `Backfill` row complete once
+    `~exists(... DagRun.state.in_((RUNNING, QUEUED)) ...)` for that backfill -- i.e. a DagRun whose
+    task keeps getting killed mid-execution and re-queued (because the OOM-cycle period, 5-7min
+    after the first cycle, is SHORTER than the ~13-15min a real task needs to finish) never leaves
+    RUNNING/QUEUED, so the backfill never completes, regardless of how well orphan-reset itself
+    works. This directly explains the REOPENED ROUND 2 deep-mining Evidence's own
+    `AlreadyRunningBackfill` cascade "blocking all subsequent backfill-CLI tests for that dag_id"
+    for the rest of a run, not just a slow patch -- a livelock, not (necessarily) an ever-growing
+    literal COUNT of stuck DagRuns (bounded by `max_active_runs=1`'s own throttle on new DagRun
+    creation for that dag_id), but a persistent failure-to-complete that adds real, compounding
+    per-loop scheduling/retry/callback overhead across restarts.
+    (6) Fresh-process-boundary reasoning (a logical deduction from basic container-restart
+    semantics, not itself directly observed this round): a Kubernetes container that restarts
+    after an OOMKill is a genuinely NEW OS process -- no prior heap, no prior CoW-duplicated pages
+    carry over. This means a pattern that COMPOUNDS across MULTIPLE restarts (shrinking cycle time,
+    rising post-restart baseline -- see the new_evidence entry immediately above) cannot be fully
+    explained by pure in-process CoW/allocator retention alone (which resets to near-zero on every
+    fresh process); the only state that legitimately persists across a scheduler pod restart is the
+    shared Postgres metadata DB's own stored rows -- consistent with (5)'s livelock mechanism as
+    the compounding driver, not a flat fixed-rate leak that a bigger ceiling alone would cleanly
+    absorb.
+    (7) WebSearch independently surfaced apache/airflow#1389 ("Scheduler can't restart until
+    long-running local executor(s) finish"), corroborating (3)/(4) from an entirely separate
+    upstream report, not just this session's own source read. apache/airflow#56641 (already cited
+    prior round) explicitly documents "~1GB of total memory allocation across all workers" from
+    each LocalExecutor worker independently importing modules at the stock parallelism=32 default
+    -- external corroboration of (1)'s own mechanism, not a project-specific novelty.
+  implication: >
+    Directly answers the task's own analytical_hint and item-3 framing with source-grounded
+    evidence rather than pure inference from noisy timing numbers: the growth/compounding pattern
+    is best explained by GENUINE LIVE-OBJECT/DB-STATE ACCUMULATION (a livelock where repeated
+    violent OOM-SIGKILLs interrupt in-flight tasks faster than they can complete, which Airflow's
+    own Backfill/DagRun-completion mechanics do not route around), not a pure allocator/CoW
+    artifact a bigger ceiling would legitimately absorb "for free" -- meaning "just raise the
+    ceiling" is NOT by itself a complete answer, matching the task's own framing precisely. This
+    favors a fix that reduces the SOURCE of memory pressure (the oversized, un-tuned
+    `core.parallelism=32` worker pool this workload never needs, finding (1)/(2)) over one that
+    only tolerates it, paired with a modest, separately-justified ceiling raise as safety margin
+    for whatever residual sustained-churn growth apache/airflow#56641 still describes (no released
+    upstream fix exists). `[scheduler] num_runs` is a real, source-verified, GRACEFUL alternative
+    to a violent SIGKILL in principle (finding (3), corroborated externally by #1389) but finding
+    (4) shows it interacts badly with this project's own specific task-runtime-vs-heartbeat-
+    threshold shape and was not adopted this round without further dedicated verification --
+    recorded as a considered-and-rejected option, not a silent omission.
+
+- timestamp: 2026-08-24 (ROUND 2 continuation -- fix decision, implementation, and offline
+    verification)
+  checked: >
+    Implemented the fix informed by the investigation above: (1) `helm/values/ci/airflow.yaml` and
+    `helm/values/local/airflow.yaml`: `config.core.parallelism` added, `"32"` (implicit stock
+    default) -> `"16"`, IDENTICALLY in both files (behavioral Airflow config, not a permitted D-06
+    resource-sizing divergence axis, matching the established precedent already used for
+    `scheduler_health_check_threshold`/`dag_file_processor_timeout` earlier this session -- ~2x
+    headroom over the hand-counted realistic peak concurrency estimate from finding (2) above,
+    while halving the eagerly-forked worker population and its associated per-worker import
+    overhead). (2) `helm/values/ci/airflow.yaml` only: `scheduler.resources.limits.memory` 1Gi ->
+    1536Mi (request left at 512Mi, unchanged) -- a secondary safety margin, ~1.5x the highest
+    recorded peak sample (954MiB), CI-only since LOCAL's own scheduler never OOMs (KubernetesExecutor
+    never pre-forks LocalExecutor workers at all, so this mechanism cannot occur there -- no larger
+    LOCAL anchor value exists to match, per the task's own framing, so this raise is independently
+    justified against the measured peak rather than a local-matching number). Verified both YAML
+    files parse and both new/changed values render correctly: `make manifests` (0 chart lint
+    failures across all 9 charts both profiles; `kubeconform -strict`: 540 resources, 378 valid, 0
+    invalid, 0 errors); direct render inspection confirmed `[core] parallelism = 16` under the
+    correct INI section in BOTH build/manifests/{ci,local}/airflow.yaml, and the scheduler
+    StatefulSet container's `resources.limits.memory: 1536Mi` in the CI manifest. `uv run pytest
+    tests/policy/test_manifest_resources.py -q -m manifests`: 5/5 pass, including
+    `test_ci_profile_fits_runner` (3.180/3.200 cores -- byte-identical to before this fix, since it
+    touches zero CPU requests and the memory-limit raise does not count toward the requests-only
+    budget sum; real memory-request total 6504Mi/13107Mi budget, enormous headroom, confirmed via a
+    direct one-off `request_totals()` invocation against the rendered CI manifests). `uv run pytest
+    tests/policy/test_values_profiles.py -q`: 6/6 pass (confirms `core.parallelism` is correctly
+    treated as identical/non-divergent between profiles, and the CI-only memory-limit change stays
+    within the already-permitted "resource sizing" axis). `uv run pytest tests/policy/ -q -m "not
+    manifests"` (167 collectible): 157 passed, 2 failed -- the SAME 2 pre-existing,
+    already-documented out-of-scope failures every prior round in this file has shown
+    (test_dag_line_budget.py's 150-line DAG budget, test_gates_actually_fail.py's lint meta-test,
+    confirmed via the actual failure text: ruff findings in files this fix never touched,
+    test_backfill_2year_sweep.py and test_migrations.py) -- zero new regressions.
+  found: >
+    All offline gates this session has established as authoritative for this debug session pass
+    cleanly against the fix as implemented, with no new regressions anywhere in the broader policy
+    suite. The fix is offline-complete; only live verification (a genuinely fresh
+    cluster-slice-verify run against the actual CI runner's real contention) remains before this
+    round can be considered resolved, per this session's own established discipline that
+    self-verification alone -- however thorough -- is not sufficient without direct live evidence,
+    especially given the deliberately-uncertain "peak realistic concurrency" hand-count noted as a
+    blind_spot above.
+  implication: >
+    Ready to commit and push per this session's own established push-only precedent for
+    e2e-full.yml (no pull_request trigger exists on this workflow, confirmed earlier in-file).
+    Recorded here, before starting the live wait, per this round's own explicit task instruction --
+    so that even in the worst case of an environment interruption mid-wait, the next continuation
+    has full context and does not repeat this investigation.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -1107,6 +1435,45 @@ root_cause: >
   unrelated to vault-0/poll_pod_running/CPU/memory resourcing -- none of this debug session's
   fixes touch it. Not investigated further here (out of scope per task guidance); a fresh,
   differently-scoped debug session would be needed if this recurs.
+  (3b, ROUND 2, same root-cause CLASS as (3) -- scheduler memory -- but a SUSTAINED-LOAD
+  manifestation only visible under cluster-slice-verify's much heavier ~60min multi-DAG suite,
+  not smoke-verify's single-DAG ~8.5min proof that live-confirmed (3) as fixed): with (1)-(4)
+  fully resolving the ORIGINAL fixed-timeout smoke-verify failures, the heavier suite exposed
+  scheduler restarting repeatedly (7 times in ~62min, direct `kubectl describe pod` confirming
+  `Reason: OOMKilled`/`Exit Code: 137` each time -- a genuine memory-ceiling breach, unambiguously
+  different from (1)'s own CPU/heartbeat signature) even at (3)'s already-raised 512Mi/1Gi. Root
+  mechanism, confirmed via direct source read of the installed apache-airflow==3.3.0 (not
+  generic/version-agnostic reasoning): CI's `core.parallelism` was still at Airflow's stock
+  default (32, never overridden), and `LocalExecutor.start()` eagerly forks exactly that many
+  worker processes on every scheduler startup ("to minimize gc freeze/unfreeze cycles" per its own
+  source comment) -- each independently importing the full Airflow module tree, the exact
+  mechanism the currently-open apache/airflow#56641 documents ("~1GB... across all workers" at the
+  stock default). This project's own two production DAGs cap real concurrency far below 32 by
+  construction (`integrity_gate.override(max_active_tis_per_dag=3)` is the highest fan-out point
+  either DAG has; `stage`/`dbt_build`/`publish` are each `max_active_tis_per_dag=1` GLOBALLY) --
+  the eagerly-forked pool was provisioned roughly 3x+ larger than this workload could ever need,
+  and the excess workers' import overhead plus their own sustained CoW growth under real task
+  churn is what drove the ceiling breach. The observed restart-CYCLE-TIME pattern (a slow first
+  climb, 31m52s, then a consistently faster 5-7min per cycle thereafter) is additional, source-
+  grounded evidence of a genuine LIVE-OBJECT/DB-STATE-DRIVEN compounding mechanism, not a flat
+  per-process leak: a K8s container restart after OOMKill starts a genuinely fresh OS process (no
+  prior heap/CoW state carries over), so a pattern that compounds ACROSS restarts must be driven
+  by something that DOES persist across a restart -- the shared metadata DB. Direct source read of
+  `airflow.jobs.scheduler_job_runner` confirmed the mechanism: `adopt_or_reset_orphaned_tasks()`
+  does run on every scheduler startup and correctly resets orphaned TASK INSTANCES, but
+  `_mark_backfills_complete()` only clears a `Backfill` once none of its DagRuns are still
+  RUNNING/QUEUED -- and a DagRun whose task keeps getting killed mid-execution (OOM-cycle period,
+  5-7min after the first cycle, shorter than the ~13-15min a real task needs to finish, per
+  test_backfill_2year_sweep.py's own docstring) never reaches that state. This is the direct,
+  source-confirmed explanation for the REOPENED ROUND 2 deep-mining Evidence's own
+  `AlreadyRunningBackfill` cascade blocking the rest of an affected run, not merely a slow patch --
+  a livelock, not a one-time delay. See Evidence (ROUND 2 continuation) for the full source-level
+  investigation, including the `[scheduler] num_runs` alternative that was researched and
+  deliberately NOT adopted (LocalExecutor.end() gracefully waits for in-flight tasks rather than
+  killing them, in principle avoiding this exact livelock -- but this project's own task runtimes
+  comfortably exceed `scheduler_health_check_threshold`, 90s, meaning the liveness probe would
+  very likely fire and kill the pod mid-graceful-wait anyway, undermining the benefit without
+  further dedicated work).
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -1141,6 +1508,22 @@ fix: >
   10m->5m each, prometheusOperator 20m->10m, its admission-webhook patch Job 10m->5m) --
   grafana/prometheus's own serving containers, Kyverno, and all Airflow components deliberately
   left untouched.
+  (6, ROUND 2): helm/values/{ci,local}/airflow.yaml identically: config.core.parallelism added,
+  "16" (stock default was an implicit, never-overridden 32) -- behavioral Airflow config, not a
+  permitted D-06 resource-sizing divergence axis, same non-divergent-axis precedent as (1)'s
+  scheduler_health_check_threshold/dag_file_processor_timeout. PRIMARY fix for ROUND 2: trims the
+  eagerly-forked LocalExecutor worker pool to roughly 2x this project's own hand-counted realistic
+  peak concurrency (a low double digit), down from a pool sized 3x+ larger than ever needed.
+  helm/values/ci/airflow.yaml only: scheduler.resources.limits.memory 1Gi -> 1536Mi (request left
+  at 512Mi, unchanged -- does not affect the CI CPU/memory-request budget gate at all). SECONDARY
+  safety margin (not claimed sufficient alone), ~1.5x the highest recorded peak sample (954MiB);
+  CI-only because LOCAL's own scheduler never OOMs (KubernetesExecutor never pre-forks
+  LocalExecutor workers), so no LOCAL anchor value exists to match this time -- justified
+  independently against the measured peak instead, per the task's own explicit framing.
+  `[scheduler] num_runs` was researched and deliberately NOT adopted this round -- see root_cause
+  (3b) and Evidence (ROUND 2 continuation) for the full reasoning (graceful-shutdown benefit is
+  real in principle, but interacts badly with this project's own task-runtime-vs-liveness-probe-
+  threshold shape without further dedicated work).
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -1186,6 +1569,27 @@ verification: >
   produce, but a genuinely independent human check (e.g. triggering the real Phase 11 completion
   gates against a clean main, or reviewing the live evidence directly) is the final gate per
   protocol.
+  Fix (6, ROUND 2): offline-verified -- `make manifests` (0 chart lint failures across all 9
+  charts both profiles, kubeconform -strict 0 invalid/0 errors across 540 resources; direct render
+  inspection confirmed `[core] parallelism = 16` in the correct INI section of BOTH
+  build/manifests/{ci,local}/airflow.yaml, and the scheduler container's `resources.limits.memory:
+  1536Mi` in the CI manifest); `uv run pytest tests/policy/test_manifest_resources.py -q -m
+  manifests` -- 5/5 pass, `test_ci_profile_fits_runner` unchanged at 3.180/3.200 cores (this fix
+  touches zero CPU requests; the memory-limit raise does not count toward the requests-only
+  budget sum -- real memory-request total 6504Mi/13107Mi budget, confirmed via a direct
+  `request_totals()` invocation); `uv run pytest tests/policy/test_values_profiles.py -q` -- 6/6
+  pass (confirms `core.parallelism` correctly classified as non-divergent behavioral config,
+  identical in both profiles, and the CI-only memory-limit change stays within the
+  already-permitted "resource sizing" axis); `uv run pytest tests/policy/ -q -m "not manifests"`
+  (167 collectible) -- 157 pass, 2 fail, the SAME 2 pre-existing, already-documented out-of-scope
+  failures every prior round in this file has shown (confirmed via the actual failure text: ruff
+  findings in test_backfill_2year_sweep.py/test_migrations.py, files this fix never touched) --
+  zero new regressions.
+  NOT YET LIVE-VERIFIED -- this round's own live push-and-wait is the immediate next step (see
+  Current Focus next_action). Archiving this debug session is now blocked on BOTH: the still-
+  unanswered human checkpoint for the REOPENED ROUND (4b, vault-0 Python-side wait race, already
+  live-verified, awaiting confirmation only) AND this round's own live verification of fix (6),
+  not yet attempted.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml

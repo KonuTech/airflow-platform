@@ -96,6 +96,46 @@ config:
     scheduler_health_check_threshold: "90"
   dag_processor:
     dag_file_processor_timeout: "120"
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 2 (2026-08-24): raised
+  # identically in helm/values/local/airflow.yaml too -- same D-06 rule as
+  # scheduler/dag_processor above (behavioral config, not a permitted
+  # resource-sizing divergence axis).
+  #
+  # core.parallelism (chart/Airflow default 32, never previously overridden
+  # -- confirmed via `airflow config get-value` inside the live scheduler
+  # pod): under LocalExecutor specifically, this is not just a scheduling
+  # throttle -- LocalExecutor.start() forks exactly `parallelism` worker
+  # processes UP FRONT on every scheduler startup ("This creates the maximum
+  # number of worker processes (parallelism) at once to minimize gc
+  # freeze/unfreeze cycles", read directly from the installed
+  # airflow.executors.local_executor source, this round), each one
+  # independently importing the full Airflow module tree. This is the exact
+  # mechanism documented in the currently-open apache/airflow#56641 ("each
+  # worker imports modules independently, ~1GB of total memory allocation
+  # across all workers" at the stock default of 32) that this round's live
+  # cp-monitor.csv evidence (scheduler OOMKilled 7 times in one
+  # cluster-slice-verify run, peak ~910MiB/1Gi) converged on as the leading
+  # mechanism. This project's own two production DAGs (csv_ingest_customers.py,
+  # csv_ingest_orders.py) cap concurrency far below 32 by construction:
+  # integrity_gate.override(max_active_tis_per_dag=3) is the single highest
+  # fan-out point in either DAG, stage/dbt_build/publish are each
+  # max_active_tis_per_dag=1 GLOBALLY (shared across every concurrent DagRun
+  # of that dag_id, backfill or scheduled alike -- confirmed via
+  # tests/e2e/slice/test_backfill_2year_sweep.py's own module docstring).
+  # Worst realistic simultaneous peak across both DAGs plus slice-verify's
+  # own sensor/gate tasks is a low double digit at most, never remotely 32.
+  # Trimmed to 16 -- roughly 2x the estimated real peak (generous headroom
+  # against a hand-counted estimate, not a live-measured one) while halving
+  # the eagerly-forked worker population and its associated per-worker
+  # import overhead. This is the PRIMARY fix for ROUND 2: it reduces the
+  # SOURCE of the memory pressure (excess pre-forked workers this workload
+  # never uses) rather than only tolerating it with a bigger ceiling.
+  # Does NOT by itself claim to eliminate apache/airflow#56641's own
+  # documented SUSTAINED per-task-churn growth (still open upstream, no
+  # released fix) -- paired with a modest scheduler memory headroom increase
+  # below for that residual risk.
+  core:
+    parallelism: "16"
 
 data:
   metadataSecretName: airflow-metadata
@@ -203,7 +243,46 @@ scheduler:
       memory: 512Mi
     limits:
       cpu: 1500m
-      memory: 1Gi
+      memory: 1536Mi
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 2 (2026-08-24): memory
+  # LIMIT raised again, 1Gi->1536Mi (request left at 512Mi -- unaffected by
+  # tests/policy/test_manifest_resources.py's CI budget, which sums only
+  # `requests`, never `limits`). A live cp-monitor.csv time series across a
+  # full cluster-slice-verify run (~62min) showed scheduler restarting 7
+  # times with `Reason: OOMKilled`/`Exit Code: 137` -- a genuine cgroup
+  # memory-ceiling breach, not the CPU/heartbeat-probe signature fixed
+  # earlier this session -- peak recorded sample 954MiB/1Gi (89%, on a 15s
+  # poll interval that necessarily undersamples the true pre-kill peak).
+  # There is NO larger LOCAL value to match here (unlike the fixes below):
+  # LOCAL's own scheduler never OOMs, because KubernetesExecutor never
+  # pre-forks LocalExecutor workers in-process at all -- this mechanism is
+  # CI-LocalExecutor-specific, so this round's headroom is justified
+  # independently (roughly 1.5x the highest recorded sample, not a round
+  # local-matching number). PRIMARY fix for this round is `config.core.
+  # parallelism` below (32->16, trims the actual eagerly-forked-worker
+  # population that apache/airflow#56641 identifies as the growth source) --
+  # this limit raise is a SECONDARY safety margin, not the primary fix,
+  # because the restart-interval pattern (first cycle 31m52s, every
+  # subsequent cycle 5-7min) is more consistent with genuine DB-persisted
+  # state accumulation across restarts (a scheduler OOM-kill always starts a
+  # genuinely fresh OS process -- container restart, not process reuse -- so
+  # pure in-process CoW/allocator retention cannot itself explain a pattern
+  # that compounds ACROSS restarts) than with a flat, ceiling-alone-fixable
+  # leak. Read directly from the installed airflow.jobs.scheduler_job_runner
+  # source this round: `adopt_or_reset_orphaned_tasks()` does run on every
+  # scheduler startup (self-heals orphaned TASK INSTANCES), but
+  # `_mark_backfills_complete()` only clears a Backfill once none of its
+  # DagRuns are RUNNING/QUEUED -- a DagRun whose task keeps getting
+  # interrupted mid-execution by a shorter-than-task-runtime OOM cycle never
+  # reaches that state, which is why `AlreadyRunningBackfill` was observed
+  # cascading for the rest of an affected run (see Evidence). A bigger
+  # ceiling alone raises the bar this livelock has to clear but does not by
+  # itself remove the livelock; the parallelism trim addresses the
+  # oversized-worker-pool root cause instead. See `config.core.parallelism`'s
+  # own comment below for the full reasoning, including why `[scheduler]
+  # num_runs` (considered, per apache/airflow#1389 and #56641/#58143) was
+  # deliberately NOT adopted this round.
+  #
   # Debug session ci-pipeline-ingestion-timeout, continuation session 2, ROUND
   # 2 (2026-08-24): memory raised 256Mi/512Mi->512Mi/1Gi -- a THIRD, newly-
   # exposed bottleneck, found via the SAME live-verify round that confirmed

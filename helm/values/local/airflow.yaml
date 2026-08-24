@@ -104,6 +104,23 @@ config:
     scheduler_health_check_threshold: "90"
   dag_processor:
     dag_file_processor_timeout: "120"
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 2 (2026-08-24): mirrors
+  # helm/values/ci/airflow.yaml's identical key -- see that file's own
+  # comment for the full live-diagnosed rationale (LocalExecutor.start()
+  # eagerly forks exactly `parallelism` worker processes on every scheduler
+  # startup, each independently importing the full Airflow module tree --
+  # apache/airflow#56641's documented mechanism -- and this project's own
+  # DAG concurrency ceilings (max_active_tis_per_dag 1-3) never come close to
+  # the stock default of 32). This profile has no live-observed instability
+  # of its own (KubernetesExecutor never pre-forks LocalExecutor workers at
+  # all, so this mechanism cannot occur here), but this is behavioral config,
+  # not a permitted resource-sizing divergence axis under
+  # tests/policy/test_values_profiles.py's D-06 axis table, so it stays
+  # identical here rather than CI-only -- same precedent as
+  # scheduler_health_check_threshold/dag_file_processor_timeout directly
+  # above.
+  core:
+    parallelism: "16"
   # OBS-10, local profile ONLY: CI has no OTel Collector deployed (D-16), so
   # tracing stays off there -- this whole `traces:` block, and the
   # OTEL_EXPORTER_OTLP_ENDPOINT env var below, are a legitimate local/ci
