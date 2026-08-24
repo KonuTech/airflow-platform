@@ -85,6 +85,68 @@ jobs:
           DOCTOR_MIN_MEM_GB: "14"
         run: PROFILE=ci make cluster-up
 
+      # THROWAWAY DIAGNOSTIC (debug session ci-pipeline-ingestion-timeout,
+      # REOPENED ROUND 2 -- sustained multi-DAG load hypothesis). NEVER to be
+      # merged as a permanent workflow change; reverted in a follow-up commit
+      # once this round's live evidence is collected. This workflow has no
+      # `pull_request` trigger (push-to-main only), so the "throwaway PR"
+      # pattern already used twice this session for e2e-smoke.yml does not
+      # apply here -- this mirrors the session's own established alternative
+      # for push-only workflows instead: push a temporary evidence-gathering
+      # commit directly to main. Polls BOTH control-plane pods' cgroup
+      # memory.current/pids.current + K8s-reported restartCount/phase every
+      # 15s, starting immediately after cluster-up (both production DAGs run
+      # on a 1-minute schedule regardless of which pytest step is currently
+      # executing, so real LocalExecutor task load begins the moment
+      # cluster-up finishes -- not just once cluster-slice-verify starts) --
+      # a full time-series growth curve, not a single end-of-run snapshot,
+      # to directly test whether memory grows unboundedly under sustained
+      # load (this round's leading hypothesis) versus some other mechanism.
+      - name: "DEBUG: start background control-plane resource monitor"
+        run: |
+          cat > /tmp/cp-monitor.sh <<'MONITOR_EOF'
+          #!/usr/bin/env bash
+          set -u
+          LOG=/tmp/cp-monitor.csv
+          ALLPODS_LOG=/tmp/cp-monitor-allpods.log
+          NS=airflow
+          echo "ts_utc,role,pod,phase,restarts,mem_current_bytes,pids_current" > "$LOG"
+          : > "$ALLPODS_LOG"
+          i=0
+          while [ "$i" -lt 600 ]; do
+            ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            for role in scheduler dag-processor; do
+              pod=$(kubectl -n "$NS" get pods -l component="$role" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              if [ -z "$pod" ]; then
+                echo "$ts,$role,NA,NoPodFound,NA,NA,NA" >> "$LOG"
+                continue
+              fi
+              phase=$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)
+              [ -z "$phase" ] && phase=NA
+              restarts=$(kubectl -n "$NS" get pod "$pod" -o jsonpath="{.status.containerStatuses[?(@.name=='$role')].restartCount}" 2>/dev/null)
+              [ -z "$restarts" ] && restarts=$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+              [ -z "$restarts" ] && restarts=NA
+              container=$(kubectl -n "$NS" get pod "$pod" -o jsonpath="{.spec.containers[?(@.name=='$role')].name}" 2>/dev/null)
+              [ -z "$container" ] && container=$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.spec.containers[0].name}' 2>/dev/null)
+              mem=$(kubectl -n "$NS" exec "$pod" -c "$container" -- cat /sys/fs/cgroup/memory.current 2>/dev/null)
+              [ -z "$mem" ] && mem=NA
+              pids=$(kubectl -n "$NS" exec "$pod" -c "$container" -- cat /sys/fs/cgroup/pids.current 2>/dev/null)
+              [ -z "$pids" ] && pids=NA
+              echo "$ts,$role,$pod,$phase,$restarts,$mem,$pids" >> "$LOG"
+            done
+            {
+              echo "== $ts =="
+              kubectl -n "$NS" get pods -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,STATUS:.status.phase --no-headers 2>/dev/null
+            } >> "$ALLPODS_LOG"
+            i=$((i+1))
+            sleep 15
+          done
+          MONITOR_EOF
+          chmod +x /tmp/cp-monitor.sh
+          nohup /tmp/cp-monitor.sh > /tmp/cp-monitor-stdout.log 2>&1 < /dev/null &
+          disown || true
+          echo "Started control-plane monitor, PID $!"
+
       - name: Point csv_processor_image/dbt_image at this commit's own GHCR images
         run: scripts/ci-set-workload-images.sh ${{ github.sha }}
 
@@ -124,6 +186,35 @@ jobs:
       # orchestration only.
       - name: Run cluster + slice E2E suite (observability deferred, staggered below)
         run: make cluster-slice-verify
+
+      # THROWAWAY DIAGNOSTIC, paired with the monitor-start step above --
+      # same never-to-be-merged scope. `if: always()` so this survives
+      # cluster-slice-verify's own failure/timeout (the actual scenario this
+      # round needs data from). Dumps the full time series plus a final
+      # snapshot using the SAME `kubectl describe pod -l component=X`
+      # pattern already live-proven twice this session (throwaway PR #14).
+      - name: "DEBUG: dump control-plane resource monitor + final diagnostics"
+        if: always()
+        run: |
+          pkill -f cp-monitor.sh || true
+          echo "===== cp-monitor.csv (full time series, ts_utc,role,pod,phase,restarts,mem_current_bytes,pids_current) ====="
+          cat /tmp/cp-monitor.csv || echo "no monitor log found"
+          echo "===== per-role peak memory / peak pids across the whole run ====="
+          awk -F, 'NR>1 && $6!="NA" {if($6+0>max[$2]) max[$2]=$6+0} NR>1 && $7!="NA" {if($7+0>maxp[$2]) maxp[$2]=$7+0} END {for (r in max) printf "%s: peak_mem_bytes=%d peak_pids=%d\n", r, max[r], maxp[r]}' /tmp/cp-monitor.csv || true
+          echo "===== restart-count timeline (rows where restarts changed since the previous sample for that role) ====="
+          awk -F, 'NR==1{next} {if (($2 in prev) && prev[$2]!=$5) print; prev[$2]=$5}' /tmp/cp-monitor.csv || true
+          echo "===== cp-monitor-allpods.log (all airflow-namespace pods, every poll) ====="
+          tail -400 /tmp/cp-monitor-allpods.log || echo "no allpods log found"
+          echo "===== final kubectl get pods -o wide ====="
+          kubectl -n airflow get pods -o wide || true
+          echo "===== final kubectl describe pod -l component=scheduler ====="
+          kubectl -n airflow describe pod -l component=scheduler || true
+          echo "===== final kubectl describe pod -l component=dag-processor ====="
+          kubectl -n airflow describe pod -l component=dag-processor || true
+          echo "===== kubectl get events -n airflow (last 150, sorted) ====="
+          kubectl -n airflow get events --sort-by=.lastTimestamp | tail -150 || true
+          echo "===== kubectl describe node ====="
+          kubectl describe node || true
 
       - name: Install trimmed monitoring, run tests/e2e/observability, tear down
         run: make observability-verify-ci

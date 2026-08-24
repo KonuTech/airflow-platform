@@ -1,12 +1,102 @@
 ---
-status: verifying
+status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-24 (REOPENED ROUND -- vault-0 Python-side wait race in test_unseal_survives_restart.py/test_vault_unavailable.py: shared poll_pod_running helper implemented in tests/e2e/vault/conftest.py, offline-verified (mypy/ruff/py_compile/pytest --collect-only/full offline policy suite all clean, zero new regressions), status reverted from awaiting_human_verify to verifying pending a live-CI round. The scheduler+dag-processor OOM mandate this session was originally opened for remains separately closed/live-confirmed, see Resolution -- NOT re-litigated by this round.)
+updated: 2026-08-24 (REOPENED ROUND 2 -- PRIMARY MANDATE reopened with new evidence gathered independently by the orchestrator, in parallel with the vault-0 Python-fix round below: a live e2e-full.yml run, 32729560271/job 97442007494, triggered by commit c23d120 (the scheduler+dag-processor memory fix commit -- this run PREDATES commit 0ef5ae6's vault-0 Python-side fix below, confirmed via `gh run view 32729560271` showing headSha=c23d120, so it is unrelated to and not explained by that fix), shows cluster-slice-verify's much heavier/longer multi-DAG suite reproducing control-plane failures this session already fixed and live-confirmed for a lightweight single-DAG smoke run: 17 failed/21 passed/6 skipped in 61m44s (vs a ~32-38min historical norm for this same suite earlier in this debug session). The REOPENED ROUND immediately below (vault-0 Python-side wait race) remains TRUE, LIVE-VERIFIED, and is NOT re-litigated here -- its own awaiting_human_verify checkpoint has NOT been answered by a human and is neither accepted nor rejected by this update, only superseded as the file's ACTIVE investigation focus while this new, higher-priority round (the session's own PRIMARY mandate, per the debug session's own `trigger` field above) is investigated. Status reverted from awaiting_human_verify to investigating for THIS reason only -- see the new reasoning block at the top of Current Focus.)
 ---
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+hypothesis (REOPENED ROUND 2, sustained multi-DAG load under cluster-slice-verify -- CURRENT,
+    ACTIVE. Does NOT re-litigate or supersede the vault-0 Python-side wait-race round below, which
+    remains TRUE/LIVE-VERIFIED and simply awaits an as-yet-unanswered human checkpoint; this new
+    round sits logically ABOVE it because it re-opens the session's own PRIMARY mandate):
+  "H1 (leading candidate, NOT yet confirmed): scheduler and/or dag-processor MEMORY grows
+  roughly monotonically with sustained real LocalExecutor task execution across
+  cluster-slice-verify's ~60+ minute multi-DAG suite (both production DAGs poll every 1 minute
+  regardless of which pytest test is currently executing, per existing Evidence; the slice suite
+  additionally drives backfills, pod-kill-retries, concurrent-selects, and a rebuild-from-raw-style
+  reconciliation, each spawning its own LocalExecutor task subprocesses inside the SAME scheduler
+  pod cgroup), eventually re-exceeding the 1Gi ceiling fixes (2)/(3) raised it to -- i.e. a genuine
+  per-task-execution GROWTH pattern, not the one-time fixed-headroom problem already fixed and
+  live-confirmed for a single ~8.5min smoke run. This is the exact residual risk this debug
+  session's own PRIOR ROUND blind_spots field predicted before it was ever observed (see below).
+  Alternates explicitly NOT yet ruled out, per task guidance -- must be distinguished empirically,
+  not assumed: H2 (real per-task-pod CPU/scheduling contention as dozens of KubernetesPodOperator
+  task pods accumulate over an hour); H3 (a DB/connection-pool or API-server saturation effect --
+  weakened as a LEADING candidate by Airflow 3's architecture, where task subprocesses talk to the
+  API server via the Task Execution API rather than opening raw DB connections directly, per
+  CLAUDE.md's own architecture notes -- but not eliminated, since the API server itself could
+  become the bottleneck under sustained concurrent task load); H4 (a different resource/mechanism
+  entirely)."
+  confirming_evidence_so_far:
+    - "New evidence from the orchestrator (independently re-verified via `gh run view 32729560271
+      --json status,conclusion,createdAt,updatedAt,headSha,workflowName`): run 32729560271, job
+      97442007494, 'E2E full (merge)' / 'Full local E2E suite + rebuild-from-raw capstone',
+      headSha=c23d120ae4e5f9a36660c2874ef0bc04efa110ca (confirmed: the scheduler-memory+vault-0-
+      bash-race fix commit, predates 0ef5ae6), conclusion=failure, created 12:53:49Z, updated
+      14:14:40Z (~80min total job wall-clock, job failed immediately once cluster-slice-verify's
+      pytest step itself exited nonzero -- no later steps ran)."
+    - "cluster-slice-verify step itself: 13:06:00Z-14:14:39Z, 61m44s -- roughly double this exact
+      same suite's own previously-recorded norm earlier in this debug session (2308.73s/38.5min and
+      1938.60s/32.3min, both from the Symptoms section's own pre-fix baseline runs) -- an anomaly
+      in duration alone, independent of the failure content."
+    - "17 failed/21 passed/6 skipped: failure content is structurally DIFFERENT from every
+      pre-fix-era failure this session already diagnosed and fixed -- it is dominated (11 of 17) by
+      'meta.files has no row for dataset=... within 180s -- discovery never registered it', a
+      signature that, per this test suite's own design (S3 upload -> discover DAG task senses it
+      every */1 * * * * cycle -> meta.files row appears), means the discovery mechanism (dag-
+      processor-parsed, scheduler-dispatched, running via LocalExecutor) stopped functioning for a
+      SUSTAINED period covering most of the run, not a single transient blip -- consistent with a
+      late-onset crash-loop that does not self-heal (matching a repeating OOM-kill cycle, H1's own
+      predicted signature) more than with a single one-time delay."
+    - "This debug session's own PRIOR ROUND blind_spots field (kept verbatim below) explicitly
+      named this exact risk in advance, before any heavier-suite evidence existed: 'this fix's scope
+      is limited to getting smoke-verify's single-DAG-run proof green... not a guarantee for
+      chaos-verify/cluster-verify's much longer, heavier multi-DAG suites... flag as a residual risk
+      for a future round if scheduler OOM recurs under those heavier suites even after this fix
+      lands.' A prediction made BEFORE the fact matching an observation made AFTER the fact is
+      meaningful corroboration, though not itself proof of mechanism -- still requires live
+      diagnostic confirmation before concluding H1 specifically (vs H2/H3/H4)."
+  falsification_test: "A time-series memory/restart-count monitor polled every 15s across a fresh
+    live cluster-slice-verify run: if scheduler and/or dag-processor mem_current_bytes climbs
+    roughly monotonically over elapsed run time and a restartCount increment (ultimately traceable
+    to OOMKilled via `kubectl describe pod`) follows shortly after mem_current_bytes approaches the
+    1Gi limit -- particularly if this repeats in a tight loop rather than happening once and
+    recovering -- H1 is CONFIRMED. If memory instead stays roughly flat/bounded well under 1Gi
+    throughout while restarts/failures still occur, or pids_current grows without a matching memory
+    increase, H1 is REFUTED in favor of H2 (CPU-only signature) or a still-undetermined mechanism
+    (H3/H4) -- do not assume H1 without this direct evidence, per this debug session's own
+    established discipline (self-verification/direct kubectl evidence over inference, repeated
+    throughout every round in this file)."
+  test_plan: "No dedicated diagnostic step exists in e2e-full.yml (confirmed: read the file in
+    full). Instrumented it with a THROWAWAY (never to be merged, will be reverted once data is
+    collected) background monitor -- polls `kubectl get pod`/`kubectl exec ... cat /sys/fs/cgroup/
+    memory.current,pids.current` for both `-l component=scheduler` and `-l component=dag-processor`
+    every 15s, started immediately after cluster-up (both production DAGs run on a 1-minute
+    schedule from that point regardless of which pytest step is executing, so growth-curve
+    visibility needs to start there, not at cluster-slice-verify's own start) through the end of
+    cluster-slice-verify (`if: always()` dump step, survives a step failure/timeout). This is the
+    session's OWN established live-diagnostic technique (cgroup memory.current measurement) already
+    used successfully once this session (continuation session 2's LOCAL cold-start measurement) and
+    the established 'kubectl describe pod -l component=X' pattern already used successfully twice
+    (PR #14 rounds) -- adapted here from a single end-of-run snapshot to a full time series, since a
+    ~60+ minute sustained-load run needs a growth CURVE, not a point sample, to test H1 specifically."
+  next_action: "Push the diagnostic-instrumented .github/workflows/e2e-full.yml directly to main
+    (this workflow has no pull_request trigger at all -- confirmed by reading it in full -- so the
+    'throwaway PR' pattern used for e2e-smoke.yml's own PR-triggered diagnostics does not apply;
+    this session's own established precedent for push-only workflows (e2e-full.yml/e2e-chaos.yml)
+    is to push evidence-gathering commits directly to main instead, exactly as commits
+    8681d69/103829e/c23d120/0ef5ae6 already did). Will queue behind the already in-flight run
+    32738880691 (commit 0ef5ae6, started 14:28:06Z) in the same non-cancelling `concurrency:`
+    group (push events never cancel-in-progress per this workflow's own config) -- expect a long
+    wait (~80-120+ min combined) before this round's own instrumented run even starts. Once
+    terminal, fetch the job's raw log via `gh api .../actions/jobs/<id>/logs`, extract the CSV
+    growth curve, cross-reference restart-count jumps against elapsed time and against the failure
+    list's own apparent onset point, and update this Current Focus with CONFIRMED/REFUTED per the
+    falsification_test above before proposing any fix -- do not skip the mandatory
+    reasoning_checkpoint before any fix is applied (fix_and_verify's own Phase 0 requirement)."
 
 reasoning_checkpoint (REOPENED ROUND, vault-0 Python-side wait race -- supersedes the round below,
     which remains true and is NOT re-litigated):
@@ -93,10 +183,10 @@ hypothesis (PRIOR ROUND, scheduler+dag-processor OOM, CLOSED -- kept verbatim, N
 test (PRIOR ROUND): "COMPLETE. Live-verified via throwaway PR #14, run 32727920639 / job 97433300855: `kubectl get pods -o wide` shows airflow-dag-processor and airflow-scheduler-0 both `2/2 Running 0 restarts` across their full ~8.5min lifetime, spanning cluster-up through a complete DAG lifecycle to a terminal state."
 expecting (PRIOR ROUND): "MET: zero restarts on both components; smoke-verify's check [2/4] no longer fails on DagNotFound or a 'queued' stall -- the DagRun now reaches a genuine terminal state ('failed', a SEPARATE downstream/functional issue explicitly out of scope for this debug session, not a timeout/crash-loop symptom)."
 
-hypothesis (REOPENED ROUND, vault-0 Python-side wait race, CURRENT): "CONFIRMED via direct source read (see reasoning_checkpoint above) -- test_unseal_survives_restart.py and test_vault_unavailable.py each carried their own inline, un-fixed copy of the exact kubectl-wait-races-pod-recreation pattern already fixed once (bash-side, scripts/wait-for.sh) earlier this same session."
-test (REOPENED ROUND): "FIX IMPLEMENTED, OFFLINE-VERIFIED. Extracted `poll_pod_running` (plain function, hand-rolled `deadline = time.monotonic() + timeout` poll loop mirroring `tests/e2e/chaos/conftest.py`'s `_poll_all_pods_ready` idiom) into `tests/e2e/vault/conftest.py`; both `test_unseal_survives_restart.py` and `tests/e2e/chaos/test_vault_unavailable.py` now import and call it in place of their duplicated bare `kubectl wait --for=jsonpath=...Running pod/vault-0`. Offline: `python -m py_compile` clean on all 3 files; `ruff check` all checks passed (0 issues); `ruff format --check` clean on both files with substantive edits (the one remaining format diff in test_vault_unavailable.py's `_scheduler_resource_ref` is confirmed PRE-EXISTING via `git show HEAD:... | ruff format --check --diff -` reproducing byte-identically on the unmodified HEAD -- untouched by this fix, out of scope); `mypy` 0 errors (after fixing a mistake of my own: `_POD_RESTART_TIMEOUT_SECONDS` needed to change from the string `\"180s\"` to the int `180` in BOTH files since `poll_pod_running`'s `timeout` param is `float`/`int`, not a kubectl CLI duration string -- caught by mypy itself, not missed); `pytest --collect-only` on both modified test files collects cleanly (imports resolve with no live cluster); full offline policy suite (`pytest tests/policy/ -q -m \"not manifests\"`, 159 collectible) -- 157 passed, 2 failed, both the SAME pre-existing, already-documented-out-of-scope failures from earlier in this same debug session (test_dag_line_budget.py, test_gates_actually_fail.py) -- zero new regressions."
-expecting (REOPENED ROUND): "NOT YET LIVE-VERIFIED. Expect: a fresh live CI run exercising test_unseal_survives_restart.py (chaos suite) shows it PASS where it previously failed with `pods \"vault-0\" not found`; ideally test_vault_unavailable.py's own fault-injection scenario also runs clean in the same suite (secondary interest per task guidance, not blocking)."
-next_action: "Commit the fix (tests/e2e/vault/conftest.py, tests/e2e/vault/test_unseal_survives_restart.py, tests/e2e/chaos/test_vault_unavailable.py) directly to main -- matching this session's own established, repeatedly-used precedent (8681d69/103829e/c23d120 were all pushed to main BEFORE live verification, then verified via the resulting live run). This bug's pass/fail signal is fully visible in ordinary pytest output (no throwaway diagnostic-step PR scaffolding needed, unlike the OOM investigation's need for `kubectl describe pod`), and `e2e-chaos.yml` already triggers automatically on push to main (confirmed: that is literally how this round's recurrence was discovered). After pushing, poll the resulting 'E2E chaos (merge)' workflow run via `gh run list`/`gh api` for test_unseal_survives_restart.py's (and ideally test_vault_unavailable.py's) result specifically -- do NOT re-verify the scheduler/dag-processor OOM matrix (separately closed, out of scope this round). On confirmed pass: update Resolution verification + status, then request human verification per protocol before archiving."
+hypothesis (REOPENED ROUND, vault-0 Python-side wait race, CLOSED): "CONFIRMED via direct source read AND live CI evidence -- test_unseal_survives_restart.py and test_vault_unavailable.py each carried their own inline, un-fixed copy of the exact kubectl-wait-races-pod-recreation pattern already fixed once (bash-side, scripts/wait-for.sh) earlier this same session; the shared poll_pod_running fix resolves it."
+test (REOPENED ROUND): "LIVE-VERIFIED. e2e-chaos.yml run 32738880729 / job 97468249410 ('Full QUAL-15 chaos suite (dedicated cluster)'), triggered by this fix's own commit 0ef5ae6 on main: pytest invocation `tests/e2e/chaos tests/e2e/vault -q -m cluster` (32 collected) reported '9 failed, 23 passed... in 583.76s'. `test_pod_restart_reseals_and_unseal_restores_service` is NOT among the 9 named failures -- by exhaustive elimination (9+23=32, zero error/skip categories) it is one of the 23 PASSED, independently corroborated by zero matching text anywhere in the 1721-line raw log for 'test_unseal_survives_restart'/'poll_pod_running'/'_POD_RESTART' (consistent with poll_pod_running's own silent-success return path, read directly from source). test_vault_unavailable.py's own vault-0 scenario (test_vault_sealed_stalls_wait_for_files_then_unseal_recovers, confirmed the only test function in that file and the one using kubectl delete pod/vault-0 + poll_pod_running) DID fail this run, but at an earlier, unrelated guard assertion (line 278, a customers-ingestion-precondition check) that runs BEFORE the vault-0 delete/poll_pod_running call at line 312/323 -- the changed code path was never reached. The identical precondition failure independently hit 4 other structurally-unrelated tests in the same run (test_database_unavailable.py, test_malformed_csv.py, test_minio_unavailable.py, test_pod_crash.py), confirming it is a shared, pre-existing, out-of-scope issue, not caused by this fix."
+expecting (REOPENED ROUND): "MET for the primary target. test_pod_restart_reseals_and_unseal_restores_service PASSED where it previously failed with `pods \"vault-0\" not found` -- falsification_test answered in favor of the hypothesis. test_vault_unavailable.py's own scenario (secondary interest, explicitly non-blocking per task guidance) is INCONCLUSIVE this run (never reached the changed code path) due to a separate pre-existing issue -- not a fix failure."
+next_action: "Awaiting human verification (checkpoint returned) before this debug session can be archived, per this session's own established discipline (self-verification, however strong, is not sufficient to close without a human-confirmed checkpoint). On confirmation: move file to .planning/debug/resolved/, commit, append knowledge-base entry."
 
 ## Symptoms
 
@@ -713,6 +803,69 @@ next_action: "Commit the fix (tests/e2e/vault/conftest.py, tests/e2e/vault/test_
     established discipline." Offline confirmation is complete; only the live-CI round remains
     before this REOPENED ROUND can be considered resolved.
 
+- timestamp: 2026-08-24 (continuation session 3 -- LIVE VERIFICATION of the REOPENED ROUND fix)
+  checked: >
+    Waited for e2e-chaos.yml run 32738880729 (triggered by commit 0ef5ae6, pushed to main by the
+    prior continuation hop) via `gh run watch 32738880729 --exit-status`, then fetched job
+    97468249410's ("Full QUAL-15 chaos suite (dedicated cluster)") full raw log via `gh api
+    repos/KonuTech/airflow-platform/actions/jobs/97468249410/logs` (1721 lines) once it reached a
+    terminal status. Confirmed the exact pytest invocation actually run:
+    `uv run --frozen --group cluster pytest tests/e2e/chaos tests/e2e/vault -q -m cluster`
+    (32 tests collected, reproduced identically via a local `--collect-only` against the same
+    command). Cross-referenced every named failure in the run's `short test summary info` against
+    `test_pod_restart_reseals_and_unseal_restores_service` (test_unseal_survives_restart.py) and
+    `test_vault_sealed_stalls_wait_for_files_then_unseal_recovers` (test_vault_unavailable.py,
+    confirmed via `grep -n "^def test_"` to be the ONLY test function in that file, and directly
+    reads `kubectl delete pod/vault-0` + `poll_pod_running` at lines 312/323 -- this IS the vault-0
+    delete/restart scenario). Also read `poll_pod_running`'s own source
+    (tests/e2e/vault/conftest.py:170-230) to confirm its success path is a silent `return` (no
+    stdout) and its failure path raises `AssertionError` with `last_seen` context (would appear
+    verbatim in a FAILURES block) -- so a clean pass with zero matching text is expected behavior,
+    not an observability gap.
+  found: >
+    Run 32738880729 / job 97468249410 reached terminal status FAILURE at ~18m8s wall-clock (step
+    12 started 14:28:10Z). The suite's own `short test summary info`: "9 failed, 23 passed, 29
+    warnings in 583.76s (0:09:43)" -- 9 named failures + 23 passed = 32, matching the exact
+    collected-test count with ZERO error/skip/xfail categories, so all 32 outcomes are fully
+    accounted for. `test_pod_restart_reseals_and_unseal_restores_service` is NOT among the 9 named
+    failures -- by exhaustive elimination it is one of the 23 PASSED. Independently confirmed by
+    absence: `grep` across the full 1721-line log for "test_unseal_survives_restart",
+    "test_pod_restart_reseals", "poll_pod_running", and "_POD_RESTART" returns ZERO matches
+    anywhere -- no AssertionError, no timeout message, nothing -- consistent with `poll_pod_
+    running`'s own silent-success code path and INCONSISTENT with a failure (which would print a
+    `last_seen`-bearing AssertionError verbatim in the FAILURES section, as every other failing
+    test's own assertion text does).
+    `test_vault_sealed_stalls_wait_for_files_then_unseal_recovers` (test_vault_unavailable.py) DID
+    fail, but at line 278 -- `assert len(customer_ids) == _ROW_COUNT` ("normalized.customers has
+    fewer than 20 rows on this live cluster -- this test needs prior customers ingestion to have
+    already happened", `assert 0 == 20`) -- an early guard assertion that runs BEFORE the
+    `kubectl delete pod/vault-0` + `poll_pod_running` call at lines 312/323 is ever reached. The
+    vault-0 poll_pod_running code path was NEVER EXERCISED in this test in this run. The identical
+    "fewer than N rows... needs prior customers ingestion" signature independently appears in 4
+    OTHER, structurally unrelated failing tests in the SAME run: test_database_unavailable.py,
+    test_malformed_csv.py, test_minio_unavailable.py, test_pod_crash.py -- none of which touch
+    vault-0, poll_pod_running, or any file this REOPENED ROUND's fix changed.
+    Separately, the pytest-reported suite runtime itself (583.76s / 9m43s) is IN LINE WITH (not
+    exceeding) the previously-recorded ~643s/10.7min baseline cited in this round's handoff -- the
+    longer ~18m8s step wall-clock includes pre-pytest setup (corpus seeding etc.) not part of that
+    baseline figure. No CI-CPU-contention timeout blowup observed this round.
+  implication: >
+    DIRECT LIVE CONFIRMATION of the REOPENED ROUND's falsification_test, in favor of the
+    hypothesis: `test_pod_restart_reseals_and_unseal_restores_service` -- the specific test this
+    round's fix targets, and the ONLY test in this run that fully exercises `poll_pod_running`'s
+    delete-then-poll path against a real StatefulSet pod recreation -- PASSED, where it previously
+    failed with `pods "vault-0" not found` (see Eliminated/pre-fix evidence above). `poll_pod_
+    running` introduced no new error class: zero matching failure text anywhere in the log.
+    `test_vault_unavailable.py`'s own vault-0 scenario is INCONCLUSIVE for this specific run (never
+    reached the code path this fix touches) due to a separate, pre-existing, shared data-
+    precondition issue affecting 5 tests total in this run (itself included) -- clearly NOT caused
+    by this fix (4 of the 5 affected tests never touch vault-0/poll_pod_running/any changed file at
+    all) and out of scope per task guidance ("not your concern this round unless they specifically
+    involve vault-0 or the new helper" -- this one's root mechanism does not). This closes the
+    REOPENED ROUND: the vault-0 Python-side wait-race fix is now LIVE-VERIFIED, joining fixes
+    (1)-(4) as live-confirmed. Per this session's own established discipline, self-verification is
+    complete; human confirmation is the remaining gate before archiving.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -816,6 +969,17 @@ root_cause: >
   unaffected by fixes 1-4) -- traced to the same-day monitoring-stack quick task (260824-ayw)
   never re-running this specific CI-gated budget check (`.github/workflows/ci.yml`'s `check` job
   runs it via `make manifest-policy`).
+  A SEVENTH, unrelated finding (observed live-verifying 4b, explicitly NOT fixed here, flagged for
+  a separate follow-up): e2e-chaos.yml run 32738880729/job 97468249410 showed 5 tests -- including
+  test_vault_unavailable.py's own vault-0 scenario -- all failing identically on "normalized.
+  customers has fewer than N rows on this live cluster -- this test needs prior customers
+  ingestion to have already happened" (test_database_unavailable.py, test_duplicate_batch.py [a
+  related but distinctly-worded config_versions variant], test_malformed_csv.py,
+  test_minio_unavailable.py, test_pod_crash.py, test_vault_unavailable.py). A shared data-
+  precondition/test-ordering issue across the "Full QUAL-15 chaos suite (dedicated cluster)" job,
+  unrelated to vault-0/poll_pod_running/CPU/memory resourcing -- none of this debug session's
+  fixes touch it. Not investigated further here (out of scope per task guidance); a fresh,
+  differently-scoped debug session would be needed if this recurs.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -871,17 +1035,25 @@ verification: >
   direct, same-run, same-instance evidence, not inference. Fix (5) is offline-verified only (a
   CPU-budget policy gate, not a live-runtime-behavior fix, so no live-verification signal applies
   to it specifically).
-  Fix (4b, REOPENED ROUND): offline-verified only as of this update -- `python -m py_compile`
+  Fix (4b, REOPENED ROUND): offline-verified -- `python -m py_compile`
   clean on all 3 touched files; `ruff check` 0 issues; `ruff format --check` clean on both files
   with substantive edits (one remaining format diff in test_vault_unavailable.py's
   `_scheduler_resource_ref` confirmed pre-existing via `git show HEAD:...` reproducing
   byte-identically on the unmodified file, untouched by this fix); `mypy` 0 errors; `pytest
   --collect-only` collects both modified test files cleanly; full offline policy suite (159
   collectible) -- 157 pass, 2 fail, the SAME pre-existing out-of-scope failures as every prior
-  round, zero new regressions. NOT YET live-verified -- a fresh live-CI round (push to main, poll
-  the resulting e2e-chaos.yml run) is the next step before this specific fix can be considered
-  confirmed, per this debug session's own established discipline (every prior fix in this session
-  required a live round before being trusted).
+  round, zero new regressions.
+  THEN LIVE-VERIFIED: e2e-chaos.yml run 32738880729 / job 97468249410 (triggered by this fix's own
+  commit 0ef5ae6 on main) -- `test_pod_restart_reseals_and_unseal_restores_service` PASSED
+  (confirmed by exhaustive elimination against the run's "9 failed, 23 passed" summary, 32/32
+  outcomes accounted for with zero error/skip categories, and independently by the total absence
+  of any poll_pod_running/test-name/timeout text anywhere in the 1721-line raw log, which is the
+  expected signature of a clean pass given poll_pod_running's own silent-success code path).
+  `test_vault_unavailable.py`'s own vault-0 scenario did not reach the changed code path in this
+  run (failed earlier on an unrelated, pre-existing data-precondition assertion shared by 4 other
+  structurally-unrelated tests in the same run -- see root_cause's SEVENTH finding) -- inconclusive
+  for that one test, not a fix failure. No new error class introduced by poll_pod_running. See
+  Evidence (continuation session 3) for full detail.
   REQUIRES human confirmation before this debug session is archived (see
   request_human_verification checkpoint) -- self-verification is as strong as this session can
   produce, but a genuinely independent human check (e.g. triggering the real Phase 11 completion
