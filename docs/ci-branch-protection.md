@@ -245,3 +245,8 @@ observation, using exactly the procedure this section previously prescribed:
 silently un-require a check while leaving this document looking correct.
 
 Recorded in `01-VALIDATION.md` § Manual-Only Verifications as `01-09/T2`.
+
+<!-- throwaway/ci-pipeline-ingestion-timeout-live-proof: comment-only edit to trigger
+     e2e-smoke.yml's pull_request-only DEBUG diagnostic step, verifying the
+     scheduler/dag-processor CPU+threshold fix from
+     .planning/debug/ci-pipeline-ingestion-timeout.md (commit a73282e). -->
