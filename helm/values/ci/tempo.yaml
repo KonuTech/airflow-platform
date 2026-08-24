@@ -10,9 +10,27 @@ tempo:
 
   # Smaller than local: matches helm/values/ci/vault.yaml's own sizing for
   # the same reason.
+  #
+  # Debug session ci-pipeline-ingestion-timeout, continuation session 2
+  # (2026-08-24): CPU request trimmed 100m->20m -- a SEPARATE, unrelated
+  # regression discovered incidentally while offline-verifying this debug
+  # session's own dagProcessor memory fix (`uv run pytest
+  # tests/policy/test_manifest_resources.py -m manifests`, the same CI-gated
+  # check .github/workflows/ci.yml's `check` job runs via `make
+  # manifest-policy`): the real Helm-rendered CI profile total had drifted to
+  # 3.400 cores against the 3.200-core EFFECTIVE_CI_CPU_BUDGET, confirmed via
+  # `git stash` to be a PRE-EXISTING overage on `main`, unrelated to and
+  # unaffected by this session's own dagProcessor memory change. This chart
+  # is confirmed NEVER deployed live in CI even after quick task 260824-ayw
+  # (only `make observability-verify-ci` installs it, staggered and torn
+  # down immediately, per Makefile's cluster-slice-verify header comment) --
+  # so its `requests.cpu` exists purely to satisfy kubeconform/D-12's
+  # "every container is sized" structural check, not real scheduling
+  # pressure, making it the safest place to reclaim budget with zero
+  # behavioral risk.
   resources:
     requests:
-      cpu: 100m
+      cpu: 10m
       memory: 256Mi
     limits:
       cpu: 500m

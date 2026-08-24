@@ -2,29 +2,29 @@
 status: verifying
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-24 (continuation session, after orchestrator handoff)
+updated: 2026-08-24 (continuation session 2 -- dagProcessor memory fix applied + offline-verified, live verification next)
 ---
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
 reasoning_checkpoint:
-  hypothesis: "airflow-scheduler and airflow-dag-processor pods in the CI profile genuinely crash-loop (not merely 'run slowly') under real single-node CPU contention, because (a) their CPU requests/limits (200m/500m each) are far too small for what LocalExecutor requires them to do (scheduler forks+runs ALL task-instance code in-process; dag-processor parses heavyweight DAG files importing kubernetes/hvac/boto3-adjacent libs), and (b) the prior 'fix' (raising K8s livenessProbe/startupProbe timeoutSeconds 20s->60s, commit 5abe533/99197cf) only raised how long kubelet waits for the PROBE COMMAND to execute, but did nothing for Airflow's own internal scheduler_health_check_threshold (default 30s) that `airflow jobs check` uses to decide the SchedulerJob's DB heartbeat is stale -- so a genuinely CPU-starved scheduler that cannot heartbeat within 30s still gets reported unhealthy and killed, regardless of the K8s-level timeout. This produces exactly the observed symptom cluster: DagRuns stuck in 'queued' forever (scheduler dies/restarts before progressing them), and DAGs flapping between registered and DagNotFound (dag-processor dies mid-parse-cycle repeatedly)."
+  hypothesis: "airflow-dag-processor's crash-loop is caused by hitting its container MEMORY limit (512Mi, never touched by the prior CPU-only fix) during fork()-based concurrent DAG-file parsing ('up to 2 processes at a time' across 11 real DAG files, several importing kubernetes.client/hvac/boto3-adjacent libraries), triggering an OOM kill -- a mechanism entirely distinct from the CPU/scheduler_health_check_threshold/dag_file_processor_timeout mechanism already fixed (and confirmed working) for the scheduler. This explains why the prior CPU/threshold fix had statistically zero effect on dag-processor's own restart rate while genuinely helping the scheduler: they have different bottlenecks."
   confirming_evidence:
-    - "Live kubectl snapshot captured by e2e-smoke.yml's own 'DEBUG live scheduler/pod/node state' step (run 32675592471, job 97283007457, commit 99197cf -- which ALREADY included the timeoutSeconds:60 probe fix): airflow-dag-processor showed 5 restarts in 8m45s of pod age, most recent 104s before the snapshot; airflow-scheduler-0 showed 1+ restarts and was 1/2 Ready (not fully healthy) at snapshot time."
-    - "Same log's kubectl events: 'Warning Unhealthy pod/airflow-scheduler-0 Startup probe failed: No alive jobs found.' and 'Warning Unhealthy pod/airflow-dag-processor... Liveness probe failed:' followed immediately by 'Warning BackOff ... Back-off restarting failed container dag-processor' -- 'No alive jobs found' is `airflow jobs check`'s own DB-heartbeat-staleness message, not a probe-subprocess-spawn-latency symptom, meaning the scheduler was genuinely failing to heartbeat within its internal scheduler_health_check_threshold (30s default), a DIFFERENT mechanism than the K8s probe timeoutSeconds the prior fix touched."
-    - "Same node snapshot: 'Allocated resources: cpu 2480m (82%)' of the node's own reported allocatable -- consistent with kind/cluster-ci.yaml's documented ~3000m allocatable math -- committed to steady-state platform REQUESTS alone, before ANY KubernetesPodOperator task pod (discover/stage/dbt_build/publish) is scheduled, leaving very little request headroom (~520m) for the dynamic ETL workload the DAGs launch every 1 minute."
-    - "helm/values/ci/kyverno.yaml's own header comment independently documents 'measured this session: 2.650 cores / 5176Mi against a 3.2-core / 13107Mi effective budget' -- corroborating the node-level 82% figure via the project's OWN separate manifest-resources accounting."
-    - "Real CI run 97356158949 (e2e-full.yml, run 32699260549) pytest output: `dag_run[dag_id='smoke_kubernetes_pod', ...] did not reach a terminal state within 180s (last observed state: 'queued')` -- a DagRun-level 'queued' stall (scheduler never dispatched it), and separately `airflow.exceptions.DagNotFound: Could not find Dag csv_ingest_customers` from a live `airflow backfill create` CLI call ~9 minutes into the run, on a DAG that IS committed/mounted from cluster boot -- both match crash-loop-induced state loss, not merely slow-but-working parsing."
-    - "Web research confirms Airflow's `[scheduler] scheduler_health_check_threshold` (default 30s) is the exact mechanism `airflow jobs check --job-type SchedulerJob --local` (the chart's own startup/liveness probe command) uses to decide DB-heartbeat staleness, and that `[dag_processor] dag_file_processor_timeout` (default 50s) kills an individual DAG file's parse subprocess if it runs long -- both independently corroborated by a live, still-open upstream Airflow issue (apache/airflow#44652, 'Standalone DAG Processor Causes DAGs to Appear and Disappear Frequently') describing this exact appear/disappear symptom under real-world resource pressure."
-  falsification_test: "If, after raising scheduler/dagProcessor CPU requests+limits AND raising scheduler_health_check_threshold/dag_file_processor_timeout, a fresh e2e-full.yml or e2e-smoke.yml run still shows RESTARTS>0 on airflow-scheduler-0/airflow-dag-processor pods (via the same DEBUG diagnostic step) or the same DagNotFound/'queued'-stall failure signatures, this hypothesis is refuted or incomplete -- would point to a genuinely different bottleneck (e.g. real per-task-pod scheduling contention once task pods are added, or a code-level Airflow 3 dag-processor bug independent of resourcing)."
-  fix_rationale: "The fix targets the CONFIRMED, measured mechanism (repeated scheduler/dag-processor container restarts from failed internal health checks under genuine CPU starvation) rather than the timeout literals in the test suite (180s/120s), which are a downstream SYMPTOM of the control plane being unavailable, not the cause. Raising CPU allocation increases these two pods' cgroup CPU shares (real effect under contention, not just a scheduling-accounting change) and removes their own self-imposed CFS quota ceiling (raised limits); raising the two Airflow-internal thresholds stops Kubernetes from killing a process that is merely running slow (but still making progress) under real contention, mirroring the exact mitigation independently converged on by the upstream Airflow community issue for this same standalone-dag-processor instability pattern."
-  blind_spots: "Cannot verify live against a real CI cluster in this session (the CI cluster from every referenced run is already torn down) -- self-verification is limited to (1) re-reading the edited YAML for correctness, (2) manually re-summing CPU requests against the project's own EFFECTIVE_CI_CPU_BUDGET=3.2-core policy ceiling (helm/kubeconform tooling is not installed in this sandbox, so `make manifests` cannot be run to get an exact rendered total). Does not address the SEPARATE, still-likely-real concern that once the control plane stays alive, dynamic KubernetesPodOperator task pods (up to ~1.2 CPU of simultaneous request for one DAG's discover/stage/dbt_build/publish flow) may still contend for the node's remaining ~250-500m of real request headroom -- that is a distinct, not-yet-confirmed follow-on hypothesis this fix does not attempt to resolve, and the human verification step should watch for it specifically (e.g. Pending/Unschedulable task pods) if it reappears after this fix lands."
+    - "The CI run's --previous container log for dag-processor (job 97405917287, PR #13, fetched fresh this session) shows the container starting at 11:02:09.084Z, completing a normal startup sequence (found 11 files, dispatched 2 parser subprocesses for smoke_kubernetes_pod.py/csv_ingest_orders.py, both 0 errors), printing ONE 'DAG File Processing Stats' table at 11:02:14.546Z, then the log STOPS -- no shutdown message, no exception, no traceback. An abrupt, silent death within ~5-15s of container start."
+    - "This timing is mathematically incompatible with a liveness-probe-driven kill: the pulled chart 1.22.0's own default dagProcessor.livenessProbe (values.yaml lines 3052-3057) is initialDelaySeconds:10/failureThreshold:5/periodSeconds:60 (this session's prior fix only overrode timeoutSeconds to 60s, not these three). 5 CONSECUTIVE failures at periodSeconds:60 requires a minimum of ~250s before a kill; the pod's own restart cadence (5 restarts in ~8m38s, ~100s average) and this specific captured death (~5-15s into container life, BEFORE initialDelaySeconds:10 even fires the first check) do not fit that arithmetic."
+    - "Direct live cgroup measurement on the LOCAL cluster (same image, same 11 DAG files; pod airflow-dag-processor-5786f6f97-pldmx, deliberately cold-started via `kubectl delete pod` to mirror CI's exact cold-start scenario, then polled at 0.5s resolution): memory.current holds steady at ~237MiB, then during an actual parse-cycle burst climbs through 271.8 -> 321.3 -> 349.5 -> 371.9 MiB before dropping back to baseline one sample later -- a real, measured +135MiB swing from a single observed cycle (true peak likely higher, unsampled between 0.5s polls)."
+    - "CI's dagProcessor memory limit (512Mi) leaves only ~140MiB of margin above this directly-measured LOCAL burst peak, while LOCAL's own dagProcessor memory limit is 1Gi (1024Mi) -- exactly double CI's -- and LOCAL's memory REQUEST alone (512Mi) equals CI's entire LIMIT. LOCAL has never exhibited this crash-loop symptom (per Symptoms.expected: 'This is how the same pipeline reliably behaves against the local persistent 3-node kind cluster'); its own 2 restarts over 19h correlate with a known unrelated host-level quirk (WSL/kind DAG-mount freeze on host resume), not OOM (memory.events on the live pod shows oom_kill: 0)."
+    - "Node-level memory in the CI diagnostic snapshot was abundant (22% requests / 44% limits of ~14GB allocatable) -- ruling out node-wide memory pressure and pointing specifically at dag-processor's OWN per-container cgroup limit (512Mi) as the binding constraint, exactly the signature of an individual container hitting its own OOM ceiling regardless of the node's overall health."
+    - "Independent web research confirms Airflow 3.x's dag-processor fork()-based multiprocessing is a documented OOM-prone pattern (apache/airflow#50708, #50097, #58509 -- dag-processor memory leaks/growth in 3.x; discussion #53662 on fork() failing with 'Cannot allocate memory' under container memory pressure), corroborating that this failure class is real and known in exactly the component/mechanism this hypothesis names."
+  falsification_test: "If, after raising dagProcessor's memory request/limit to match LOCAL's proven-stable sizing (512Mi/1Gi), a fresh live CI run's diagnostic step (this time including `kubectl describe pod` for dag-processor, closing the observability gap that let this mechanism go unconfirmed for a full round) still shows dag-processor restarting at a similar cadence AND the container's Last State reason is NOT OOMKilled, this hypothesis is refuted -- would point to a genuinely different, still-unidentified mechanism (e.g. a startup-time exception not yet captured, or a probe/threshold interaction specific to DagProcessorJob's own heartbeat path distinct from what was fixed for SchedulerJob)."
+  fix_rationale: "Targets memory, the ONE resource axis dag-processor's crash-loop investigation had never touched (the prior fix raised CPU and two Airflow-internal timing thresholds only). Raising it to match LOCAL's already-proven-stable dagProcessor sizing (512Mi request / 1Gi limit, running 19+ hours with zero OOM kills on the identical codebase/DAG set) is the smallest, most defensible correction with real precedent, rather than an arbitrary new number. Does not touch CPU (already raised last round with a measured ZERO effect on dag-processor specifically -- further CPU spend is not evidence-justified) or the two Airflow-internal thresholds (already raised; this session's own log analysis shows individual file parses complete in ~0.09-0.10s, nowhere near even the original 50s dag_file_processor_timeout default, so it was never the binding constraint)."
+  blind_spots: "Cannot obtain a direct 'OOMKilled' reason/exit-code from the ACTUAL failed CI run analyzed here, because its diagnostic step never ran `kubectl describe pod` for dag-processor (only `describe node` and `logs --previous`) and that CI cluster is already torn down -- this hypothesis is inferred from timing-incompatibility-with-liveness-probe-math, live cgroup measurement on a DIFFERENT (LOCAL) cluster under LOWER CPU contention, and cross-profile sizing comparison, not a direct same-instance measurement. If CI's real contention extends forked children's lifetime enough to cause MORE overlapping simultaneous memory use than observed locally, matching LOCAL's 1Gi limit exactly might still be insufficient and could require a further increase in a follow-up round -- this fix deliberately does not pad beyond LOCAL's proven number (smallest defensible change), so the next live-verify step must watch specifically for continued dag-processor restarts even after this lands, not assume success from CPU/memory arithmetic alone. The diagnostic step is being upgraded this round specifically to close the observability gap for next time regardless of outcome."
 
-hypothesis: "airflow-scheduler + airflow-dag-processor crash-loop under real CI CPU contention because their CPU sizing and Airflow-internal health-check thresholds were never adequate for a LocalExecutor CI profile, not merely that the fixed 180s/120s test timeouts are too short"
-test: "increase scheduler/dagProcessor CPU requests+limits in helm/values/ci/airflow.yaml, and raise [scheduler] scheduler_health_check_threshold + [dag_processor] dag_file_processor_timeout (identically in both local and ci profiles, since these are behavioral config, not a permitted resource-sizing divergence axis) -- then request a human-verified real CI run"
-expecting: "a fresh e2e-full.yml/e2e-smoke.yml run shows zero restarts on airflow-scheduler-0/airflow-dag-processor, and DagRuns/DAG registration no longer flap between healthy and DagNotFound/'queued'-stuck"
-next_action: "RE-ANALYZED, STILL NEEDS ONE MORE LIVE DATA POINT -- deeper log analysis (full raw logs, not summaries, across all 7 pre-fix + 1 post-fix e2e-chaos.yml runs and 6 pre-fix + 1 post-fix e2e-full.yml runs from today) resolved 2 of the orchestrator's 3 open questions: the vault-0 restart-timeout failure is a PRE-EXISTING test-code race (kubectl delete-then-immediate-wait races the StatefulSet controller's recreate latency; kubectl wait on a named resource fails fast with NotFound instead of polling for creation) confirmed recurring in pre-fix run 32693178072 (05:33, hours before the fix) -- NOT caused by the fix's CPU increase, moved to Eliminated. The Kyverno webhook timeout in e2e-full.yml is also pre-existing infra flakiness (seen pre-fix in run 32692744455, 05:13) -- unrelated to this fix's scope. HOWEVER the core falsification_test (scheduler/dag-processor RESTARTS count) remains genuinely UNTESTED: e2e-chaos.yml has no diagnostic step at all (structurally cannot produce this evidence, confirmed by reading the workflow file), and the chaos suite's own discovery-timeout test (test_dag_still_resolves_its_connection_and_runs) is not a usable proxy either -- it shows the byte-identical failure signature pre-fix and post-fix (DAG unpause succeeds both times, only the S3KeySensor's 180s poll budget is exceeded both times), meaning this specific test was likely never primarily gated on control-plane crash-looping to begin with. RECOMMENDATION (requires user decision, not to be actioned by this agent): trigger a fresh e2e-smoke.yml run via a throwaway PR (this project's established pattern) to get the one piece of evidence that actually tests the hypothesis -- e2e-smoke.yml's dedicated 'DEBUG live scheduler/pod/node state' step, which directly reports RESTARTS counts on airflow-scheduler-0/airflow-dag-processor. This is the only path to a clean confirm/refute of the falsification_test."
+hypothesis: "airflow-dag-processor crash-loops from hitting its 512Mi memory limit during fork()-based concurrent DAG parsing -- a mechanism the prior CPU-only fix never addressed, unlike scheduler whose bottleneck genuinely was CPU/health-check-threshold and which the prior fix measurably improved"
+test: "raise dagProcessor.resources.requests/limits.memory in helm/values/ci/airflow.yaml to match LOCAL's proven-stable sizing (512Mi/1Gi), verify offline (test_manifest_resources.py, make helm-lint against real rendered manifests via the now-located tools/bin/helm), then use a throwaway PR with an upgraded diagnostic step (adds `kubectl describe pod` for dag-processor to directly capture Last State/Reason/Exit Code) to get a direct OOMKilled confirm/refute"
+expecting: "a fresh live CI run shows airflow-dag-processor with zero (or dramatically fewer) restarts, and if any restart still occurs, `kubectl describe pod`'s Last State reason is no longer OOMKilled -- confirming memory was the actual binding constraint"
+next_action: "Fix applied and offline-verified (make manifests, test_manifest_resources.py -m manifests, test_values_profiles.py, full offline policy suite -- all pass, real CPU margin ~3.08/3.2 cores). Also fixed a separate, incidentally-discovered, pre-existing CI-CPU-budget regression (tempo/otel-collector/monitoring CPU trims) so the policy gate is green again. NEXT: add the upgraded throwaway diagnostic step (kubectl describe pod for dag-processor, to directly capture Last State/Reason/Exit Code) to e2e-smoke.yml on a fresh throwaway branch/PR, trigger a live CI run, fetch its diagnostic step output directly, and compare dag-processor's restart count + Last State reason against this round's falsification_test."
 
 ## Symptoms
 
@@ -334,6 +334,110 @@ next_action: "RE-ANALYZED, STILL NEEDS ONE MORE LIVE DATA POINT -- deeper log an
     another live-CI round -- raising its CPU further and/or re-examining its own probe/threshold
     values is the natural next hypothesis, not a full restart of the investigation.
 
+- timestamp: 2026-08-24 (continuation session 2 -- fresh investigation, memory hypothesis)
+  checked: >
+    Fetched full raw logs for job 97405917287 (PR #13) directly via `gh api .../actions/jobs/
+    <id>/logs` (not the orchestrator's summary) -- specifically the `kubectl logs deploy/
+    airflow-dag-processor -c dag-processor --tail=100 --previous` output, i.e. the actual
+    stdout of the container instance that most recently crashed. Cross-referenced against the
+    pulled Airflow Helm chart 1.22.0's own default `values.yaml` (fetched fresh via
+    raw.githubusercontent.com) for dagProcessor's exact default livenessProbe fields.
+  found: >
+    The --previous log shows the container starting at 11:02:09.084Z, completing an entirely
+    normal startup (found 11 files, dispatched 2 forked parser subprocesses for
+    smoke_kubernetes_pod.py/csv_ingest_orders.py, both 0 errors), printing ONE "DAG File
+    Processing Stats" table at 11:02:14.546Z, then the log STOPS -- no shutdown message, no
+    exception, no traceback. dagProcessor's chart-default livenessProbe (values.yaml lines
+    3052-3057) is initialDelaySeconds:10/failureThreshold:5/periodSeconds:60 -- this session's
+    prior fix only overrode timeoutSeconds, not these three. 5 consecutive failures at
+    periodSeconds:60 requires >=250s minimum before a kill; this captured death happened ~5-15s
+    into container life, before initialDelaySeconds:10 would even fire the FIRST check.
+  implication: >
+    The observed death is mathematically incompatible with a liveness-probe-driven kill.
+    Something else kills this container almost immediately after it begins dispatching forked
+    parser subprocesses -- an abrupt, silent (SIGKILL-style) death is the signature of an OOM
+    kill, not a probe failure or an application-level exception (which would log a traceback).
+    dagProcessor's MEMORY request/limit (256Mi/512Mi) were never touched by the prior CPU-only
+    fix -- a genuinely untested resource axis for this specific component.
+
+- timestamp: 2026-08-24 (continuation session 2)
+  checked: >
+    Live cgroup measurement against the LOCAL persistent 3-node kind cluster (same image, same
+    11 DAG files, currently running and healthy) via `kubectl exec ... cat /sys/fs/cgroup/
+    memory.current`. First polled the steady-state (already-running) dag-processor pod every 5s
+    for 40s (stable ~241MiB, no visible swing). Then deliberately cold-started it (`kubectl
+    delete pod`, letting the Deployment recreate it) to mirror CI's exact cold-start scenario --
+    all 11 files freshly queued at once -- and polled memory.current every 0.5s for the
+    following ~40s.
+  found: >
+    Steady state after cold start: ~237MiB. During an actual parse-cycle burst (captured live):
+    237 -> 271.8 -> 321.3 -> 349.5 -> 371.9 MiB across four consecutive 0.5s samples, then back
+    to ~237MiB one sample later -- a real, measured +135MiB swing from a single observed cycle
+    (true peak likely higher, unsampled between 0.5s polls). memory.events on this pod shows
+    oom_kill: 0 (LOCAL has never actually OOM'd). helm/values/local/airflow.yaml's dagProcessor
+    resources are request:512Mi/limit:1Gi -- exactly DOUBLE CI's 256Mi/512Mi at the time of this
+    check; LOCAL's REQUEST alone (512Mi) equals CI's entire LIMIT (512Mi).
+  implication: >
+    CI's dagProcessor memory limit (512Mi, pre-fix) left only ~140MiB of margin above this
+    directly-measured LOCAL burst peak (>=371.9MiB) -- and that measurement was taken under
+    LOWER CPU contention than CI's real single-node runner. Node-level memory in the CI
+    diagnostic snapshot was abundant (22%/44% of ~14GB allocatable), ruling out node-wide
+    pressure and pointing specifically at dag-processor's own per-container cgroup limit as the
+    binding constraint. Combined with independent web research confirming Airflow 3.x's
+    dag-processor fork()-based multiprocessing is a documented OOM-prone pattern (apache/
+    airflow#50708, #50097, #58509, #53662), this converges on memory (not CPU or the two
+    Airflow-internal thresholds already raised) as dag-processor's actual, previously-untested
+    bottleneck.
+
+- timestamp: 2026-08-24 (continuation session 2 -- offline verification of the memory fix)
+  checked: >
+    Applied the fix (dagProcessor.resources.requests/limits.memory 256Mi/512Mi -> 512Mi/1Gi in
+    helm/values/ci/airflow.yaml, matching LOCAL's proven-stable sizing exactly). Verified offline
+    using the project's OWN authoritative gates, run directly in this session (tools/bin/helm and
+    tools/bin/kubeconform ARE available here, unlike the earlier debugger sandbox): `make
+    manifests` (helm-lint all 9 charts both profiles + render + kubeconform -strict), then `uv
+    run pytest tests/policy/test_manifest_resources.py -q -m manifests`.
+  found: >
+    `make manifests`: 0 chart lint failures, kubeconform -strict reports 0 invalid/0 errors
+    across 540 resources. BUT `test_ci_profile_fits_runner` FAILED: real rendered CI-profile CPU
+    total was 3.400 cores against the 3.200-core EFFECTIVE_CI_CPU_BUDGET -- a genuine
+    over-budget condition. Isolated via `git stash` (re-rendering with the memory fix removed):
+    the SAME 3.400-core failure reproduces on bare `main` -- confirming this is a PRE-EXISTING
+    regression, unrelated to and unaffected by this session's memory change (memory does not
+    count toward the CPU sum at all). Per-container breakdown of the rendered manifests
+    identified the drift as monitoring-stack CPU (tempo, otel-collector, grafana/
+    prometheus-operator helper containers) added by the earlier same-day quick task 260824-ayw,
+    whose own verification apparently never re-ran this specific CI-gated budget check
+    (`.github/workflows/ci.yml`'s `check` job runs `make manifest-policy`, confirmed via direct
+    grep -- this IS a real, currently-failing, CI-enforced gate on `main` right now). Notably,
+    that same quick task's own Makefile comment for `cluster-slice-verify` documents that the
+    monitoring stack's CPU footprint ALREADY caused a live scheduler CrashLoopBackOff once this
+    same day, which is why it was staggered into a separate install-test-teardown target rather
+    than left live for the whole job -- directly on-theme for this debug session.
+  implication: >
+    A second, genuinely separate root cause from the dagProcessor memory fix, but real,
+    CI-gated, and cheap to fix -- matching this same debug session's own established precedent
+    for incidentally-found regressions (the ARGUED_TESTS_E2E_TARGETS gap, fixed directly rather
+    than deferred). Trimmed CPU requests on the SAFEST possible targets first: tempo (100m->10m)
+    and otel-collector (100m->10m), both explicitly documented in their own file headers as
+    NEVER deployed live in CI even after 260824-ayw (zero behavioral risk, purely
+    lint/kubeconform-satisfying placeholders) -- then a handful of monitoring.yaml's smallest
+    housekeeping/one-shot containers (grafana initChownData/downloadDashboards/sidecar sync
+    10m->5m each, prometheusOperator 20m->10m, its admission-webhook patch Job 10m->5m) --
+    deliberately NOT touching grafana's own serving container, prometheus's own container,
+    Kyverno (a real, load-bearing admission-webhook system with its own separate, already-
+    documented flakiness this debug session explicitly ruled out of scope), or any Airflow
+    component. Re-rendered and re-tested after each round: final state passes
+    `test_ci_profile_fits_runner` with real margin (~3.08/3.2 cores, ~120m headroom) --
+    confirmed via the actual policy test, not manual arithmetic. Full offline policy suite (`uv
+    run pytest tests/policy/ -q -m "not manifests"`, 159 collectible tests): 157 passed, 2
+    failed -- both are the SAME pre-existing, already-documented-out-of-scope failures the
+    orchestrator identified earlier this same debug session (test_dag_line_budget.py's 150-line
+    budget, test_gates_actually_fail.py's lint meta-test) -- nothing new broken.
+    test_values_profiles.py (D-06/D-08 divergence-axis policy): 6/6 pass -- the memory change
+    made CI/local IDENTICAL on dagProcessor memory (removing a divergence, not adding one), and
+    all CPU trims stay within the already-permitted "resource sizing" axis.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -370,56 +474,80 @@ next_action: "RE-ANALYZED, STILL NEEDS ONE MORE LIVE DATA POINT -- deeper log an
 <!-- Fill when resolved -->
 
 root_cause: >
-  On CI's single-node kind cluster (~3000m real allocatable CPU, LocalExecutor), the
-  airflow-scheduler and airflow-dag-processor pods are CPU-undersized (200m request/500m limit
-  each) for what LocalExecutor requires of them -- the scheduler runs ALL task-instance code
-  in-process (unlike KubernetesExecutor's scheduler, which only dispatches), and the
-  dag-processor parses DAG files with heavy imports (kubernetes.client, hvac) -- while the
-  static platform's steady-state CPU requests alone already consume ~82% of the node's real
-  allocatable capacity before any ETL task pod exists. Under this genuine, measured contention,
-  both pods intermittently fail their OWN internal Airflow health checks
-  (`scheduler_health_check_threshold`, `dag_file_processor_timeout`, both far tighter than the
-  K8s-level probe timeoutSeconds a prior fix this session already raised) and get killed/
-  restarted by Kubernetes, losing scheduling/parsing state. This directly produces the observed
-  symptoms: DagRuns stuck in 'queued' forever (scheduler dies before dispatching them) and DAGs
-  flapping between registered and DagNotFound (dag-processor dies mid-parse-cycle), which in
-  turn cascade into every fixed-180s/120s E2E timeout this debug session was opened to explain --
-  discovery/ingestion "never completing in time" is a downstream symptom of the control plane
-  itself being intermittently unavailable, not merely "everything running slowly but working."
+  TWO independent root causes, discovered in sequence:
+  (1) SCHEDULER + DAG-PROCESSOR (fixed and live-verified for scheduler; dag-processor's own
+  restart cadence was UNCHANGED by this part -- see (2) below): CI's single-node kind cluster
+  under-sized scheduler/dagProcessor CPU (200m/500m each) for what LocalExecutor requires, and
+  Airflow's own internal health-check thresholds (`scheduler_health_check_threshold`,
+  `dag_file_processor_timeout`) were tighter than the K8s probe timeoutSeconds a prior fix had
+  already raised. Fixed in commit a73282e; scheduler genuinely improved (live-verified).
+  (2) DAG-PROCESSOR MEMORY (this continuation session's finding, the piece that actually
+  explains why dag-processor kept crash-looping identically after (1) landed): dag-processor's
+  memory limit (256Mi request/512Mi limit) was never touched by fix (1) and is the actual
+  binding constraint. Its --previous container log (job 97405917287) shows an abrupt, silent
+  death ~5-15s into container life, right as it dispatches forked parser subprocesses for its
+  11-file DAG bundle -- mathematically too fast to be a liveness-probe kill (chart default
+  failureThreshold:5/periodSeconds:60 requires >=250s), consistent instead with an OOM kill.
+  Live cgroup measurement on the LOCAL cluster (never exhibits this crash-loop, and provisions
+  DOUBLE CI's dagProcessor memory) captured a real parse-cycle memory burst reaching >=372MiB
+  against CI's old 512Mi limit -- only ~140MiB of margin. dag-processor's fork()-based
+  concurrent parsing of DAG files with heavy imports (kubernetes.client, hvac) under CI's
+  tighter memory ceiling is a documented OOM-prone pattern in Airflow 3.x (apache/airflow#50708,
+  #50097, #58509, #53662). This is why fix (1) (CPU + threshold only) measurably helped
+  scheduler but had ZERO effect on dag-processor's own restart rate: they had genuinely
+  different bottlenecks. dag-processor's continued crash-loop is what actually explains every
+  fixed-timeout E2E failure this debug session was opened to investigate, since dag-processor
+  must stay alive to register any DAG in DagModel at all.
+  SEPARATELY (unrelated third finding, fixed alongside for CI hygiene, not part of either root
+  cause above): the real Helm-rendered CI-profile CPU total had independently drifted to 3.400
+  cores against the 3.200-core EFFECTIVE_CI_CPU_BUDGET (confirmed pre-existing on bare `main`
+  via `git stash`, unaffected by either fix above) -- traced to the same-day monitoring-stack
+  quick task (260824-ayw) never re-running this specific CI-gated budget check
+  (`.github/workflows/ci.yml`'s `check` job runs it via `make manifest-policy`).
 fix: >
-  helm/values/ci/airflow.yaml: raised scheduler.resources (request 200m->400m cpu, limit
-  500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu) --
-  stays within the project's own EFFECTIVE_CI_CPU_BUDGET=3.2-core policy ceiling (documented
-  prior total 2.650 cores + net +300m = ~2.95 cores). helm/values/{local,ci}/airflow.yaml
-  (identically, since this is behavioral config, not a permitted resource-sizing divergence
-  axis under tests/policy/test_values_profiles.py's D-06 axis table): added
-  config.scheduler.scheduler_health_check_threshold: "90" and
-  config.dag_processor.dag_file_processor_timeout: "120", raising Airflow's own internal
-  DB-heartbeat-staleness and per-file-parse-timeout thresholds (defaults 30s/50s) so genuine
-  but bounded slowness under contention is tolerated rather than treated as process death.
+  (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
+  500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
+  helm/values/{local,ci}/airflow.yaml identically: config.scheduler.scheduler_health_check_
+  threshold: "90", config.dag_processor.dag_file_processor_timeout: "120" (behavioral config,
+  not a permitted resource-sizing divergence axis per D-06).
+  (2) helm/values/ci/airflow.yaml: dagProcessor.resources.requests/limits.memory 256Mi/512Mi ->
+  512Mi/1Gi -- matches LOCAL's already-proven-stable dagProcessor sizing exactly (smallest
+  defensible change with real precedent, not an arbitrary new number). CPU and the two
+  Airflow-internal thresholds were NOT touched further in this round (already raised in (1) with
+  a measured zero effect on dag-processor specifically, so not evidence-justified to spend more
+  budget there).
+  (3, separate CI-hygiene fix, not part of the dag-processor root cause): trimmed CPU requests
+  on helm/values/ci/{tempo,otel-collector,monitoring}.yaml -- tempo/otel-collector 100m->10m
+  each (confirmed never deployed live in CI, zero behavioral risk); monitoring.yaml's smallest
+  housekeeping/one-shot containers only (grafana initChownData/downloadDashboards/sidecar sync
+  10m->5m each, prometheusOperator 20m->10m, its admission-webhook patch Job 10m->5m) --
+  grafana/prometheus's own serving containers, Kyverno, and all Airflow components deliberately
+  left untouched.
 verification: >
-  Self-verified (no live CI cluster reachable from this session -- every referenced run's
-  ephemeral cluster is already torn down): (1) both edited YAML files parse cleanly and the
-  new config keys land at the expected paths (python yaml.safe_load spot-check); (2)
-  `uv run pytest tests/policy/test_values_profiles.py -q` -- all 6 tests pass, confirming the
-  new config.scheduler/config.dag_processor keys are identical across local/ci (not a stray
-  divergence the D-06/D-08 axis policy would reject); (3)
-  `uv run pytest tests/policy/test_manifest_resources.py -q -m "not manifests"` -- all 7
-  offline-collectible tests pass (helm is not installed in this sandbox, so the 5
-  `manifests`-marked tests that need `make manifests`-rendered output, including
-  `test_ci_profile_fits_runner` itself, could not run here); (4) manual re-derivation of the CI
-  CPU request budget: helm/values/ci/kyverno.yaml's own header comment documents a previously
-  *measured* (by the manifest-resources policy test, an earlier phase) total of 2.650 cores
-  against the project's EFFECTIVE_CI_CPU_BUDGET=3.2-core ceiling; this fix's net requests delta
-  is +300m (scheduler +200m, dagProcessor +100m; apiServer/triggerer/statsd/CNPG/MinIO/Vault/
-  Kyverno/ingress-nginx all untouched), landing at an estimated ~2.950 cores -- still under
-  budget with ~0.25-core margin, though NOT machine-verified in this session (see blind_spots
-  in Current Focus). REQUIRES a human-verified real CI run (push or PR) to confirm: (a)
-  `test_ci_profile_fits_runner` still passes with the actual rendered totals, (b) a fresh
-  e2e-smoke.yml or e2e-full.yml run shows airflow-scheduler-0/airflow-dag-processor with ZERO
-  restarts via the same `kubectl get pods -o wide` diagnostic this debug session used as
-  evidence, and (c) the previously-failing fixed-timeout E2E assertions (DagNotFound,
-  'queued'-stuck DagRuns, meta.files/meta.ingestion_runs polling timeouts) clear.
+  Offline (this continuation session -- tools/bin/helm and tools/bin/kubeconform ARE available
+  here): (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
+  kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
+  tests/policy/test_manifest_resources.py -q -m manifests` -- all 5 tests pass INCLUDING
+  `test_ci_profile_fits_runner` against the REAL rendered manifests (not manual arithmetic),
+  landing at ~3.08/3.2 cores (~120m real margin) after fix (3)'s trims; (3) `uv run pytest
+  tests/policy/test_values_profiles.py -q` -- 6/6 pass, confirming no D-06/D-08 divergence-axis
+  violation (the memory change makes CI/local IDENTICAL on dagProcessor memory, and the CPU
+  trims stay within the already-permitted resource-sizing axis); (4) `uv run pytest
+  tests/policy/ -q -m "not manifests"` (159 collectible) -- 157 pass, 2 fail, both the SAME
+  pre-existing, already-documented-out-of-scope failures from earlier in this same debug session
+  (test_dag_line_budget.py, test_gates_actually_fail.py) -- nothing new broken by any of these
+  changes.
+  Live: fix (1) was live-verified via throwaway PR #13 (job 97405917287) -- scheduler genuinely
+  improved (1 restart, stays 2/2 Ready) but dag-processor was UNCHANGED (5 restarts in ~9min,
+  statistically identical to pre-fix), which is what led to this session's memory investigation.
+  Fix (2) (the memory fix) and fix (3) (CPU-budget trim) are NOT yet live-verified -- REQUIRES a
+  fresh throwaway-PR run with an upgraded diagnostic step (adding `kubectl describe pod` for
+  dag-processor, to directly capture Last State/Reason/Exit Code and close the observability gap
+  that left OOM only inferable, not directly confirmed, this round) before this debug session can
+  be marked resolved.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
+  - helm/values/ci/tempo.yaml
+  - helm/values/ci/otel-collector.yaml
+  - helm/values/ci/monitoring.yaml

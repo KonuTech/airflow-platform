@@ -270,10 +270,10 @@ dagProcessor:
   resources:
     requests:
       cpu: 300m
-      memory: 256Mi
+      memory: 512Mi
     limits:
       cpu: 1200m
-      memory: 512Mi
+      memory: 1Gi
   # Same live-diagnosed contention race as scheduler.livenessProbe above --
   # dag-processor's own liveness check timed out at the chart's 20s default.
   #
@@ -287,6 +287,29 @@ dagProcessor:
   # governs how long a single DAG file's own parse subprocess may run before
   # being killed as hung -- independent of this timeoutSeconds, which only
   # bounds the K8s probe command itself).
+  #
+  # Debug session ci-pipeline-ingestion-timeout, continuation session 2
+  # (2026-08-24): the CPU+threshold fix above measurably helped scheduler but
+  # had ZERO effect on dag-processor's own restart cadence (still 5 restarts
+  # in ~9min, live-verified via throwaway PR #13, job 97405917287) -- because
+  # dag-processor's actual bottleneck is a DIFFERENT resource this fix never
+  # touched: MEMORY. Its --previous container log shows an abrupt, silent
+  # death ~5-15s into container life (right after dispatching 2 forked parser
+  # subprocesses for the 11-file DAG bundle) -- too fast to be the
+  # livenessProbe (initialDelaySeconds:10/failureThreshold:5/periodSeconds:60
+  # requires >=250s of consecutive failure), consistent instead with an OOM
+  # kill. Live cgroup measurement on the LOCAL cluster (same image, same DAG
+  # files, cold-started to mirror this exact scenario) showed a real parse-
+  # cycle memory burst reaching >=372MiB against the OLD 512Mi limit here --
+  # only ~140MiB of margin. Raised to match LOCAL's already-proven-stable
+  # dagProcessor sizing (512Mi request / 1Gi limit, 19+ hours with zero OOM
+  # kills on the identical codebase) rather than an arbitrary new number --
+  # the smallest change with real precedent. Memory has enormous slack under
+  # this project's own EFFECTIVE_CI_MEMORY_BUDGET=13107Mi policy gate
+  # (baseline measured total was 5176Mi requests before this change), unlike
+  # CPU which is already tight -- so this fix does not touch CPU further,
+  # since raising CPU alone already proved to have no effect on this
+  # component's restart rate.
   livenessProbe:
     timeoutSeconds: 60
   logGroomerSidecar:

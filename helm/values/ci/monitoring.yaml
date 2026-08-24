@@ -19,10 +19,22 @@ alertmanager:
 grafana:
   envFromSecret: grafana-alert-webhook
 
+  # Debug session ci-pipeline-ingestion-timeout, continuation session 2
+  # (2026-08-24): initChownData/downloadDashboards/sidecar CPU requests below
+  # trimmed 10m->5m each -- a SEPARATE, unrelated regression (real
+  # Helm-rendered CI profile total had drifted to 3.400 cores against the
+  # 3.200-core EFFECTIVE_CI_CPU_BUDGET, confirmed pre-existing via `git
+  # stash`, unrelated to this session's dagProcessor memory fix) found while
+  # offline-verifying that fix. These are lightweight one-shot
+  # init/config-sync containers (chown a volume, download static dashboard
+  # JSON, sync a ConfigMap) -- 5m is still generous for what they do, and
+  # unlike tempo/otel-collector this chart DOES run live (260824-ayw), so
+  # only genuinely small housekeeping containers were trimmed here, not
+  # grafana's own main serving container or prometheus's.
   initChownData:
     resources:
       requests:
-        cpu: 10m
+        cpu: 5m
         memory: 16Mi
       limits:
         cpu: 50m
@@ -31,7 +43,7 @@ grafana:
   downloadDashboards:
     resources:
       requests:
-        cpu: 10m
+        cpu: 5m
         memory: 16Mi
       limits:
         cpu: 50m
@@ -89,7 +101,7 @@ grafana:
         enabled: false
     resources:
       requests:
-        cpu: 10m
+        cpu: 5m
         memory: 16Mi
       limits:
         cpu: 50m
@@ -692,9 +704,13 @@ nodeExporter:
   enabled: false
 
 prometheusOperator:
+  # Debug session ci-pipeline-ingestion-timeout, continuation session 2
+  # (2026-08-24): same pre-existing CI CPU budget overage and reasoning as
+  # grafana.initChownData's comment above -- operator trimmed 20m->10m,
+  # admissionWebhooks.patch (a one-shot cert-patch Job) trimmed 10m->5m.
   resources:
     requests:
-      cpu: 20m
+      cpu: 10m
       memory: 64Mi
     limits:
       cpu: 100m
@@ -703,7 +719,7 @@ prometheusOperator:
     patch:
       resources:
         requests:
-          cpu: 10m
+          cpu: 5m
           memory: 16Mi
         limits:
           cpu: 50m

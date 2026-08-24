@@ -50,9 +50,16 @@ ports:
 # Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
 # other pod the CI job renders (matches helm/values/ci/vault.yaml's own
 # sizing for the same reason).
+#
+# Debug session ci-pipeline-ingestion-timeout, continuation session 2
+# (2026-08-24): CPU request trimmed 100m->20m -- same pre-existing CI CPU
+# budget overage and same reasoning as helm/values/ci/tempo.yaml's matching
+# comment (a separate, unrelated regression found while offline-verifying
+# this session's own dagProcessor memory fix). This chart is also confirmed
+# NEVER deployed live in CI, so this is a zero-behavioral-risk trim.
 resources:
   requests:
-    cpu: 100m
+    cpu: 10m
     memory: 256Mi
   limits:
     cpu: 500m
