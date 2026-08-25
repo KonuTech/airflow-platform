@@ -2,7 +2,10 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 10 POST-RUN ANALYSIS COMPLETE on run 32873456327 (headSha d0d1ad6):
+updated: 2026-08-25 (ROUND 11 fixes 15a+15b + two test artifacts implemented, offline-verified
+  with a red/green falsification, pushed as 377c068; live verification run 32884691063
+  recorded; awaiting watcher. See Current Focus ROUND 11 + Resolution fix (15).)
+updated_prior_round11: 2026-08-25 (ROUND 10 POST-RUN ANALYSIS COMPLETE on run 32873456327 (headSha d0d1ad6):
   ROOT CAUSE (14) LIVE-CONFIRMED, fix (14) WORKS at mechanism level -- ALL FIVE pre-registered
   primaries green: (0) publish.yml companion success; (1) fix verifiably in force
   (stage_cpu_request=200m registered AND effective, node platform requests 2780m->2580m);
@@ -138,7 +141,156 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- CURRENT STATE):
+ROUND 11 (2026-08-25, opened on user decision: SCOPE B -- CURRENT STATE):
+  charter: "User-chosen scope B: (1) 15a silver_orders/dedup_audit null dataset_id -- fix the
+      orders dataset_id resolution on a fresh cluster at the right layer (registration
+      ordering vs seed vs the model's lookup), NOT a nullable-column workaround. (2) 15b
+      reconciliation_customers permission denial -- make the compiled SQL use migration 0028's
+      lookup function instead of reading meta.datasets directly; do NOT grant dbt_app SELECT.
+      (3) Determine whether (15) is latent locally (orders pre-registered? more privileged
+      role?) with direct evidence, record in Evidence -- if latent, state explicitly that this
+      is a production-shaped defect CI caught. (4) Test artifacts: fix
+      test_smoke_dag_xcom_contains_built_sha's full-vs-short sha comparison (shape bug, image
+      is correct) and test_no_extra_schemas_exist's stale allowlist (add 'meta' after
+      confirming migrations create it). DEFERRED to post-run analysis (user-accepted):
+      measured-floor budget assessment for discovery windows/backfill collisions -- judge from
+      this round's verification run data. Standing rules unchanged: rounds 1-10 fixes stay; no
+      slot redesign; runner migration out of scope; follow-up B (sidecar mirror) captured;
+      offline battery before push; one 60s watcher (run by session manager, NOT this agent);
+      judge by internals + census, node-ID diff secondary (expect the saturated 17-set to
+      START clearing if the knock-on theory is right -- note exactly which node-IDs go
+      green); commit docs per convention."
+  hypothesis: "Fixing (15a)+(15b) unblocks dbt_build (first-ever dbt_build success on CI) ->
+      the 45-min dbt-retry dagrun_timeout wedge disappears -> max_active_runs=1 slot frees ->
+      the knock-on templates (7x discovery-window, 3x AlreadyRunningBackfill, publish-never-
+      ran data-state asserts, DBT_BUILD-never-RUNNING) collapse."
+  falsification_criteria_preregistered:
+    - "(a) dbt_build reaches state=success on CI (first ever)."
+    - "(b) ZERO dedup_audit not-null violations and ZERO permission-denied errors in dbt
+      pod logs."
+    - "(c) DagRuns complete well under dagrun_timeout=45min (no wedge)."
+    - "(d) Regression guards hold: stage successes persist (try=1, ~30s), FailedScheduling 0,
+      Kyverno DENY 0, control-plane restarts 0."
+    - "(e) Node-ID diff: expect the saturated 17-test signature to START clearing; record
+      exactly which node-IDs go green + measured floors for discovery windows/backfill
+      collisions (deferred budget assessment input)."
+  investigation_state: "IN PROGRESS. Confirmed so far by direct source reads: (15a) mechanism
+      -- dbt/macros/dedup_audit_post_hook.sql inserts ONE audit row UNCONDITIONALLY per
+      invocation, resolving dataset_id via meta.dataset_id_for_name('{dataset}') (migration
+      0028 SECURITY DEFINER fn returning NULL for unregistered names); meta.datasets rows are
+      created ONLY by ingestion-side code (dataplat config/registry.py sync() upsert +
+      metadata/postgres.py get_or_create_dataset -- no config-sync DAG exists yet, registry
+      docstring says planned), so a fresh cluster where orders has never ingested has no
+      'orders' row; dbt build (whole project, triggered from csv_ingest_customers) still runs
+      silver_orders whose post-hook then inserts dataset_id=NULL vs NOT NULL FK (migration
+      0024). Sibling macro reconciliation_post_hook.sql ALREADY documents+implements the
+      no-phantom-row-on-empty-input behavior (bronze_files cross join). CRITICAL coupling
+      found: reconciliation's prior_watermark EXCLUDES the current build's own dedup_audit
+      row by identity (dedup_audit_id < max(dedup_audit_id)), which RELIES on dedup's
+      unconditional insert -- so a naive skip-when-new_bronze-empty guard in dedup would
+      lower recon's floor on every no-op build and re-write duplicate reconciliation rows.
+      Right-layer fix: guard dedup's audit insert on DATASET RESOLVABILITY (where
+      meta.dataset_id_for_name(...) is not null) -- unregistered implies staging empty
+      implies pure no-op row, and recon's floor logic is provably unaffected in that branch
+      (max(dedup_audit_id) over zero rows -> NULL -> empty prior set -> floor 0 -> bronze_files
+      empty -> zero rows). (15b) mechanism -- dbt/tests/reconciliation_customers.sql (and
+      reconciliation_orders.sql, same defect) JOIN meta.datasets directly; dbt_app has
+      SELECT+INSERT on meta.reconciliation_results (migration 0032) and EXECUTE on the 0028
+      fn, but zero grant on meta.datasets (D-08 boundary) -> rewrite the join as
+      rr.dataset_id = meta.dataset_id_for_name('customers'/'orders')."
+  reasoning_checkpoint:
+    hypothesis: "(15a) dedup_audit_post_hook's unconditional audit INSERT resolves
+        dataset_id via meta.dataset_id_for_name(), which returns NULL for a dataset never
+        registered in meta.datasets -- and registration happens ONLY via that dataset's own
+        ingestion path, so a whole-project dbt build on a fresh cluster fails silver_orders
+        with a NOT NULL violation before orders ever ingests. (15b) the two singular
+        reconciliation tests JOIN meta.datasets directly, which the least-privilege dbt_app
+        role deliberately cannot SELECT (D-08/migrations 0021/0028). Together they make
+        dbt_build fail deterministically every try -> 45min dagrun_timeout wedge -> the
+        knock-on templates."
+    confirming_evidence:
+      - "Round10 dbt pod output: exact NOT NULL failing row (dataset 'orders',
+        dataset_id null) + exact 'permission denied for table datasets' in
+        reconciliation_customers -- read directly from the run log."
+      - "Direct source reads: unconditional INSERT in dedup_audit_post_hook.sql; NOT NULL
+        FK in migration 0024; only two meta.datasets writers repo-wide, both
+        ingestion-side; both singular tests join meta.datasets; 0032 grants dbt_app
+        reconciliation_results but nothing grants meta.datasets."
+      - "Direct LOCAL reproduction: SET ROLE dbt_app -> the join errors 'permission denied
+        for table datasets' on the live local warehouse; dataset_id_for_name works as
+        dbt_app (1/76); local orders pre-registered (latent 15a); local dbt_build zero
+        successes since 2026-08-20 (15b live locally, not latent)."
+    falsification_test: "Pre-registered for the ROUND 11 live run (internals primary,
+        node-IDs secondary): (a) dbt_build reaches state=success on CI (first ever);
+        (b) ZERO dedup_audit not-null violations and ZERO permission-denied errors in dbt
+        pod logs; (c) DagRuns complete well under dagrun_timeout=45min (no wedge);
+        (d) regression guards hold (stage successes try=1 persist, FailedScheduling 0,
+        Kyverno DENY 0, control-plane restarts 0); (e) census/node-ID diff -- the 17-set
+        should START clearing; record which node-IDs go green + measured discovery-window/
+        backfill floors for the deferred budget assessment. If dbt_build STILL fails with
+        both fixes verifiably in the image, (15)'s attribution is wrong."
+    fix_rationale: "Root-cause-level, not symptom-level: (15a)'s guard makes the audit
+        write conditional on the dataset being REGISTERED -- the exact predicate whose
+        violation produced the NULL -- rather than nulling the column, seeding data from
+        migrations (structure/data boundary violation), or granting dbt registration
+        rights; the unregistered=>empty-staging invariant means the skipped row is always
+        a zero-information no-op row, and the recon-floor coupling analysis proves sibling
+        behavior is unperturbed. (15b) switches the tests to the purpose-built 0028 lookup
+        function -- the project's own documented least-privilege interface -- instead of
+        widening dbt_app's grants. Artifacts: prefix-compare proves image-commit identity
+        under BOTH bake formats; 'meta' allowlisting matches what migrations 0001+0038
+        deliberately create/expose."
+    blind_spots: "(1) dbt's partial-parse cache could in principle serve a stale compiled
+        test -- mitigated: the dbt image is rebuilt from scratch per commit (COPY dbt/).
+        (2) The recon-floor analysis for the unregistered branch is source-derived, not
+        yet empirically run against a live dbt build on a fresh warehouse -- offline
+        battery includes a fresh-schema simulation of both macro paths if feasible via
+        testcontainers integration tests. (3) A dbt_build success on CI exposes publish
+        and downstream hops to first-ever CI execution -- new residuals may surface
+        beneath (per this session's whack-a-mole precedent). (4) The 180s windows may
+        still miss at 12-file depth even unwedged -- that is the deferred measured-floor
+        branch, NOT a refutation of (15)."
+  fixes_implemented: "ALL FOUR IMPLEMENTED + offline-verified (see Resolution fix (15) and
+      its verification entry, incl. the red/green falsification of the 15a guard against a
+      fresh-database dbt build reproducing the exact CI NOT NULL error). Pushed as commit
+      377c068 (base 50d80b6)."
+  live_verification_state: "RECORDED 2026-08-25T18:36Z: fix (15) pushed as commit 377c068.
+      AUTHORITATIVE ROUND 11 live-verification run: e2e-full.yml run 32884691063 (headSha
+      377c068, created 2026-08-25T18:35:59Z, in_progress at recording time). Companion
+      runs, same headSha: publish.yml 32884691018 (must complete build+sign BEFORE the e2e
+      cluster pulls -- verify its conclusion as POST-RUN CHECK ITEM 0), CI 32884691069,
+      e2e-chaos 32884690971 (both out of scope for this signature). The docs push
+      recording this state uses [skip ci] per the ROUND 7 lesson -- no supersession risk.
+      POST-RUN ANALYSIS STEPS (for the continuation agent, once the session manager's
+      single 60s-interval watcher reports terminal), judged on INTERNAL diagnostics per
+      the ROUND 11 pre-registered falsification criteria (node-ID diff SECONDARY):
+      (0) publish.yml 32884691018 conclusion must be success (image race check; the dbt
+      image MUST be rebuilt from 377c068 -- both fixes live inside the dbt image via
+      COPY dbt/);
+      (1) FIX-IN-FORCE probe: the dbt-build pods' logs must show NO 'null value in column
+      dataset_id' and NO 'permission denied for table datasets' -- their presence with the
+      377c068 dbt image verifiably pulled REFUTES the (15) fix;
+      (2) PRIMARY -- first-ever dbt_build state=success on CI (TI dump), and DagRuns
+      completing WELL under dagrun_timeout=45min (no wedge);
+      (3) PRIMARY -- knock-on collapse: discovery-window misses and AlreadyRunningBackfill
+      counts must drop vs ROUND 10's 7/3 as the max_active_runs slot frees; record the
+      MEASURED floors (per-file drain, discovery latency, backfill window occupancy) for
+      the deferred measured-floor budget assessment;
+      (4) REGRESSION GUARDS: stage successes persist (try=1, ~30s), FailedScheduling 0,
+      Kyverno DENY 0, scheduler/dag-processor/triggerer restarts 0, scheduler peak below
+      2048Mi;
+      (5) SECONDARY -- pytest failure-template census + node-ID diff vs the invariant
+      17-set (12 consecutive runs): the saturated signature should START clearing; note
+      exactly which node-IDs go green (expected direct beneficiaries:
+      test_smoke_dag_xcom_contains_built_sha, test_no_extra_schemas_exist, the dbt/
+      data-state asserts, plus whatever the unwedged slot drains in time); per the
+      whack-a-mole precedent, NEW residuals may surface beneath (publish and downstream
+      hops execute on CI for the first time) -- name them with direct evidence, return a
+      decision checkpoint before any ROUND 12 fix."
+  next_action: "AWAITING the session manager's watcher on run 32884691063. On terminal:
+      continuation agent executes the POST-RUN ANALYSIS STEPS above."
+
+ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- SUPERSEDED BY ROUND 11 ABOVE):
   charter: "User-chosen Hybrid, amendment verbatim: 'reduce number of processed files if they
       are an issue and their size.' Priority order: (1) throughput-ceiling analysis FIRST --
       empirically quantify from round9-job.log whether a file can drain within 180s given
@@ -4356,6 +4508,87 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     visible before: dbt had NEVER actually executed on CI until this run (blocked by (12)
     then (14)). Per the standing rule, no ROUND 11 fix without a decision checkpoint.
 
+- timestamp: 2026-08-25 (ROUND 11 -- root-cause investigation of (15a)/(15b) + the two
+    test artifacts, all by direct source reads + direct LOCAL-cluster queries)
+  checked: >
+    (a) dbt/macros/dedup_audit_post_hook.sql + dbt/macros/reconciliation_post_hook.sql
+    full source; (b) migrations 0001/0021/0024/0028/0032 (schema/grant/constraint layer);
+    (c) dataplat config/registry.py + metadata/postgres.py (the ONLY two meta.datasets
+    writers repo-wide); (d) dbt/tests/reconciliation_{customers,orders}.sql; (e) LOCAL
+    analytics-db live queries: meta.datasets contents, role_table_grants on meta.datasets,
+    SET ROLE dbt_app probes (the recon-test join AND meta.dataset_id_for_name), schema
+    owners + has_schema_privilege + information_schema.schemata AS analytics_owner;
+    (f) LOCAL airflow-db task_instance history for task_id='dbt_build'; (g) Vault
+    bootstrap _ensure (k) block (dbt-db secret -> user=dbt_app both profiles);
+    (h) docker/dbt/Dockerfile (COPY dbt/ -> project baked into image) + local image tags
+    vs git ancestry of the recon-test commit 60284e7; (i) Makefile GIT_SHA (short) vs
+    publish.yml build-args GIT_SHA=${{ github.sha }} (full); (j)
+    tests/e2e/cluster/test_postgres_topology.py ALLOWED_SCHEMAS + round10-job.log exact
+    failure text.
+  found: >
+    (15a) MECHANISM CONFIRMED: dedup_audit_post_hook inserts ONE audit row UNCONDITIONALLY
+    per invocation, resolving dataset_id via meta.dataset_id_for_name('{dataset}')
+    (migration 0028 SECURITY DEFINER, returns NULL for unregistered names) into a NOT NULL
+    FK column (migration 0024). meta.datasets rows are created ONLY by ingestion-side code
+    (registry.sync upsert at cli config-sync; get_or_create_dataset at discovery) -- no
+    config-sync DAG exists yet, no seed. A fresh cluster where orders never ingested has no
+    'orders' row, but dbt build (WHOLE project, triggered from csv_ingest_customers) still
+    runs silver_orders -> post-hook inserts dataset_id NULL -> deterministic failure.
+    LATENT-LOCALLY CONFIRMED: local meta.datasets has orders=dataset_id 1 (registered
+    before customers=76, from early local ingests) -- the resolution succeeds locally
+    purely by historical accident of ingestion order. This is a PRODUCTION-SHAPED defect
+    CI caught: ANY fresh deployment where the dbt project builds before every dataset's
+    first ingest hits it. CRITICAL COUPLING (constrains the fix): reconciliation_post_hook
+    derives its per-model floor by EXCLUDING the current build's own dedup_audit row via
+    identity (dedup_audit_id < max(dedup_audit_id) for model_name) -- this RELIES on
+    dedup's unconditional insert, so a skip-on-empty-new_bronze guard would lower recon's
+    floor on every no-op build of a REGISTERED dataset and re-write duplicate
+    reconciliation rows. A skip-on-UNRESOLVABLE-dataset guard has no such hazard:
+    unregistered => staging.<ds> empty (rows only arrive via ingestion, which registers
+    the dataset first) => recon's max(dedup_audit_id) over zero rows -> NULL -> floor 0 ->
+    bronze_files empty -> recon writes zero rows (its own documented no-phantom-row
+    cross-join) -- both hooks cleanly no-op.
+    (15b) MECHANISM CONFIRMED + NOT LATENT LOCALLY -- LIVE ON BOTH CLUSTERS: the two
+    singular tests JOIN meta.datasets directly; dbt runs as dbt_app in BOTH profiles
+    (vault-bootstrap (k): etl/dbt-db user=dbt_app; resolve_secrets.py -> DBT_PG_USER);
+    dbt_app has SELECT+INSERT on meta.reconciliation_results (0032) + EXECUTE on the 0028
+    function but ZERO grant on meta.datasets (D-08 boundary). Direct local reproduction:
+    SET ROLE dbt_app -> the recon-test join = 'ERROR: permission denied for table
+    datasets'; meta.dataset_id_for_name('orders'/'customers') as dbt_app = 1/76 (works).
+    Corroborating timeline: local dbt_build has ZERO successes since 2026-08-20 19:26
+    (customers; orders' single success 2026-08-20 16:42) -- the recon tests landed
+    2026-08-19 (60284e7), are contained in dbt image 46da94a (built 08-20, ancestry
+    verified) and in the currently-pinned localhost:5001/dbt:d290f77 (built 08-23, project
+    baked in via COPY dbt/) -- consistent with the permission denial having broken local
+    dbt_build the moment an image containing the tests rolled out. NOT a fresh-cluster
+    artifact.
+    ARTIFACT (i) CONFIRMED: Makefile bakes GIT_SHA=$(git rev-parse --short HEAD) locally;
+    publish.yml bakes GIT_SHA=${{ github.sha }} (full 40-char) on CI; the test compares
+    XCom git_sha against `git rev-parse --short HEAD` -- passes locally, fails on CI with
+    the image demonstrably CORRECT (round10 log: XCom d0d1ad6be1... IS the checked-out
+    d0d1ad6). Pure comparison-shape bug.
+    ARTIFACT (ii) CONFIRMED: ALLOWED_SCHEMAS={pg_catalog,information_schema,public,
+    pg_toast} (test_postgres_topology.py line 37, Phase-3-era 'no schema exists yet'
+    docstring). Migration 0001 creates schema meta; migrations 0012/0013/0038 grant
+    analytics_owner (the analytics-db-app secret user the test connects as) USAGE/SELECT
+    on meta objects -- so information_schema.schemata AS analytics_owner returns exactly
+    {information_schema,meta,pg_catalog,public} (verified live locally; staging/silver/
+    normalized are NOT visible to it -- no USAGE), matching CI's exact failure "unexpected
+    schema(s): ['meta']". Stale allowlist; would fail locally identically. Add 'meta'.
+  implication: >
+    All four ROUND 11 scope-B items have confirmed mechanisms and right-layer fixes:
+    (15a) guard dedup_audit_post_hook's audit INSERT on dataset resolvability (WHERE
+    meta.dataset_id_for_name(...) IS NOT NULL) -- fixes the fresh-deployment NULL without
+    perturbing the recon floor coupling, keeps the every-build-audit-row invariant for
+    registered datasets, and fails LOUDLY (decisions-insert FK violation) if the
+    unregistered-implies-empty-staging invariant is ever breached; (15b) rewrite both
+    singular tests to rr.dataset_id = meta.dataset_id_for_name('<ds>') -- preserves
+    least-privilege dbt_app exactly as migration 0028 designed (NO new grant); (i) compare
+    XCom sha as a prefix of `git rev-parse HEAD` (min-length-guarded) so both the local
+    short-sha and CI full-sha bake formats prove the same commit; (ii) add 'meta' to
+    ALLOWED_SCHEMAS with a migration-0001 justification. Note: fixing 15b also unblocks
+    LOCAL dbt_build (broken since 2026-08-20, previously unnoticed).
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -4802,6 +5035,20 @@ root_cause: >
   ROUND 10 show the same full-vs-short shape); (ii) test_no_extra_schemas_exist flags
   schema 'meta' which the project's own migrations create (stale allowlist suspicion,
   1 confirmation read needed).
+  ROUND 11 UPDATE: (15) is now CONFIRMED (upgraded from candidate) with full mechanism
+  detail and a direct local reproduction -- see the ROUND 11 Evidence entry. (15a) root
+  cause: dedup_audit_post_hook's UNCONDITIONAL audit INSERT resolves dataset_id via
+  meta.dataset_id_for_name(), which returns NULL for any dataset not yet registered in
+  meta.datasets; registration happens ONLY via that dataset's own ingestion path (no seed,
+  no config-sync DAG exists), so a whole-project dbt build on a fresh cluster fails
+  silver_orders before orders' first ingest. LATENT LOCALLY (orders pre-registered as
+  dataset_id=1 by early local ingests) => a production-shaped fresh-deployment defect CI
+  caught. (15b) root cause: both singular reconciliation tests JOIN meta.datasets directly,
+  which dbt_app (the role dbt runs as in BOTH profiles, per vault-bootstrap (k)) deliberately
+  cannot SELECT (D-08 boundary). NOT latent locally: reproduced 1:1 via SET ROLE dbt_app on
+  the live local warehouse, and local dbt_build has had ZERO successes since 2026-08-20
+  (when a dbt image containing the 08-19-committed reconciliation tests rolled out) --
+  fixing 15b also repairs LOCAL dbt_build, broken since then and previously unnoticed.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -4993,6 +5240,40 @@ fix: >
   pod/FailedScheduling-event capture (events expire ~1h, so only rolling capture yields a
   trustworthy census -- closes root cause (14)'s recorded HONEST GAP) plus an end-of-run
   `airflow variables get stage_cpu_request` proof-of-fix-in-force probe.
+  (15, ROUND 11, user-chosen scope B): (15a) `dbt/macros/dedup_audit_post_hook.sql`: the
+  audit INSERT gains a registration guard -- `where meta.dataset_id_for_name('{{
+  dataset_name }}') is not null` -- plus docstring point 5 documenting the fresh-deployment
+  rationale, the unregistered=>empty-staging invariant (a skipped row is always a
+  zero-information no-op: counts 0, NULL run-id range), the loud-failure property if that
+  invariant were ever breached (dedup_decisions' NOT NULL dedup_audit_id), and WHY it is
+  deliberately NOT a skip-when-new_bronze-empty guard (reconciliation_post_hook's floor
+  excludes the current build's own audit row BY IDENTITY and relies on the
+  every-invocation-writes-a-row behavior for REGISTERED datasets; in the unregistered
+  branch the sibling macro provably no-ops on its own: max(dedup_audit_id) over zero rows
+  -> NULL -> floor 0 -> bronze_files empty -> zero rows). NOT a nullable-column workaround,
+  no migration-time data seeding (structure/data boundary), no new dbt_app privileges.
+  (15b) `dbt/tests/reconciliation_customers.sql` + `dbt/tests/reconciliation_orders.sql`:
+  the `join meta.datasets` is replaced with `rr.dataset_id =
+  meta.dataset_id_for_name('<dataset>')` (migration 0028's purpose-built least-privilege
+  lookup; dbt_app keeps zero grant on meta.datasets, headers document the D-08 boundary
+  and the observed denial). NEW REGRESSION TEST: `tests/integration/test_dbt_dedup_audit.py::
+  test_whole_project_build_on_a_fresh_unregistered_database_writes_no_audit_rows` -- spins
+  its OWN throwaway PG18 container (the shared migrated_dsn gets 'customers'/'orders'
+  registered by sibling files, and env.py's wrong-database guard demands the name
+  'analytics', so a second container is the minimal honest fresh-cluster simulation), runs
+  alembic head + a WHOLE-project dbt build with ZERO datasets registered, asserts build
+  green + zero dedup_audit rows + zero reconciliation_results rows. Artifact (i):
+  `tests/e2e/slice/test_smoke_and_idempotency.py::test_smoke_dag_xcom_contains_built_sha`
+  now compares the XCom sha as a min-length-guarded (>=7) PREFIX of `git rev-parse HEAD` --
+  Makefile bakes the short sha locally, publish.yml bakes the full `${{ github.sha }}` on
+  CI, both name the same commit; equality-vs-one-shape was the bug (image provably correct
+  in rounds 9/10); U1 spike-doc template text updated to match. Artifact (ii):
+  `tests/e2e/cluster/test_postgres_topology.py` ALLOWED_SCHEMAS += 'meta' with a comment
+  citing migration 0001 (creates meta) and 0012/0013/0038 (grant analytics_owner -- the
+  analytics-db-app user the test connects as -- USAGE/SELECT on meta objects, which is
+  exactly why information_schema.schemata reports it); staging/silver/normalized
+  deliberately NOT allowlisted (no analytics_owner USAGE -- if one ever appears the test
+  should flag it); stale Phase-3 'no schema exists yet' docstring corrected.
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -5204,6 +5485,29 @@ verification: >
   its fix verified at mechanism level. Suite NOT yet green: residual candidate (15) (dbt
   layer -- see root_cause (15) and the ROUND 10 post-run Evidence entry) now dominates the
   unchanged 17-node-ID set via its dagrun_timeout wedge knock-ons.
+  Fix (15) + artifacts, ROUND 11: offline battery ALL GREEN, zero new regressions, WITH a
+  genuine red/green falsification of the (15a) guard: the NEW fresh-database integration
+  test reproduces the EXACT CI error with the guard reverted (`git stash` the macro only ->
+  dbt build fails 'null value in column "dataset_id" of relation "dedup_audit" violates
+  not-null constraint' -- byte-matching run 32873456327's failure) and passes with the
+  guard in place (build green, 0 dedup_audit rows, 0 reconciliation_results rows on a
+  never-registered database). Full battery: tests/integration/test_dbt_dedup_audit.py +
+  test_dbt_reconciliation.py 5/5 (these execute REAL `dbt build`s through the modified
+  macro AND the rewritten singular tests -- compiled-SQL correctness proven);
+  test_dbt_silver_dedup.py 4/4; tests/unit 555/555; tests/dagtest 14/14; tests/policy
+  -m "not manifests" 157 passed / 2 failed -- the SAME 2 pre-existing out-of-scope
+  failures as every prior round (test_dag_line_budget, test_gates_actually_fail);
+  test_manifest_resources 5/5 + test_values_profiles 6/6 (no helm changes this round);
+  make manifests kubeconform -strict 540 resources / 0 invalid / 0 errors; ruff check +
+  ruff format --check + mypy clean on all three touched Python test files; collect-only
+  clean on both modified e2e files. The (15b) rewrite is additionally grounded in the
+  direct local reproduction: the OLD join fails as dbt_app ('permission denied for table
+  datasets') while meta.dataset_id_for_name() succeeds as dbt_app (returns 1/76) on the
+  live local warehouse. LIVE CI VERIFICATION: pending -- judged on the ROUND 11
+  pre-registered falsification criteria (dbt_build first-ever CI success; zero
+  NOT-NULL/permission-denied in dbt logs; no 45-min wedge; stage/FailedScheduling/Kyverno/
+  restart regression guards; census + node-ID diff secondary with measured floors recorded
+  for the deferred budget assessment).
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -5229,3 +5533,9 @@ files_changed:
   - helm/values/ci/vault.yaml
   - configs/datasets/customers.yaml
   - .github/workflows/e2e-full.yml
+  - dbt/macros/dedup_audit_post_hook.sql
+  - dbt/tests/reconciliation_customers.sql
+  - dbt/tests/reconciliation_orders.sql
+  - tests/integration/test_dbt_dedup_audit.py
+  - tests/e2e/slice/test_smoke_and_idempotency.py
+  - tests/e2e/cluster/test_postgres_topology.py
