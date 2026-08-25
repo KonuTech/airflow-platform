@@ -135,9 +135,19 @@ hypothesis (ROUND 6, CONFIRMED via direct evidence -- Kyverno pod-admission deni
     `dbt` GHCR images, under real CI-node CPU contention that leaves its admission-controller's 200m
     CPU limit unable to reliably complete a live, uncached cosign/registry verification round-trip in
     time.):
-  next_action: "See reasoning_checkpoint above for the full statement/evidence/rationale. Fix
-    applied: (a) helm/values/ci/kyverno.yaml admissionController.container.resources.limits.cpu
-    200m->500m (matches LOCAL's already-proven value, zero CI budget-gate impact); (b)
+  next_action: "Fix committed (87cddd4) and pushed to main. Confirmed via `gh run list
+    --workflow=e2e-full.yml`: run 32822697162, headSha 87cddd480424b932b023566d87f01c862d063666
+    (matches this commit exactly), status in_progress at push+20s, no competing e2e-full.yml run
+    ahead of it in the concurrency queue. Now waiting for terminal status via a SINGLE `gh run watch
+    32822697162 --exit-status --interval 60` (per this file's own hard-learned ROUND 2/3 lesson:
+    never more than one such watcher concurrently, never the 3s default). Expect ~70-90min total. On
+    terminal: fetch the raw job log via `gh api repos/KonuTech/airflow-platform/actions/jobs/<id>/
+    logs`, grep the scheduler-log section for 'denied the request'/Kyverno DENY text (should be
+    ABSENT or much rarer if the fix worked), re-extract the pytest summary/failing-test list and diff
+    against the invariant 17-test baseline (not just the count), per the falsification_test above.
+    See reasoning_checkpoint above for the full statement/evidence/rationale. Fix applied: (a)
+    helm/values/ci/kyverno.yaml admissionController.container.resources.limits.cpu 200m->500m
+    (matches LOCAL's already-proven value, zero CI budget-gate impact); (b)
     airflow/dags/csv_ingest_customers.py discover/stage/dbt_build/publish get an explicit
     `retry_delay=pendulum.duration(seconds=30)` (was: stock 5min exponential default). Offline-verify
     (make manifests + kubeconform, tests/policy/ suite, dagtest), commit, push to main, trigger a
