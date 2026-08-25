@@ -1,8 +1,25 @@
 ---
-status: fixing
+status: verifying
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 7 opened on session resume -- user chose REDUCE CONCURRENT LOAD
+updated: 2026-08-25 (ROUND 8 fix A implemented per user decision A+B: alpine:3.24.1 XCom-sidecar
+  exemption added to kubernetes/kyverno-policy.yaml (both ref forms), LIVE-FALSIFIED before/after
+  on the LOCAL cluster via server-side dry-run probes (denied -> admitted; negative control still
+  denied), LOCAL reconciliation question ANSWERED (local does NOT pass -- same denial reproduced
+  1:1, 'local passes' was stale), full offline battery green. Awaiting authoritative CI run.
+  See Current Focus ROUND 8 block.)
+updated_prior_round7: 2026-08-25 (ROUND 7 post-run analysis COMPLETE: aggregate-load hypothesis REFUTED per
+  its own pre-registered falsification test (run 32834311083: byte-identical 17-test signature,
+  9th consecutive, with parallelism=8 VERIFIED in force) -- BUT the run's DENY text surfaced a
+  NEW, structural root-cause mechanism with direct evidence: Kyverno policy evaluation aborts on
+  'GET https://index.docker.io/v2/library/alpine/manifests/3.24.1: 429 Too Many Requests' -- the
+  KPO XCom sidecar image (provider 10.19.0 XCOM_SIDECAR_IMAGE='alpine:3.24.1', injected at
+  runtime into every KPO pod by do_xcom_push=True in _common/kpo.py) is NOT on
+  kubernetes/kyverno-policy.yaml's exception list (which pins stale 'alpine:3.17'), so it
+  requires cosign verification it can structurally never pass, and on GH-hosted runners even the
+  manifest fetch is Docker-Hub-rate-limited. See Current Focus ROUND 7 OUTCOME + Resolution
+  root_cause (10). Awaiting user decision checkpoint on the ROUND 8 fix direction.)
+updated_prior: 2026-08-25 (ROUND 7 opened on session resume -- user chose REDUCE CONCURRENT LOAD
   direction after ROUND 6's live falsification FAILED (14 Kyverno DENY messages persisted, same
   invariant 17-test signature, 8th consecutive identical run). See Current Focus ROUND 7 block.
   Prior ROUND 6 note: CONFIRMED via direct evidence: Kyverno's require-signed-images
@@ -12,7 +29,7 @@ updated: 2026-08-25 (ROUND 7 opened on session resume -- user chose REDUCE CONCU
   the identical failure, ruling out a one-time drainable backlog). Fix applied: Kyverno
   admissionController CPU limit 200m->500m (zero CI budget-gate cost) + short, capped retry_delay
   for the 4 KPO tasks (more attempts fit inside dagrun_timeout=45min). Awaiting live verification.)
-updated_prior: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture removal) independently
+updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture removal) independently
   RE-CONFIRMED LIVE-VERIFIED INSUFFICIENT via direct `gh run view`/`gh api actions/jobs/.../logs`
   evidence gathered fresh this round against run 32779160265/job 97597115875 (headSha f0ebfe3,
   fix (8) itself, NOT a stale/different commit): pytest "17 failed, 21 passed, 6 skipped... in
@@ -41,6 +58,141 @@ updated_prior: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture 
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 8 (2026-08-25, user-chosen direction A+B: exempt the runtime-injected XCom sidecar NOW,
+    mirror-and-sign LATER -- CURRENT STATE):
+  status: "FIX A IMPLEMENTED + LIVE-FALSIFIED ON LOCAL + OFFLINE-VERIFIED. Awaiting push +
+      authoritative CI run ID recording + human-action checkpoint for the watcher."
+  reasoning_checkpoint:
+    hypothesis: "Adding the runtime-injected KPO XCom sidecar reference (alpine:3.24.1, the
+        exact string provider 10.19.0 writes into every do_xcom_push pod spec; plus the
+        registry-qualified docker.io/library/alpine:3.24.1 defensively) to
+        kubernetes/kyverno-policy.yaml's matchImageReferences exception list removes the
+        deterministic require-signed-images admission denial of all 4 KPO tasks' pods --
+        root cause (10) -- because an exempted image is excluded from images.containers
+        entirely: BOTH the structurally-impossible cosign verification AND the Docker Hub
+        429 manifest fetch simply never happen for it."
+    confirming_evidence:
+      - "ROUND 7 DENY text names the mechanism verbatim (GET .../library/alpine/manifests/
+        3.24.1: 429) on run 32834311083."
+      - "Every chain link directly verified: kpo.py do_xcom_push=True (all 4 tasks);
+        provider 10.19.0 XCOM_SIDECAR_IMAGE='alpine:3.24.1' (read from inside BOTH the .venv
+        and the running LOCAL airflow image); exception list lacked 3.24.1 (both committed
+        file and live local policy)."
+      - "ROUND 8 LIVE BEFORE/AFTER ON LOCAL: dry-run KPO-shaped probe DENIED with the
+        byte-identical CI DENY text (incl. 429) under the old policy, ADMITTED under the
+        fixed policy ~2 min later on the same cluster/network; negative control
+        (unexempted alpine:3.19) still DENIED -- enforcement intact."
+      - "LOCAL Airflow DB shows 22 consecutive stage failures 08-24 08:38-08:48Z (30s-retry
+        cadence) -- the same denial active locally, now repaired by the same fix."
+    falsification_test: "If the authoritative CI e2e-full run for the pushed commit (with the
+        exemption verifiably in the applied policy -- 26-kyverno-policy.sh applies this
+        committed file on cluster-up, no staleness path exists) STILL shows the invariant
+        17-test node-ID signature unchanged, or ANY Kyverno DENY naming the alpine sidecar,
+        the exemption is insufficient and the hypothesis is wrong."
+    fix_rationale: "Addresses the root cause (structural exception-list gap for a
+        runtime-injected image that no static render can enumerate), not a symptom -- unlike
+        rounds 1-7's resourcing/concurrency/retry fixes, which the 9-run invariance proved
+        orthogonal. Follow-up B (mirror+sign+remove exemption) later restores the
+        verify-everything posture; the exemption is the deliberate, documented interim."
+    blind_spots: "(1) CI could fail on OTHER mechanisms hidden behind 9 runs of this
+        first-domino denial (e.g. genuine capacity limits rounds 5-7 worried about) -- the
+        17-test signature may shrink rather than vanish; partial improvement still confirms
+        the hypothesis per the node-ID diff. (2) The LOCAL 08-23 14:18-17:31Z
+        post-policy-creation success window is explained only plausibly (webhook-enforcement
+        gap during Kyverno churn), not proven -- recorded honestly in Evidence, not
+        load-bearing for the fix. (3) publish.yml must rebuild/sign images for the pushed
+        sha before DAG pods can pull -- same race every prior round navigated."
+  fix_applied: "kubernetes/kyverno-policy.yaml: +2 exception entries ('alpine:3.24.1',
+      'docker.io/library/alpine:3.24.1') in sorted positions + header paragraph documenting
+      the runtime-injection indirection, the NOT-dead-weight status of alpine:3.17 (it is the
+      CNPG db-ping-test Job image, live in all 4 cnpg renders -- KEPT), the provider-bump
+      coupling, and the follow-up-B removal plan. Also applied live to the LOCAL cluster
+      (same kubectl-apply shape as 26-kyverno-policy.sh), which repaired local's own
+      since-08-24 KPO denial as a side effect."
+  offline_verification: "make manifests: kubeconform 540 resources 0 invalid 0 errors;
+      tests/policy -m 'not manifests': 157 passed / 2 failed (SAME 2 pre-existing
+      out-of-scope: test_dag_line_budget customers budget, test_gates_actually_fail);
+      test_manifest_resources 5/5; test_values_profiles 6/6; dagtest 14/14. YAML parse clean."
+  local_reconciliation: "ANSWERED (see Evidence 2026-08-25 ROUND 8 entries): LOCAL does NOT
+      pass -- same provider, same sidecar constant, same policy gap, same DENY text
+      live-reproduced via dry-run probe; 'local passes' was stale impression. Not
+      ref-normalization, not a policy-version difference."
+  live_verification_state: "PENDING -- run ID to be recorded after push (fill in below;
+      docs-push recording the ID must use [skip ci] per the ROUND 7 supersession lesson).
+      Post-run analysis steps: (1) verify exemption in force (job log: 26-kyverno-policy.sh
+      applies the committed file; optionally grep the apply output); (2) pytest summary +
+      node-ID diff vs the invariant 17-test baseline (Evidence line ~2302) -- expect the
+      KPO-dependent tests to flip green / the signature to break for the first time in 10
+      runs; (3) grep scheduler log for Kyverno DENY -- expect ZERO alpine-sidecar denials
+      (csv-processor/airflow image verifications may still appear and must PASS)."
+  next_action: "Commit (code + this file), push, record authoritative e2e-full run ID for the
+      head sha, then return human-action checkpoint for the 60s-interval single watcher."
+  scope_guardrails: "Rounds 1-7 fixes stay in place. Timeout loosening / job splitting /
+      runner migration remain out of scope. Follow-up B is NOT blocking the green signal."
+  follow_up_B_verbatim: "Mirror the sidecar image to GHCR, sign it in publish.yml, point
+      KPO's sidecar_container_image in airflow/dags/_common/kpo.py at the signed mirror, then
+      remove the step-1 exemption. Implement only if step-1 verification goes green and
+      budget remains."
+
+ROUND 7 OUTCOME (2026-08-25, post-run analysis of run 32834311083 -- SUPERSEDED BY ROUND 8
+    ABOVE, kept for the mechanism chain):
+  status: "RESOLVED: user chose direction A+B; ROUND 8 implements A."
+  run_analyzed: "e2e-full.yml run 32834311083 (headSha 84e9c74, identical fix code to 32d9911),
+      job 97760563853 'Full local E2E suite + rebuild-from-raw capstone', started 09:56:21Z,
+      completed 11:03:56Z, conclusion failure. Terminal status confirmed via fallback poller
+      after the original watcher died in a network outage (user checkpoint response); log
+      fetched via gh api .../jobs/97760563853/logs (5402 lines)."
+  falsification_result: "pytest '17 failed, 21 passed, 6 skipped in 3605.36s'. Node-ID diff vs
+      the invariant 17-test baseline (Evidence line ~2302): IDENTICAL, all 17 names match --
+      the 9TH consecutive byte-identical signature. Regime precondition: (a) parallelism=8
+      POSITIVELY VERIFIED in force ('LocalExecutor(parallelism=8)' throughout scheduler log --
+      the lever this round's own blind_spots declared load-bearing); (b) max_active_tasks=6 in
+      DAG source but zero 'max_active_tasks limit of 6' throttle lines (only logs when binding;
+      plausibly never bound under global cap 8 -- ambiguous, not falsified); (c)
+      max_units_per_run=10 unobservable ('discovery.units_capped' absent because discover pods
+      NEVER RAN -- denied at admission, see below). Kyverno DENY count 18 (was 14) -- secondary
+      indicator went UP. Per the pre-registered test: aggregate-load hypothesis REFUTED (blind
+      spot (2) 'network-side bottleneck' materialized exactly as anticipated)."
+  new_root_cause_discovered: "The ROUND 7 DENY text is DIFFERENT from ROUND 6's and names the
+      true mechanism: 'Policy require-signed-images error: failed to evaluate policy: GET
+      https://index.docker.io/v2/library/alpine/manifests/3.24.1: unexpected status code 429
+      Too Many Requests' -- a policy-evaluation ERROR (not a verification-false), raised while
+      admitting discover/publish KPO pods. Chain (every link directly verified): (1)
+      airflow/dags/_common/kpo.py line 136 sets do_xcom_push=True on ALL 4 KPO tasks; (2)
+      provider 10.19.0 (constraints-pinned, verified in .venv dist-info) injects XCom sidecar
+      XCOM_SIDECAR_IMAGE='alpine:3.24.1' (xcom_sidecar.py line 31) into every such pod AT
+      RUNTIME; (3) kubernetes/kyverno-policy.yaml's matchImageReferences exception list pins
+      'alpine:3.17' -- NOT 3.24.1 -- because the list was built from 'make manifests' renders +
+      a live Vault pod query, and a runtime-injected KPO sidecar structurally CANNOT appear in
+      any static render (follow-the-indirection bug); (4) so alpine:3.24.1 requires cosign
+      keyless verification against publish.yml's OIDC identity -- structurally impossible for a
+      Docker-library image; (5) on GH-hosted runners even the manifest fetch 429s (Docker Hub
+      per-IP anonymous rate limits on shared runner egress IPs), so failurePolicy:Fail +
+      validationActions:[Deny] rejects the pod either way; (6) discover/publish only ever
+      reached up_for_retry try 1-5, never success, in the captured scheduler log. This explains
+      the 9-run invariance (structural policy mismatch -- no CPU/concurrency/timeout knob
+      touches it), ROUND 6's load-correlation observation (early single verifications squeeze
+      under the rate limit; suite-time bursts exhaust it), and why the airflow control-plane
+      image (no XCom sidecar) verified clean. ROUND 6's DENY was almost certainly the SAME
+      sidecar failing the verification expression (its custom message does not name the failing
+      image; round 6 attributed it to csv-processor by inference, not observation)."
+  open_question: "Why does the LOCAL slice suite pass (if it currently does) with the same
+      policy + same provider? Candidates: local cluster's Kyverno/policy version predates this
+      ImageValidatingPolicy, local hasn't re-run the slice suite since the policy/provider
+      state changed, or local Docker Hub fetches succeed AND alpine:3.24.1 somehow matches the
+      exception via a normalization difference. MUST be answered during fix verification."
+  next_action: "Present decision checkpoint to user: ROUND 8 direction. Evidence-backed fix
+      candidates (NOT yet chosen): (A) add the exact runtime sidecar reference
+      'alpine:3.24.1' (and/or 'docker.io/library/alpine:3.24.1', matching however Kyverno
+      normalizes ref) to kyverno-policy.yaml's exception list -- one-line, follows the file's
+      own pinned-upstream pattern; (B) override the sidecar image in _common/kpo.py to a
+      registry not subject to Docker Hub rate limits (KPO exposes the sidecar image via
+      PodDefaults/sidecar_container_image), e.g. a GHCR mirror this repo signs itself --
+      stronger (also removes the 429 exposure and keeps the verify-everything posture); (C) the
+      previously-reserved directions (loosen timeouts / split jobs / leave GH runners) -- now
+      DISFAVORED: none address the structural policy mismatch, and leaving GH runners would
+      only mask the 429 leg, not the verification-impossible leg."
 
 ROUND 7 (OPENED 2026-08-25 on session resume -- USER-CHOSEN STRATEGIC DIRECTION, not another
     single-cause guess):
@@ -3097,6 +3249,167 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     history dump's per-run TI census -- required by the pre-registered falsification test
     before any signature comparison is meaningful.
 
+- timestamp: 2026-08-25 (ROUND 7 -- post-run analysis, part 1: falsification-test execution
+    against run 32834311083)
+  checked: >
+    `gh run view 32834311083 --json jobs,...` (conclusion failure; single job 97760563853 'Full
+    local E2E suite + rebuild-from-raw capstone', 09:56:21Z-11:03:56Z) then `gh api
+    repos/KonuTech/airflow-platform/actions/jobs/97760563853/logs` (5402 lines, saved to
+    scratchpad). Executed the pre-registered checks in order: (1) regime-precondition greps
+    ('max_active_tasks limit of 6', 'discovery.units_capped', parallelism evidence); (2) full
+    failing-test node-ID extraction (grep 'FAILED tests/e2e/...' with a digit-safe character
+    class -- an initial `[a-z_/]` class silently dropped all 6 test_backfill_2year_sweep.py
+    entries because of the '2' in the filename; corrected and re-diffed) and exact diff against
+    the invariant 17-test baseline recorded in this file; (3) 'denied the request' grep.
+  found: >
+    (1) REGIME: 'LocalExecutor(parallelism=8)' appears on every enqueue/finish scheduler line --
+    lever (a), the self-declared load-bearing global cap, POSITIVELY in force. ZERO
+    'max_active_tasks' lines of any kind -- lever (b) cannot be positively confirmed from logs
+    (the message only appears when the cap BINDS; with a global ceiling of 8 across 2+ runs it
+    plausibly never bound), but the kwarg is verifiably in the deployed DAG source (hostPath
+    mount, zero staleness per the prior deployment-staleness investigation). ZERO
+    'units_capped' lines -- lever (c) unobservable because NO discover pod ever ran (see (3));
+    integrity_gate fan-out still reached map_index=19 (20 mapped TIs) but integrity_gate maps
+    over the bucket listing, not the claimed batch, so this does not falsify lever (c) either.
+    (2) SIGNATURE: pytest '17 failed, 21 passed, 6 skipped, 16 warnings in 3605.36s'; the 17
+    node-IDs diff CLEAN against the baseline -- IDENTICAL name-for-name, the 9TH consecutive
+    byte-identical signature. First-casualty assertion text also unchanged
+    (test_pilot_window_drains_without_cpu_starvation: customers_20240101.csv 'missing
+    entirely'). (3) KYVERNO: 18 'denied the request' lines (9 unique events, each mirrored in
+    scheduler + task-runner views), ALL for discover/publish of
+    backfill__2026-08-25T01:45:00+00:00, try_numbers 2-4; TaskInstance Finished lines show
+    discover try 1-5 and publish try 2-5 ALL 'up_for_retry', NEVER success. DENY count moved UP
+    (14 -> 18) despite verified halved parallelism. NOTE the captured scheduler-log section is
+    the ROUND-5 grep slice (sweeps in backfill-run lines via the 'Backfill' substring), so both
+    counts are sampling-biased lower bounds -- directionally, load reduction did not reduce
+    denials.
+  implication: >
+    Per the pre-registered falsification test: the aggregate-load hypothesis is REFUTED. The
+    load-bearing concurrency lever was verifiably in force, the signature is unchanged for a
+    9th run, and the secondary indicator worsened. Blind spot (2) of the ROUND 7
+    reasoning_checkpoint ('if the true Kyverno bottleneck is network-side... load reduction may
+    be insufficient -- that outcome is exactly what the falsification test detects')
+    materialized precisely.
+
+- timestamp: 2026-08-25 (ROUND 7 -- post-run analysis, part 2: the DENY text itself names a NEW
+    structural mechanism -- Docker Hub 429 on the KPO XCom sidecar image alpine:3.24.1)
+  checked: >
+    Full text of the 18 DENY lines (previous rounds only counted/attributed them); then
+    followed the indirection: kubernetes/kyverno-policy.yaml lines 103-215 (matchImageReferences
+    exception list, attestors, validations, failurePolicy), the installed provider's
+    .venv/lib/python3.12/site-packages/airflow/providers/cncf/kubernetes/utils/xcom_sidecar.py,
+    the provider dist-info version, and airflow/dags/_common/kpo.py.
+  found: >
+    Every DENY reads: 'Policy require-signed-images error: failed to evaluate policy: GET
+    https://index.docker.io/v2/library/alpine/manifests/3.24.1: unexpected status code 429 Too
+    Many Requests' -- an EVALUATION ERROR (Kyverno could not even fetch the manifest), distinct
+    from ROUND 6's verification-failed message. This is HTTP 429 from Docker Hub's anonymous
+    per-IP rate limit, notorious on GitHub-hosted runners' shared egress IPs. Why alpine at
+    all: (a) _common/kpo.py line 136 sets "do_xcom_push": True for ALL 4 KPO tasks; (b) the
+    constraints-pinned provider apache-airflow-providers-cncf-kubernetes==10.19.0 (verified
+    dist-info) injects an XCom sidecar container with XCOM_SIDECAR_IMAGE = "alpine:3.24.1"
+    (xcom_sidecar.py line 31) into every do_xcom_push KPO pod AT POD-CREATE TIME; (c) the
+    Kyverno exception list pins 'alpine:3.17' -- NOT 3.24.1 -- and the policy file's own
+    comment says the list was enumerated from 'make manifests' renders plus a live Vault pod
+    query: a runtime-injected KPO sidecar image structurally CANNOT appear in any static
+    manifest render, so it was never enumerated (follow-the-indirection: the list's producer
+    and the admission-time consumer disagree); (d) an unexempted image requires cosign keyless
+    verification against publish.yml's OIDC identity
+    (subjectRegExp ^https://github.com/KonuTech/airflow-platform/...publish.yml@...$) --
+    docker.io/library/alpine can NEVER satisfy this, so even without the 429 the pod is denied
+    (this is very likely what ROUND 6 actually observed: its custom deny message does not name
+    the failing image, and round 6 attributed csv-processor by inference); (e) failurePolicy:
+    Fail + validationActions [Deny] make both failure modes (fetch-429 and verify-false) an
+    identical hard pod-creation denial.
+  implication: >
+    STRUCTURAL root-cause candidate that explains every stubborn property of this signature:
+    (1) 9-run invariance -- no scheduler/CPU/memory/concurrency/timeout/retry fix can make an
+    unexempted, unsignable sidecar image admissible; (2) exactly the same 17 tests -- precisely
+    those needing a KPO-bearing DagRun to reach SUCCEEDED; (3) ROUND 6's load-correlation
+    (airflow image verified clean early, csv-processor pods denied mid-suite) -- the airflow
+    control-plane pods carry NO XCom sidecar, and isolated early fetches can squeeze under the
+    rate limit while suite-time admission bursts exhaust it; (4) retries can't help -- try 1-5
+    all hit the same deny. Kyverno DENIALS are the proximate cause; the alpine:3.24.1
+    sidecar-vs-exception-list mismatch is the root cause; Docker Hub 429 on GH runner IPs is an
+    aggravating second leg that makes even a would-be-exempted fetch flaky in CI. OPEN
+    QUESTION for fix verification: reconcile with LOCAL slice-suite behavior (if local
+    currently passes with this same policy + provider, something differs -- policy version,
+    stale local airflow image, or ref-normalization -- and the fix must be verified against
+    whichever is true).
+
+- timestamp: 2026-08-25 (ROUND 8 -- LOCAL reconciliation, ANSWERED with direct evidence)
+  checked: >
+    The ROUND 7 open question "why does the LOCAL slice suite pass (or appear to) with the same
+    policy + provider?" -- investigated directly against the live LOCAL cluster
+    (kind-airflow-platform, reachable) BEFORE touching the policy file: (a) live policy read via
+    `kubectl get imagevalidatingpolicy require-signed-images -o jsonpath=...` (generation 3,
+    created 2026-08-23T10:00:15Z); (b) provider + sidecar constant read from INSIDE the running
+    LOCAL airflow image via `kubectl -n airflow exec deploy/airflow-scheduler -- python -c ...`;
+    (c) Airflow metadata DB queried directly (`kubectl -n data exec airflow-db-1 -- psql`) for
+    all discover/stage/dbt_build/publish TaskInstance states since policy creation; (d) pod ages
+    via `kubectl get pods --sort-by=.metadata.creationTimestamp`; (e) a live SERVER-SIDE DRY-RUN
+    admission probe (`kubectl apply --dry-run=server`) of a KPO-shaped mixed pod (base =
+    localhost:5001/csv-processor:917e45c + sidecar alpine:3.24.1) against the etl namespace.
+  found: >
+    (1) The LOCAL airflow image (localhost:5001/airflow:cd0d2aa) carries the IDENTICAL provider
+    (apache-airflow-providers-cncf-kubernetes 10.19.0) and IDENTICAL sidecar constant
+    (alpine:3.24.1) as CI -- no provider/image-staleness difference exists. (2) The live LOCAL
+    policy's exception list also lacks alpine:3.24.1 (it is stale only w.r.t. the two
+    kindest/local-path-* entries commit caeeae4 added -- so 26-kyverno-policy.sh has not been
+    re-run locally since 08-23 evening). (3) THE DECISIVE FINDING: the dry-run probe was DENIED
+    with the BYTE-IDENTICAL CI DENY text INCLUDING the Docker Hub 429 leg ('Policy
+    require-signed-images error: failed to evaluate policy: GET
+    https://index.docker.io/v2/library/alpine/manifests/3.24.1: unexpected status code 429 Too
+    Many Requests') -- the CI mechanism reproduces 1:1 on LOCAL, right now, on this host's own
+    (also currently rate-limited) egress IP. (4) DB corroboration: LOCAL is NOT passing --
+    csv_ingest_customers `stage` shows 22 consecutive `failed` TaskInstances on 2026-08-24
+    08:38-08:48Z at the ~45s cadence the ROUND 6 retry_delay=30s fix produces under instant
+    admission denial; nothing KPO-bearing has succeeded locally since 2026-08-23 17:31Z. (5) One
+    residual anomaly, honestly recorded: 71 stage + 3 discover + 5 publish successes DID occur
+    on LOCAL 2026-08-23 14:18-17:31Z, AFTER policy creation (10:00Z), with do_xcom_push=True
+    already in kpo.py since 08-13/08-16 (git-verified) -- most plausibly a webhook-enforcement
+    gap during that afternoon's Kyverno/control-plane churn (kyverno pods recreated ~12:00Z
+    08-23, admission-controller has 6 restarts since; scheduler/api-server redeployed 16:21Z),
+    but the exact window mechanism is NOT load-bearing for the fix and was not chased further.
+  implication: >
+    The open question's answer is: "LOCAL does NOT pass -- the impression it passes is stale."
+    Neither ref-normalization nor a policy-version difference explains anything (bare
+    'alpine:3.24.1' is what Kyverno matches, same as the pod spec, and the live local list has
+    the same alpine gap as the committed file). The structural root cause (10) is now
+    LIVE-REPRODUCED ON DEMAND on a second, independent cluster -- the strongest confirmation
+    this session has produced for any hypothesis.
+
+- timestamp: 2026-08-25 (ROUND 8 -- fix A applied + before/after LIVE falsification on LOCAL +
+    offline verification battery)
+  checked: >
+    Implemented user-chosen direction A: added 'alpine:3.24.1' AND 'docker.io/library/
+    alpine:3.24.1' (defensive dual form) to kubernetes/kyverno-policy.yaml's
+    matchImageReferences exception list, plus a header paragraph documenting the
+    runtime-injection indirection (so the next static-render re-enumeration cannot remove the
+    entries), the provider-bump coupling, and the follow-up-B removal plan. 'alpine:3.17'
+    KEPT -- verified NOT dead weight: it is the CNPG db-ping-test Job's container, present in
+    all four build/manifests/{local,ci}/cnpg-*.yaml renders. Then: applied the updated policy
+    to the LOCAL cluster (the exact `kubectl apply -f` shape 26-kyverno-policy.sh uses) and
+    re-ran the SAME dry-run probe, plus a NEGATIVE control probe (unexempted alpine:3.19).
+  found: >
+    BEFORE fix: probe DENIED (429 text). AFTER fix (same cluster, same still-rate-limited
+    network, ~2 minutes apart): probe ADMITTED ('pod/kyverno-probe-alpine-sidecar created
+    (server dry run)') -- proving the exemption removes BOTH legs at once (an exempted image is
+    excluded from images.containers entirely, so Kyverno never fetches its manifest at all --
+    the 429 leg dies with the verification leg). NEGATIVE control: alpine:3.19 still DENIED --
+    fail-closed enforcement intact, not weakened. Offline battery, all green: `make manifests`
+    0 chart-lint failures, kubeconform -strict 540 resources / 0 invalid / 0 errors;
+    `tests/policy -m "not manifests"`: 157 passed, 2 failed -- the SAME 2 pre-existing
+    out-of-scope failures as every prior round (test_dag_line_budget.py customers budget,
+    test_gates_actually_fail.py), zero new regressions; test_manifest_resources 5/5 (CPU budget
+    untouched -- this fix changes no chart values); test_values_profiles 6/6; dagtest 14/14.
+  implication: >
+    Fix A is as verified as it can be without a CI run: live before/after falsification on an
+    independent cluster exhibiting the identical denial, plus a negative control, plus the full
+    offline battery. Incidental benefit: the LOCAL cluster's own since-08-24 KPO denial is now
+    repaired (and local picked up the caeeae4 kindest entries it was missing). Remaining risk
+    for the CI run is only environmental (anything ELSE broken on GH runners), not mechanistic.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -3128,6 +3441,23 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     met` rollout-wait line), further showing this run's overall failure count (12 failed/20 passed)
     was already noisier pre-fix than the orchestrator's cited baseline.
   timestamp: 2026-08-24 (continuation session, after orchestrator handoff)
+
+- hypothesis: "ROUND 7: The invariant 17-test signature is an emergent property of aggregate
+    concurrent load (sweep_corpus 19-file fan-out + multiple simultaneous DagRuns oversubscribing
+    ~3 allocatable CPUs); reducing peak concurrency (parallelism 16->8, max_active_tasks=6,
+    max_units_per_run 100->10) will move the signature."
+  evidence: >
+    REFUTED per its own pre-registered falsification test. Live run 32834311083 (headSha
+    84e9c74, containing the full three-lever fix) reproduced the byte-identical 17-test
+    node-ID signature (9th consecutive run) WITH the load-bearing lever positively verified in
+    force ('LocalExecutor(parallelism=8)' on every scheduler enqueue line). Kyverno DENY count
+    rose 14->18 rather than falling. The DENY text itself revealed the true mechanism is
+    network/policy-structural (Docker Hub 429 + unexempted alpine:3.24.1 XCom-sidecar image --
+    see Evidence ROUND 7 part 2), which no concurrency knob can influence -- exactly the
+    outcome ROUND 7's own blind_spots (2) pre-declared as the refutation signature. NOTE: the
+    three levers are real load-hygiene improvements and are NOT reverted (scope guardrails);
+    only their claim to be the root-cause fix for THIS signature is eliminated.
+  timestamp: 2026-08-25 (ROUND 7 post-run analysis)
 
 ## Resolution
 <!-- Fill when resolved -->
@@ -3371,6 +3701,40 @@ root_cause: >
   correctly-signed image. This directly explains the invariant 17-test signature across all 7
   consecutive runs this session (none of ROUNDs 1-5's fixes touch pod admission at all, so this
   mechanism persisted unchanged through every one of them).
+  (10, ROUND 7, SUPERSEDES (9)'s proximate-mechanism attribution -- the CURRENT LEADING ROOT
+  CAUSE for the invariant 17-test signature, direct-evidence-backed, NOT YET FIXED, awaiting
+  user decision on fix direction): the Kyverno `require-signed-images` denial of
+  discover/stage/dbt_build/publish KPO pods is caused by the KPO XCom SIDECAR image, not by
+  csv-processor's own signature and not by Kyverno CPU throttling. Chain, every link directly
+  verified in ROUND 7's post-run analysis (run 32834311083): (a) `airflow/dags/_common/kpo.py`
+  line 136 sets `do_xcom_push: True` on all 4 KPO tasks; (b) the constraints-pinned provider
+  `apache-airflow-providers-cncf-kubernetes==10.19.0` injects a sidecar container with
+  `XCOM_SIDECAR_IMAGE = "alpine:3.24.1"` (`utils/xcom_sidecar.py` line 31) into every such pod
+  at pod-create time; (c) `kubernetes/kyverno-policy.yaml`'s `matchImageReferences` exception
+  list pins stale `'alpine:3.17'` -- the list was enumerated from static `make manifests`
+  renders plus a live Vault query, and a runtime-injected sidecar image structurally cannot
+  appear in any static render, so alpine:3.24.1 was never enumerated; (d) an unexempted image
+  must pass cosign keyless verification against publish.yml's OIDC identity, which
+  docker.io/library/alpine can never satisfy -- a STRUCTURAL, deterministic denial (explains
+  9-run invariance and why every resourcing/concurrency/timeout/retry fix produced zero
+  movement); (e) a second, CI-specific aggravating leg: ROUND 7's DENY text is 'failed to
+  evaluate policy: GET https://index.docker.io/v2/library/alpine/manifests/3.24.1: unexpected
+  status code 429 Too Many Requests' -- Docker Hub anonymous per-IP rate limiting on GitHub's
+  shared runner egress IPs aborts even the manifest fetch, and failurePolicy: Fail collapses
+  evaluation-error and verification-false into the same hard Deny. (9)'s
+  CPU-throttling framing is superseded: its 200m->500m fix was live-refuted in ROUND 6's own
+  falsification, and its 'denied image: csv-processor' attribution was inference (the custom
+  deny message names no image), whereas (10)'s alpine attribution is read directly from the
+  DENY text. ROUND 8 UPDATE: the LOCAL reconciliation is ANSWERED (local does NOT pass --
+  identical provider/sidecar/policy-gap, DENY text live-reproduced 1:1 via server-side dry-run
+  probe, 22 consecutive local stage failures since 08-24 08:38Z; 'local passes' was a stale
+  impression), and root cause (10) is now the CONFIRMED root cause with a live before/after
+  falsification on a second independent cluster -- fix (11) below applies user-chosen
+  direction A. FOLLOW-UP B (recorded verbatim, deliberately NOT blocking the green signal,
+  implement only if step-1 verification goes green and budget remains): mirror the sidecar
+  image to GHCR, sign it in publish.yml, point KPO's sidecar_container_image in
+  airflow/dags/_common/kpo.py at the signed mirror, then remove the step-1 exemption --
+  restoring the verify-everything posture and removing the Docker Hub 429 exposure entirely.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -3495,6 +3859,22 @@ fix: >
   this round (same mechanism plausibly applies, but none of the 17 in-scope failing tests are in its
   own pipeline -- noted as a documented follow-up, not fixed here, matching this session's own
   established precedent for related-but-out-of-scope findings).
+  (11, ROUND 8): `kubernetes/kyverno-policy.yaml`: added `'alpine:3.24.1'` and
+  `'docker.io/library/alpine:3.24.1'` (defensive dual ref form; the bare form is what provider
+  10.19.0 writes into the pod spec and what Kyverno's `ref` matches, per the existing
+  `alpine:3.17` precedent) to the `matchImageReferences` exception list, in sorted positions,
+  plus a header paragraph documenting: the runtime-injection indirection (a KPO XCom sidecar
+  structurally cannot appear in any `make manifests` render, so static re-enumeration must not
+  remove these entries), that `alpine:3.17` is NOT dead weight (it is the CNPG db-ping-test
+  Job's container, live in all four `build/manifests/{local,ci}/cnpg-*.yaml` renders --
+  verified, KEPT), the provider-bump coupling (re-read XCOM_SIDECAR_IMAGE on any
+  cncf-kubernetes provider bump), and the follow-up-B removal plan. Exemption removes BOTH
+  denial legs at once: an exempted image never enters `images.containers`, so neither the
+  structurally-impossible cosign verification nor the Docker-Hub-rate-limited manifest fetch
+  ever happens for it. Also applied live to the LOCAL cluster (identical `kubectl apply -f`
+  shape to `scripts/stages/26-kyverno-policy.sh`), incidentally repairing LOCAL's own
+  since-08-24 KPO denial and its missing caeeae4 kindest entries. No chart values, DAG code,
+  test code, or CI workflow touched -- one committed file.
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -3639,6 +4019,20 @@ verification: >
   failures every prior round in this file has shown (`test_dag_line_budget.py`,
   `test_gates_actually_fail.py`) -- zero new regressions.
   LIVE VERIFICATION: pending -- see Current Focus's own next_action for the push-and-wait plan.
+  Fix (11, ROUND 8): STRONGEST pre-CI verification of any round this session -- a genuine live
+  before/after falsification on an independent cluster exhibiting the identical failure:
+  (a) BEFORE: server-side dry-run of a KPO-shaped mixed pod (base localhost:5001/csv-processor
+  + sidecar alpine:3.24.1) against the LOCAL cluster's etl namespace DENIED with the
+  byte-identical CI DENY text including the Docker Hub 429; (b) applied the updated committed
+  file to the same cluster; (c) AFTER (~2 min later, same still-rate-limited network): same
+  probe ADMITTED; (d) NEGATIVE CONTROL: unexempted alpine:3.19 probe still DENIED --
+  fail-closed enforcement intact. Offline battery all green: YAML parse clean; `make
+  manifests` kubeconform -strict 540 resources / 0 invalid / 0 errors; `tests/policy -m "not
+  manifests"` 157 passed / 2 failed -- the SAME 2 pre-existing out-of-scope failures as every
+  prior round (test_dag_line_budget.py customers budget, test_gates_actually_fail.py), zero
+  new regressions; test_manifest_resources 5/5 (no chart values touched, CPU budget
+  unaffected); test_values_profiles 6/6; dagtest 14/14. LIVE CI VERIFICATION: pending -- run
+  ID recorded in Current Focus live_verification_state after push.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -3653,4 +4047,6 @@ files_changed:
   - airflow/dags/csv_ingest_orders.py
   - tests/policy/test_dag_line_budget.py
   - tests/e2e/slice/test_backfill_2year_sweep.py
+  - helm/values/ci/kyverno.yaml
+  - kubernetes/kyverno-policy.yaml
   - helm/values/ci/kyverno.yaml
