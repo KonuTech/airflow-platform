@@ -1,8 +1,23 @@
 ---
-status: verifying
+status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 8 fix A implemented per user decision A+B: alpine:3.24.1 XCom-sidecar
+updated: 2026-08-25 (ROUND 8 post-run analysis COMPLETE on run 32845181597: per the pre-registered
+  decision tree, hypothesis (10)-as-signature-cause is INSUFFICIENT -- the exemption was
+  VERIFIABLY applied (policy created at cluster-up from the ce73d9d committed file) and WORKED at
+  the mechanism level (ZERO Kyverno denials anywhere in the 5434-line log vs 14-18 in rounds 6/7;
+  ZERO Docker Hub 429s; discover tasks now reach state=success try=1 in 11-15s when scheduled --
+  first discover successes EVER observed on CI this session), yet the pytest signature is the
+  10TH consecutive byte-identical 17-test node-ID set (17 failed/21 passed/6 skipped in
+  3509.10s). The run exposes the actual residual mechanism directly: scheduler OOM crash-loop
+  (9 restarts at ~6min cadence, kubectl describe: OOMKilled/137, one container alive only 38s)
+  wedged the first two DagRuns for 47min (dbt_build marked upstream_failed at 12:07:51/59 --
+  seconds into the FIRST crash window -- with discover try=0/start=None) until dagrun_timeout
+  failed them at 12:54:44; replacement runs then executed correctly (discover success) but were
+  throttled by the global max_active_tis_per_dag slot (269 'task concurrency ... reached'
+  scheduler-log messages: integrity_gate x149, stage x120) with the suite ending at 13:05 with
+  runs still in flight. Awaiting user decision checkpoint. See Current Focus ROUND 8 OUTCOME.)
+updated_prior_round8_fix: 2026-08-25 (ROUND 8 fix A implemented per user decision A+B: alpine:3.24.1 XCom-sidecar
   exemption added to kubernetes/kyverno-policy.yaml (both ref forms), LIVE-FALSIFIED before/after
   on the LOCAL cluster via server-side dry-run probes (denied -> admitted; negative control still
   denied), LOCAL reconciliation question ANSWERED (local does NOT pass -- same denial reproduced
@@ -59,10 +74,68 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 8 (2026-08-25, user-chosen direction A+B: exempt the runtime-injected XCom sidecar NOW,
-    mirror-and-sign LATER -- CURRENT STATE):
-  status: "FIX A IMPLEMENTED + LIVE-FALSIFIED ON LOCAL + OFFLINE-VERIFIED. Awaiting push +
-      authoritative CI run ID recording + human-action checkpoint for the watcher."
+ROUND 8 OUTCOME (2026-08-25, post-run analysis of run 32845181597 -- CURRENT STATE):
+  status: "ANALYSIS COMPLETE. Decision-tree branch: signature unchanged despite exemption
+      verifiably applied -> hypothesis (10)-as-signature-cause INSUFFICIENT. Awaiting user
+      decision checkpoint on ROUND 9 direction."
+  run_analyzed: "e2e-full.yml run 32845181597 (headSha ce73d9df, fix commit ce73d9d), job
+      97793152902 'Full local E2E suite + rebuild-from-raw capstone', conclusion failure.
+      Log: 5434 lines via gh api .../jobs/97793152902/logs."
+  exemption_in_force: "VERIFIED: git show ce73d9d:kubernetes/kyverno-policy.yaml contains both
+      'alpine:3.24.1' and 'docker.io/library/alpine:3.24.1' in matchImageReferences; job log
+      12:01:09-10Z shows 26-kyverno-policy.sh 'applying kubernetes/kyverno-policy.yaml' ->
+      'imagevalidatingpolicy.policies.kyverno.io/require-signed-images created'."
+  mechanism_level_result: "FIX (11) WORKED ON CI: ZERO 'denied the request' occurrences in the
+      entire log (rounds 6/7 had 14-18); ZERO real Docker Hub 429s (all 23 grep hits are
+      coincidental substrings in timestamps/container IDs/byte counts); discover reached
+      state=success try=1 in 11-15s in BOTH post-wedge DagRuns (backfill__03:48 12:56:26->
+      12:56:41; scheduled__12:54 12:57:22->12:57:33) -- the first discover successes ever
+      observed on CI this session. Root cause (10)'s denial mechanism is ELIMINATED."
+  signature_level_result: "FALSIFICATION TRIGGERED: pytest '17 failed, 21 passed, 6 skipped,
+      16 warnings in 3509.10s (0:58:29)'; node-ID diff vs the invariant 17-test baseline:
+      IDENTICAL, all 17 names match -- 10th consecutive occurrence. Failure templates unchanged
+      ('meta.files has no row ... within 180s -- discovery never registered it' x7 distinct
+      files; 'airflow backfill create ... failed after 3 attempts' x6)."
+  residual_mechanism_directly_observed:
+    - "Scheduler OOM crash-loop, WORSE than ROUND 3's live-verified 3 restarts: 9 restarts at
+      ~6min cadence (12:08:06, 12:14:10, 12:19:56, 12:26:17, 12:33:31, 12:36:59, 12:42:29,
+      12:48:31, 12:54:35), kubectl describe scheduler-0: Last State Terminated/OOMKilled/137,
+      restart-8 container alive only 38s (12:48:31->12:49:09). First restart 40s after the
+      first DagRuns started."
+    - "First two DagRuns (scheduled__12:06, backfill__03:47) WEDGED 47min: wait_for_files
+      SUCCESS at 12:07:45/12:07:53, then dbt_build marked upstream_failed at 12:07:51/12:07:59
+      (inside the first scheduler crash window) while discover NEVER launched (try=0,
+      start=None; final state 'skipped' -- consistent with fix (7)'s dagrun_timeout handler
+      overwriting at 12:54:44 when both runs went failed). UNEXPLAINED: what marked dbt_build
+      upstream_failed seconds after wait_for_files succeeded, when discover never even ran --
+      prime ROUND 9 investigation target (suspect: scheduler crash mid-scheduling-loop leaving
+      partial TI state, or the orphan-reset path (3c))."
+    - "Replacement DagRuns (12:54:45) executed CORRECTLY (discover success) but stage/
+      integrity_gate throttled by the global max_active_tis_per_dag slot: 269 'task concurrency
+      for this task has been reached' scheduler-log messages (csv_ingest_customers.
+      integrity_gate x149, .stage x120); at suite end (13:05) stage map_index TIs still
+      state=scheduled try=1 start=None. ROUND 5's source-verified global-limit mechanism is
+      now VISIBLE in live logs for the first time (previously masked by the admission denial)."
+    - "dag-processor 0 restarts (peak ~559Mi/1Gi), triggerer 0 restarts -- rounds 1-2 fixes
+      still holding on their own mechanisms."
+  interpretation: "Root cause (10) was REAL and its fix (11) STAYS (a deterministic admission
+      denial, live-verified removed on two independent clusters) -- but it was one of MULTIPLE
+      sufficient causes, not the sole first domino. With it removed, the failure reverts to the
+      scheduler-OOM class (3)/(3b)/(3c) that rounds 1-3 partially treated (restarts went 7->6->3
+      across rounds, now BACK UP to 9 with KPO pods actually executing for the first time --
+      the memory/work profile changed when admission started succeeding) plus max_active_tis
+      throttling making even the healthy post-wedge pipeline too slow for 180s test windows.
+      Blind_spot (1) of the ROUND 8 reasoning_checkpoint ('other mechanisms hidden behind the
+      first-domino denial') is exactly what materialized -- except the signature did not even
+      shrink, because the 180s test timeouts fire identically whether the pipeline is blocked
+      by admission denial, scheduler crash-loop, or concurrency throttling."
+  next_action: "Present decision checkpoint to user: ROUND 9 direction against the
+      scheduler-OOM crash-loop + first-DagRun wedge (upstream_failed anomaly) + global
+      max_active_tis_per_dag throughput ceiling, within scope guardrails (no timeout loosening,
+      no job splitting, no runner migration)."
+
+ROUND 8 FIX-IMPLEMENTATION RECORD (superseded by the OUTCOME above; kept for the reasoning
+    chain -- the falsification_test below is what the OUTCOME's decision-tree branch executed):
   reasoning_checkpoint:
     hypothesis: "Adding the runtime-injected KPO XCom sidecar reference (alpine:3.24.1, the
         exact string provider 10.19.0 writes into every do_xcom_push pod spec; plus the
@@ -136,9 +209,8 @@ ROUND 8 (2026-08-25, user-chosen direction A+B: exempt the runtime-injected XCom
       then remaining failures are a NEW, distinct signature to triage; (3) grep scheduler
       log for Kyverno DENY -- expect ZERO alpine-sidecar denials (csv-processor/airflow
       GHCR verifications may still appear and must PASS)."
-  next_action: "Return human-action checkpoint: session manager runs the single watcher
-      (gh run watch 32845181597, 60s interval); continuation agent performs the post-run
-      analysis steps above."
+  next_action_superseded: "(DONE -- watcher ran, run terminal, post-run analysis performed;
+      see ROUND 8 OUTCOME above for the live next_action.)"
   scope_guardrails: "Rounds 1-7 fixes stay in place. Timeout loosening / job splitting /
       runner migration remain out of scope. Follow-up B is NOT blocking the green signal."
   follow_up_B_verbatim: "Mirror the sidecar image to GHCR, sign it in publish.yml, point
@@ -3421,6 +3493,68 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     repaired (and local picked up the caeeae4 kindest entries it was missing). Remaining risk
     for the CI run is only environmental (anything ELSE broken on GH runners), not mechanistic.
 
+- timestamp: 2026-08-25 (ROUND 8 -- post-run analysis of the authoritative live-verification
+    run 32845181597, per the pre-registered decision tree)
+  checked: >
+    e2e-full.yml run 32845181597 (headSha ce73d9df, fix commit ce73d9d), job 97793152902 'Full
+    local E2E suite + rebuild-from-raw capstone', conclusion failure; raw 5434-line log fetched
+    via gh api .../jobs/97793152902/logs. Executed the 4 pre-registered steps: (1) exemption-in-
+    force check; (2) pytest summary + name-for-name node-ID diff vs the invariant 17-test
+    baseline; (3) Kyverno DENY grep; (4) plus the ROUND 5 diagnostics dumps (DagRun/TI DB state,
+    scheduler-log concurrency greps, pod monitor CSV, kubectl describe) that this run captured.
+  found: >
+    (1) EXEMPTION IN FORCE: git show ce73d9d:kubernetes/kyverno-policy.yaml carries both
+    'alpine:3.24.1' and 'docker.io/library/alpine:3.24.1'; job log 12:01:09-10Z shows
+    26-kyverno-policy.sh applying the committed file -> 'imagevalidatingpolicy.../
+    require-signed-images created'. (2) SIGNATURE: '17 failed, 21 passed, 6 skipped, 16
+    warnings in 3509.10s (0:58:29)'; the 17 FAILED node-IDs are name-for-name IDENTICAL to the
+    baseline -- 10TH consecutive byte-identical signature; failure templates unchanged
+    ('meta.files has no row ... within 180s -- discovery never registered it' for 7 distinct
+    per-test files; 'airflow backfill create ... failed after 3 attempts' x6). (3) DENY GREP:
+    ZERO 'denied the request' occurrences in the ENTIRE log (rounds 6/7: 14-18); zero real 429s
+    (all 23 grep hits are coincidental substrings in timestamps/container IDs/memory byte
+    counts); the only 'signature' match is a workflow comment string. (4) DIAGNOSTICS -- the
+    decisive new picture: (a) discover reached state=success try=1 for the FIRST TIME EVER on
+    CI, twice, in 11-15s each (backfill__03:48: 12:56:26->12:56:41; scheduled__12:54:
+    12:57:22->12:57:33) -- the admission-denial mechanism is definitively gone; (b) the FIRST
+    two DagRuns (scheduled__12:06 start 12:07:24, backfill__03:47 start 12:07:47) WEDGED for
+    47min and were failed at 12:54:44 (fix (7) dagrun_timeout doing its job): within them
+    wait_for_files SUCCEEDED (12:07:45/12:07:53) but dbt_build was marked upstream_failed at
+    12:07:51/12:07:59 -- SECONDS after wait_for_files success and inside the scheduler's first
+    crash window -- while discover shows try=0/start=None (final state 'skipped', consistent
+    with the dagrun_timeout handler's overwrite); (c) scheduler OOM crash-loop: 9 restarts at
+    a strikingly regular ~6min cadence (first at 12:08:06 -- 40s after the DagRuns started;
+    then 12:14, 12:19, 12:26, 12:33, 12:36, 12:42, 12:48, 12:54), kubectl describe: Last State
+    Terminated/OOMKilled/Exit 137, restart-8's container alive only 38s (12:48:31->12:49:09);
+    dag-processor 0 restarts (~559Mi peak), triggerer 0 restarts -- rounds 1-2 fixes still
+    holding on their own mechanisms; (d) the replacement DagRuns (12:54:45) executed correctly
+    but slowly: 269 'task concurrency for this task has been reached' scheduler-log messages
+    (csv_ingest_customers.integrity_gate x149, .stage x120 -- ROUND 5's source-verified global
+    max_active_tis_per_dag mechanism now VISIBLE live for the first time), and at suite end
+    (13:05) stage map_index TIs still sat state=scheduled try=1 start=None.
+  implication: >
+    Decision-tree branch: signature unchanged despite exemption verifiably applied ->
+    hypothesis (10)-as-signature-cause INSUFFICIENT. Root cause (10) was REAL and fix (11)
+    STAYS (deterministic denial, now live-verified removed on BOTH clusters, first-ever CI
+    discover successes prove it) -- but it was one of MULTIPLE sufficient causes stacked behind
+    the same externally-identical 180s-timeout symptom, not the sole first domino. With
+    admission repaired, the failure reverts to the scheduler-OOM class (3)/(3b)/(3c) that
+    rounds 1-3 only partially treated: restarts had declined 7->6->3 across rounds but are now
+    BACK UP to 9 -- plausibly because KPO pods now actually execute, changing the scheduler's
+    work/memory profile (executor events, XCom sidecar handling, real task churn) versus 9
+    prior runs where every KPO pod was denied at admission. Three concrete ROUND 9 targets, in
+    causal order: (i) the UNEXPLAINED upstream_failed anomaly -- what marks dbt_build
+    upstream_failed seconds after wait_for_files succeeds when discover never launched
+    (suspects: scheduler crash mid-scheduling-loop leaving partially-committed TI state, or the
+    (3c) orphan-reset path misclassifying); this wedge consumed 47 of 58 suite minutes and is
+    when most of the 17 tests burned their 180s windows; (ii) the scheduler OOM cycle itself
+    (~6min period against the 1536Mi ceiling); (iii) the global max_active_tis_per_dag=1
+    throughput ceiling that makes even the healthy post-wedge pipeline unable to finish a file
+    within a 180s test window under CI's task-start latencies. NOTE the signature did not even
+    SHRINK because the 180s test timeouts fire identically regardless of WHICH upstream
+    mechanism delays the pipeline -- the node-ID set is a saturated, low-resolution instrument
+    and cannot distinguish these mechanisms; only the internal diagnostics can.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -3469,6 +3603,30 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     three levers are real load-hygiene improvements and are NOT reverted (scope guardrails);
     only their claim to be the root-cause fix for THIS signature is eliminated.
   timestamp: 2026-08-25 (ROUND 7 post-run analysis)
+
+- hypothesis: "ROUND 8: root cause (10) -- the Kyverno require-signed-images denial of the
+    runtime-injected alpine:3.24.1 XCom sidecar -- is the (sole) proximate cause of the
+    invariant 17-test signature; exempting the sidecar image will break the signature."
+  evidence: >
+    REFUTED per its own pre-registered falsification test, on its strongest possible terms.
+    Live run 32845181597 (headSha ce73d9df, the exemption commit itself): exemption VERIFIABLY
+    applied at cluster-up (policy created from the committed file, 12:01:10Z) and VERIFIABLY
+    effective at the mechanism level -- ZERO Kyverno denials in the whole 5434-line log (vs
+    14-18 in rounds 6/7), zero Docker Hub 429s, and discover tasks reached state=success try=1
+    in 11-15s (the first CI discover successes of the entire session) -- yet the pytest
+    signature was the 10th consecutive byte-identical 17-test node-ID set (17/21/6 in
+    3509.10s), same failure templates. The run's own diagnostics expose the residual
+    mechanisms directly: scheduler OOM crash-loop (9 restarts, ~6min cadence, OOMKilled/137)
+    wedging the first two DagRuns for 47min behind an unexplained early upstream_failed
+    cascade, then global max_active_tis_per_dag throttling (269 scheduler-log occurrences)
+    slowing the healthy replacement runs past every 180s test window. NOTE: fix (11) is NOT
+    reverted -- the denial mechanism was real, deterministic, and is now live-verified
+    eliminated on both clusters; only its claim to be THE cause of the 17-test signature is
+    eliminated. Key lesson recorded: the 17-test node-ID set is a SATURATED instrument -- any
+    mechanism that delays the pipeline past 180s produces the identical set, so 'signature
+    unchanged' can never distinguish which upstream mechanism is active; internal diagnostics
+    (TI states, restart timelines, DENY greps) are the only discriminating measurements.
+  timestamp: 2026-08-25 (ROUND 8 post-run analysis)
 
 ## Resolution
 <!-- Fill when resolved -->
@@ -3746,6 +3904,19 @@ root_cause: >
   image to GHCR, sign it in publish.yml, point KPO's sidecar_container_image in
   airflow/dags/_common/kpo.py at the signed mirror, then remove the step-1 exemption --
   restoring the verify-everything posture and removing the Docker Hub 429 exposure entirely.
+  ROUND 8 POST-RUN CORRECTION (run 32845181597): (10)'s MECHANISM is CONFIRMED AND FIXED --
+  zero Kyverno denials on CI, discover reached success try=1 for the first time all session --
+  but its ATTRIBUTION as the sole proximate cause of the 17-test signature is REFUTED (10th
+  consecutive identical node-ID set despite the mechanism being verifiably gone; see
+  Eliminated ROUND 8 entry). (10) was one of multiple stacked sufficient causes behind the
+  same saturated 180s-timeout symptom. The signature's REMAINING causes, directly observed in
+  the same run: the scheduler-OOM class (3)/(3b)/(3c) back at 9 restarts (worse than ROUND 3's
+  3, plausibly because KPO pods now actually execute), an UNEXPLAINED early upstream_failed
+  cascade wedging the first two DagRuns for 47min (dbt_build upstream_failed seconds after
+  wait_for_files success with discover never launched -- ROUND 9's prime target), and the
+  global max_active_tis_per_dag=1 throughput ceiling (ROUND 5's mechanism, now live-visible:
+  269 task-concurrency-reached messages). NOT YET RESOLVED -- ROUND 9 direction awaiting user
+  decision.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -4042,8 +4213,16 @@ verification: >
   manifests"` 157 passed / 2 failed -- the SAME 2 pre-existing out-of-scope failures as every
   prior round (test_dag_line_budget.py customers budget, test_gates_actually_fail.py), zero
   new regressions; test_manifest_resources 5/5 (no chart values touched, CPU budget
-  unaffected); test_values_profiles 6/6; dagtest 14/14. LIVE CI VERIFICATION: pending -- run
-  ID recorded in Current Focus live_verification_state after push.
+  unaffected); test_values_profiles 6/6; dagtest 14/14. LIVE CI VERIFICATION (run
+  32845181597, ROUND 8 post-run analysis): MECHANISM-LEVEL SUCCESS -- exemption verifiably
+  applied at cluster-up, ZERO Kyverno denials in the entire run (vs 14-18 in rounds 6/7),
+  zero Docker Hub 429s, and discover reached state=success try=1 in 11-15s twice (the first
+  CI discover successes of the session). SIGNATURE-LEVEL INSUFFICIENT -- the invariant
+  17-test node-ID set recurred identically (10th consecutive) because further stacked causes
+  (scheduler OOM crash-loop at 9 restarts, first-DagRun upstream_failed wedge,
+  max_active_tis_per_dag throttling) independently exceed the tests' 180s windows. Fix (11)
+  STAYS (real mechanism, really fixed); see Eliminated ROUND 8 entry and root_cause (10)'s
+  ROUND 8 POST-RUN CORRECTION.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
