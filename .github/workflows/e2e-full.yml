@@ -115,7 +115,11 @@ jobs:
           i=0
           while [ "$i" -lt 600 ]; do
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            for role in scheduler dag-processor; do
+            # ROUND 5 (debug/ci-pipeline-ingestion-timeout): added triggerer -- never once
+            # monitored in this entire debug session despite wait_for_files (S3KeySensor,
+            # deferrable=True) depending on it being alive/responsive to ever wake a deferred
+            # task. Cheap addition to the same existing loop; closes a real blind spot.
+            for role in scheduler dag-processor triggerer; do
               pod=$(kubectl -n "$NS" get pods -l component="$role" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
               if [ -z "$pod" ]; then
                 echo "$ts,$role,NA,NoPodFound,NA,NA,NA" >> "$LOG"
@@ -215,6 +219,61 @@ jobs:
           kubectl -n airflow get events --sort-by=.lastTimestamp | tail -150 || true
           echo "===== kubectl describe node ====="
           kubectl describe node || true
+
+          # ROUND 5 (debug/ci-pipeline-ingestion-timeout): THROWAWAY diagnostics, never to be
+          # merged -- same scope discipline as everything above. Rounds 1-4 fixed 3 genuinely
+          # real scheduler/dag-processor restart mechanisms plus a DAG-pause test-fixture bug,
+          # each live-verified, yet the exact same 17-test failure signature (dominated by
+          # "meta.files has no row ... discovery never registered it") recurred byte-for-byte
+          # across 6 consecutive live runs. Every prior diagnostic step captured only
+          # scheduler/dag-processor pod-level health -- never csv_ingest_customers' own DagRun/
+          # TaskInstance DB state, never the triggerer (which wait_for_files' deferrable
+          # S3KeySensor depends on to ever wake up), never the raw bucket's own contents. These
+          # queries read persistent DB rows / bucket object metadata (not ephemeral pod stdout),
+          # so a single end-of-run snapshot reconstructs the full session's timeline for free --
+          # no periodic polling needed for this part.
+          echo "===== ROUND 5: csv_ingest_customers DagRun history (this whole session, dag_id-scoped) ====="
+          kubectl -n airflow exec -i airflow-scheduler-0 -c scheduler -- python - <<'PYEOF' 2>&1 | grep -v "DeprecatedImportWarning\|py.warnings" || echo "DagRun history query failed"
+          from airflow.utils.session import create_session
+          from airflow.models import DagRun
+          with create_session() as session:
+              rows = session.query(DagRun).filter(DagRun.dag_id == "csv_ingest_customers").order_by(DagRun.id).all()
+              print("TOTAL DagRuns:", len(rows))
+              for dr in rows:
+                  print(dr.run_id, "| type=", dr.run_type, "| state=", dr.state, "| backfill_id=", dr.backfill_id, "| start=", dr.start_date, "| end=", dr.end_date, "| logical_date=", dr.logical_date)
+          PYEOF
+
+          echo "===== ROUND 5: csv_ingest_customers key TaskInstance history (wait_for_files/discover/stage/dbt_build/publish) ====="
+          kubectl -n airflow exec -i airflow-scheduler-0 -c scheduler -- python - <<'PYEOF' 2>&1 | grep -v "DeprecatedImportWarning\|py.warnings" || echo "TaskInstance history query failed"
+          from airflow.utils.session import create_session
+          from airflow.models import TaskInstance
+          with create_session() as session:
+              tasks = ["wait_for_files", "discover", "stage", "dbt_build", "publish"]
+              rows = (
+                  session.query(TaskInstance)
+                  .filter(TaskInstance.dag_id == "csv_ingest_customers", TaskInstance.task_id.in_(tasks))
+                  .order_by(TaskInstance.run_id, TaskInstance.task_id, TaskInstance.map_index)
+                  .all()
+              )
+              print("TOTAL TaskInstances (5 key tasks):", len(rows))
+              for ti in rows:
+                  print(ti.run_id, "| task=", ti.task_id, "| map_index=", ti.map_index, "| state=", ti.state, "| try=", ti.try_number, "| start=", ti.start_date, "| end=", ti.end_date)
+          PYEOF
+
+          echo "===== ROUND 5: scheduler log (current+previous container), csv_ingest_customers lines mentioning contention/pause/backfill/concurrency ====="
+          { kubectl -n airflow logs airflow-scheduler-0 -c scheduler --since=100m 2>/dev/null; kubectl -n airflow logs airflow-scheduler-0 -c scheduler -p --since=100m 2>/dev/null; } | grep -i "csv_ingest_customers" | grep -iE "constraint|concurrency|max_active|AlreadyRunning|is_paused|starv|Backfill|wait_for_files|deferred|exceeds_max" | tail -500 || echo "no matching scheduler log lines"
+
+          echo "===== ROUND 5: triggerer pod status (never monitored by any prior round's diagnostics) ====="
+          kubectl -n airflow get pod -l component=triggerer -o wide || true
+          kubectl -n airflow describe pod -l component=triggerer || true
+
+          echo "===== ROUND 5: triggerer log (current+previous container), filtered for S3Key/customers/trigger activity ====="
+          { kubectl -n airflow logs airflow-triggerer-0 -c triggerer --since=100m 2>/dev/null; kubectl -n airflow logs airflow-triggerer-0 -c triggerer -p --since=100m 2>/dev/null; } | grep -iE "s3key|wait_for_files|customers|trigger" | tail -300 || echo "no matching triggerer log lines"
+
+          echo "===== ROUND 5: MinIO raw/customers/ listing (object count + LastModified timestamps) -- via mc inside the minio pod itself, no external tooling/ingress dependency ====="
+          ROUND5_MINIO_ROOT_USER=$(kubectl -n data get secret minio-root -o jsonpath='{.data.rootUser}' 2>/dev/null | base64 -d)
+          ROUND5_MINIO_ROOT_PASS=$(kubectl -n data get secret minio-root -o jsonpath='{.data.rootPassword}' 2>/dev/null | base64 -d)
+          kubectl -n data exec deploy/minio -- sh -c "mc alias set diag http://localhost:9000 '$ROUND5_MINIO_ROOT_USER' '$ROUND5_MINIO_ROOT_PASS' >/dev/null 2>&1 && mc ls diag/raw/customers/ --recursive" 2>&1 | tail -80 || echo "MinIO listing failed"
 
       - name: Install trimmed monitoring, run tests/e2e/observability, tear down
         run: make observability-verify-ci
