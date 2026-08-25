@@ -118,16 +118,27 @@ ROUND 8 (2026-08-25, user-chosen direction A+B: exempt the runtime-injected XCom
       pass -- same provider, same sidecar constant, same policy gap, same DENY text
       live-reproduced via dry-run probe; 'local passes' was stale impression. Not
       ref-normalization, not a policy-version difference."
-  live_verification_state: "PENDING -- run ID to be recorded after push (fill in below;
-      docs-push recording the ID must use [skip ci] per the ROUND 7 supersession lesson).
-      Post-run analysis steps: (1) verify exemption in force (job log: 26-kyverno-policy.sh
-      applies the committed file; optionally grep the apply output); (2) pytest summary +
-      node-ID diff vs the invariant 17-test baseline (Evidence line ~2302) -- expect the
-      KPO-dependent tests to flip green / the signature to break for the first time in 10
-      runs; (3) grep scheduler log for Kyverno DENY -- expect ZERO alpine-sidecar denials
-      (csv-processor/airflow image verifications may still appear and must PASS)."
-  next_action: "Commit (code + this file), push, record authoritative e2e-full run ID for the
-      head sha, then return human-action checkpoint for the 60s-interval single watcher."
+  live_verification_state: "RECORDED 2026-08-25T12:0xZ: fix pushed as commit ce73d9d (base
+      30d4d96). AUTHORITATIVE ROUND 8 live-verification run: e2e-full.yml run 32845181597
+      (headSha ce73d9df, created 2026-08-25T11:59:42Z, in_progress at recording time). No
+      supersession risk this time: this run-ID-recording docs push uses [skip ci] per the
+      ROUND 7 lesson. Companion runs, same headSha: publish.yml 32845181663 --
+      already conclusion=SUCCESS (all 3 images built+signed for ce73d9d BEFORE
+      the e2e cluster needs them -- the blind-spot (3) image race is already closed);
+      e2e-chaos 32845181677 and CI 32845181713 (both out of scope for this signature).
+      POST-RUN ANALYSIS STEPS (for the continuation agent, once the single 60s-interval
+      watcher reports terminal): (1) verify exemption in force -- grep the job log for
+      26-kyverno-policy.sh's 'applying kubernetes/kyverno-policy.yaml' + configured/created
+      output (the committed file is applied on cluster-up; no staleness path exists);
+      (2) pytest summary + node-ID diff vs the invariant 17-test baseline (Evidence line
+      ~2302) -- expect the KPO-dependent tests to flip green / the signature to break for
+      the first time in 10 runs; a PARTIAL shrink still confirms hypothesis per the diff,
+      then remaining failures are a NEW, distinct signature to triage; (3) grep scheduler
+      log for Kyverno DENY -- expect ZERO alpine-sidecar denials (csv-processor/airflow
+      GHCR verifications may still appear and must PASS)."
+  next_action: "Return human-action checkpoint: session manager runs the single watcher
+      (gh run watch 32845181597, 60s interval); continuation agent performs the post-run
+      analysis steps above."
   scope_guardrails: "Rounds 1-7 fixes stay in place. Timeout loosening / job splitting /
       runner migration remain out of scope. Follow-up B is NOT blocking the green signal."
   follow_up_B_verbatim: "Mirror the sidecar image to GHCR, sign it in publish.yml, point
