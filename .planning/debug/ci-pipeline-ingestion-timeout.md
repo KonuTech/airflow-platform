@@ -185,9 +185,39 @@ ROUND 9 (2026-08-25, opened on user decision A+B combined -- CURRENT STATE):
         (4) The Task-SDK worker path resolves connections via the supervisor API, not directly;
         the offline get_uri round-trip plus the hand-fixed local cluster's live success are the
         evidence it works -- CI run is the final proof."
-  next_action: "Implement fix (12) in scripts/vault-bootstrap.py and fix (13) in
-      helm/values/ci/airflow.yaml; run offline battery; commit+push; record run ID in
-      live_verification_state; return human-action checkpoint for the watcher."
+  live_verification_state: "RECORDED 2026-08-25T13:43Z: fixes (12)+(13) pushed as commit
+      ee87708 (base c72c4d0). AUTHORITATIVE ROUND 9 live-verification run: e2e-full.yml run
+      32855002333 (headSha ee87708, created 2026-08-25T13:42:54Z, in_progress at recording
+      time). Companion runs, same headSha: publish.yml 32855002320 (must complete
+      build+sign BEFORE the e2e cluster pulls -- the recurring image-race blind spot; verify
+      its conclusion in post-run analysis), CI 32855002326, e2e-chaos 32855002282 (both out
+      of scope for this signature). This docs push uses [skip ci] per the ROUND 7 lesson --
+      no supersession risk.
+      POST-RUN ANALYSIS STEPS (for the continuation agent, once the single 60s-interval
+      watcher reports terminal), judged on INTERNAL diagnostics per the pre-registered
+      falsification test, node-ID diff SECONDARY:
+      (1) verify fix (12) in force: grep the job log for vault-bootstrap output 'secret
+      airflow/connections/analytics_db_default: created' (the bootstrap prints it; CI Vault
+      is fresh so it must be 'created', never 'already present');
+      (2) WEDGE CHECK (primary): in the ROUND 5 TI-history dump, dbt_build must NOT be
+      upstream_failed-with-try=0 in any DagRun; it must reach a real state (running/success/
+      failed-or-retry with try>=1). If ANY DagRun still shows the t+~30s upstream_failed
+      stamp with the connection verifiably provisioned, root cause (12) attribution is WRONG;
+      (3) OOM CHECK (primary): scheduler restart count from the cgroup CSV / kubectl describe
+      -- target 0-1 (was 9). If OOMs persist with the same abrupt-burst signature (spike to
+      >1900MiB against 2048Mi with pids ~24-25), fix (13)'s sizing model is wrong; if spikes
+      cap BELOW the old 1536Mi ceiling, (13) was unnecessary-but-harmless and (12) removed
+      the churn -- record which;
+      (4) Kyverno DENY grep: must REMAIN 0 (fix 11 regression check);
+      (5) publish behavior: with (12) in force publish must no longer launch before stage --
+      check publish try-counts/timing vs stage in the TI dump; if publish STILL fails with
+      try>=2 AFTER stage completes, that is blind-spot (2)'s additional failure mode -- a
+      NEW, distinct mechanism to triage;
+      (6) pytest summary + node-ID diff vs the invariant 17-test baseline (SECONDARY,
+      saturated instrument): any shrink is signal; unchanged-set-with-clean-internals means
+      residual is the deferred option C throughput ceiling."
+  next_action: "(watcher handoff) Session manager runs the single 60s-interval watcher on run
+      32855002333; continuation agent executes the post-run analysis steps above."
 
 ROUND 8 OUTCOME (2026-08-25, post-run analysis of run 32845181597 -- SUPERSEDED BY ROUND 9 ABOVE):
   status: "ANALYSIS COMPLETE. Decision-tree branch: signature unchanged despite exemption
