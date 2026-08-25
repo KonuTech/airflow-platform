@@ -1,8 +1,18 @@
 ---
-status: investigating
+status: verifying
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 10 THROUGHPUT-CEILING ANALYSIS COMPLETE under the user-chosen Hybrid
+updated: 2026-08-25 (ROUND 10 FIX (14) IMPLEMENTED per user decision A+B COMBINATION (fallback
+  not needed -- Variable leg proven offline): stage/publish CPU request per-profile via
+  Airflow Variable stage_cpu_request (ci=200m set in scripts/ci-set-workload-images.sh,
+  local=500m via the in-code default, limits untouched); CI platform request trims
+  analytics-db 200->100m / minio 100->50m / vault 100->50m (~200m freed at node level,
+  ~220m -> ~420m); sweep corpus 19->12 files (seed v5, all six anomaly features preserved);
+  etl-namespace FailedScheduling rolling capture added to e2e-full.yml. Offline battery all
+  green, zero new regressions. Awaiting live CI verification per the pre-registered
+  falsification criteria in Current Focus reasoning_checkpoint. See ROUND 10 Evidence +
+  Resolution fix (14).)
+updated_prior_round10_analysis: 2026-08-25 (ROUND 10 THROUGHPUT-CEILING ANALYSIS COMPLETE under the user-chosen Hybrid
   charter: the pre-registered three-branch expectation resolved to a FOURTH branch -- the
   per-file drain floor on CI is INFINITE. NEW ROOT CAUSE (14), arithmetic-decisive from
   round9-job.log + source: _STAGE_RESOURCES requests cpu=500m (stage AND publish pods) vs
@@ -172,17 +182,87 @@ ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- CURRENT STATE):
       slot) becomes load-bearing only AFTER (14) is fixed. Option C proper (slot redesign)
       assessed AGAINST: slot=1 is matched to CI capacity even post-fix. Full numbers in the
       two ROUND 10 Evidence entries."
-  next_action: "DECISION CHECKPOINT RETURNED to user (priority-3 branch of the charter: the
-      required fix -- stage/publish CPU-request sizing -- is a production-code DAG change
-      with implications beyond CI). Proposal options quantified in the checkpoint: (A)
-      lower _STAGE_RESOURCES request 500m->200m in both DAGs (limits untouched) + trim
-      ~200m of idle CI platform requests in helm/values/ci (analytics-db/minio/vault) so
-      stage+discover can co-schedule; (B) Variable-driven per-profile resources (ci=200m,
-      local=500m, csv_processor_image precedent); (C) CI-values-only trims to free >=500m
-      (no DAG change, most fragile). PLUS, in the same round regardless of A/B/C: shrink
-      sweep corpus filler days 19->~12 files preserving all six anomaly features (user's
-      preferred lever), and add etl-namespace pod/event capture to the diagnostic step
-      (closes the FailedScheduling evidence gap). Awaiting user choice."
+  user_decision: "A+B COMBINATION chosen (2026-08-25): B's leg for the DAG side -- per-profile
+      stage/publish CPU REQUEST via an Airflow Variable following the csv_processor_image
+      precedent, ci=200m / local=500m verbatim (limits untouched at 2CPU/4Gi in both); A's leg
+      for the platform side -- trim ~200m of idle CI platform requests (analytics-db 200->100m,
+      minio 100->50m, vault 100->50m), CI values only, local untouched. All bundled items
+      approved: corpus shrink 19->12 preserving all six anomaly features, FailedScheduling/
+      etl-namespace event capture, no slot redesign, backfill treated as coupled knock-on, no
+      pre-committed budget raises. FALLBACK RULE (user's own words): if the combination proves
+      impractical during implementation -- e.g. the Variable machinery turns out fragile,
+      untestable offline, or creates an unacceptable divergence axis -- drop to plain A (200m
+      request in both DAGs everywhere + the same platform trims) rather than stalling; note in
+      this file which path was taken and why."
+  fix_path_taken: "A+B COMBINATION (not the fallback). The Variable leg proved neither fragile
+      nor untestable offline: Variable.get(key, default=...) resolves through the same layered
+      secrets chain csv_processor_image already exercises at DAG-parse time (AIRFLOW_VAR_* env
+      backend first), and a default of '500m' means LOCAL needs zero provisioning -- local
+      behavior is byte-identical to today's hardcoded value without any new local bootstrap
+      step, while CI sets stage_cpu_request=200m in scripts/ci-set-workload-images.sh (the
+      exact same post-cluster-up `airflow variables set` site the csv_processor_image
+      precedent uses, covering all three e2e workflows with one change). Divergence-axis
+      check: D-06's permitted axes are replica counts / resource sizing / monitoring -- a
+      per-profile CPU request is squarely the resource-sizing axis, same as every helm-values
+      CI sizing divergence already in force."
+  reasoning_checkpoint:
+    hypothesis: "(14) stage/publish pods request cpu=500m against ~220m free on the 3000m-
+        allocatable CI node (2780m steady-state platform requests), so kube-scheduler can
+        never place them; KPO startup_timeout_seconds=120 converts every attempt into a
+        deterministic ~129s failure; every residual failure template reduces to this."
+    confirming_evidence:
+      - "Arithmetic: 3000m allocatable - 2780m platform requests = ~220m free < 500m request;
+        memory a non-issue (26% requested)."
+      - "Run 32855002333 TI dump: EVERY recorded stage attempt lasted 128-130s (six distinct
+        attempts measured), try counts to 6, up_for_retry observed, ZERO stage successes ever
+        on CI -- while discover (100m request) succeeded try=1 in 11-23s in all 4 DagRuns."
+      - "Pilot file meta.ingestion_runs status=PENDING at 1800s: a stage container that ever
+        STARTED would have advanced it -- direct DB-state proof no stage container has ever
+        run on CI."
+      - "kpo.py's own on_finish_action comment (2026-08-16) already documents this exact
+        startup-timeout failure mode as routine under tight node CPU."
+    falsification_test: "Pre-registered on the next live run's INTERNAL diagnostics (node-ID
+        set is a saturated instrument, secondary only): (a) FIRST-EVER stage success on CI
+        (TI dump: stage state=success with try>=1 and a start/end under ~60s) -- if stage
+        STILL fails every attempt at ~129s with the 200m request verifiably in force and
+        >=400m free, root cause (14) is WRONG; (b) the NEW etl-namespace event census must
+        show FailedScheduling events BEFORE this fix's first successful schedule (or none at
+        all post-fix) -- present-with-Insufficient-cpu confirms (14)'s mechanism, absent-
+        while-stage-still-fails refutes it; (c) Kyverno DENY count stays 0 (fix 11
+        regression); (d) scheduler/dag-processor/triggerer restarts stay 0 (fixes 1-3/13
+        regression); (e) failure-template census + node-ID diff as secondary -- any shrink is
+        signal, unchanged-with-clean-internals means a further stacked cause remains."
+    fix_rationale: "Addresses the root cause (request > free capacity) on both sides of the
+        inequality: the request side drops to 200m (a REQUEST is a scheduling reservation,
+        not a cap -- the untouched 2-CPU LIMIT still lets stage burst identically once
+        placed, so local runtime behavior at 500m request is preserved verbatim via the
+        Variable default), and the free-capacity side rises ~220m->~420m by trimming idle CI
+        platform requests (analytics-db/minio/vault run near-idle in CI at steady state).
+        200m + discover's 100m co-schedule inside ~420m with margin. NOT symptom-level: no
+        timeout was loosened, no retry added, no test budget raised. The corpus shrink
+        (19->12) is the user's preferred post-fix drain lever -- load-bearing only AFTER
+        schedulability is fixed, per the ROUND 10 arithmetic."
+    blind_spots: "(1) The 2780m platform-request census came from one run's node describe;
+        if another platform pod's requests grew since, free capacity could still be <200m --
+        the etl-namespace FailedScheduling census will show it directly. (2) A 200m-request
+        stage pod on a contended node gets less guaranteed CPU: stage wall time may stretch
+        beyond the ~15-40s post-fix floor estimate; the 180s windows may still miss at 12-file
+        depth -- judged by the census, budget raises only per-test to a measured floor if so.
+        (3) publish shares _STAGE_RESOURCES: a publish-specific failure mode beyond
+        scheduling would surface only post-fix. (4) AlreadyRunningBackfill is treated as a
+        coupled knock-on -- if it persists after stage drains, it is a NEW mechanism to
+        triage. (5) The Variable read happens at DAG-parse time: a parse cycle BEFORE
+        ci-set-workload-images.sh runs uses the 500m default -- same already-proven
+        eventual-consistency shape as csv_processor_image (dag-processor re-parses
+        continuously; the suite starts minutes after cluster-up)."
+  next_action: "Implement the A+B fix: (B) kpo.py stage_pod_resources() reading Airflow
+      Variable stage_cpu_request (default 500m), both DAGs switch to it, CI sets 200m in
+      scripts/ci-set-workload-images.sh; (A) trim helm/values/ci analytics-db 200->100m,
+      minio 100->50m, vault 100->50m; corpus 19->12 files (_NUM_DAYS 20->13, indices
+      re-derived, _MASTER_SEED v4->v5 per the content-hash idempotency precedent);
+      etl-namespace pod/event capture added to the e2e-full cp-monitor + dump step. Then
+      offline battery, commit, push, record run ID, return human-action checkpoint for the
+      60s watcher."
 
 ROUND 9 OUTCOME (2026-08-25, post-run analysis of run 32855002333 -- SUPERSEDED BY ROUND 10 ABOVE):
   status: "ANALYSIS COMPLETE. Decision-tree branch: mechanisms (12)/(13) CONFIRMED FIXED and
@@ -4093,6 +4173,58 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     six anomaly features) to bring per-DagRun drain under the 180s test windows; budget
     adjustments only if a measured floor still exceeds a specific test's window afterward.
 
+- timestamp: 2026-08-25 (ROUND 10 -- fix implementation, A+B combination, offline verification)
+  checked: >
+    Implementation of the user-chosen A+B combination (fallback NOT needed -- see Current
+    Focus fix_path_taken): airflow/dags/_common/kpo.py (new stage_pod_resources() reading
+    Airflow Variable stage_cpu_request with default '500m'); both DAG files switched to it;
+    scripts/ci-set-workload-images.sh (CI-profile Variable bootstrap site, sets
+    stage_cpu_request=200m); helm/values/ci/{cnpg-analytics,minio,vault}.yaml CPU-request
+    trims; tests/e2e/slice/test_backfill_2year_sweep.py corpus 20->13 days / seed v4->v5;
+    .github/workflows/e2e-full.yml cp-monitor + dump step etl-namespace instrumentation.
+  found: >
+    (a) VARIABLE LEG PROVEN OFFLINE (the fallback trigger did not fire): direct DagBag
+    round-trip -- with AIRFLOW_VAR_STAGE_CPU_REQUEST unset, both DAGs parse clean and
+    stage/publish requests == {cpu:500m, memory:1Gi} (byte-identical to the pre-fix
+    hardcoded values, so LOCAL needs zero provisioning); with the env var set to 200m, both
+    DAGs' stage AND customers' publish resolve {cpu:200m, memory:1Gi}; limits {cpu:2,
+    memory:4Gi} unchanged in every case; orders' publish stays on the light 100m profile
+    (unchanged, as designed). (b) CI VARIABLE SITE: scripts/ci-set-workload-images.sh is
+    invoked by ALL THREE e2e workflows post-cluster-up (grep-verified), so one change covers
+    every CI cluster; PROFILE=ci values-file resolution for the vault trim verified via
+    scripts/helm-install.sh's own values_file derivation. (c) PLATFORM TRIMS RENDERED:
+    build/manifests/ci shows analytics-db 100m and minio 50m; vault is NOT in the rendered
+    manifest set (installed by scripts/stages/80-vault.sh -> helm_install with
+    helm/values/ci/vault.yaml), so its 50m trim lands live-only -- the offline budget-gate
+    sum drops 150m (3.180 -> 3.030 of the 3.200 effective budget, test_ci_profile_fits_runner
+    PASSES), while the NODE-level trim is the full 200m (~220m -> ~420m free; 200m stage +
+    100m discover co-schedule with ~120m margin). (d) CORPUS: 12 customers + 12 orders files
+    at the new shape (_NUM_DAYS=13, gap=3, schema=5, late_event=7, attr=8,
+    correction_arrival=10/offset=7 landing exactly on the gap date, missing=12=last);
+    direct byte-level verification of ALL SIX anomaly features (gap file absent; loyalty_tier
+    header appears exactly from day 5; day-7 file contains the 90d-backdated 2023-10-10
+    event_ts; member 30's name/country differ across the day-8 boundary; day-10 file carries
+    member 31's EXTRA row backdated to the gap date 2024-01-04, strictly between real day-2
+    and day-4 events; member 32 present on day 11, absent from final day 12); total corpus
+    ~41KiB. _MASTER_SEED bumped v4->v5 per the established content-hash-idempotency
+    precedent (same-named files change bytes under the new shape). (e) OFFLINE BATTERY ALL
+    GREEN, zero new regressions: make manifests kubeconform -strict 540 resources/0 invalid/
+    0 errors; test_manifest_resources 5/5; test_values_profiles 6/6 (per-profile CPU request
+    is the permitted resource-sizing divergence axis); tests/policy -m 'not manifests' 157
+    passed / 2 failed -- the SAME 2 pre-existing out-of-scope failures as every prior round;
+    tests/unit 555/555; tests/dagtest 14/14; sweep file collects 7/7; ruff/py_compile clean
+    on all touched python (2 ruff findings byte-identical on bare HEAD, pre-existing); mypy
+    0 new errors (1 identical pre-existing import-untyped line A/B-verified via git stash);
+    ruff format diffs on the sweep file byte-identical before/after (pre-existing drift,
+    ROUND 4 precedent); bash -n clean on the edited script and BOTH edited workflow step
+    bodies including the inner MONITOR_EOF heredoc.
+  implication: >
+    Root cause (14)'s fix is implemented on both sides of the scheduling inequality
+    (request 500m->200m on CI via the Variable; free capacity ~220m->~420m via the trims)
+    plus the user's preferred post-fix drain lever (12-file batch depth) and the
+    FailedScheduling evidence-gap instrumentation. Ready for live falsification per the
+    pre-registered criteria in the reasoning_checkpoint.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -4683,6 +4815,31 @@ fix: >
   Same CI-only limit-raise shape as ROUND 2's precedent but grounded in the direct
   per-process burst evidence, not trend extrapolation. parallelism=8 (the burst bound
   itself) deliberately unchanged.
+  (14, ROUND 10, user-chosen A+B combination -- fallback to plain A NOT needed): B leg --
+  `airflow/dags/_common/kpo.py` gains `stage_pod_resources()`: builds the heavy stage/publish
+  V1ResourceRequirements with the CPU REQUEST read from Airflow Variable `stage_cpu_request`
+  (default '500m' via `Variable.get(key, default=...)`; memory request 1Gi and limits
+  2CPU/4Gi hardcoded, identical everywhere). Both DAGs
+  (`csv_ingest_customers.py`/`csv_ingest_orders.py`) replace their duplicated hardcoded
+  `_STAGE_RESOURCES` literal with `stage_pod_resources()` -- customers' publish deliberately
+  keeps sharing the heavy profile (plan 10-07 precedent), orders' publish stays on the light
+  100m profile. LOCAL never sets the Variable and gets 500m verbatim (zero new local
+  bootstrap); CI sets `stage_cpu_request=200m` in `scripts/ci-set-workload-images.sh` -- the
+  exact csv_processor_image-precedent `airflow variables set` site, invoked by all three e2e
+  workflows post-cluster-up. A REQUEST is a scheduling reservation, not a cap: the untouched
+  2-CPU limit means placed pods burst identically in both profiles. A leg --
+  `helm/values/ci/{cnpg-analytics,minio,vault}.yaml` CPU requests trimmed 200->100m /
+  100->50m / 100->50m respectively (limits untouched; local values untouched): frees ~200m
+  of idle platform reservation at the node level (~220m -> ~420m free), so a 200m stage pod
+  plus a 100m discover pod co-schedule with margin. Bundled (same round, user-approved):
+  sweep corpus filler shrink `_NUM_DAYS` 20->13 (19->12 real files, `_MASTER_SEED` v4->v5
+  per the content-hash idempotency precedent, all six anomaly features preserved at
+  re-derived indices gap=3/schema=5/late_event=7/attr=8/correction=10(offset 7 -> gap
+  date)/missing=12) -- the user's preferred post-fix drain lever through the single global
+  stage slot; and e2e-full.yml's cp-monitor + dump step gain rolling etl-namespace
+  pod/FailedScheduling-event capture (events expire ~1h, so only rolling capture yields a
+  trustworthy census -- closes root cause (14)'s recorded HONEST GAP) plus an end-of-run
+  `airflow variables get stage_cpu_request` proof-of-fix-in-force probe.
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -4877,6 +5034,20 @@ verification: >
   regression-clean). Node-ID set unchanged (11th run, saturated instrument as pre-registered)
   but the failure-template census moved for the first time all session; residual mechanisms
   recorded in the ROUND 9 OUTCOME block and Evidence -- NOT a failure of fixes (12)/(13).
+  Fix (14), ROUND 10: offline battery ALL GREEN, zero new regressions -- full detail in the
+  ROUND 10 fix-implementation Evidence entry: DagBag proof of BOTH profiles' Variable
+  resolution (absent->500m byte-identical to pre-fix, 200m->200m on stage AND customers'
+  publish, limits unchanged, orders publish unchanged); corpus byte-level verification of
+  all six anomaly features at the new 13-day shape; make manifests kubeconform 540/0/0;
+  test_manifest_resources 5/5 with the CI CPU request total dropping 3.180 -> 3.030 of the
+  3.200 effective budget (the vault trim additionally lands live-only, outside the rendered
+  set); test_values_profiles 6/6; policy not-manifests 157/2 (same 2 pre-existing);
+  tests/unit 555/555; tests/dagtest 14/14; ruff/mypy/format/bash -n all clean or
+  byte-identical-pre-existing. LIVE CI VERIFICATION: pending -- judged on INTERNAL
+  diagnostics per the ROUND 10 pre-registered falsification test (first-ever stage success
+  on CI; etl-namespace FailedScheduling census confirming/falsifying (14); Kyverno DENY
+  still 0; control-plane restarts still 0; failure-template census + node-ID diff
+  secondary/saturated).
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -4895,3 +5066,10 @@ files_changed:
   - kubernetes/kyverno-policy.yaml
   - scripts/vault-bootstrap.py
   - tests/unit/test_vault_bootstrap.py
+  - airflow/dags/_common/kpo.py
+  - scripts/ci-set-workload-images.sh
+  - helm/values/ci/cnpg-analytics.yaml
+  - helm/values/ci/minio.yaml
+  - helm/values/ci/vault.yaml
+  - configs/datasets/customers.yaml
+  - .github/workflows/e2e-full.yml

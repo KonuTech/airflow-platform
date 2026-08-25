@@ -37,9 +37,14 @@ existingSecret: minio-root
 
 # Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
 # other pod the CI job renders.
+# CPU request 100m->50m (debug/ci-pipeline-ingestion-timeout ROUND 10, root
+# cause 14): part of the ~200m idle-platform-request trim (with
+# analytics-db/vault) freeing headroom so stage/publish pods can schedule at
+# all on the single CI node; MinIO idles well under 50m between e2e bursts
+# and the untouched 500m limit still covers real I/O load.
 resources:
   requests:
-    cpu: 100m
+    cpu: 50m
     memory: 256Mi
   limits:
     cpu: 500m

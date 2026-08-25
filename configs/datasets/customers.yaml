@@ -33,7 +33,7 @@ load:
   target: normalized.customers
 # max_units_per_run 100->10 (debug/ci-pipeline-ingestion-timeout ROUND 7,
 # REDUCE CONCURRENT LOAD): the platform's own metadata-driven batching knob
-# now throttles a bulk landing (e.g. the e2e sweep corpus's 19 files arriving
+# now throttles a bulk landing (e.g. the e2e sweep corpus's 12 files arriving
 # in one PUT burst) into <=10 claims per DagRun instead of fanning every
 # pending file into one run's mapped stage TIs at once. Listing is sorted
 # (discovery.py) so batch membership is deterministic; a capped run logs

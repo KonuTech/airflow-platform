@@ -110,8 +110,16 @@ jobs:
           LOG=/tmp/cp-monitor.csv
           ALLPODS_LOG=/tmp/cp-monitor-allpods.log
           NS=airflow
+          # ROUND 10 (debug/ci-pipeline-ingestion-timeout): etl-namespace pod/event capture --
+          # root cause (14)'s HONEST GAP was that no FailedScheduling/Pending evidence was ever
+          # captured directly (events had expired by the end-of-run dump; this monitor only ever
+          # watched the airflow namespace). Periodic capture inside this same loop closes it:
+          # Kubernetes events expire (~1h TTL), so only a rolling capture can produce a
+          # trustworthy FailedScheduling census for the whole run.
+          ETL_LOG=/tmp/etl-monitor.log
           echo "ts_utc,role,pod,phase,restarts,mem_current_bytes,pids_current" > "$LOG"
           : > "$ALLPODS_LOG"
+          : > "$ETL_LOG"
           i=0
           while [ "$i" -lt 600 ]; do
             ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -142,6 +150,13 @@ jobs:
               echo "== $ts =="
               kubectl -n "$NS" get pods -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[*].restartCount,STATUS:.status.phase --no-headers 2>/dev/null
             } >> "$ALLPODS_LOG"
+            {
+              echo "== $ts =="
+              echo "-- etl pods --"
+              kubectl -n etl get pods -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName --no-headers 2>/dev/null
+              echo "-- etl events (FailedScheduling / scheduling-related) --"
+              kubectl -n etl get events --sort-by=.lastTimestamp --no-headers 2>/dev/null | grep -iE "FailedScheduling|Insufficient|Preempt|TriggeredScaleUp|FailedCreate" | tail -20
+            } >> "$ETL_LOG"
             i=$((i+1))
             sleep 15
           done
@@ -219,6 +234,21 @@ jobs:
           kubectl -n airflow get events --sort-by=.lastTimestamp | tail -150 || true
           echo "===== kubectl describe node ====="
           kubectl describe node || true
+
+          # ROUND 10 (debug/ci-pipeline-ingestion-timeout): etl-namespace FailedScheduling
+          # census -- the direct evidence root cause (14) never had. The rolling capture
+          # (etl-monitor.log, written by the background monitor above) is authoritative
+          # because events expire; the live queries below are the end-of-run snapshot.
+          echo "===== ROUND 10: etl-monitor.log (rolling etl pods + scheduling events, full run) ====="
+          cat /tmp/etl-monitor.log || echo "no etl monitor log found"
+          echo "===== ROUND 10: FailedScheduling census (unique event lines seen across the whole run) ====="
+          grep -h "FailedScheduling" /tmp/etl-monitor.log 2>/dev/null | sort -u | tail -80 || echo "ZERO FailedScheduling lines captured"
+          echo "===== ROUND 10: final etl-namespace pods ====="
+          kubectl -n etl get pods -o wide || true
+          echo "===== ROUND 10: final etl-namespace events (last 100, sorted) ====="
+          kubectl -n etl get events --sort-by=.lastTimestamp | tail -100 || true
+          echo "===== ROUND 10: effective stage_cpu_request Airflow Variable ====="
+          kubectl -n airflow exec deploy/airflow-api-server -- airflow variables get stage_cpu_request 2>/dev/null || echo "stage_cpu_request NOT SET (DAGs fall back to 500m default)"
 
           # ROUND 5 (debug/ci-pipeline-ingestion-timeout): THROWAWAY diagnostics, never to be
           # merged -- same scope discipline as everything above. Rounds 1-4 fixed 3 genuinely

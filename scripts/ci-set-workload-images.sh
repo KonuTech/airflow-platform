@@ -52,4 +52,18 @@ echo "==> registering dbt_image=ghcr.io/${owner}/dbt:${tag}"
 "${kubectl_bin}" --context "${ctx}" exec -n airflow deploy/airflow-api-server -- \
   airflow variables set dbt_image "ghcr.io/${owner}/dbt:${tag}"
 
-echo "==> ci-set-workload-images complete: csv_processor_image/dbt_image now point at tag=${tag}"
+# debug/ci-pipeline-ingestion-timeout ROUND 10 (root cause 14): the CI
+# profile's stage/publish pods must request 200m CPU, not the 500m default
+# both DAGs' stage_pod_resources() falls back to on local -- 500m can never
+# be scheduled on CI's single ~3-CPU node (~220m free at steady state
+# pre-fix), which made every stage attempt a deterministic ~129s
+# startup-timeout failure. This script is the CI-profile Airflow-Variable
+# bootstrap site (the csv_processor_image precedent above), invoked by all
+# three e2e workflows post-cluster-up, so the per-profile request lives here
+# rather than in a fourth mechanism. Local clusters never run this script
+# and keep the 500m default verbatim.
+echo "==> registering stage_cpu_request=200m (CI profile; local default is 500m)"
+"${kubectl_bin}" --context "${ctx}" exec -n airflow deploy/airflow-api-server -- \
+  airflow variables set stage_cpu_request "200m"
+
+echo "==> ci-set-workload-images complete: csv_processor_image/dbt_image now point at tag=${tag}; stage_cpu_request=200m"

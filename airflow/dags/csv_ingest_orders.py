@@ -28,7 +28,7 @@ from kubernetes.client import models as k8s
 
 from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
-from _common.kpo import common_kpo_kwargs
+from _common.kpo import common_kpo_kwargs, stage_pod_resources
 from _common.run_stage_recorder import wire_dbt_build_tracking
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
@@ -39,9 +39,9 @@ customers_asset = Asset("s3://normalized/customers")  # D-15: same URI, own obje
 _DISCOVER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "100m", "memory": "128Mi"}, limits={"cpu": "500m", "memory": "256Mi"}
 )
-_STAGE_RESOURCES = k8s.V1ResourceRequirements(
-    requests={"cpu": "500m", "memory": "1Gi"}, limits={"cpu": "2", "memory": "4Gi"}
-)
+# CPU request is per-profile via the stage_cpu_request Airflow Variable (ci=200m, local=500m);
+# see stage_pod_resources()'s own comment (debug/ci-pipeline-ingestion-timeout ROUND 10).
+_STAGE_RESOURCES = stage_pod_resources()
 _INGEST_EXTRA_ENV_VARS = [k8s.V1EnvVar(name="DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", value="2")]
 
 

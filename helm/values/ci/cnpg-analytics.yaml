@@ -27,9 +27,15 @@ cluster:
 
   # Smaller than local: this profile shares a 4 CPU / 16 GB runner with every
   # other pod the CI job renders, including the metadata cluster and MinIO.
+  # CPU request 200m->100m (debug/ci-pipeline-ingestion-timeout ROUND 10,
+  # root cause 14): steady-state platform requests totalled 2780m of the
+  # node's 3000m allocatable, leaving ~220m free -- below even a 200m-request
+  # stage pod. This instance idles at a tiny fraction of 100m between e2e
+  # bursts; the untouched 1-CPU limit still covers real load. Part of the
+  # ~200m trim (with minio/vault) that lets stage+discover co-schedule.
   resources:
     requests:
-      cpu: 200m
+      cpu: 100m
       memory: 512Mi
     limits:
       cpu: "1"

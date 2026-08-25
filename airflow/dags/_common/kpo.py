@@ -46,6 +46,38 @@ _OTEL_COLLECTOR_ENDPOINT = (
     "http://otel-collector-opentelemetry-collector.monitoring.svc.cluster.local:4318"
 )
 
+# debug/ci-pipeline-ingestion-timeout ROUND 10 (root cause 14): the local
+# profile's 500m stage/publish CPU REQUEST is structurally unschedulable on
+# CI's single ~3-CPU node (~220m free at steady state pre-fix), turning every
+# stage attempt into a deterministic ~129s startup_timeout failure -- no
+# stage container had EVER run on CI. A request is a scheduling reservation,
+# not a cap: the 2-CPU LIMIT below is identical in both profiles, so a pod
+# bursts the same once placed. Per-profile request via an Airflow Variable
+# follows the csv_processor_image precedent exactly: CI sets
+# stage_cpu_request=200m post-cluster-up (scripts/ci-set-workload-images.sh);
+# local never sets it and gets this default -- byte-identical to the value
+# both DAGs hardcoded before this fix. Resolved at DAG-parse time through
+# the same layered secrets chain (AIRFLOW_VAR_STAGE_CPU_REQUEST env backend
+# first) the image Variables already exercise offline.
+_DEFAULT_STAGE_CPU_REQUEST = "500m"
+
+
+def stage_pod_resources() -> k8s.V1ResourceRequirements:
+    """Build the heavy stage/publish pod resource profile, CPU request per profile.
+
+    Used by both DAGs' ``stage`` (and customers' ``publish``, which
+    deliberately reuses the heavy profile since plan 10-07's publish-OOM
+    fix). Only the CPU *request* varies by profile (see the module comment
+    above); memory request and both limits are identical everywhere.
+    """
+    return k8s.V1ResourceRequirements(
+        requests={
+            "cpu": Variable.get("stage_cpu_request", default=_DEFAULT_STAGE_CPU_REQUEST),
+            "memory": "1Gi",
+        },
+        limits={"cpu": "2", "memory": "4Gi"},
+    )
+
 
 def common_kpo_kwargs(  # noqa: PLR0913 -- all 6 are keyword-only (08.1-12 generalization; see Args)
     *,

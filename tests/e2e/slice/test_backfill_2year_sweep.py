@@ -115,9 +115,12 @@ full-scale, no live cluster required). This module's LIVE proof — the one D-27
 representative-scale fallback for when local hardware/time genuinely cannot sustain the full-scale
 live run — uses a smaller, still fully live, still combining all four D-10 properties in the SAME
 window (regular cadence + one gap day + one schema-change boundary + one late/out-of-order event):
-`_NUM_DAYS = 20` days per dataset (19 real files after the gap day; extended from 14 by plan 10-07
-to comfortably fit three additional SCD anomaly days without cramming — see that plan's own module
-constants block), comfortably under `discover_files`' `max_units_per_run: 100` batching cap (so
+`_NUM_DAYS = 13` days per dataset (12 real files after the gap day; was 20/19 until
+debug/ci-pipeline-ingestion-timeout ROUND 10 shrank the plain filler days -- all six anomaly
+features are preserved at re-derived indices, see the module constants block; only
+window-realism filler was cut, because at the single global `stage` slot's measured per-file
+cost the 19-file batch depth alone pushed fresh-file discovery past the suite's 180s windows
+on CI), comfortably under `discover_files`' `max_units_per_run` batching cap (so
 this module proves the SAME mechanics `Pitfall 1`'s 2-year/15-discover-call math describes, at a
 wall-clock-tractable scale for a single live-cluster proof session run on real WSL2/kind hardware
 with this project's own documented, recurring CPU-starvation history). This is the D-27 fallback
@@ -282,16 +285,29 @@ _ETL_NAMESPACE = "etl"
 # precedent above). -v4 guarantees every file this run's own assertions
 # depend on is genuinely fresh content, generated and uploaded AFTER every
 # fix landed, never touching any contaminated run_id from earlier today.
-_MASTER_SEED = "phase-09-plan-11-backfill-2year-sweep-v4"
+# Bumped v4 -> v5 (debug/ci-pipeline-ingestion-timeout ROUND 10): the corpus
+# shrink below (20 -> 13 days, anomaly indices re-derived) changes the BYTES
+# of same-named files the long-lived local cluster already published under
+# -v4's keys (the schema-change boundary, attribute-change span and
+# correction arrival all move to different calendar days) -- same
+# same-name/different-content ineligibility trap the -v1 -> -v2 and
+# -v3 -> -v4 precedents above document, so the seed bump makes every file
+# genuinely fresh under `discover_files`' own idempotency.
+_MASTER_SEED = "phase-09-plan-11-backfill-2year-sweep-v5"
 _START_DATE = date(2024, 1, 1)
-# Extended from 14 to 20 (plan 10-07) to comfortably fit D-11's three new
-# anomaly days (12/16/19 below) alongside the pre-existing gap(5)/schema-
-# change(7)/late-event(10) days without cramming -- matches this file's own
-# established "comfortably under [budget]" comment style.
-_NUM_DAYS = 20
-_GAP_DAY_INDEX = 5
-_SCHEMA_CHANGE_DAY_INDEX = 7
-_LATE_EVENT_DAY_INDEX = 10
+# Shrunk from 20 to 13 (debug/ci-pipeline-ingestion-timeout ROUND 10, root
+# cause 14 follow-through): the ~7 removed days were plain filler whose only
+# role was window realism -- every one of this module's six anomaly features
+# (gap, schema change, late event, attribute change, late correction,
+# missing customer) is preserved at the re-derived indices below, keeping
+# the original relative order (gap < schema < late-event < attribute <
+# correction < missing/last). 12 real files halve the serialized drain time
+# through the single global `stage` slot on CI once stage pods can schedule
+# at all.
+_NUM_DAYS = 13
+_GAP_DAY_INDEX = 3
+_SCHEMA_CHANGE_DAY_INDEX = 5
+_LATE_EVENT_DAY_INDEX = 7
 _LATE_EVENT_OFFSET_DAYS = 90
 _ROWS_PER_DAY = 50  # default -- keeps orders' customer_id pool (day 0, rows 0..29) fully valid
 
@@ -301,19 +317,19 @@ _ROWS_PER_DAY = 50  # default -- keeps orders' customer_id pool (day 0, rows 0..
 # orders' own referential-integrity customer_id pool (_ORDER_CUSTOMER_IDS,
 # roster indices [0, 29]) or with the pre-existing late-event mechanic's own
 # member index (_ROWS_PER_DAY // 2 == 25).
-_ATTRIBUTE_CHANGE_DAY_INDEX = 12
+_ATTRIBUTE_CHANGE_DAY_INDEX = 8
 _ATTRIBUTE_CHANGE_MEMBER_INDEX = 30
-_LATE_CORRECTION_ARRIVAL_DAY_INDEX = 16
+_LATE_CORRECTION_ARRIVAL_DAY_INDEX = 10
 _LATE_CORRECTION_MEMBER_INDEX = 31
-# 16 - 11 = day index 5 -- this corpus' OWN gap day, which never has a real
+# 10 - 7 = day index 3 -- this corpus' OWN gap day, which never has a real
 # bronze event for ANY member (no file generated that day at all). Every
 # real day shares the identical T08:15:00Z time-of-day, so any OTHER
 # integer offset would land the correction's backdated event_ts EXACTLY on
 # some other real day's own event_ts (an ambiguous tie); landing on the gap
 # day's own calendar date guarantees a clean, unambiguous chronological
-# position strictly between two real, adjacent bronze events (day 4 and day
-# 6) for this member.
-_LATE_CORRECTION_OFFSET_DAYS = 11
+# position strictly between two real, adjacent bronze events (day 2 and day
+# 4) for this member.
+_LATE_CORRECTION_OFFSET_DAYS = 7
 # The LAST day in the window -- required, not incidental. SCDPublisher's
 # Step A (DELETE-detection) compares EACH pass's own staged snapshot
 # against currently-current gold rows; a member missing from a MIDDLE day
@@ -1027,7 +1043,8 @@ def test_pilot_window_drains_without_cpu_starvation(  # noqa: PLR0913, PLR0917 -
     # "confirm at least one file was discovered/staged" (Task 1's own acceptance criteria).
     # Sizing (plan 10-07, live re-tuning): 600s (10 min) was too tight -- live-observed this
     # session (via direct task_instance inspection, not guessed): the `raw` bucket's own
-    # `customers/` prefix currently holds MORE files than just this corpus's own ~19 real days
+    # `customers/` prefix currently holds MORE files than just this corpus's own real days
+    # (19 when this was measured; 12 since ROUND 10's corpus shrink)
     # (25 mapped `integrity_gate`/`stage` instances observed for a single DagRun -- historical
     # accumulation across this phase's earlier live-sweep sessions, v1/v2/v3 seeds, since this
     # shared bucket prefix is never cleaned between sessions; `discover` re-lists the WHOLE
