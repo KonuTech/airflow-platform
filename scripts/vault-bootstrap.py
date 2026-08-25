@@ -39,6 +39,24 @@ step). It creates, if not already present:
       back to `Connection(conn_id, **response)` otherwise) -- assembled
       from the same live `data/minio-app` Kubernetes Secret `etl/minio`
       reads (see `_ensure_airflow_secrets`)
+  (i2) the `airflow/connections/analytics_db_default` KV secret VALUE
+      (debug/ci-pipeline-ingestion-timeout ROUND 9) -- field name
+      `conn_uri`, same VaultBackend convention as (i), value copied from
+      the `etl/analytics-db` `dsn` (h) writes earlier in this same
+      invocation (the same `etl_app` credential -- no new role, no new
+      privilege). This Connection is resolved at DagRun start by
+      `airflow/dags/_common/run_stage_recorder.py`'s
+      `list_run_ids_pending_dbt_build` (plus `integrity_gate.py`'s
+      rejection path, `gap_recorder.py`'s empty-backfill path and
+      `retention_query.py`); it previously existed ONLY as an ad-hoc
+      hand-written secret on the long-lived local cluster (recorded in
+      `tests/e2e/slice/test_backfill_2year_sweep.py`'s module docstring,
+      finding 4), so every ephemeral CI cluster bootstrapped from this
+      script was missing it -- failing that root task in 100% of CI
+      DagRuns and cascading `upstream_failed` through
+      `mark_dbt_build_running -> dbt_build` (deferred-items.md plan 11-09
+      "defect 1" firing deterministically, not just during injected fault
+      windows)
   (j) the `grafana` KV secret VALUES and the `grafana-alert-webhook`
       Kubernetes Secret in namespace `monitoring` (plan 07-06) --
       `grafana/analytics-db` (`password`, from a fresh `kubectl exec`-driven
@@ -704,7 +722,7 @@ def _ensure_etl_secrets(client: hvac.Client, kubectl_context: str) -> None:
 
 
 def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
-    """(i) Populate `airflow/connections/minio_default`'s KV secret VALUE, if not already present.
+    """(i)+(i2) Populate the `airflow/connections/*` KV secret VALUES, if not already present.
 
     Same read-then-skip-or-write shape as `_ensure_etl_secrets`. Guard:
     attempt `read_secret_version` first; a successful read means the secret
@@ -721,6 +739,23 @@ def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
     (`response.get("conn_uri")`, verified against the installed provider's
     source: it prioritizes `conn_uri` if present, falling back to
     `Connection(conn_id, **response)` otherwise). Never prints the value.
+
+    (i2, debug/ci-pipeline-ingestion-timeout ROUND 9)
+    `airflow/connections/analytics_db_default`: same read-then-skip-or-write
+    guard, value copied verbatim from the `etl/analytics-db` `dsn` field
+    `_ensure_etl_secrets` (h) guarantees exists by this point (`bootstrap()`
+    calls (h) immediately before this function) -- the SAME `etl_app`
+    credential, no new role, no new privilege, matching the prior session's
+    ad-hoc live repair recorded in `test_backfill_2year_sweep.py`'s module
+    docstring (finding 4). The raw `postgresql://` DSN is a valid
+    `conn_uri`: Airflow's `Connection` normalizes the scheme to conn_type
+    `postgres`, and its `get_uri()` output (`postgres://...`) is itself a
+    libpq-valid URI -- verified offline against the installed
+    apache-airflow==3.3.0 + psycopg (`conninfo_to_dict` round-trip). Without
+    this entry, every ephemeral (CI) cluster is missing the Connection that
+    `list_run_ids_pending_dbt_build` resolves at DagRun start, so
+    `dbt_build` reaches `upstream_failed` in 100% of CI DagRuns and
+    `publish` launches prematurely (deferred-items.md plan 11-09 defect 1).
 
     Args:
         client: An `hvac.Client` authenticated with the root token.
@@ -752,6 +787,27 @@ def _ensure_airflow_secrets(client: hvac.Client, kubectl_context: str) -> None:
             secret={"conn_uri": conn_uri},
         )
         print("secret airflow/connections/minio_default: created")
+
+    try:
+        client.secrets.kv.v2.read_secret_version(
+            mount_point="airflow",
+            path="connections/analytics_db_default",
+        )
+        print("secret airflow/connections/analytics_db_default: already present")
+    except hvac.exceptions.InvalidPath:
+        # (h) ran first in bootstrap(), so etl/analytics-db is guaranteed
+        # present; a failure here is a genuine bootstrap-ordering bug and
+        # should surface loudly rather than be caught.
+        analytics_dsn = client.secrets.kv.v2.read_secret_version(
+            mount_point="etl",
+            path="analytics-db",
+        )["data"]["data"]["dsn"]
+        client.secrets.kv.v2.create_or_update_secret(
+            mount_point="airflow",
+            path="connections/analytics_db_default",
+            secret={"conn_uri": analytics_dsn},
+        )
+        print("secret airflow/connections/analytics_db_default: created")
 
 
 def _apply_kubernetes_secret(

@@ -224,6 +224,9 @@ def test_ensure_etl_secrets_reads_minio_app_secret_when_minio_absent(
 # -- _ensure_airflow_secrets ---------------------------------------------------
 
 
+_ANALYTICS_DSN = "postgresql://etl_app:unit-test-password@analytics-db-rw.data:5432/analytics"
+
+
 def test_ensure_airflow_secrets_assembles_conn_uri_when_absent(
     monkeypatch: pytest.MonkeyPatch,
     vault_bootstrap,
@@ -231,9 +234,21 @@ def test_ensure_airflow_secrets_assembles_conn_uri_when_absent(
     """CR-01: `airflow/connections/minio_default` is assembled from the same
     live `data/minio-app` Secret `_ensure_etl_secrets` reads for
     `etl/minio` -- never the deleted `airflow-minio-connection` Secret.
+    (i2, debug/ci-pipeline-ingestion-timeout ROUND 9):
+    `airflow/connections/analytics_db_default` is copied verbatim from the
+    `etl/analytics-db` `dsn` field `_ensure_etl_secrets` wrote earlier in
+    the same bootstrap invocation -- never assembled independently.
     """
     client = MagicMock()
-    client.secrets.kv.v2.read_secret_version.side_effect = hvac.exceptions.InvalidPath
+
+    def _read_secret_version(*, mount_point: str, path: str):
+        # Both airflow/connections/* guard reads miss (fresh Vault); the
+        # etl/analytics-db recovery read hits -- (h) always runs first.
+        if mount_point == "etl" and path == "analytics-db":
+            return {"data": {"data": {"dsn": _ANALYTICS_DSN}}}
+        raise hvac.exceptions.InvalidPath
+
+    client.secrets.kv.v2.read_secret_version.side_effect = _read_secret_version
 
     encoded_secret = base64.b64encode(b"live-minio-app-secret").decode("ascii")
     mock_run = MagicMock(return_value=_completed(stdout=encoded_secret))
@@ -255,16 +270,45 @@ def test_ensure_airflow_secrets_assembles_conn_uri_when_absent(
         "jsonpath={.data.secretKey}",
     ]
 
-    client.secrets.kv.v2.create_or_update_secret.assert_called_once()
-    kwargs = client.secrets.kv.v2.create_or_update_secret.call_args.kwargs
-    assert kwargs["mount_point"] == "airflow"
-    assert kwargs["path"] == "connections/minio_default"
-    conn_uri = kwargs["secret"]["conn_uri"]
+    writes = client.secrets.kv.v2.create_or_update_secret.call_args_list
+    assert len(writes) == 2, "expected minio_default AND analytics_db_default writes"
+
+    minio_kwargs = writes[0].kwargs
+    assert minio_kwargs["mount_point"] == "airflow"
+    assert minio_kwargs["path"] == "connections/minio_default"
+    conn_uri = minio_kwargs["secret"]["conn_uri"]
     assert conn_uri.startswith("aws://etl-app:")
     assert (
         "endpoint_url=http%3A%2F%2Fminio.data.svc.cluster.local%3A9000&region_name=us-east-1"
         in conn_uri
     )
+
+    analytics_kwargs = writes[1].kwargs
+    assert analytics_kwargs["mount_point"] == "airflow"
+    assert analytics_kwargs["path"] == "connections/analytics_db_default"
+    assert analytics_kwargs["secret"] == {"conn_uri": _ANALYTICS_DSN}
+
+
+def test_ensure_airflow_secrets_skips_analytics_db_connection_when_already_present(
+    vault_bootstrap,
+) -> None:
+    """(i2)'s guard: an already-present `analytics_db_default` (e.g. the
+    long-lived local cluster's own hand-written repair, see
+    `test_backfill_2year_sweep.py` module docstring finding 4) is never
+    overwritten -- and no `etl/analytics-db` recovery read even happens.
+    """
+    client = MagicMock()
+    client.secrets.kv.v2.read_secret_version.return_value = {
+        "data": {"data": {"conn_uri": "already-present"}}
+    }
+
+    vault_bootstrap._ensure_airflow_secrets(client, _KUBECTL_CONTEXT)  # noqa: SLF001 -- exercising the private function this test covers
+
+    client.secrets.kv.v2.create_or_update_secret.assert_not_called()
+    read_paths = {
+        call.kwargs["path"] for call in client.secrets.kv.v2.read_secret_version.call_args_list
+    }
+    assert read_paths == {"connections/minio_default", "connections/analytics_db_default"}
 
 
 # -- _ensure_policy: CR-02 policy-drift correction -----------------------------

@@ -260,7 +260,25 @@ scheduler:
       memory: 512Mi
     limits:
       cpu: 1500m
-      memory: 1536Mi
+      memory: 2048Mi
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 9 (2026-08-25): memory
+  # LIMIT raised 1536Mi->2048Mi (request again untouched at 512Mi -- zero
+  # effect on the requests-only CI budget gate; node memory requests sit at
+  # ~26% of allocatable, so limit overcommit is safe). Grounded in a direct
+  # per-process burst model from ROUND 8's 17s-cadence cgroup time series
+  # (run 32845181597): the scheduler idles at a STABLE ~360MiB with 17 pids
+  # (scheduler + 8 pre-forked LocalExecutor workers -- NO leak), and every
+  # one of the run's 8 OOMKills was preceded by an ABRUPT one-to-two-sample
+  # spike to 1331-1533MiB with pids jumping to 24-25: a dispatch burst
+  # filling all `core.parallelism=8` slots at once launches ~8 task
+  # processes, each importing the full Airflow tree (~145MiB RSS), for a
+  # transient worst-case of ~360 + 8x150 ~= 1.6-1.7GiB -- just over the old
+  # 1536Mi ceiling (which ROUND 2 sized against parallelism=16's DIFFERENT
+  # regime, where Kyverno-denied KPO pods kept task lifetimes short). 2048Mi
+  # covers the full-burst worst case at the ROUND 7-chosen parallelism=8
+  # with ~20% margin; the burst bound itself (parallelism=8) is the primary
+  # control and stays unchanged.
+  # ROUND 2 note kept below for the mechanism-history chain:
   # Debug session ci-pipeline-ingestion-timeout, ROUND 2 (2026-08-24): memory
   # LIMIT raised again, 1Gi->1536Mi (request left at 512Mi -- unaffected by
   # tests/policy/test_manifest_resources.py's CI budget, which sums only

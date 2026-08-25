@@ -2,7 +2,25 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 8 post-run analysis COMPLETE on run 32845181597: per the pre-registered
+updated: 2026-08-25 (ROUND 9 investigation COMPLETE + fixes (12)/(13) implemented, offline-verified,
+  awaiting live CI verification. Both ROUND 8 suspects for the dbt_build upstream_failed leg
+  REFUTED (stamps recur under a healthy scheduler in ALL DagRuns of rounds 5-8): actual cause is
+  root cause (12) -- Airflow Connection analytics_db_default was NEVER provisioned in code (only
+  ad-hoc hand-written into the long-lived LOCAL Vault by a prior session; scripts/
+  vault-bootstrap.py wrote only minio_default), so every ephemeral CI cluster lacks it and
+  list_run_ids_pending_dbt_build (root task, retries=0) fails ~30s into EVERY CI DagRun,
+  cascading upstream_failed through mark_dbt_build_running->dbt_build and launching publish
+  prematurely into guaranteed-failing 2-min KPO retry pods (= deferred-items.md plan-11-09
+  'defect 1' firing 100% deterministically on CI; dbt has NEVER run on CI). Scheduler OOM leg:
+  root cause (13) -- burst-concurrency, not a leak (stable 360MiB baseline; abrupt
+  1331-1533MiB/24-25-pid spikes one 17s sample before each of 8 OOMKills = ~8 simultaneous task
+  processes x ~145MiB import cost vs the 1536Mi limit; crash-loop provably stops the moment the
+  wedged runs die at dagrun_timeout 12:54:44). Fixes: (12) vault-bootstrap.py now provisions
+  airflow/connections/analytics_db_default from etl/analytics-db#dsn (read-guarded, idempotent,
+  local hand-written secret untouched); (13) CI scheduler memory limit 1536Mi->2048Mi
+  (limit-only, zero request-budget cost, sized to the measured worst-case parallelism=8 burst).
+  See Current Focus ROUND 9 + the four ROUND 9 Evidence entries + root_cause (12)/(13).)
+updated_prior_round9: 2026-08-25 (ROUND 8 post-run analysis COMPLETE on run 32845181597: per the pre-registered
   decision tree, hypothesis (10)-as-signature-cause is INSUFFICIENT -- the exemption was
   VERIFIABLY applied (policy created at cluster-up from the ce73d9d committed file) and WORKED at
   the mechanism level (ZERO Kyverno denials anywhere in the 5434-line log vs 14-18 in rounds 6/7;
@@ -74,7 +92,104 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 8 OUTCOME (2026-08-25, post-run analysis of run 32845181597 -- CURRENT STATE):
+ROUND 9 (2026-08-25, opened on user decision A+B combined -- CURRENT STATE):
+  charter: "What happens inside the scheduler in its first 60 seconds under real DagRun load.
+      Treat the near-simultaneous first scheduler OOM (12:08:06) and the wrongful
+      upstream_failed stamps on dbt_build (12:07:51/59, seconds after wait_for_files succeeded,
+      with discover at try=0/start=None) as ONE question. Both the 47-min wedge and the ~6min
+      OOM cadence hang off that first-minute window. Option C (throughput-ceiling design
+      analysis, max_active_tis_per_dag) explicitly DEFERRED until runs stop wedging."
+  hypothesis: "PRELIMINARY (to be refined from direct log+source evidence): in the first
+      scheduler crash window, the scheduler dies (OOM) mid-scheduling-loop and/or the restart
+      recovery path (adopt_or_reset_orphaned_tasks / trigger-rule dep evaluation over
+      partially-committed TI state) evaluates dbt_build's trigger rule against an upstream TI
+      state that never legitimately existed, stamping dbt_build upstream_failed while discover
+      is still try=0/start=None -- wedging the DagRun until dagrun_timeout (12:54:44). Two
+      named suspects: (a) OOM mid-loop leaving partially-committed TI state that a fresh loop
+      then misreads; (b) the orphan/stuck-in-queued reset path misclassifying."
+  test: "Mine round8-job.log 12:07:00-12:09:00 for the two wedged DagRuns: exact scheduler
+      lines for the upstream_failed stamps, executor events, first OOM kill boundary, adoption/
+      orphan messages after restart; then source-read installed apache-airflow==3.3.0 for the
+      exact code path that can write upstream_failed on dbt_build given the observed upstream
+      states. Direct evidence over theory."
+  expecting: "The log shows WHICH component wrote the upstream_failed stamps and what upstream
+      state it saw; source shows the only code path(s) that produce that write, narrowing to a
+      falsifiable mechanism with a targeted fix within scope guardrails."
+  falsification_test_pre_registered: "Because the pytest 17-test node-ID signature is a
+      SATURATED instrument (any >180s delay reproduces it identically), ROUND 9 success/failure
+      is defined on INTERNAL diagnostics of the next live run: (1) scheduler restart count
+      (ROUND 8: 9) -- must drop materially; (2) wedge presence -- ZERO wrongful upstream_failed
+      stamps on dbt_build while discover try=0 (ROUND 8: 2 DagRuns wedged 47min); (3) Kyverno
+      DENY count must REMAIN 0 (fix 11 regression check); (4) node-ID diff vs the invariant
+      17-test baseline as a secondary check only. If the wedge recurs with the fix verifiably
+      in force, the ROUND 9 mechanism attribution is wrong."
+  scope_guardrails: "No timeout loosening, no job splitting, no runner migration, no reverting
+      rounds 1-8 fixes. Fix (11) stays; follow-up B (sidecar mirror) captured, non-blocking.
+      Option C deferred (noted as such per user decision)."
+  investigation_result: "BOTH ROUND 8 suspects for the upstream_failed leg REFUTED by direct
+      evidence (stamps recur identically under a healthy scheduler in the replacement runs);
+      actual mechanisms found and confirmed -- see the four ROUND 9 Evidence entries. Two
+      distinct root causes: (12) analytics_db_default never provisioned in code (ad-hoc local
+      Vault fix never landed in scripts/vault-bootstrap.py; ephemeral CI Vault always missing
+      it -> list_run_ids_pending_dbt_build fails ~30s into EVERY DagRun -> dbt_build
+      upstream_failed cascade + premature failing publish churn, = deferred-items.md plan-11-09
+      'defect 1' firing 100% deterministically on CI); (13) scheduler OOM is burst-concurrency
+      (~360MiB baseline + 8 simultaneous task processes x ~145MiB > 1536Mi limit), spikes
+      abrupt (one 17s sample), no leak, crash-loop self-sustaining via re-synchronized dispatch
+      waves killing the wedged runs' own tasks ((3c) resonance), ends exactly when the wedged
+      runs die at dagrun_timeout."
+  reasoning_checkpoint:
+    hypothesis: "(12) On CI the Airflow Connection analytics_db_default does not exist (only
+        minio_default is provisioned by scripts/vault-bootstrap.py; the local repair was ad-hoc
+        infra-only), so list_run_ids_pending_dbt_build (root task, retries=0) fails ~30s into
+        every DagRun, cascading upstream_failed to mark_dbt_build_running/dbt_build and
+        launching publish prematurely into guaranteed 2-min failing pods. (13) Independently,
+        a dispatch burst that fills all 8 parallelism slots simultaneously spikes the scheduler
+        cgroup ~1.5-1.7GiB transient (+7-8 task processes x ~145MiB over the ~360MiB baseline),
+        exceeding the 1536Mi CI limit -> OOMKilled -> orphan-reset resync -> repeat, wedging
+        the first two DagRuns until dagrun_timeout."
+    confirming_evidence:
+      - "(12) dbt_build upstream_failed try=0 ~30-80s after run start in 14+ DagRuns across 4
+        instrumented runs INCLUDING healthy-scheduler replacement runs; prior session's direct
+        root-token Vault listing (minio_default only) + 22/22 failure history + repo-wide grep
+        zero provisioning sites; vault-bootstrap.py read directly (only minio_default under
+        airflow/connections); e2e-full.yml runs make vault-bootstrap on ephemeral cluster-up."
+      - "(13) cgroup series: stable 360MiB/17pids baseline, abrupt 1331-1533MiB/24-25pid spikes
+        one sample before each of 8 OOMs, cadence ~6min, crash-loop stops permanently at
+        12:54:44 when the wedged runs die; post-wedge phase peaks 1496MiB with pids<=22 and
+        zero OOMs."
+    falsification_test: "Pre-registered above (falsification_test_pre_registered): next live CI
+        run with both fixes verifiably in force must show (1) scheduler restarts materially
+        below 9 (target 0-1), (2) ZERO dbt_build-upstream_failed-with-discover-try=0 wedge
+        stamps (dbt_build must reach a real state: running/success/failed-with-try>=1), (3)
+        Kyverno DENY still 0, (4) node-ID diff secondary. If dbt_build still goes
+        upstream_failed at t+30s with the connection verifiably provisioned, (12) is wrong; if
+        OOMs persist at the same burst signature under a 2048Mi limit, (13)'s sizing model is
+        wrong."
+    fix_rationale: "(12) provisions the missing Connection in the SAME bootstrap code CI
+        rebuilds Vault from, reusing the already-existing etl_app DSN (etl/analytics-db#dsn)
+        exactly as the prior session's hand-fix did -- root cause (provisioning gap), not
+        symptom (not retries/trigger-rule surgery; the wiring defect remains tracked as
+        deferred-items defect 1). (13) sizes the CI scheduler memory LIMIT to the measured
+        worst-case burst at the ROUND 7-chosen parallelism=8 (2048Mi > 360 + 8x150 + margin);
+        request untouched -> zero CI request-budget cost; same CI-only limit-raise shape as
+        ROUND 2's precedent, but now grounded in a direct per-process burst model instead of a
+        trend extrapolation."
+    blind_spots: "(1) The exact ~6min resync period is attributed (retry backoff + post-restart
+        backlog) but not proven line-by-line; the fix does not depend on it. (2) publish may
+        have an ADDITIONAL failure mode beyond running-prematurely-with-nothing-staged --
+        post-fix runs will show it (publish try counts/states are in the diagnostics). (3)
+        max_active_tis_per_dag=1 throughput ceiling (option C, deferred) still bounds
+        end-to-end latency; some of the 17 tests may still time out at 180s even with zero
+        OOMs and a working dbt chain -- expected residual, judged on internal diagnostics.
+        (4) The Task-SDK worker path resolves connections via the supervisor API, not directly;
+        the offline get_uri round-trip plus the hand-fixed local cluster's live success are the
+        evidence it works -- CI run is the final proof."
+  next_action: "Implement fix (12) in scripts/vault-bootstrap.py and fix (13) in
+      helm/values/ci/airflow.yaml; run offline battery; commit+push; record run ID in
+      live_verification_state; return human-action checkpoint for the watcher."
+
+ROUND 8 OUTCOME (2026-08-25, post-run analysis of run 32845181597 -- SUPERSEDED BY ROUND 9 ABOVE):
   status: "ANALYSIS COMPLETE. Decision-tree branch: signature unchanged despite exemption
       verifiably applied -> hypothesis (10)-as-signature-cause INSUFFICIENT. Awaiting user
       decision checkpoint on ROUND 9 direction."
@@ -3555,6 +3670,116 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     mechanism delays the pipeline -- the node-ID set is a saturated, low-resolution instrument
     and cannot distinguish these mechanisms; only the internal diagnostics can.
 
+- timestamp: 2026-08-25 (ROUND 9, first-minute mining of round8-job.log + cross-round diff)
+  checked: >
+    The end-of-run DagRun/TI DB dump (round8-job.log lines 4536-4571) for ALL FOUR
+    csv_ingest_customers DagRuns, cross-referenced against the SAME dump in rounds 5/6/7 logs
+    (round5verify_97698134909.log:4531-4546, round6verify_97724031971.log:4525-4540,
+    round7_job.log:4526-4531).
+  found: >
+    dbt_build reaches upstream_failed with try=0 in EVERY DagRun of EVERY diagnostic-instrumented
+    run (rounds 5, 6, 7, 8 -- 14+ DagRuns total), always ~30-80s after that DagRun's own start --
+    INCLUDING ROUND 8's two HEALTHY post-wedge replacement runs (backfill__03:48 stamped
+    12:55:13.5, scheduled__12:54 stamped 12:55:19.1 -- ~28-34s after run start at 12:54:45, with
+    a HEALTHY scheduler: restart 9 was 12:54:35 and NO further restarts through suite end 13:05)
+    and BEFORE discover even ran in those runs (discover succeeded 12:56:26/12:57:22). Also:
+    publish in both replacement runs STARTED and failed repeatedly (up_for_retry try=3, ~2min
+    per attempt, 13:01-13:04) while stage map TIs were still scheduled/running.
+  implication: >
+    The upstream_failed stamps are NOT a scheduler-crash artifact -- both prime ROUND 8 suspects
+    (OOM mid-scheduling-loop partial commit; orphan-reset misclassification) are WRONG for this
+    leg: the stamp occurs identically under a healthy scheduler, deterministically, in every
+    DagRun, load-independent. It must be a deterministic failure of dbt_build's upstream chain
+    within each run's first ~30s.
+
+- timestamp: 2026-08-25 (ROUND 9, source read: DAG wiring for dbt_build)
+  checked: >
+    airflow/dags/csv_ingest_customers.py + airflow/dags/_common/run_stage_recorder.py
+    (wire_dbt_build_tracking) + _common/integrity_gate.py + _common/gap_recorder.py.
+  found: >
+    Graph: stage >> mark_dbt_build_running >> dbt_build >> resolve_dbt_build_status(all_done) >>
+    mark_dbt_build_done(all_done) >> publish. list_run_ids_pending_dbt_build (feeding
+    mark_dbt_build_running's run_ids XCom) is a ROOT task -- no upstream at all, Airflow default
+    retries=0 -- that unconditionally resolves BaseHook.get_connection("analytics_db_default")
+    at DagRun start. integrity_gate only resolves that conn in its REJECTION path (_reject_file);
+    its happy path never touches it -- reconciling why gate/discover succeed while the dbt chain
+    dies. gap_recorder no-ops unless an EMPTY backfill listing. publish's ONLY upstream is
+    mark_dbt_build_done: when list_run_ids fails at t+~30s, all_success short-circuits
+    mark_running and dbt_build to upstream_failed immediately, the two all_done tasks then
+    complete (mark_done's run_ids XCom resolves None -> `if not run_ids: return` -> SUCCESS),
+    and publish launches PREMATURELY -- before stage has even started -- fails (nothing staged),
+    and burns its 6 retries as real 2-min KPO pods holding the GLOBAL max_active_tis_per_dag=1
+    publish slot plus node CPU. This exact wiring defect is ALREADY DOCUMENTED as plan 11-09's
+    'defect 1' (CRITICAL, Open) in .planning/phases/11-ci-cd-completion-operations/
+    deferred-items.md -- there framed as firing only during injected DB/Vault fault windows.
+  implication: >
+    A single deterministic root-task failure explains the dbt_build stamps, the premature-publish
+    churn, and (via never-running dbt) every 'normalized.customers has fewer than N rows'-class
+    test precondition failure. Question reduces to: why does list_run_ids_pending_dbt_build fail
+    on CI in EVERY run?
+
+- timestamp: 2026-08-25 (ROUND 9, follow-the-indirection: analytics_db_default provisioning)
+  checked: >
+    tests/e2e/slice/test_backfill_2year_sweep.py module docstring (prior session's live
+    diagnosis); scripts/vault-bootstrap.py (grep for connections provisioning);
+    .github/workflows/e2e-full.yml (line 177: `make vault-bootstrap` on CI cluster-up);
+    helm values (no AIRFLOW_CONN_* env), Makefile (only kubernetes_default is CLI-added);
+    local cluster vault-0 state (0/1 sealed, 28h uptime -- not probed further).
+  found: >
+    A PRIOR session already root-caused this exact failure ON LOCAL and recorded it in the sweep
+    test's own docstring: 'analytics_db_default was never provisioned in Vault' --
+    list_run_ids_pending_dbt_build failed 22/22 historical attempts; root-token
+    `vault kv list airflow/connections` showed minio_default as the ONLY entry; grep confirmed
+    ZERO provisioning sites repo-wide. It was then 'Fixed live (Rule 3, infra-only, no repo file
+    changed)' -- i.e. the secret was hand-written into the LOCAL cluster's Vault ONLY and the fix
+    never became code. scripts/vault-bootstrap.py::_ensure_airflow_secrets provisions ONLY
+    airflow/connections/minio_default (verified by direct read); CI's ephemeral cluster
+    re-bootstraps Vault from this script on every run; no other seeding path exists (workflow/
+    helm/Makefile all checked). Therefore on CI the Connection NEVER EXISTS, and the root task
+    fails deterministically ~seconds into every DagRun, every run, forever.
+  implication: >
+    CONFIRMED ROOT CAUSE for the dbt_build/premature-publish leg: a follow-the-indirection gap --
+    an ad-hoc live-cluster repair that never landed in the bootstrap code the ephemeral CI
+    cluster is rebuilt from. Fix: provision airflow/connections/analytics_db_default in
+    scripts/vault-bootstrap.py (read-guarded, from the same etl/analytics-db#dsn the bootstrap
+    itself writes earlier in the same invocation -- same etl_app credential the prior session's
+    hand-fix used). Offline round-trip VERIFIED against the installed stack:
+    Connection(uri='postgresql://...').get_uri() -> 'postgres://...' -> psycopg
+    conninfo_to_dict parses cleanly (conn_type normalized 'postgresql'->'postgres'; both schemes
+    libpq-valid).
+
+- timestamp: 2026-08-25 (ROUND 9, scheduler cgroup memory time-series extraction)
+  checked: >
+    Full scheduler memory/pids/restart-count series from ROUND 5's cgroup instrumentation in
+    round8-job.log (17s sampling, 12:06-13:05), plotted per crash cycle.
+  found: >
+    Idle baseline is a STABLE ~360MiB with 17 pids (scheduler + 8 pre-forked LocalExecutor
+    workers) for minutes at a time -- NO gradual leak. Every OOM is preceded by an ABRUPT spike
+    within one or two 17s samples: 361->1331MiB (12:13:17->12:13:34), 361->1356 (12:19:20),
+    411->1532 (12:25:25), 359->1442 (12:31:47), 752->1529 (12:37:17), 779->1511 (12:43:05),
+    836->1533 (12:49:08) -- each spike coinciding with pids jumping 17 -> 24-25, i.e. ~7-8
+    NEW task processes launched simultaneously (each imports the full Airflow tree, ~140-150MiB
+    RSS). Spike cadence is ~5:45-6:20 apart. THE CRASH-LOOP ENDS PERMANENTLY the moment the two
+    wedged DagRuns die at dagrun_timeout (12:54:44): from 12:55 to 13:05 memory oscillates
+    726-1496MiB with pids 18-22 and ZERO further OOMs (concurrency never fills all 8 slots at
+    once again).
+  implication: >
+    The scheduler OOM is a BURST-CONCURRENCY phenomenon, not a leak: peak ~= 360MiB baseline +
+    N_simultaneous_task_processes x ~145MiB. At parallelism=8 the worst-case dispatch burst
+    (~1.5-1.7GiB transient) exceeds the 1536Mi CI limit almost exactly -- the limit raised in
+    ROUND 2 was sized against ROUND 2's observed peak under parallelism=16's DIFFERENT regime
+    (denied KPO pods = short task lifetimes), not against 8 concurrent full task processes.
+    First-minute connection: the initial burst at 12:07:47 (917MiB, pids 23) IS the first
+    DagRuns' root-task fan-out (2 customers runs + orders runs each launching resolve_window/
+    list_matched_keys/list_run_ids/record_gap/wait_for_files near-simultaneously). Subsequent
+    ~6min-spaced bursts are re-synchronized dispatch waves (retry backoff + post-restart
+    backlog); the wedged runs' tasks are repeatedly killed by the very bursts their dispatch
+    participates in (self-resonant variant of ROUND 3's (3c) orphan-reset livelock), which is
+    why the wedge only cleared when dagrun_timeout killed the runs and why the loop then
+    stopped. Fix: raise the CI scheduler memory limit to cover the measured worst-case burst
+    at parallelism=8 (limit-only change; requests untouched -> zero budget-gate cost),
+    complementing (not replacing) the ROUND 7 parallelism=8 cap.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -3917,6 +4142,47 @@ root_cause: >
   global max_active_tis_per_dag=1 throughput ceiling (ROUND 5's mechanism, now live-visible:
   269 task-concurrency-reached messages). NOT YET RESOLVED -- ROUND 9 direction awaiting user
   decision.
+  (12, ROUND 9, CONFIRMED -- the deterministic mechanism behind the dbt_build upstream_failed
+  stamps and the premature-publish churn, REFUTING both ROUND 8 suspects for that leg): the
+  Airflow Connection `analytics_db_default` is NEVER provisioned by any code path --
+  scripts/vault-bootstrap.py's `_ensure_airflow_secrets` wrote ONLY
+  `airflow/connections/minio_default` -- and the connection existed solely as an ad-hoc,
+  hand-written Vault secret on the long-lived LOCAL cluster (a prior session's 'Rule 3,
+  infra-only, no repo file changed' live repair, recorded in test_backfill_2year_sweep.py's
+  module docstring finding 4 after 22/22 consecutive local failures and a direct root-token
+  `vault kv list`). Every ephemeral CI cluster re-bootstraps Vault from the script, so on CI
+  the connection NEVER exists: `list_run_ids_pending_dbt_build` (a ROOT task, no upstream,
+  Airflow-default retries=0, resolving `BaseHook.get_connection("analytics_db_default")` at
+  DagRun start) fails ~30s into EVERY DagRun; `all_success` short-circuits
+  `mark_dbt_build_running` and `dbt_build` to upstream_failed immediately (the observed
+  12:07:51/59 and 12:55:13/19 stamps -- present in ALL FOUR ROUND 8 DagRuns including the
+  healthy-scheduler replacement runs, and in every DagRun of rounds 5/6/7, load-independent);
+  the two `all_done` recorder tasks then complete (mark_done's failed-upstream XCom resolves
+  None -> its own `if not run_ids: return` no-op), so `publish` -- whose ONLY upstream is
+  mark_done -- launches PREMATURELY before stage has run, fails against nothing-staged, and
+  burns its 6 retries as real ~2min KPO pods holding the GLOBAL max_active_tis_per_dag=1
+  publish slot and node CPU. This is deferred-items.md plan 11-09 'defect 1' (CRITICAL, Open)
+  firing 100% deterministically on CI, not just during injected fault windows -- and it means
+  dbt_build has NEVER once run on CI, so silver/normalized are never (re)built and every
+  'normalized.customers has fewer than N rows' test precondition is structurally
+  unsatisfiable there. The DAG-wiring half of defect 1 (publish not gated on stage) remains
+  tracked in deferred-items.md, deliberately NOT fixed here.
+  (13, ROUND 9, CONFIRMED -- the scheduler-OOM mechanism, refining (3)/(3b)/(3c)): the CI
+  scheduler OOM is BURST-CONCURRENCY, not a leak. Direct cgroup time-series evidence (ROUND
+  5's instrumentation, run 32845181597, 17s cadence): stable ~360MiB/17-pid idle baseline
+  (scheduler + 8 pre-forked LocalExecutor workers) for minutes at a time, then an ABRUPT
+  one-to-two-sample spike to 1331-1533MiB with pids jumping to 24-25 immediately before every
+  one of the 8 observed OOMKills -- a dispatch burst filling all core.parallelism=8 slots
+  launches ~8 task processes simultaneously, each importing the full Airflow tree (~145MiB
+  RSS), for a transient worst case of ~360 + 8x150 ~= 1.6-1.7GiB against the 1536Mi limit
+  (which ROUND 2 sized against parallelism=16's different regime, when Kyverno-denied KPO
+  pods kept task lifetimes short). The ~6min crash cadence is re-synchronized dispatch waves
+  (retry backoff + post-restart backlog), and the first two DagRuns' 47min wedge is the (3c)
+  orphan-reset livelock in self-resonant form: the wedged runs' tasks are dispatched IN the
+  burst that OOMs the pod, so they die mid-run every cycle and are reset without retry
+  accounting. Decisive corroboration: the crash-loop STOPS PERMANENTLY at 12:54:44 -- the
+  exact moment dagrun_timeout kills the two wedged runs -- and the post-wedge phase peaks at
+  1496MiB with pids<=22 and zero further OOMs.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -4057,6 +4323,32 @@ fix: >
   shape to `scripts/stages/26-kyverno-policy.sh`), incidentally repairing LOCAL's own
   since-08-24 KPO denial and its missing caeeae4 kindest entries. No chart values, DAG code,
   test code, or CI workflow touched -- one committed file.
+  (12, ROUND 9): `scripts/vault-bootstrap.py`: `_ensure_airflow_secrets` now also provisions
+  `airflow/connections/analytics_db_default` (same read-then-skip-or-write InvalidPath guard
+  as every other `_ensure_*`), with `conn_uri` copied VERBATIM from the `etl/analytics-db`
+  `dsn` field `_ensure_etl_secrets` (h) guarantees exists earlier in the same `bootstrap()`
+  invocation -- the SAME `etl_app` credential the prior session's ad-hoc local repair used,
+  no new role/privilege, and the recovery read is deliberately un-caught (an InvalidPath
+  there would be a genuine bootstrap-ordering bug that must surface). Module docstring gains
+  step (i2) documenting the whole indirection. The raw `postgresql://` DSN as `conn_uri` was
+  offline-verified against the installed stack: Connection(uri=...) normalizes conn_type to
+  `postgres`, get_uri() emits `postgres://...`, psycopg `conninfo_to_dict` parses it cleanly
+  (both schemes libpq-valid). Idempotent on LOCAL (guard skips the existing hand-written
+  secret, read-only); e2e-full.yml already runs `make vault-bootstrap` on every CI
+  cluster-up, so CI picks this up with zero workflow changes. `tests/unit/
+  test_vault_bootstrap.py`: existing conn-uri test extended to model the new read pattern
+  (per-path side_effect; asserts BOTH writes, analytics conn_uri == the etl dsn verbatim)
+  plus a NEW guard test (already-present connection is never overwritten and no recovery
+  read happens -- protecting the local hand-written secret).
+  (13, ROUND 9): `helm/values/ci/airflow.yaml`: scheduler.resources.limits.memory
+  1536Mi -> 2048Mi (request untouched at 512Mi -- zero CI requests-budget cost, node memory
+  requests ~26% of allocatable so limit overcommit is safe), with the values comment
+  documenting the measured burst model (stable 360MiB baseline + ~8 simultaneous task
+  processes x ~145MiB import cost ~= 1.6-1.7GiB transient > old 1536Mi ceiling; 2048Mi
+  covers the full-burst worst case at the ROUND 7-chosen parallelism=8 with ~20% margin).
+  Same CI-only limit-raise shape as ROUND 2's precedent but grounded in the direct
+  per-process burst evidence, not trend extrapolation. parallelism=8 (the burst bound
+  itself) deliberately unchanged.
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -4223,6 +4515,24 @@ verification: >
   max_active_tis_per_dag throttling) independently exceed the tests' 180s windows. Fix (11)
   STAYS (real mechanism, really fixed); see Eliminated ROUND 8 entry and root_cause (10)'s
   ROUND 8 POST-RUN CORRECTION.
+  Fixes (12)+(13), ROUND 9: offline battery ALL GREEN, zero new regressions --
+  `python -m py_compile` + `ruff check` + `ruff format --check` + `mypy` clean on
+  scripts/vault-bootstrap.py AND tests/unit/test_vault_bootstrap.py; YAML parse clean on
+  helm/values/ci/airflow.yaml; `make manifests` kubeconform -strict 540 resources /
+  0 invalid / 0 errors, rendered build/manifests/ci/airflow.yaml carries `memory: 2048Mi`
+  (2 occurrences -- scheduler pod's paired containers, same render shape as the prior 1536Mi,
+  0 remaining 1536Mi); `tests/policy/test_manifest_resources.py -m manifests` 5/5 (CPU
+  request budget UNCHANGED -- limit-only change); `test_values_profiles.py` 6/6;
+  `tests/policy -m "not manifests"` 157 passed / 2 failed -- the SAME 2 pre-existing
+  out-of-scope failures as every prior round; `tests/dagtest` 14/14; `tests/unit` 555/555
+  (incl. the updated + 1 new vault-bootstrap tests; suite was 554 before, +1 = the new guard
+  test). Additional targeted offline proof for (12): live .venv round-trip
+  `Connection(uri='postgresql://etl_app:...@analytics-db-rw.data:5432/analytics')` ->
+  conn_type 'postgres' -> get_uri() 'postgres://...' -> psycopg.conninfo.conninfo_to_dict
+  parses to the correct host/port/user/dbname. LIVE CI VERIFICATION: pending -- judged on
+  INTERNAL diagnostics per the ROUND 9 pre-registered falsification test (scheduler restart
+  count, zero dbt_build-upstream_failed-with-discover-try=0 stamps, dbt_build reaching a
+  real state, Kyverno DENY still 0), with the node-ID diff secondary (saturated instrument).
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -4239,4 +4549,5 @@ files_changed:
   - tests/e2e/slice/test_backfill_2year_sweep.py
   - helm/values/ci/kyverno.yaml
   - kubernetes/kyverno-policy.yaml
-  - helm/values/ci/kyverno.yaml
+  - scripts/vault-bootstrap.py
+  - tests/unit/test_vault_bootstrap.py
