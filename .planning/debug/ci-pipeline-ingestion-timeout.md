@@ -70,8 +70,24 @@ ROUND 7 (OPENED 2026-08-25 on session resume -- USER-CHOSEN STRATEGIC DIRECTION,
       demand-vs-capacity deficit. Reducing peak concurrency (staggered/batched sweep_corpus
       uploads, max_active_runs / max_active_tis_per_dag caps tuned for the CI profile) attacks the
       deficit itself."
-  next_action: "IMPLEMENTING (this session, investigation complete -- see reasoning_checkpoint
-      ROUND 7 below): three-lever load reduction, all verified against the installed
+  live_verification_state (2026-08-25T09:52Z): "Fix committed (32d9911 code, 9291e98 docs tip)
+      and pushed to main. e2e-full.yml run 32834232783 (headSha 9291e982fb355b26272d0f243e964f41
+      b94b219d, status pending at +20s) is the ROUND 7 live-verification run -- NOTE it is queued
+      behind in-progress run 32822780401 (headSha 3742be8, the PRE-ROUND-7 wip commit; that run's
+      result is NOT informative for ROUND 7 and must not be confused with 32834232783's).
+      publish.yml run 32834232641 (same headSha) is building/signing the 9291e98 images the DAGs
+      will pull. On resume: a SINGLE `gh run watch 32834232783 --exit-status --interval 60` (never
+      more than one watcher, never the 3s default), then `gh api repos/KonuTech/airflow-platform/
+      actions/jobs/<job-id>/logs` and (1) FIRST verify the reduced-concurrency regime was in force
+      (falsification-test precondition): grep for 'max_active_tasks limit of 6' scheduler lines,
+      'discovery.units_capped' cap=10 in discover output, and read the DagRun/TI history dump's
+      per-run TI census; (2) diff the failing-test NODE-ID list against the invariant 17-test
+      baseline (names, not counts); (3) grep for 'denied the request' Kyverno DENY as the
+      secondary indicator. Signature gone/materially reduced -> hypothesis confirmed, proceed to
+      human-verify. Same 17 node-IDs under verified reduced concurrency -> hypothesis REFUTED per
+      the pre-registered falsification test; ROUND 8's reserved directions apply."
+  next_action_completed: "IMPLEMENTED (this session, investigation complete -- see
+      reasoning_checkpoint ROUND 7 below): three-lever load reduction, all verified against the installed
       apache-airflow==3.3.0 source and this repo's own policy gates before writing a line:
       (a) config.core.parallelism 16->8 in BOTH helm/values/{ci,local}/airflow.yaml (D-06
       behavioral non-divergence rule, same precedent as ROUND 2's 32->16) -- the ONLY truly
