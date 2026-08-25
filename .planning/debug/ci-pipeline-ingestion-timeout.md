@@ -2,9 +2,20 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 11 fixes 15a+15b + two test artifacts implemented, offline-verified
-  with a red/green falsification, pushed as 377c068; live verification run 32884691063
-  recorded; awaiting watcher. See Current Focus ROUND 11 + Resolution fix (15).)
+updated: 2026-08-25 (ROUND 11 POST-RUN ANALYSIS COMPLETE on run 32884691063 (headSha 377c068,
+  conclusion CANCELLED by the job-level timeout-minutes: 120 after exactly 2h00m42s -- partial
+  logs + always()-diagnostics fully recovered): fix (15) LIVE-CONFIRMED -- criteria (a)/(b)/(d)
+  ALL MET: dbt_build state=success try=1 in ALL 7 DagRuns that reached it (first-ever CI dbt
+  successes, 20-30s each), ZERO NOT-NULL/permission-denied anywhere, stage 60/60 success try=1
+  (8-26s), FailedScheduling 0, Kyverno DENY 0, restarts 0 (scheduler peak 1288MiB<2048Mi).
+  FIRST-EVER complete end-to-end DagRun on CI: backfill__10:24 in 6m28s incl. publish success
+  try=1 (29s). Criterion (c) FAILED for a NEW mechanism = residual candidate (16): every
+  subsequent DagRun's publish deterministically trips mass_delete_circuit_breaker
+  (QualityThresholdExceeded, vanished 27/50=54% > threshold 10%), retries exhaust, DagRun
+  wedges to exactly dagrun_timeout=45min; 4 wedged runs x 45min consumed the 120-min job
+  budget (poison is self-sustaining -- raising timeout-minutes alone CANNOT go green).
+  DECISION CHECKPOINT returned. See Current Focus ROUND 11 OUTCOME + ROUND 11 post-run
+  Evidence + Resolution (15)/(16).)
 updated_prior_round11: 2026-08-25 (ROUND 10 POST-RUN ANALYSIS COMPLETE on run 32873456327 (headSha d0d1ad6):
   ROOT CAUSE (14) LIVE-CONFIRMED, fix (14) WORKS at mechanism level -- ALL FIVE pre-registered
   primaries green: (0) publish.yml companion success; (1) fix verifiably in force
@@ -287,8 +298,72 @@ ROUND 11 (2026-08-25, opened on user decision: SCOPE B -- CURRENT STATE):
       whack-a-mole precedent, NEW residuals may surface beneath (publish and downstream
       hops execute on CI for the first time) -- name them with direct evidence, return a
       decision checkpoint before any ROUND 12 fix."
-  next_action: "AWAITING the session manager's watcher on run 32884691063. On terminal:
-      continuation agent executes the POST-RUN ANALYSIS STEPS above."
+  ROUND_11_OUTCOME (post-run analysis on run 32884691063, conclusion CANCELLED at the
+      job-level `timeout-minutes: 120` after 2h00m42s -- orchestrator triage confirmed no
+      concurrency supersession, no manual cancel; publish.yml 32884691018 success =
+      criterion 0 met; partial job log 5577 lines fetched incl. ALL always()-diagnostics):
+    criterion_a: "MET -- dbt_build state=success try=1 in ALL 7 DagRuns that reached it
+        (backfills 10:24/10:25/12:55/12:56, scheduled 18:43/19:28/20:13; 20-30s wall each).
+        FIRST-EVER dbt_build successes on CI."
+    criterion_b: "MET -- zero 'null value in column dataset_id' and zero 'permission denied
+        for table datasets' anywhere in the log (grep count 0 across all diagnostics)."
+    criterion_c: "NOT MET -- but for a NEW mechanism, not (15): backfill__10:24 is the
+        FIRST-EVER complete end-to-end CI DagRun (18:44:24->18:50:52 = 6m28s; publish
+        success try=1, 29s). EVERY subsequent DagRun wedged at exactly start+45:00
+        (dagrun_timeout): scheduled 18:43, backfill 10:25, scheduled 19:28, backfill
+        12:55 all failed at +45:00; 12:56 (publish try=4 up_for_retry) + scheduled 20:13
+        (publish try=5) in flight at cancel; 12:57 queued. Wedge cause = residual (16)."
+    criterion_d: "MET -- stage 60/60 state=success try=1 (19-26s first runs, 8-12s warm);
+        FailedScheduling census EMPTY; Kyverno DENY 0; control-plane restarts 0
+        (restart-timeline empty; peaks: scheduler 1288MiB/21pids < 2048Mi, dag-processor
+        699MiB, triggerer 422MiB)."
+    criterion_e: "UNMEASURABLE for pytest node-IDs -- the cancelled step's streamed stdout
+        was NOT archived (only the invocation line survived before ##[error] The operation
+        was canceled); no PASS/FAIL lines exist. Cluster-side evidence places the suite
+        still inside tests/e2e/slice (sweep module backfill_id=2 window in flight) at
+        113m26s of pytest wall."
+    new_residual_16: "Publish poison: dataplat publish fails QualityThresholdExceeded,
+        rule_id=mass_delete_circuit_breaker, 'vanished-key ratio 54.00% exceeds configured
+        mass-delete threshold 10.00%', current_count=50 vanished_count=27 -- BYTE-IDENTICAL
+        across all observed tries (12:56 tries 1-4 directly in scheduler log; earlier
+        wedged runs' publish tries rotated out of the captured window but share the try=6
+        end-state 'skipped'). raw/customers/ listing at cancel: EXACTLY the 12 corpus
+        files, all uploaded 18:43:54, NO separate mass-delete snapshot ever uploaded ->
+        the 54% arises from re-publishing corpus snapshots against evolved gold state,
+        not from the mass-delete test's own fixture. current_count=50 == _ROWS_PER_DAY
+        (each file is a full 50-row daily snapshot; gold current after run 1 = one day's
+        50-key roster). Leading hypothesis (parts INFERRED, needs ROUND 12 evidence):
+        publish applies delete-detection per staged snapshot against currently-current
+        gold; a later run staging an OLDER/different day-window fails to re-confirm 27 of
+        gold's 50 current keys (cumulative roster churn over the re-published window >10%)
+        -> trip; and because tripped runs never publish, their files are never marked
+        ingested -> re-discovered by every subsequent run -> SELF-SUSTAINING poison loop.
+        Evidence gap: WHICH files each run staged is not in any diagnostic (no
+        assignment_uri dump); needs a bronze _run_id->file mapping dump or local repro.
+        Open sub-questions: (i) why publish's final try ends state=skipped try=6 (no
+        skip_on_exit_code wiring found in _common/kpo.py or the DAG); (ii) why wedged
+        DagRuns still sat until +45:00 after publish resolved (10:25 publish skipped
+        19:22:08, run failed 19:35:53 -- 13.7min later, something downstream never
+        resolved)."
+    timeline_120min: "job start 18:36:02; cluster-up 18:36:10->18:42:21 (6m11s); images/
+        migrate/vault 37s; pytest 18:42:58->cancel 20:36:24 (113m26s). Inside pytest:
+        cluster tests + 12-file corpus upload done by 18:43:54 (<1min); one healthy DagRun
+        6m28s; then 4 x 45min wedges (overlapping scheduled/backfill streams, serialized
+        per-stream by max_active_runs=1) consumed the rest. Workflow sets
+        timeout-minutes: 120 (.github/workflows/e2e-full.yml line 41)."
+    measured_floors: "wait_for_files 5-28s; discover 9-19s try=1; stage per file 19-26s
+        cold / 8-12s warm; dbt_build 20-30s try=1; publish 29s (success). Healthy 10-file
+        DagRun: 6m28s cold, ~2.5-3min warm (est. from warm stage cadence). Publish retry
+        cadence (capped delays): tries at +0/+1m/+2.5m/+5.9m. KEY ARITHMETIC: the poison
+        never clears, so raising timeout-minutes ALONE cannot go green; conversely, with
+        (16) fixed, ~5 sweep DagRuns x 3-6.5min + scheduled stream suggests the suite
+        plausibly fits the existing 120-min budget -- measure again post-fix before
+        touching timeout-minutes."
+  next_action: "DECISION CHECKPOINT returned to user: choose ROUND 12 direction for
+      residual (16) (investigate re-staging/re-publish ordering + idempotency-ledger
+      interaction; add per-run file-assignment diagnostics; local repro) vs corpus/test
+      redesign vs accepting breaker behavior and isolating the sweep. No fix without a
+      decision per the standing rule."
 
 ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- SUPERSEDED BY ROUND 11 ABOVE):
   charter: "User-chosen Hybrid, amendment verbatim: 'reduce number of processed files if they
@@ -4589,6 +4664,85 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     ALLOWED_SCHEMAS with a migration-0001 justification. Note: fixing 15b also unblocks
     LOCAL dbt_build (broken since 2026-08-20, previously unnoticed).
 
+- timestamp: 2026-08-25 (ROUND 11 POST-RUN -- analysis of live-verification run 32884691063,
+    headSha 377c068, conclusion CANCELLED by the job-level timeout)
+  checked: >
+    gh run view 32884691063 (single job 97922265576 'Full local E2E suite + rebuild-from-raw
+    capstone', started 18:36:02Z, completed 20:36:44Z = 2h00m42s, conclusion cancelled);
+    partial job log fetched via gh api actions/jobs/97922265576/logs (5577 lines, saved
+    round11-job.log) -- the cancelled `make cluster-slice-verify` step's STREAMED stdout was
+    NOT archived (log jumps from the pytest invocation line at 18:42:58 straight to
+    '##[error]The operation was canceled.' at 20:36:24), but ALL if:always() diagnostic
+    steps ran at cancel time and were captured in full: cp-monitor per-role peaks +
+    restart timeline, FailedScheduling census, etl-monitor, final pods/events/node,
+    DagRun history (8 runs), 5-key TaskInstance history (103 TIs), scheduler-log grep,
+    triggerer status/log, MinIO raw/customers listing. Also: .github/workflows/e2e-full.yml
+    line 41 (timeout-minutes: 120), git show d0d1ad6 (ROUND 10 corpus shrink 20->13 days,
+    _ROWS_PER_DAY=50, anomaly indices re-derived, seed v4->v5),
+    packages/dataplat/src/dataplat/scd/delete_detection.py (delete-detection scoping
+    docstrings), airflow/dags/csv_ingest_customers.py (publish retries=6, dagrun_timeout=
+    45min, max_active_runs=1, schedule */1).
+  found: >
+    (1) FIX (15) LIVE-CONFIRMED -- criteria (a)+(b) MET: dbt_build state=success try=1 in
+    ALL 7 DagRuns that reached it (backfill 10:24 18:49:48-18:50:17; 10:25; 12:55; 12:56;
+    scheduled 18:43; 19:28; 20:13 -- 20-30s wall each), the FIRST dbt_build successes ever
+    observed on CI; zero occurrences of 'null value in column' and 'permission denied for
+    table datasets' in the entire log.
+    (2) FIRST-EVER COMPLETE END-TO-END DAGRUN ON CI: backfill__10:24 state=success,
+    18:44:24->18:50:52 (6m28s): wait_for_files 8s, discover try=1 19s, stage map 0-9 ALL
+    try=1 (19-26s each, serial), dbt_build 29s, publish try=1 SUCCESS 29s. The full
+    discover->stage->dbt_build->publish pipeline is now PROVEN on GitHub free-tier CI.
+    (3) Criterion (c) NOT MET -- NEW residual (16), publish poison: every subsequent
+    DagRun's publish fails deterministically with QualityThresholdExceeded rule_id=
+    mass_delete_circuit_breaker 'vanished-key ratio 54.00% exceeds configured mass-delete
+    threshold 10.00%' current_count=50 vanished_count=27 (byte-identical across 12:56
+    tries 1-4, the window the captured scheduler log covers; publish end-states elsewhere:
+    skipped try=6 in 10:25/18:43/19:28/12:55, up_for_retry try=4/5 in the two in-flight
+    runs). Four DagRuns failed at EXACTLY start+45:00 = dagrun_timeout (18:43:51->19:28:51;
+    18:50:53->19:35:53; 19:28:52->20:13:53; 19:36:07->20:21:08). backfill__12:56 running +
+    12:57 queued + scheduled 20:13 running at cancel.
+    (4) MinIO listing at cancel: raw/customers/ contains EXACTLY the 12 corpus files, all
+    LastModified 18:43:54, sizes 3.1-3.5KiB -- NO mass-delete snapshot object exists, so
+    the 54% trip is generated by re-publishing ordinary corpus snapshots against evolved
+    gold state, not by the mass-delete test's fixture. current_count=50 == _ROWS_PER_DAY
+    (each corpus file is a full 50-row daily snapshot -> gold current == one day's roster).
+    (5) Criterion (d) MET, all regression guards green: stage 60/60 success try=1 across
+    all 6 staged runs (19-26s in the first two runs, 8-12s warm from 12:55 onward --
+    fastest CI stage times ever); FailedScheduling census EMPTY; Kyverno DENY count 0;
+    restart-count timeline EMPTY (0 restarts all roles); peaks scheduler 1288MiB/21pids
+    (< 2048Mi), dag-processor 699MiB, triggerer 422MiB.
+    (6) Criterion (e) pytest node-ID diff UNMEASURABLE: streamed stdout of the cancelled
+    step is unrecoverable; no per-test PASS/FAIL exists. Cluster evidence places the suite
+    still in tests/e2e/slice (sweep module; backfill_id=2 window 12:55-12:57 in flight) at
+    113m26s of pytest wall.
+    (7) Timeline of the 120min: cluster-up 6m11s (18:36:10-18:42:21), glue 37s, pytest
+    113m26s of which: cluster tests + corpus upload <1min, one healthy DagRun 6m28s, then
+    the serial 45-min wedge cadence ate everything else. Job timeout-minutes: 120.
+    (8) Measured floors (deferred budget assessment input): wait_for_files 5-28s, discover
+    9-19s, stage/file 8-12s warm, dbt_build 20-30s, publish 29s; healthy 10-file DagRun
+    6m28s cold / ~2.5-3min warm est.; publish retry cadence +0/+1m/+2.5m/+5.9m.
+  implication: >
+    The ROUND 11 hypothesis is CONFIRMED at its core -- (15a)/(15b) were the dbt_build
+    blockers, and unblocking dbt exposed the next layer exactly as blind-spot (3)
+    predicted (publish executing repeatedly on CI for the first time). The orchestrator's
+    proposed interpretation ('suite grew past 120min BECAUSE fixes work') is only HALF
+    right: the fixes verifiably work (a/b/d green, first full pipeline proven), but the
+    budget was consumed by the NEW deterministic publish wedge (16), not by honest
+    long-running successes. Decisive arithmetic: the poison is self-sustaining (tripped
+    runs never publish -> their files are never marked ingested -> re-discovered next run
+    -> same trip), so each future DagRun costs 45min and fails -- raising timeout-minutes
+    ALONE can never make this suite green; (16) must be root-caused first. Conversely the
+    healthy-path floors suggest that WITH (16) fixed the suite plausibly fits the existing
+    120-min budget (five-ish sweep DagRuns x 3-6.5min + scheduled stream + fixed 7min
+    setup), so the timeout decision should WAIT for a post-fix measurement. Evidence gap
+    for ROUND 12: which files each run staged (no assignment_uri/bronze-run mapping in any
+    diagnostic) -- needed to decide between 'older-window re-publish vs evolved gold' and
+    alternative orderings; also two open sub-questions (publish skipped-at-try-6 mechanism;
+    why wedged runs sat to +45:00 after publish resolved). Bearing on reserved options:
+    zero FailedScheduling + warm 8-12s stages + 0 restarts say the platform now FITS the
+    free-tier runner -- current evidence argues AGAINST reviving runner migration/job
+    splitting.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -5049,6 +5203,21 @@ root_cause: >
   the live local warehouse, and local dbt_build has had ZERO successes since 2026-08-20
   (when a dbt image containing the 08-19-committed reconciliation tests rolled out) --
   fixing 15b also repairs LOCAL dbt_build, broken since then and previously unnoticed.
+  ROUND 11 POST-RUN: (15) LIVE-CONFIRMED on run 32884691063 -- dbt_build success try=1 in
+  all 7 reaching DagRuns, zero NOT-NULL/permission errors; first-ever complete end-to-end
+  CI DagRun (backfill__10:24, 6m28s). NEW RESIDUAL CANDIDATE (16) -- publish poison: after
+  the first successful publish, EVERY subsequent DagRun's publish deterministically trips
+  mass_delete_circuit_breaker (QualityThresholdExceeded, vanished 27 / current 50 = 54% >
+  10% threshold; current_count=50 == _ROWS_PER_DAY, gold current == one day's roster; NO
+  mass-delete snapshot object exists in raw/customers/ -- only the 12 corpus files),
+  publish retries=6 exhaust, DagRun wedges to exactly dagrun_timeout=45min, and because
+  tripped runs never publish their files are never marked ingested -> re-discovered next
+  run -> SELF-SUSTAINING poison; 4x45min wedges blew the job's timeout-minutes: 120
+  (conclusion cancelled at 2h00m42s). Leading (partly INFERRED) mechanism: re-publication
+  of a day-window snapshot against gold evolved past it fails to re-confirm >10% of
+  current keys; WHICH files each run staged is the ROUND 12 evidence gap. Open
+  sub-questions: publish end-state skipped-at-try-6 mechanism; wedged runs sitting to
+  +45:00 after publish resolved.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -5503,11 +5672,15 @@ verification: >
   clean on both modified e2e files. The (15b) rewrite is additionally grounded in the
   direct local reproduction: the OLD join fails as dbt_app ('permission denied for table
   datasets') while meta.dataset_id_for_name() succeeds as dbt_app (returns 1/76) on the
-  live local warehouse. LIVE CI VERIFICATION: pending -- judged on the ROUND 11
-  pre-registered falsification criteria (dbt_build first-ever CI success; zero
-  NOT-NULL/permission-denied in dbt logs; no 45-min wedge; stage/FailedScheduling/Kyverno/
-  restart regression guards; census + node-ID diff secondary with measured floors recorded
-  for the deferred budget assessment).
+  live local warehouse. LIVE CI VERIFICATION (run 32884691063, headSha 377c068, cancelled
+  at the 120-min job timeout -- verdict from always()-diagnostics): criteria (a)/(b)/(d)
+  ALL MET -- dbt_build success try=1 in all 7 reaching DagRuns (first ever on CI), zero
+  NOT-NULL/permission-denied, stage 60/60 try=1, FailedScheduling 0, Kyverno DENY 0,
+  restarts 0 (scheduler peak 1288MiB < 2048Mi); first-ever complete end-to-end CI DagRun
+  (6m28s incl. publish success). Fix (15) CONFIRMED WORKING. Criterion (c) failed for the
+  NEW residual (16) (publish mass-delete-breaker poison, 45-min wedges); criterion (e)
+  node-ID diff unmeasurable (cancelled step's streamed stdout not archived). Suite NOT
+  yet green: (16) dominates.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
