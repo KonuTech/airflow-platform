@@ -2,7 +2,20 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 9 investigation COMPLETE + fixes (12)/(13) implemented, offline-verified,
+updated: 2026-08-25 (ROUND 9 POST-RUN ANALYSIS COMPLETE on run 32855002333: BOTH fixes
+  (12)/(13) LIVE-CONFIRMED at mechanism level -- analytics_db_default provisioned ('created'
+  13:50:28Z), ZERO dbt_build upstream_failed stamps anywhere (wedge GONE, was every DagRun of
+  rounds 5-8), scheduler restarts 0 over 66min (was 9) with measured peak 1559MiB/24pids --
+  ABOVE the old 1536Mi ceiling, BELOW the new 2048Mi, proving fix (13) load-bearing, and
+  Kyverno DENY still 0 (fix 11 holding). pytest node-ID set is the same 17 for the 11th run
+  (saturated instrument, as pre-registered) BUT the failure-template census shifted materially
+  for the first time all session: dbt chain now starts (meta.run_stages DBT_BUILD row exists),
+  backfill-create failures dropped 6->3 (all AlreadyRunningBackfill -- backfills overrun and
+  collide, also present in ROUND 8), pilot file now REGISTERS but stays PENDING at 1800s, 7
+  files still miss the 180s discovery window. Residual = the deferred option C throughput
+  ceiling (max_active_tis_per_dag=1 global slots + ~3 CPU) plus downstream data-state asserts.
+  Awaiting user decision checkpoint on next direction. See Current Focus ROUND 9 OUTCOME.)
+updated_prior_round9_fix: 2026-08-25 (ROUND 9 investigation COMPLETE + fixes (12)/(13) implemented, offline-verified,
   awaiting live CI verification. Both ROUND 8 suspects for the dbt_build upstream_failed leg
   REFUTED (stamps recur under a healthy scheduler in ALL DagRuns of rounds 5-8): actual cause is
   root cause (12) -- Airflow Connection analytics_db_default was NEVER provisioned in code (only
@@ -92,7 +105,71 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 9 (2026-08-25, opened on user decision A+B combined -- CURRENT STATE):
+ROUND 9 OUTCOME (2026-08-25, post-run analysis of run 32855002333 -- CURRENT STATE):
+  status: "ANALYSIS COMPLETE. Decision-tree branch: mechanisms (12)/(13) CONFIRMED FIXED and
+      the remaining failures have nameable causes. Awaiting user decision checkpoint on the
+      next direction (residual = deferred option C territory + AlreadyRunningBackfill
+      collisions + downstream data-state asserts)."
+  run_analyzed: "e2e-full.yml run 32855002333 (headSha ee87708, fixes 12+13), job 97824707600
+      'Full local E2E suite + rebuild-from-raw capstone', conclusion failure. Companion
+      publish.yml 32855002320 SUCCESS (image race clear). NOTE: the original analysis agent
+      completed all log analysis then died to an API interruption before writing this file;
+      this block was reconstructed by a resumed agent from the surviving scratchpad artifacts
+      (round9-job.log, round9_failed.txt, baseline_sorted.txt) with every criterion re-run
+      fresh against the raw log."
+  criterion_results:
+    - "(1) fix (12) in force: VERIFIED -- job log 13:50:28Z 'secret
+      airflow/connections/analytics_db_default: created' (fresh CI Vault, 'created' as
+      required)."
+    - "(2) WEDGE CHECK: PASSED -- ZERO occurrences of dbt_build+upstream_failed anywhere in
+      the log (rounds 5-8: every single DagRun had the t+~30s stamp). Root cause (12)
+      attribution CONFIRMED live. Corroboration that the dbt chain now actually starts:
+      a failing test's own assert references meta.run_stages[run_id=58,
+      stage_name='DBT_BUILD'] -- that row EXISTING at all is a first for CI."
+    - "(3) OOM CHECK: PASSED, fix (13) LOAD-BEARING -- scheduler restarts 0 over the full
+      66min run (was 9); zero OOMKilled/137 anywhere. Decisive: per-role peak census shows
+      scheduler peak_mem_bytes=1635192832 (~1559MiB) at peak_pids=24 -- ABOVE the old 1536Mi
+      (1610612736) ceiling and BELOW 2048Mi. The parallelism=8 dispatch burst still happened
+      exactly as modeled and would have OOMed the old limit; per the pre-registered protocol
+      this is the 'spike above old ceiling, absorbed by new limit' branch, NOT the
+      'unnecessary-but-harmless' branch."
+    - "(4) Kyverno DENY grep: 0 -- fix (11) regression check passed."
+    - "(5) publish behavior: not directly extracted (this run's log lacks a greppable TI-dump
+      in the format prior rounds matched; honest gap) -- but zero premature-publish retry
+      storms appear in the failure templates, and with (12)'s upstream chain no longer
+      short-circuiting, the structural premature-launch path is closed by construction."
+    - "(6) pytest: '17 failed, 21 passed, 6 skipped, 16 warnings in 3766.04s (1:02:46)'.
+      Node-ID set IDENTICAL to baseline, 11th consecutive -- exactly as the saturated-
+      instrument pre-registration anticipated. BUT the failure-TEMPLATE census shifted
+      materially for the FIRST time all session: 7x 'meta.files has no row ... within 180s --
+      discovery never registered it' (persisting); 3x 'airflow backfill create ... failed
+      after 3 attempts (exit 1)' with the terminal exception now cleanly visible --
+      airflow.models.backfill.AlreadyRunningBackfill: 'Another backfill is running for Dag
+      csv_ingest_customers. There can be only one running backfill per Dag.' (12 occurrences
+      in BOTH round-8 and round-9 logs -- persisting collision, backfills overrun their test
+      windows and serialize; down from 6 such test failures in ROUND 8); 1x pilot file NOW
+      REGISTERS in meta.ingestion_runs but stays status=PENDING at 1800s (progress: baseline
+      never registered); 1x 'unexpected schema(s): [meta]' on the analytical cluster; 1x
+      meta.run_stages DBT_BUILD never reached RUNNING; 2x SCD2 precondition asserts; 1x XCom
+      git_sha '' mismatch; 1x 'normalized.customers has fewer than 2 rows'."
+  interpretation: "The stacked-sufficient-causes model keeps paying out: with admission (10),
+      the connection gap (12) and the OOM burst ceiling (13) all verifiably gone, the
+      pipeline now RUNS on CI (dbt chain starts, files register) but cannot DRAIN fast
+      enough for the per-test windows: a pilot file registered-but-PENDING at 1800s, 7 files
+      missing the 180s discovery window, and backfills overrunning into
+      AlreadyRunningBackfill serialization. That is the deferred option C throughput ceiling
+      (global max_active_tis_per_dag=1 slots on stage/dbt_build/publish + ~3 allocatable
+      CPUs) as the dominant residual, plus downstream data-state asserts (schema hygiene,
+      SCD2 preconditions, XCom git_sha) that may simply be knock-ons of never having had a
+      complete prior ingest -- untriageable until a run drains."
+  next_action: "USER DECISION CHECKPOINT: option C (throughput-ceiling design analysis --
+      re-examine max_active_tis_per_dag=1 global slots and the DAG concurrency shape, a
+      production-code change with design implications, explicitly deferred until runs stop
+      wedging -- they now have) vs. triaging the AlreadyRunningBackfill test-collision leg
+      vs. ROUND 8's reserved directions (loosen timeouts / split jobs, local evaluation).
+      Scope guardrails: rounds 1-9 fixes stay; follow-up B still captured, non-blocking."
+
+ROUND 9 (2026-08-25, opened on user decision A+B combined -- fix round, SUPERSEDED BY ROUND 9 OUTCOME ABOVE):
   charter: "What happens inside the scheduler in its first 60 seconds under real DagRun load.
       Treat the near-simultaneous first scheduler OOM (12:08:06) and the wrongful
       upstream_failed stamps on dbt_build (12:07:51/59, seconds after wait_for_files succeeded,
@@ -3810,6 +3887,48 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     at parallelism=8 (limit-only change; requests untouched -> zero budget-gate cost),
     complementing (not replacing) the ROUND 7 parallelism=8 cap.
 
+- timestamp: 2026-08-25 (ROUND 9 -- post-run analysis of live-verification run 32855002333,
+    reconstructed by a resumed agent after the original analyst completed the analysis but was
+    killed by an API interruption before persisting it; all findings below re-derived fresh
+    from the surviving scratchpad log, not recalled)
+  checked: "e2e-full.yml run 32855002333 (headSha ee87708) job 97824707600 raw log (fetched via
+    gh api .../jobs/97824707600/logs, saved as scratchpad round9-job.log): (a) vault-bootstrap
+    output; (b) grep census for dbt_build upstream_failed; (c) restart/OOM census (pod listings,
+    kubectl describe Restart Count, OOMKilled/137 greps) + the per-role peak-memory summary from
+    the ROUND 5 cgroup monitor CSV; (d) 'denied the request' grep; (e) failing-test node-ID diff
+    (round9_failed.txt vs baseline_sorted.txt) + failure-template census; (f) the terminal
+    exception inside the 'backfill create failed after 3 attempts' capture; (g) same-template
+    grep against the retained ROUND 8 log for movement comparison; (h) companion publish.yml
+    32855002320 conclusion via gh run view."
+  found: "(a) 'secret airflow/connections/analytics_db_default: created' at 13:50:28Z -- fix (12)
+    in force on a fresh CI Vault. (b) ZERO dbt_build upstream_failed stamps in the entire log --
+    the wedge that appeared in EVERY DagRun of rounds 5-8 is GONE; a failing test's assert text
+    proves a meta.run_stages DBT_BUILD row now exists (run_id=58), i.e. the dbt chain started on
+    CI for the first time ever. (c) scheduler restarts 0 across the full 66min (was 9), zero
+    OOMKilled/137; per-role peak census: scheduler peak_mem_bytes=1635192832 (~1559MiB) at
+    peak_pids=24 -- ABOVE the old 1536Mi ceiling (1610612736 bytes), BELOW the new 2048Mi: the
+    parallelism=8 burst recurred exactly as fix (13)'s model predicted and the new limit absorbed
+    it (load-bearing, not unnecessary headroom). dag-processor peak 724MiB/7pids, triggerer
+    404MiB/12pids, both 0 restarts. (d) Kyverno DENY count 0 -- fix (11) holding. (e) pytest '17
+    failed, 21 passed, 6 skipped, 16 warnings in 3766.04s (1:02:46)'; node-ID set IDENTICAL to
+    the baseline for the 11th consecutive run -- but the failure-TEMPLATE census shifted for the
+    first time all session: 7x meta.files-no-row-within-180s (persisting), 3x backfill-create
+    exit 1 (down from 6), 1x pilot file registered-but-PENDING at 1800s (baseline: never
+    registered at all), 1x unexpected schema ['meta'], 1x DBT_BUILD run_stage never RUNNING, 2x
+    SCD2 precondition asserts, 1x XCom git_sha '' mismatch, 1x normalized.customers <2 rows.
+    (f) the backfill-create terminal exception is airflow.models.backfill.AlreadyRunningBackfill
+    ('There can be only one running backfill per Dag') -- and (g) the SAME exception appears 12
+    times in BOTH the round-8 and round-9 logs: a persisting backfill-overrun/serialization
+    collision, not a new regression. (h) publish.yml 32855002320 SUCCESS -- image race clear."
+  meaning: "Fixes (12) and (13) are LIVE-CONFIRMED per the pre-registered falsification test
+    (all primary internal-diagnostic criteria passed); root causes (12)/(13) join (10) as
+    verified-eliminated stacked causes. The residual blocker set is now nameable: the deferred
+    option C throughput ceiling (global max_active_tis_per_dag=1 slots + ~3 allocatable CPUs --
+    pipeline runs but cannot drain within per-test windows) as dominant, the
+    AlreadyRunningBackfill overrun collision as a coupled second leg, and a tail of data-state
+    asserts likely knock-ons of no complete prior ingest. Decision checkpoint returned to the
+    user; option C's deferral condition ('until runs stop wedging') is now satisfied."
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -4563,6 +4682,16 @@ verification: >
   INTERNAL diagnostics per the ROUND 9 pre-registered falsification test (scheduler restart
   count, zero dbt_build-upstream_failed-with-discover-try=0 stamps, dbt_build reaching a
   real state, Kyverno DENY still 0), with the node-ID diff secondary (saturated instrument).
+  Fixes (12)+(13), ROUND 9 LIVE VERIFICATION (run 32855002333, job 97824707600, headSha
+  ee87708): ALL primary internal-diagnostic criteria of the pre-registered falsification test
+  PASSED -- (1) analytics_db_default 'created' in the bootstrap log; (2) ZERO dbt_build
+  upstream_failed stamps (wedge gone; dbt chain starts, meta.run_stages DBT_BUILD row exists
+  for the first time on CI); (3) scheduler restarts 0 over 66min (was 9), measured peak
+  1559MiB/24pids -- above the old 1536Mi ceiling, below 2048Mi, proving the limit raise
+  load-bearing under the recurring parallelism=8 burst; (4) Kyverno DENY 0 (fix 11
+  regression-clean). Node-ID set unchanged (11th run, saturated instrument as pre-registered)
+  but the failure-template census moved for the first time all session; residual mechanisms
+  recorded in the ROUND 9 OUTCOME block and Evidence -- NOT a failure of fixes (12)/(13).
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
