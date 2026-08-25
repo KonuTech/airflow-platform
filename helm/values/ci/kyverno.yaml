@@ -26,13 +26,27 @@ admissionController:
       limits:
         cpu: 50m
         memory: 64Mi
+  # container.resources.limits.cpu: 200m -> 500m (debug/ci-pipeline-ingestion-timeout ROUND 6).
+  # This container performs a LIVE, uncached cosign/registry round-trip (GHCR manifest fetch +
+  # Sigstore Rekor/Fulcio lookups) on every single pod admission cluster-wide (kubernetes/
+  # kyverno-policy.yaml's own header comment: "cache or not"), and this repo's own commit history
+  # (that same file's Rule 3 fix, plan 11-06) already documented this exact call taking 15-20s
+  # under LIGHTER load than a full cluster-slice-verify run generates. A 200m limit throttles this
+  # CPU-bound crypto+network workload the moment it exceeds 1/5 of one core -- live-observed this
+  # round as intermittent DENY responses for otherwise-correctly-signed images
+  # (ghcr.io/konutech/csv-processor) under real multi-DagRun CI contention, blocking
+  # discover/stage/dbt_build/publish pod creation for the whole session. Matches LOCAL's own
+  # already-proven value for this identical container (helm/values/local/kyverno.yaml) rather than
+  # inventing a new number. LIMIT-only change: the REQUEST stays 50m, so this costs zero CI
+  # CPU-request budget (test_manifest_resources.py::request_totals() sums requests only, confirmed
+  # via direct source read -- the CI profile currently has only 20m of request headroom left).
   container:
     resources:
       requests:
         cpu: 50m
         memory: 64Mi
       limits:
-        cpu: 200m
+        cpu: 500m
         memory: 192Mi
   serviceMonitor:
     enabled: false

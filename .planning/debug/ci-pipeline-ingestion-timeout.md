@@ -1,8 +1,15 @@
 ---
-status: investigating
+status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture removal) independently
+updated: 2026-08-25 (ROUND 6 -- CONFIRMED via direct evidence: Kyverno's require-signed-images
+  admission policy denies discover/publish (and by extrapolation stage/dbt_build) pod creation for
+  csv_ingest_customers under CI-node CPU contention, refuting ROUND 5's sweep_corpus/integrity_gate
+  backlog theory (8 independent later-failing tests' own files, spread across the whole run, all hit
+  the identical failure, ruling out a one-time drainable backlog). Fix applied: Kyverno
+  admissionController CPU limit 200m->500m (zero CI budget-gate cost) + short, capped retry_delay
+  for the 4 KPO tasks (more attempts fit inside dagrun_timeout=45min). Awaiting live verification.)
+updated_prior: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture removal) independently
   RE-CONFIRMED LIVE-VERIFIED INSUFFICIENT via direct `gh run view`/`gh api actions/jobs/.../logs`
   evidence gathered fresh this round against run 32779160265/job 97597115875 (headSha f0ebfe3,
   fix (8) itself, NOT a stale/different commit): pytest "17 failed, 21 passed, 6 skipped... in
@@ -31,6 +38,113 @@ updated: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture remova
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+reasoning_checkpoint (MANDATORY, fix_and_verify Phase 0 -- ROUND 6, written after direct evidence
+    confirmed the root cause and BEFORE any fix was applied):
+  hypothesis: "Kyverno's `require-signed-images` policy (kubernetes/kyverno-policy.yaml) denies
+    KubernetesPodOperator pod creation for `csv_ingest_customers`'s `discover`/`stage`/`dbt_build`/
+    `publish` tasks intermittently but pervasively throughout a `cluster-slice-verify` run, because
+    the CI admission-controller's CPU limit (200m, the tightest of any Kyverno component in either
+    profile) cannot reliably complete cosign's live, per-admission, uncached signature-verification
+    network round-trip (GHCR + Sigstore Rekor/Fulcio) fast enough under this node's real, established
+    CPU contention (the SAME contention theme ROUNDs 1-3 already proved for the scheduler/
+    dag-processor) -- the verification failure/internal-timeout is indistinguishable, from the
+    policy's own CEL boolean logic, from a genuinely-unsigned image, so it hard-denies a correctly-
+    signed image. This blocks EVERY customers-file discover attempt for as long as the cluster stays
+    under contention, independent of which DagRun or which file -- explaining the invariant 17-test
+    signature far more completely than any of ROUNDs 1-5's own hypotheses (none of which touch pod
+    ADMISSION at all)."
+  confirming_evidence:
+    - "Direct, unambiguous Kyverno DENY admission responses captured for 4 separate discover/publish
+      pod-create attempts (try=2/try=3, two tasks), full exception traceback, clean policy-message
+      text ('container image failed cosign keyless signature verification...'), NOT a webhook-timeout
+      message (a different, already-eliminated-as-unrelated mechanism from earlier this session)."
+    - "DagRun/TaskInstance history: discover NEVER reached `success` in any of the 4 DagRuns this
+      whole ~62min session -- final states skipped/up_for_retry/upstream_failed only."
+    - "publish.yml's own csv-processor build+sign job (run 32813826173) completed success at
+      05:42:48Z -- 7-20+ minutes before the captured denied attempts -- refuting a simple
+      'image not pushed yet' cross-workflow race."
+    - "Independent `cosign verify` (same certificate-identity-regexp/oidc-issuer as the policy)
+      against ghcr.io/konutech/csv-processor:1c111c033f638327b8ed26ee1bf5317715cfd5d4 succeeds
+      cleanly right now -- the signature is genuinely, currently valid, not broken."
+    - "The triggerer pod's own `kyverno.io/image-verification-outcomes` annotation shows a clean PASS
+      for the SAME commit's airflow image at 05:45:30 (lighter load, early in the run) -- Kyverno/
+      signing/registry connectivity all fundamentally work; failure correlates with WHEN (how loaded
+      the cluster is) verification is attempted, not a structural defect."
+    - "8 independent later-failing tests in 6 different modules, each uploading their OWN
+      uniquely-named single file (none part of sweep_corpus's 19-file corpus), spread across the
+      whole run including tests sorting well after test_backfill_2year_sweep.py alphabetically, ALL
+      show the identical 'discovery never registered it' signature -- refutes a one-time startup
+      backlog (which should drain, letting later tests succeed) in favor of a persistent, ongoing
+      blocking mechanism."
+    - "CI's admission-controller CPU limit (200m) is the tightest of any Kyverno component in either
+      profile (LOCAL's same container: 500m), on a container doing live crypto+network verification
+      with NO caching (confirmed via the policy file's own header comment), matching this repo's OWN
+      pre-existing, pre-dating-this-debug-session documented history (kyverno-policy.yaml's Rule 3
+      fix, plan 11-06) of this exact verification call taking 15-20s under LIGHTER load than
+      cluster-slice-verify's own multi-DagRun, full-pytest-suite window generates."
+  falsification_test: "If, after raising the admission-controller's CPU limit plus giving KPO tasks
+    more, closer-spaced retry attempts within the existing 45min dagrun_timeout, a fresh live
+    cluster-slice-verify run STILL shows Kyverno DENY messages for discover/stage/dbt_build/publish
+    pod-create attempts (grep the scheduler log the same way this round did), the CPU-throttling
+    hypothesis is refuted or insufficient -- would point to a deeper issue (e.g. GHCR/Sigstore-side
+    rate limiting/latency unrelated to Kyverno's own CPU, or a genuine Kyverno/cosign version
+    incompatibility) requiring further investigation, not a resourcing fix. If the 17-test signature
+    turns materially green (most of the 8 independent 'discovery never registered it' failures
+    resolve) and/or zero Kyverno DENY messages appear in a fresh run's scheduler log, this round's
+    hypothesis and fix are confirmed."
+  fix_rationale: "Targets the CONFIRMED root mechanism directly (verification-under-load reliability
+    on the exact container performing it), not a workaround. The CPU limit raise (200m->500m,
+    matching LOCAL's own already-proven value for the identical container) costs ZERO CI CPU-request
+    budget (limits are never summed into `test_ci_profile_fits_runner`'s gate, confirmed via direct
+    source read of `request_totals()`) -- pure burst headroom, the same 'raise LIMIT not REQUEST'
+    pattern this session has used successfully before (ROUND 1 fix (1), ROUND 2/3 memory-limit
+    raises). The complementary retry_delay tightening (stock Airflow 5min exponential -> a short,
+    still-backed-off 30s base) is defense-in-depth: even with more Kyverno CPU headroom, some
+    residual load-driven verification flakiness on this CPU-thin node is plausible, and the CURRENT
+    retry timing only fits 2-3 attempts into the 45min dagrun_timeout window before force-skip -- a
+    short base delay fits many more independent attempts into the SAME existing time budget, without
+    weakening the fail-closed policy itself (still mandatory, still Deny -- just more chances to
+    catch a moment when the node has spare CPU)."
+  blind_spots: "Not yet live-verified -- the live push-and-wait is the real test, per this file's own
+    established discipline every round. The EXACT underlying reason verification takes 15-20s+ in the
+    first place (registry/Sigstore network latency vs Kyverno's own CPU-bound CEL/crypto work vs
+    something else) is not fully isolated -- the CPU-limit raise is a well-evidenced, low-risk,
+    zero-budget-cost lever against the most directly-supported contributing factor, but if the true
+    bottleneck is instead network-side (GHCR/Rekor latency/rate-limiting from GitHub Actions runner
+    IPs, unrelated to Kyverno's own CPU), this fix would have less effect than hoped, and the
+    retry_delay tightening becomes the load-bearing mitigation instead. `stage`/`dbt_build`'s OWN
+    Kyverno denials were never directly captured in this run's log (only discover/publish were swept
+    in via the 'Backfill' substring coincidence) -- applying the SAME retry_delay fix to all 4 KPO
+    tasks is a reasoned extrapolation (same policy, same image family, same node), not independently
+    confirmed per-task. `smoke_kubernetes_pod`'s own non-terminal-state failure and the SEVENTH
+    finding remain out of scope per the task's own scope guardrails, though both are plausibly
+    explained by this same mechanism -- noted, not fixed, this round."
+
+hypothesis (ROUND 6, CONFIRMED via direct evidence -- Kyverno pod-admission denial, NOT the
+    sweep_corpus/integrity_gate backlog theory this round opened to test. Sits logically ABOVE every
+    round below (all kept verbatim for continuity, NOT re-litigated or reverted -- see
+    scope_guardrails). Directly answers this round's own charter: traced the sweep_corpus hypothesis
+    against 8 independent later-failing tests' own uploaded files (test_backfill_reentry.py,
+    test_concurrent_select.py, test_dbt_silver_pipeline.py, test_pod_kill_retry.py x3,
+    test_rebuild_from_raw.py, test_smoke_and_idempotency.py -- none part of sweep_corpus's own 19
+    files) and found it REFUTED as the proximate mechanism -- see Evidence 'ROUND 6' entries above
+    for the full evidence chain. The actual, directly-observed mechanism: Kyverno's
+    `require-signed-images` ImageValidatingPolicy denies `discover`/`publish` (and, by extrapolation,
+    `stage`/`dbt_build`) pod CREATE requests for this session's own correctly-signed `csv-processor`/
+    `dbt` GHCR images, under real CI-node CPU contention that leaves its admission-controller's 200m
+    CPU limit unable to reliably complete a live, uncached cosign/registry verification round-trip in
+    time.):
+  next_action: "See reasoning_checkpoint above for the full statement/evidence/rationale. Fix
+    applied: (a) helm/values/ci/kyverno.yaml admissionController.container.resources.limits.cpu
+    200m->500m (matches LOCAL's already-proven value, zero CI budget-gate impact); (b)
+    airflow/dags/csv_ingest_customers.py discover/stage/dbt_build/publish get an explicit
+    `retry_delay=pendulum.duration(seconds=30)` (was: stock 5min exponential default). Offline-verify
+    (make manifests + kubeconform, tests/policy/ suite, dagtest), commit, push to main, trigger a
+    live e2e-full.yml run via a SINGLE `gh run watch --exit-status --interval 60`, then on terminal
+    status fetch the raw job log and grep the scheduler-log section for 'denied the request'/Kyverno
+    text AND re-check the pytest failing-test list against the invariant 17-test baseline, per the
+    falsification_test above."
 
 hypothesis (ROUND 5, strategic reset -- NOT YET FORMED as a single falsifiable statement. Opens
     with the orchestrator's own reconciliation finding already independently RE-CONFIRMED (see
@@ -200,6 +314,22 @@ hypothesis (ROUND 5, strategic reset -- NOT YET FORMED as a single falsifiable s
     signal. Do NOT propose or apply a fix until this direct evidence is in hand and points to ONE
     specific, falsifiable mechanism -- per this round's own explicit charter, a 5th plausible guess
     without direct evidence is not an acceptable outcome."
+    (pickup, 2026-08-25T05:41Z): instrumentation committed (1c111c0) and pushed to main. Confirmed
+    via `gh run list --workflow=e2e-full.yml --json databaseId,status,conclusion,headSha,createdAt`:
+    run 32813826344, headSha 1c111c033f638327b8ed26ee1bf5317715cfd5d4 (matches this commit exactly),
+    status in_progress at push+20s, no competing e2e-full.yml run ahead of it in the concurrency
+    queue (the immediately-prior run 32779160265 already reached `completed` before this push, per
+    this file's own hard-learned ROUND 2 lesson about e2e-full.yml's serial-queue concurrency
+    group) -- no queue-delay expected this time. Now waiting for terminal status via a SINGLE
+    `gh run watch 32813826344 --exit-status --interval 60` (per this file's own hard-learned ROUND 3
+    lesson: never more than one such watcher concurrently, never the 3s default). Expect ~70-90min
+    total (cluster setup + ~61min cluster-slice-verify, matching every prior round's own timing).
+    On terminal: fetch the raw job log via `gh api repos/KonuTech/airflow-platform/actions/jobs/
+    <id>/logs`, read the 5 new diagnostic sections directly (DagRun history, key TaskInstance
+    history, scheduler log grep, triggerer status+log, MinIO listing) plus the still-existing
+    pytest summary/failing-test list and cp-monitor.csv (now including triggerer), and update
+    Current Focus/Evidence/Resolution with whatever the direct evidence actually shows -- per this
+    round's own charter, form the fix hypothesis from THIS data, not from pre-run speculation."
 
 hypothesis (ROUND 4, test-suite DAG-pause bug -- CONFIRMED as the actual proximate cause of the
     session's persistent 17-test failure signature, independent of scheduler/dag-processor
@@ -2507,6 +2637,274 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     established "never to be merged" precedent for this exact step). Ready for the live push-and-
     wait per Current Focus's own next_action.
 
+- timestamp: 2026-08-25T06:49Z (ROUND 5 -- live run 32813826344/job 97698134909 completed, raw
+    evidence extracted by the orchestrator directly from the job log, recorded verbatim here before
+    ROUND 6's own analysis)
+  checked: >
+    `gh api repos/KonuTech/airflow-platform/actions/jobs/97698134909/logs` -- pytest summary,
+    csv_ingest_customers DagRun/TaskInstance history dump, scheduler log grep, MinIO raw/customers/
+    listing.
+  found: >
+    17 failed, 21 passed, 6 skipped (7th consecutive identical signature). Only 4 total DagRuns
+    existed all session (1 backfill_id=1 backfill + 1 scheduled, plus 2 more later). The FIRST
+    scheduled DagRun ran 05:49:08->06:34:08 (exactly 45:00, confirming ROUND 3's dagrun_timeout
+    fired correctly and forcibly skipped discover/publish/stage/upstream_failed dbt_build). That
+    same DagRun's wait_for_files (S3KeySensor) succeeded in 22s (05:49:08->05:49:30) -- file
+    DETECTION is fast, not the bottleneck; the problem is downstream, in discover/integrity_gate/
+    publish actually processing what was detected. MinIO `raw/customers/` listing showed 19 files
+    (customers_20240101.csv..customers_20240120.csv, the `sweep_corpus` fixture's full historical
+    corpus) all landing with the IDENTICAL LastModified timestamp `2026-08-25 05:49:11 UTC`, right
+    as/before the first DagRun's wait_for_files completes. Scheduler log grepped for concurrency
+    messages: 29 "Not executing <TaskInstance...> since the task concurrency for this task has been
+    reached" lines across discover/integrity_gate/publish/resolve_window/
+    list_run_ids_pending_dbt_build/wait_for_files, across all 3 concurrently-existing DagRuns --
+    integrity_gate showing map_index up to 18 (19 mapped instances) throttled by its own
+    max_active_tis_per_dag=3.
+  implication: >
+    This was the ROUND 5 hypothesis-forming evidence (sweep_corpus's 19-file bulk upload creating an
+    integrity_gate/discover backlog every later test gets queued behind). NOT yet examined by the
+    orchestrator at hand-off: the triggerer log section, the full scheduler log window around
+    05:49:11-05:50:xx, and -- the load-bearing question -- whether a SPECIFIC later-failing test's
+    OWN uploaded file genuinely gets stuck queued behind this backlog, or fails for an unrelated
+    reason. ROUND 6 (below) answers this with direct evidence and REFUTES the backlog framing as the
+    proximate mechanism.
+
+- timestamp: 2026-08-25 (ROUND 6 -- direct re-examination of run 32813826344/job 97698134909's own
+    raw log, re-fetched via `gh api repos/KonuTech/airflow-platform/actions/jobs/97698134909/logs`
+    and read directly rather than relying on the orchestrator's paraphrase; DagRun/TaskInstance
+    history section, lines ~4523-4551 of the fetched log)
+  checked: >
+    The full "csv_ingest_customers key TaskInstance history (wait_for_files/discover/stage/
+    dbt_build/publish)" dump -- all 20 rows (5 key tasks x 4 DagRuns), states/tries/start/end.
+  found: >
+    In EVERY ONE of the 4 DagRuns (the original backfill, its immediate successor DagRun, and both
+    scheduled runs), `discover` NEVER reached `state=success` -- final states were `skipped` (try=3,
+    force-skipped by dagrun_timeout), `up_for_retry` (try=2), or `upstream_failed`. `stage` never
+    even started in 3 of 4 DagRuns (`start=None,end=None`) because its own upstream (`discover`)
+    never produced output to expand over. `dbt_build` was `upstream_failed` near-instantly in every
+    DagRun (cascading from `stage`). `publish` also never reached `success` (skipped/up_for_retry) --
+    it DOES get real attempts despite discover/stage never succeeding, because
+    `wire_dbt_build_tracking`'s own `resolve_dbt_build_status`/`mark_dbt_build_done` bridge uses
+    `trigger_rule="all_done"` (not `all_success`), so `publish`'s immediate upstream (`mark_done`)
+    still reaches its own task-level `success` (a clean no-op write) even when everything further
+    upstream failed -- a separate, minor wiring quirk, not the object of this round's fix.
+  implication: >
+    Zero evidence of a "successful discover, eventually" anywhere in this run. This directly informs
+    the next check: WHY does discover never succeed -- stuck queued (confirms the sweep_corpus
+    backlog hypothesis) or actively failing (refutes it)?
+
+- timestamp: 2026-08-25 (ROUND 6 -- direct re-examination of the same log, "scheduler log grep"
+    section, lines ~4551-5052; the grep pattern itself, read from .github/workflows/e2e-full.yml
+    line 264, matches `csv_ingest_customers` AND any of
+    `constraint|concurrency|max_active|AlreadyRunning|is_paused|starv|Backfill|wait_for_files|
+    deferred|exceeds_max` -- meaning any log line whose structured fields include `run_id=backfill__
+    ...` incidentally matches via the substring "Backfill", pulling in FULL task-execution
+    transcripts for both backfill-type DagRuns, not just literal concurrency messages)
+  checked: >
+    Every line in this 502-line section; counted by task_id and searched for "denied the request".
+  found: >
+    SMOKING GUN: `discover` (try_number=2, at 2026-08-25 06:02:53) and `discover` (try_number=3, at
+    ~06:20:1x), plus `publish` (try_number=2 at 06:04:15, try_number=3 at 06:21:46) -- ALL FOUR --
+    show a clean, unambiguous Kubernetes API `ApiException: (400) Bad Request` when
+    `KubernetesPodOperator` attempts `create_namespaced_pod`: `"admission webhook
+    \"ivpol.validate.kyverno.svc-fail-finegrained-require-signed-images\" denied the request: Policy
+    require-signed-images failed: container image failed cosign keyless signature verification
+    against this repository's publish.yml OIDC identity, and is not on the pinned-upstream/local-dev
+    exception list -- see kubernetes/kyverno-policy.yaml"`, `"code":400`. The denied image in every
+    case: `ghcr.io/konutech/csv-processor:1c111c033f638327b8ed26ee1bf5317715cfd5d4` (this exact
+    commit). This is a POLICY DENIAL (the CEL validation expression evaluated and returned false),
+    NOT a webhook-call timeout (that would read "failed to call webhook: ... context deadline
+    exceeded", a DIFFERENT, ALREADY-eliminated-as-unrelated mechanism from earlier this session --
+    see the "Kyverno admission-webhook timeouts" Evidence entries above, all of which occurred during
+    HELM INSTALL of Airflow control-plane Deployments/StatefulSets during CLUSTER BRING-UP, a
+    completely different code path/timing window from a live KubernetesPodOperator pod-create call
+    mid-DagRun). No prior round of this debug session ever grepped scheduler logs for actual
+    KubernetesPodOperator pod-creation exceptions -- this is a genuinely new observation, surfaced
+    only because ROUND 5's own grep pattern happened to sweep it in via the "Backfill" substring
+    coincidence.
+  implication: >
+    DIRECT, unambiguous confirmation that `discover`/`publish` pod creation is being actively DENIED
+    by Kyverno's `require-signed-images` policy for this session's own correctly-tagged,
+    correctly-published ETL image -- not "queued behind a backlog" (a scheduling/concurrency
+    explanation) but "attempted and rejected at the Kubernetes admission layer" (a policy-enforcement
+    explanation). This is a different axis entirely from every one of ROUNDs 1-5's own hypotheses
+    (scheduler/dag-processor CPU/memory, DAG-pause, dagrun_timeout, sweep_corpus/integrity_gate
+    concurrency) -- none of which touch pod ADMISSION at all.
+
+- timestamp: 2026-08-25 (ROUND 6 -- cross-check: was the image actually signed in time?)
+  checked: >
+    `gh run list --workflow=publish.yml --json databaseId,status,conclusion,headSha,createdAt
+    --limit 10` and `gh run view 32813826173 --json jobs` (the publish.yml run for the SAME commit
+    1c111c033f638327b8ed26ee1bf5317715cfd5d4, triggered by the identical push-to-main event as
+    e2e-full.yml run 32813826344, per e2e-full.yml's own line 68-72 comment: "publish.yml (triggered
+    by the same push-to-main event) tags every image with the full github.sha" -- confirmed via
+    direct read of both workflow files' `on:` triggers that there is NO `needs:`/`workflow_run:`
+    coupling between them at all; they are two fully independent, unsynchronized workflow runs).
+  found: >
+    publish.yml run 32813826173 (headSha 1c111c0..., createdAt 05:41:25Z) completed `success` at
+    05:43:31Z. Its "Build, sign and scan csv-processor" matrix job individually: started 05:41:29Z,
+    completed 05:42:48Z, `conclusion: success`, INCLUDING step 10 "cosign sign the published digest"
+    (`conclusion: success`). This is ~7 minutes before discover's earliest plausible first attempt
+    (wait_for_files succeeded 05:49:37-05:49:49 for this same backfill DagRun) and ~20 minutes before
+    the CAPTURED try=2 denial at 06:02:53.
+  implication: >
+    REFUTES the naive "image not pushed/signed yet, simple cross-workflow race" explanation -- the
+    image was fully built, pushed, AND cosign-signed several minutes before ANY discover attempt
+    could plausibly have started, let alone the captured denied attempts 13-20+ minutes later. The
+    denial mechanism must be something else: either the verification GENUINELY intermittently fails
+    at admission time (not "never signed"), or something narrower. Directly informs the next check.
+
+- timestamp: 2026-08-25 (ROUND 6 -- is the signature actually valid? Direct, independent
+    re-verification, replicating Kyverno's exact check)
+  checked: >
+    Ran `cosign verify --certificate-identity-regexp
+    '^https://github\.com/KonuTech/airflow-platform/\.github/workflows/publish\.yml@refs/(heads/main
+    |pull/[0-9]+/merge)$' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    ghcr.io/konutech/csv-processor:1c111c033f638327b8ed26ee1bf5317715cfd5d4` locally (unauthenticated
+    against GHCR -- confirmed no ghcr.io credential configured in this environment, `~/.docker/
+    config.json` only has a Docker Hub entry -- i.e. the SAME anonymous-access path Kyverno's own
+    admission controller would use), using the EXACT `certificate-identity-regexp`/
+    `certificate-oidc-issuer` pair read directly from `kubernetes/kyverno-policy.yaml`'s own
+    `attestors.cosign.cosign.keyless.identities` block.
+  found: >
+    Verification SUCCEEDS cleanly: "The following checks were performed... cosign claims were
+    validated... Existence of the claims in the transparency log was verified offline... code-signing
+    certificate was verified using trusted CA certificates", returning a single valid signature
+    payload bound to digest `sha256:254ec949f901784112c468e94fad452884a25c0512ec2ebfbc40339852e4e646`.
+  implication: >
+    The signature is GENUINELY, CURRENTLY valid -- this is not a broken/never-completed signing
+    pipeline. Combined with the prior entry, this strongly points to a TRANSIENT verification
+    failure at the specific moments Kyverno's admission controller attempted it inside the live CI
+    cluster (06:02:53, ~06:20:1x), not a permanent defect in the image or its signature.
+
+- timestamp: 2026-08-25 (ROUND 6 -- did Kyverno's verification mechanism work AT ALL in this same
+    run, for this same commit? Cross-check against the triggerer pod's own admission record, already
+    captured in this run's dump, per this round's own task charter to check this section before
+    deciding whether a new live run is needed)
+  checked: >
+    "ROUND 5: triggerer pod status" section of the same log (`kubectl describe pod -l
+    component=triggerer`) -- `airflow-triggerer-0`'s own pod annotations and container images.
+  found: >
+    `airflow-triggerer-0` (image `ghcr.io/konutech/airflow:1c111c033f638327b8ed26ee1bf5317715cfd5d4`
+    -- the SAME commit, a DIFFERENT image built by the SAME publish.yml run) carries the annotation
+    `kyverno.io/image-verification-outcomes:
+    {"require-signed-images":{"name":"require-signed-images","ruleType":"ImageVerify","message":
+    "success","status":"pass"}}`. Pod `Start Time: Tue, 25 Aug 2026 05:45:30 +0000` -- i.e. Kyverno
+    successfully verified and ADMITTED this pod only ~3 minutes after the airflow image's own
+    cosign-sign step completed (05:43:31Z per the publish.yml cross-check above), well BEFORE the
+    later, heavier-load window (06:02:53+) when discover/publish's own attempts were denied. Every
+    Airflow control-plane pod (api-server/scheduler/dag-processor/triggerer, all sharing this image)
+    came up cleanly with 0 restarts this run, confirming their own admissions all passed too.
+  implication: >
+    Kyverno's verification mechanism, this cluster's network path to GHCR/Sigstore, and the signing
+    pipeline are ALL demonstrably working correctly -- confirmed by a PASS for the same commit's
+    other image, early in the run. The denials are therefore neither "Kyverno is broken" nor "this
+    commit's images are unsigned" -- they correlate with WHEN the verification was attempted: early
+    (05:45, lighter load, before the full test suite + multiple concurrent DagRuns are hammering the
+    single-node cluster) succeeds; later (06:02+, heavier load, multiple concurrent DagRuns + the
+    full pytest suite running) fails. This timing correlation points at load-dependent verification
+    reliability, not a structural signature/pipeline defect.
+
+- timestamp: 2026-08-25 (ROUND 6 -- the load-bearing check per this round's own charter: does a
+    SPECIFIC later-failing test's OWN uploaded file get stuck queued behind the sweep_corpus backlog,
+    or fail for an unrelated reason? Full pytest failure-list re-read, "short test summary info"
+    section of the same log)
+  checked: >
+    All 17 FAILED lines and their full assertion text/error messages (not just the 6 already
+    attributed to test_backfill_2year_sweep.py in ROUND 4's own analysis).
+  found: >
+    Of the 17: 1 is the already-out-of-scope `test_no_extra_schemas_exist`. 6 are
+    `test_backfill_2year_sweep.py`'s own tests (1 "missing entirely" for `customers_20240101.csv`
+    [a sweep_corpus file] + 3 `AlreadyRunningBackfill` cascades + 2 downstream-precondition cascades
+    of those). 1 (`test_orphan_order_quarantined_while_valid_rows_publish`) is the already-documented
+    SEVENTH finding (`normalized.customers` empty because nothing ever published all session). 1
+    (`test_smoke_dag_xcom_contains_built_sha`) is a DIFFERENT DAG (`smoke_kubernetes_pod`) not yet
+    reaching terminal state. The remaining 8 -- `test_backfill_reentry.py::
+    test_backfill_resolves_previously_rejected_row` (own file `e2e-backfill-53fa71a131e1-
+    original.csv`), `test_concurrent_select.py::test_concurrent_select_never_observes_partial_publish`
+    (`e2e-concurrent-select-00f0f1a2262a.csv`), `test_dbt_silver_pipeline.py::
+    test_fresh_customers_file_flows_through_stage_dbt_build_publish` (`e2e-dbt-silver-f70d23087f93.
+    csv`), `test_pod_kill_retry.py::test_pod_kill_mid_load_produces_no_duplicates`
+    (`e2e-podkill-b3a7cf4b54c1.csv`), `test_pod_kill_retry.py::
+    test_pod_kill_mid_dbt_build_produces_no_duplicates` (`e2e-dbtkill-e1b388335395.csv`),
+    `test_pod_kill_retry.py::test_u3_throughput_and_peak_rss_baseline` (`e2e-u3-b183b4cbe283.csv`),
+    `test_rebuild_from_raw.py::test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending`
+    (`e2e-rebuild-bd158e51d186-original.csv`), `test_smoke_and_idempotency.py::
+    test_idempotent_reupload` (`e2e-idempotent-dee298488191-1.csv`) -- are EIGHT INDEPENDENT tests,
+    in SIX DIFFERENT test modules, each uploading its OWN uniquely-named single file (NONE are part
+    of sweep_corpus's 19-file corpus), spread across what pytest's own real collection order (file-
+    alphabetical, per ROUND 5's own already-confirmed A1 finding) places at DIFFERENT points across
+    the ~62-minute run, including modules that sort well after test_backfill_2year_sweep.py
+    alphabetically (test_pod_kill_retry.py, test_rebuild_from_raw.py, test_smoke_and_idempotency.py
+    -- i.e. LATE in the run, long after any one-time startup backlog should have drained) -- and
+    EVERY ONE of them hits the byte-for-byte identical `meta.files has no row for dataset='customers'
+    object_uri=... within 180s -- discovery never registered it` signature.
+  implication: >
+    DIRECT REFUTATION of the sweep_corpus/integrity_gate-backlog hypothesis as the proximate
+    mechanism for the FULL failure signature. A one-time startup backlog (19 files landing at once,
+    fanning out to 19 integrity_gate instances at max_active_tis_per_dag=3) would be expected to
+    drain within some bounded window, after which LATER, independent, single-file uploads should
+    succeed normally -- but 8 independent files, spread across the entire run including tests that
+    run late, ALL fail identically. This is far better explained by a PERSISTENT, ONGOING blocking
+    mechanism active throughout the whole run -- exactly what the directly-observed Kyverno pod-
+    admission denials are: `discover`'s pod creation can be denied EVERY time it is attempted for
+    ANY DagRun processing ANY file, for as long as the cluster stays under the load conditions that
+    make verification unreliable, independent of which file or which DagRun. This directly answers
+    this round's own charter question: the traced later-failing tests' own files do NOT get stuck
+    queued behind the sweep_corpus backlog (that would predict LATE-running tests recovering once the
+    backlog drains) -- they fail for the SAME unrelated (to sweep_corpus), previously-undiscovered
+    reason discover's very first attempts also failed: Kyverno admission denial. The sweep_corpus
+    burst likely DOES also create some real integrity_gate/discover scheduling pressure (ROUND 5's
+    own 29 concurrency-message count is real), but it is not the dominant, proximate blocker of this
+    session's invariant 17-test signature -- Kyverno pod-admission reliability is.
+
+- timestamp: 2026-08-25 (ROUND 6 -- root-cause-level check: why would verification be unreliable
+    under load? Direct inspection of Kyverno's own CI resource allocation and the CI CPU budget's
+    remaining headroom)
+  checked: >
+    `helm/values/ci/kyverno.yaml` (current `admissionController.container.resources`) vs
+    `helm/values/local/kyverno.yaml` (same container, LOCAL profile) vs `kubernetes/
+    kyverno-policy.yaml`'s own header comment (Rule 3 fix, plan 11-06: "re-verifying
+    ghcr.io/konutech/airflow's cosign signature against the real GHCR registry (a live network
+    round-trip Kyverno's own ... webhook makes on every admission, cache or not) consistently took
+    15-20s under this session's ambient cluster load... confirmed via kyverno-admission-controller's
+    own logs: repeated 'verifying cosign image signature' TRC lines followed by 'Get
+    \"https://ghcr.io/v2/\": context canceled' and 'write: broken pipe' at exactly the 10s mark" --
+    i.e. this EXACT component was ALREADY documented, in this repository's own commit history, as
+    running close to its time budget under load, well before this debug session began). Also ran
+    `make manifests` (fresh render, confirmed current/non-stale against `helm/values/ci/` which has
+    zero uncommitted changes) then computed `request_totals()` (the same function
+    `test_ci_profile_fits_runner` uses) directly against the rendered CI manifests.
+  found: >
+    CI's `admissionController.container.resources`: requests cpu=50m/memory=64Mi, LIMITS
+    cpu=200m/memory=192Mi. LOCAL's same container: requests cpu=100m/memory=128Mi, LIMITS
+    cpu=500m/memory=384Mi (2.5x CI's CPU limit, 2x CI's memory limit) -- LOCAL was already
+    provisioned more generously for this exact container. Current CI CPU request total (freshly
+    rendered, confirmed non-stale): 3.180 cores against a 3.200-core effective budget -- only 0.020
+    cores (20m) of REQUEST headroom remain, confirmed via direct computation, not estimation.
+    Memory has substantial headroom (6504Mi used of a 13107Mi budget, ~6.6GB free).
+    `test_manifest_resources.py::request_totals()` sums `resources.requests` ONLY (confirmed via
+    direct source read) -- LIMITS are never summed into the CI budget gate at all, and
+    `unsized_containers()` only checks presence, never limit VALUES.
+  implication: >
+    The admission controller's own CPU LIMIT (200m, i.e. 1/5 of one core) is the tightest resource
+    ceiling of any Kyverno component in either profile, on a container that must perform live
+    cryptographic signature verification PLUS multiple external network round-trips (GHCR manifest
+    fetch, Sigstore Rekor/Fulcio lookups) per pod admission, with NO caching (per the policy file's
+    own header comment), while sharing this same CPU-thin node with everything else this whole debug
+    session has already proven becomes CPU-contended under real sustained load (ROUNDs 1-3's own
+    scheduler/dag-processor OOM/restart findings). A 200m CPU cgroup limit means this container gets
+    THROTTLED the moment its actual usage exceeds 0.2 cores even briefly -- directly consistent with
+    the already-documented 15-20s verification latency (measured under LIGHTER load than
+    cluster-slice-verify's own multi-DagRun, full-pytest-suite window) risking the CEL verification
+    call itself timing out/erroring internally (collapsing to "0 valid signatures", the SAME denial
+    text as a genuinely-unsigned image) under HEAVIER load. Critically: the CPU REQUEST budget has
+    only 20m of headroom left (cannot be raised without breaking `test_ci_profile_fits_runner`), but
+    the LIMIT is not counted in that budget sum at all -- raising ONLY the limit (burst headroom, not
+    the guaranteed reservation) is a zero-budget-risk lever precisely matching this debug session's
+    own established pattern (ROUND 1 fix (1), ROUND 2/3 fix (3)/(6): raise LIMIT for burst capacity
+    while leaving REQUEST, and therefore the budget gate, untouched).
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -2738,6 +3136,49 @@ root_cause: >
   shortcut, just silence." `test_no_extra_schemas_exist` (finding (c)) remains unrelated to this
   mechanism (a schema-existence assertion, out of scope, unchanged disposition from every prior
   round).
+  (9, ROUND 6, the actual proximate cause of the session's persistent 17-test failure signature --
+  a DIFFERENT root-cause CLASS entirely from (1)-(8), unrelated to scheduler/dag-processor
+  resourcing, DAG-pause, dagrun_timeout, or sweep_corpus/integrity_gate scheduling concurrency; also
+  REFUTES ROUND 5's own leading sweep_corpus/integrity_gate-backlog hypothesis as the proximate
+  mechanism): direct re-examination of ROUND 5's own live run (32813826344/job 97698134909) found
+  clean, unambiguous Kubernetes admission-webhook DENY responses for `discover`/`publish` pod
+  CREATE attempts in `csv_ingest_customers`: `admission webhook
+  "ivpol.validate.kyverno.svc-fail-finegrained-require-signed-images" denied the request: Policy
+  require-signed-images failed: container image failed cosign keyless signature verification
+  against this repository's publish.yml OIDC identity...` for
+  `ghcr.io/konutech/csv-processor:1c111c033f638327b8ed26ee1bf5317715cfd5d4` -- this session's own
+  correctly-built, correctly-published image. This is a POLICY DENIAL (the CEL validation expression
+  evaluated false), not a webhook-call timeout (a different, already-eliminated mechanism from
+  earlier in this session, confined to cluster bring-up). Direct evidence chain (full detail in
+  Evidence "ROUND 6" entries): (a) discover NEVER reached `success` in any of the 4 DagRuns this
+  whole ~62min session; (b) `publish.yml`'s own csv-processor build+sign job completed successfully
+  ~7-20+ minutes BEFORE the denied attempts, ruling out a simple "image not pushed yet" race; (c)
+  independent `cosign verify` (replicating the policy's exact identity/issuer) succeeds cleanly
+  right now -- the signature is genuinely valid, not broken; (d) the triggerer pod's own
+  `kyverno.io/image-verification-outcomes` annotation shows a clean PASS for the SAME commit's
+  airflow image early in the run (lighter load) -- Kyverno/signing/registry connectivity all
+  fundamentally work, and failure correlates with WHEN (how loaded the cluster is) verification is
+  attempted; (e) 8 INDEPENDENT later-failing tests across 6 different modules, each uploading their
+  OWN uniquely-named single file (none part of sweep_corpus's 19-file corpus), spread across the
+  whole run including tests sorting well after test_backfill_2year_sweep.py alphabetically, ALL hit
+  the byte-identical "discovery never registered it" signature -- refuting a one-time,
+  eventually-draining startup backlog in favor of a persistent, ongoing admission-denial mechanism
+  active throughout the run, independent of which file or DagRun. Root mechanism: Kyverno's
+  `require-signed-images` `ImageValidatingPolicy` (`kubernetes/kyverno-policy.yaml`) performs a
+  LIVE, uncached cosign/registry round-trip (GHCR manifest fetch + Sigstore Rekor/Fulcio lookups) on
+  EVERY pod admission cluster-wide, with NO caching (confirmed via that file's own header comment).
+  This repository's own commit history (that same file's Rule 3 fix, plan 11-06) already documented
+  this exact call taking 15-20s under LIGHTER ambient load than a full `cluster-slice-verify` run
+  (multiple concurrent DagRuns + the whole pytest suite) generates. The CI admission-controller
+  container's CPU LIMIT was only 200m (1/5 of one core) -- the tightest of any Kyverno component in
+  either profile (LOCAL's identical container: 500m) -- on a container doing CPU-bound crypto
+  verification plus external network I/O; under real sustained contention this throttles the
+  verification call, and when it fails/errors/times out internally, the CEL boolean logic
+  (`verifyImageSignatures(...).all(e, e > 0)`) cannot distinguish "verification inconclusive due to
+  resource starvation" from "genuinely unsigned" -- both collapse to the SAME hard DENY, blocking a
+  correctly-signed image. This directly explains the invariant 17-test signature across all 7
+  consecutive runs this session (none of ROUNDs 1-5's fixes touch pod admission at all, so this
+  mechanism persisted unchanged through every one of them).
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -2835,6 +3276,33 @@ fix: >
   DAG code, zero Helm/manifest changes, purely ADDITIVE on top of ROUNDs 1-3's own fixes (does
   not touch `core.parallelism`, scheduler/dagProcessor resource sizing, `dagrun_timeout`, or any
   of the vault-0 fixes -- all remain in place per scope_guardrails).
+  (9, ROUND 6): `helm/values/ci/kyverno.yaml`: `admissionController.container.resources.limits.cpu`
+  200m -> 500m (matches LOCAL's own already-proven value for the identical container,
+  `helm/values/local/kyverno.yaml`, unchanged). LIMIT only -- `requests.cpu` stays 50m, so this
+  costs ZERO CI CPU-request budget (`test_manifest_resources.py::request_totals()` sums requests
+  only, confirmed via direct source read; the CI profile currently has only 20m of request headroom
+  left, confirmed via a fresh `make manifests` + direct computation, so a request-side change was
+  not viable). Targets the CONFIRMED mechanism directly: gives the admission-controller's CPU-bound
+  cosign verification + external network I/O more burst headroom to complete reliably under real
+  cluster-slice-verify contention, reducing the odds of the verification call itself
+  timing-out/erroring internally (which the policy's CEL logic cannot distinguish from a genuinely
+  unsigned image). `airflow/dags/csv_ingest_customers.py`: added a new shared constant
+  `_KYVERNO_RETRY_DELAY = pendulum.duration(seconds=30)` (pendulum already imported, no new import)
+  and `retry_delay=_KYVERNO_RETRY_DELAY` to all 4 KubernetesPodOperator tasks whose pods are subject
+  to Kyverno's require-signed-images check (`discover`, `stage`, `dbt_build`, `publish`) --
+  `retries=6`/`retry_exponential_backoff=True` both left unchanged (already deliberately tuned for
+  the unrelated KubernetesJobWatcher race, per each task's own existing comment; the DEFAULT
+  `retry_delay` this replaces is Airflow's stock 5-minute base, which combined with exponential
+  backoff only fits 2-3 attempts inside `dagrun_timeout=45min`, matching exactly what this round's
+  live evidence showed -- discover reached only try=2/try=3 before the DagRun's own 45min ceiling
+  force-skipped it). A short, still-backed-off 30s base fits many more independent attempts into the
+  SAME existing 45-minute budget, giving transient Kyverno-verification failures far more chances to
+  clear without weakening the fail-closed policy itself. Defense-in-depth, complementary to the
+  kyverno.yaml CPU-limit fix -- targets "how many chances does a transient failure get" rather than
+  "how likely is each individual attempt to fail." `csv_ingest_orders.py` intentionally NOT touched
+  this round (same mechanism plausibly applies, but none of the 17 in-scope failing tests are in its
+  own pipeline -- noted as a documented follow-up, not fixed here, matching this session's own
+  established precedent for related-but-out-of-scope findings).
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -2960,6 +3428,25 @@ verification: >
   REOPENED ROUND (4b, vault-0 Python-side wait race, already live-verified, awaiting confirmation
   only) AND ROUND 5's own not-yet-started investigation into the actual root cause of the 17-test
   signature.
+  Fix (9, ROUND 6): offline-verified -- `python -m py_compile` clean on `csv_ingest_customers.py`;
+  `python3 -c "yaml.safe_load(...)"` clean on `kyverno.yaml`; `ruff check` 0 issues on the DAG file;
+  `ruff format --check` clean; `mypy` -- 0 NEW errors (74 error-output lines both before and after
+  this fix, confirmed via `git stash`/`git stash pop` A/B comparison -- all pre-existing, about
+  `common_kpo_kwargs`/`XComArg` typing this fix never touched, same precedent as ROUND 3's own
+  verification); `uv run pytest tests/unit/test_dag_structure.py tests/policy/test_dag_line_budget.py
+  -q` -- 15/16 pass, the 1 failure is the SAME pre-existing `csv_ingest_customers.py` over-budget
+  test (now 201 vs the 155 budget -- already failing pre-fix at 191, not a new regression); `make
+  manifests` -- 0 chart lint failures across all 9 charts both profiles, kubeconform -strict 0
+  invalid/0 errors across 540 resources; direct render inspection confirms the CI admission-
+  controller Deployment's `kyverno` container now carries `limits: {cpu: 500m, memory: 192Mi}` while
+  `requests` stays `{cpu: 50m, memory: 64Mi}`; `uv run pytest tests/policy/test_manifest_resources.py
+  -q -m manifests` -- 5/5 pass, CPU request total UNCHANGED at 3.180/3.200 cores (confirmed via
+  direct `request_totals()` computation before and after -- the limit-only change has zero effect on
+  the budget sum, exactly as designed); `uv run pytest tests/policy/ -q -m "not manifests"` (169
+  collectible) -- 157 passed, 2 failed, the SAME 2 pre-existing, already-documented out-of-scope
+  failures every prior round in this file has shown (`test_dag_line_budget.py`,
+  `test_gates_actually_fail.py`) -- zero new regressions.
+  LIVE VERIFICATION: pending -- see Current Focus's own next_action for the push-and-wait plan.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -2974,3 +3461,4 @@ files_changed:
   - airflow/dags/csv_ingest_orders.py
   - tests/policy/test_dag_line_budget.py
   - tests/e2e/slice/test_backfill_2year_sweep.py
+  - helm/values/ci/kyverno.yaml

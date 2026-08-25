@@ -40,6 +40,12 @@ _STAGE_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"}, limits={"cpu": "2", "memory": "4Gi"}
 )
 _INGEST_EXTRA_ENV_VARS = [k8s.V1EnvVar(name="DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", value="2")]
+# debug/ci-pipeline-ingestion-timeout ROUND 6: Kyverno's require-signed-images admission check
+# makes a live, uncached cosign/registry round-trip on every pod CREATE; under this CI node's own
+# established CPU contention that can intermittently deny a genuinely, correctly-signed image. The
+# stock 5min exponential retry_delay only fits 2-3 attempts into dagrun_timeout=45min -- this short,
+# still-backed-off delay fits far more independent attempts into the same budget.
+_KYVERNO_RETRY_DELAY = pendulum.duration(seconds=30)
 
 customers_asset = Asset("s3://normalized/customers")  # D-15: referenced by URI in orders DAG
 
@@ -119,6 +125,7 @@ def csv_ingest_customers() -> None:
         arguments=["discover", "--dataset", "customers"],
         retries=6,
         retry_exponential_backoff=True,
+        retry_delay=_KYVERNO_RETRY_DELAY,
         **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
     )
     wait_for_files >> matched_keys >> gate >> discover
@@ -140,6 +147,7 @@ def csv_ingest_customers() -> None:
         cmds=["dataplat"],
         retries=6,
         retry_exponential_backoff=True,
+        retry_delay=_KYVERNO_RETRY_DELAY,
         max_active_tis_per_dag=1,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
@@ -153,6 +161,7 @@ def csv_ingest_customers() -> None:
         task_id="dbt_build",
         retries=6,
         retry_exponential_backoff=True,
+        retry_delay=_KYVERNO_RETRY_DELAY,
         max_active_tis_per_dag=1,
         **common_kpo_kwargs(
             resources=_DISCOVER_RESOURCES,
@@ -172,6 +181,7 @@ def csv_ingest_customers() -> None:
         arguments=["publish", "--dataset", "customers"],
         retries=6,
         retry_exponential_backoff=True,
+        retry_delay=_KYVERNO_RETRY_DELAY,
         outlets=[customers_asset],
         # 10-07-PLAN.md (Rule 1 fix, live-cluster finding): was
         # _DISCOVER_RESOURCES (128Mi/256Mi) -- sized for discover's
