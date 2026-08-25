@@ -2,7 +2,22 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 9 POST-RUN ANALYSIS COMPLETE on run 32855002333: BOTH fixes
+updated: 2026-08-25 (ROUND 10 THROUGHPUT-CEILING ANALYSIS COMPLETE under the user-chosen Hybrid
+  charter: the pre-registered three-branch expectation resolved to a FOURTH branch -- the
+  per-file drain floor on CI is INFINITE. NEW ROOT CAUSE (14), arithmetic-decisive from
+  round9-job.log + source: _STAGE_RESOURCES requests cpu=500m (stage AND publish pods) vs
+  ~220m free on the 3000m-allocatable CI node (2780m/92% steady-state platform requests) --
+  the pods are STRUCTURALLY UNSCHEDULABLE; KPO default startup_timeout_seconds=120 turns
+  every attempt into a deterministic ~129s failure (all recorded stage attempts 128-130s,
+  tries to 6, zero stage successes EVER on CI; pilot file PENDING at 1800s proves no stage
+  container ever started; discover at 100m succeeds try=1 in 11-23s). Every residual failure
+  template reduces to (14). Corpus size irrelevant (19 x ~3.3KiB); corpus count load-bearing
+  only post-fix; option C proper (slot redesign) assessed AGAINST. DECISION CHECKPOINT
+  returned with quantified fix options (A: request 500m->200m both DAGs + ~200m CI values
+  trims; B: Variable-driven per-profile resources; C: CI-values-only trims) plus the
+  in-round-regardless corpus-filler shrink 19->~12 and etl-namespace event instrumentation.
+  See Current Focus ROUND 10 + the two ROUND 10 Evidence entries + root_cause (14).)
+updated_prior_round10: 2026-08-25 (ROUND 9 POST-RUN ANALYSIS COMPLETE on run 32855002333: BOTH fixes
   (12)/(13) LIVE-CONFIRMED at mechanism level -- analytics_db_default provisioned ('created'
   13:50:28Z), ZERO dbt_build upstream_failed stamps anywhere (wedge GONE, was every DagRun of
   rounds 5-8), scheduler restarts 0 over 66min (was 9) with measured peak 1559MiB/24pids --
@@ -105,7 +120,71 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 9 OUTCOME (2026-08-25, post-run analysis of run 32855002333 -- CURRENT STATE):
+ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- CURRENT STATE):
+  charter: "User-chosen Hybrid, amendment verbatim: 'reduce number of processed files if they
+      are an issue and their size.' Priority order: (1) throughput-ceiling analysis FIRST --
+      empirically quantify from round9-job.log whether a file can drain within 180s given
+      max_active_tis_per_dag=1 global slots on stage/dbt_build/publish + measured CI
+      task-start latencies; quantify the per-file floor and where each 180s window goes; also
+      quantify corpus load (file counts/sizes actually processed, incl. sweep_corpus's 19-file
+      corpus with ROUND 7's batching cap 10). (2) PREFERRED LEVER: shrink the CI test corpus
+      (fewer/smaller synthetic files) if the analysis implicates count/size -- preserve
+      coverage intent (each messy-CSV feature exercised >=1x), not raw volume; test-fixture
+      change, not production code. (3) Concurrency-slot design change (option C proper) only
+      where single-slot serialization remains binding even with a reduced corpus -- PROPOSE
+      via decision checkpoint before implementing if production-code design change.
+      (4) Budget adjustments only surgically: per-test, to a measured floor, justified in this
+      file -- no across-the-board loosening. AlreadyRunningBackfill triaged as part of the
+      drain-time problem (halved 6->3 in round 9). Standing rules: rounds 1-9 fixes stay;
+      follow-up B non-blocking; offline gates before push; one watcher at 60s; judged on
+      internal diagnostics + failure-template census (node-ID set is a saturated instrument)."
+  hypothesis: "The residual 17-test signature is now dominated by a throughput ceiling: with
+      admission (10), connection gap (12) and OOM bursts (13) verifiably gone, per-file
+      end-to-end latency on CI (~3 CPU, KPO pod-start ~10-20s x 4-6 serialized tasks, plus
+      stage/dbt_build/publish each holding ONE global max_active_tis_per_dag slot across ALL
+      concurrent DagRuns) exceeds the 180s discovery/terminal-state windows whenever more than
+      ~N files/DagRuns are in flight; the aggregate corpus volume (sweep_corpus 19 files +
+      per-test single files + 1-min cron runs) keeps the queue permanently deeper than the
+      windows allow. Falsifiable: the log's own timestamps must show per-file drain time and
+      queue depth; if a single file drains well under 180s even at observed queue depth, the
+      hypothesis is wrong and the residual is elsewhere (e.g. downstream data-state asserts)."
+  test: "Mine round9-job.log (surviving scratchpad artifact, 5470 lines) for: TI state
+      transitions per task (start->end wall time), task-concurrency-reached message census,
+      DagRun creation->terminal latency, backfill overrun timing vs AlreadyRunningBackfill
+      collisions, and the actual file count/size the suite pushes through. Cross-read test
+      fixtures for corpus size/shape. Compute the per-file floor arithmetic."
+  expecting: "Either (a) per-file floor > 180s even at queue depth 1 (=> surgical budget
+      adjustment territory + corpus reduction lowers depth), or (b) floor < 180s but queue
+      depth x floor > 180s (=> corpus reduction is the direct lever, matching the user's
+      preference), or (c) slot serialization dominates regardless of corpus (=> option C
+      design proposal checkpoint)."
+  analysis_result: "COMPLETE -- outcome is a FOURTH branch none of the pre-registered three
+      anticipated: the per-file floor on CI is INFINITE. NEW ROOT CAUSE (14): _STAGE_RESOURCES
+      requests cpu=500m (stage AND publish pods) against a CI node with only ~220m free
+      (3000m allocatable - 2780m steady-state platform requests, 92%); the pods can NEVER be
+      scheduled; KPO default startup_timeout_seconds=120 converts every attempt into a
+      deterministic ~129s failure (every recorded stage attempt: 128-130s, try counts to 6,
+      up_for_retry observed, ZERO stage successes EVER on CI); the pilot file's
+      PENDING-at-1800s DB state proves no stage container ever started. All residual failure
+      templates (7x discovery-window, 3x AlreadyRunningBackfill, pilot PENDING, DBT never
+      RUNNING, <2 rows, SCD2 preconditions, XCom git_sha) reduce to (14). Corpus SIZE
+      irrelevant (19 x ~3.3KiB); corpus COUNT (10-file batch depth through the single global
+      slot) becomes load-bearing only AFTER (14) is fixed. Option C proper (slot redesign)
+      assessed AGAINST: slot=1 is matched to CI capacity even post-fix. Full numbers in the
+      two ROUND 10 Evidence entries."
+  next_action: "DECISION CHECKPOINT RETURNED to user (priority-3 branch of the charter: the
+      required fix -- stage/publish CPU-request sizing -- is a production-code DAG change
+      with implications beyond CI). Proposal options quantified in the checkpoint: (A)
+      lower _STAGE_RESOURCES request 500m->200m in both DAGs (limits untouched) + trim
+      ~200m of idle CI platform requests in helm/values/ci (analytics-db/minio/vault) so
+      stage+discover can co-schedule; (B) Variable-driven per-profile resources (ci=200m,
+      local=500m, csv_processor_image precedent); (C) CI-values-only trims to free >=500m
+      (no DAG change, most fragile). PLUS, in the same round regardless of A/B/C: shrink
+      sweep corpus filler days 19->~12 files preserving all six anomaly features (user's
+      preferred lever), and add etl-namespace pod/event capture to the diagnostic step
+      (closes the FailedScheduling evidence gap). Awaiting user choice."
+
+ROUND 9 OUTCOME (2026-08-25, post-run analysis of run 32855002333 -- SUPERSEDED BY ROUND 10 ABOVE):
   status: "ANALYSIS COMPLETE. Decision-tree branch: mechanisms (12)/(13) CONFIRMED FIXED and
       the remaining failures have nameable causes. Awaiting user decision checkpoint on the
       next direction (residual = deferred option C territory + AlreadyRunningBackfill
@@ -3929,6 +4008,91 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     asserts likely knock-ons of no complete prior ingest. Decision checkpoint returned to the
     user; option C's deferral condition ('until runs stop wedging') is now satisfied."
 
+- timestamp: 2026-08-25 (ROUND 10 -- throughput-ceiling analysis, Hybrid charter priority 1)
+  checked: >
+    round9-job.log (surviving scratchpad artifact, run 32855002333) -- TI-history dump, DagRun
+    history, node describe (allocated resources), MinIO corpus listing, scheduler concurrency
+    census; airflow/dags/csv_ingest_customers.py (_STAGE_RESOURCES/_DISCOVER_RESOURCES, task
+    graph); airflow/dags/_common/kpo.py (KPO defaults incl. its own documented
+    startup_timeout_seconds=120 failure mode); kind/cluster-ci.yaml (allocatable derivation);
+    tests/e2e/slice/test_backfill_2year_sweep.py (corpus generation parameters).
+  found: >
+    NEW ROOT CAUSE (14), arithmetic-decisive: THE STAGE (AND PUBLISH) POD IS STRUCTURALLY
+    UNSCHEDULABLE ON THE CI NODE. Chain: (a) CI node allocatable CPU is exactly 3000m
+    (cluster-ci.yaml's own derivation, matches node describe); steady-state requests with ZERO
+    ETL task pods = 2780m (92%) across 23 platform pods (kube-system 950m, airflow 1080m
+    incl. rounds-1/2's own deliberate scheduler/dag-processor raises, data 400m, kyverno 150m,
+    vault 100m, ingress+cnpg 100m) -> FREE ~= 220m. (b) _STAGE_RESOURCES requests cpu=500m,
+    memory=1Gi -- used by BOTH stage (TracingKPO .partial line 152-160) and publish (line
+    185-202, deliberately reusing the heavy profile since plan 10-07's publish-OOM fix).
+    500m > 220m: kube-scheduler can NEVER place these pods; memory is a non-issue (3618Mi/
+    14.2Gi requested). (c) KubernetesPodOperator default startup_timeout_seconds=120 turns
+    every attempt into a deterministic ~2min failure -- kpo.py's own on_finish_action comment
+    (2026-08-16 debug session) already documents this exact mode as 'routine under this
+    cluster's tight node CPU budget'. (d) TI-dump corroboration, run 32855002333: EVERY stage
+    attempt with a recorded start/end lasted 128-130s (14:19:58->14:22:08=130s,
+    14:22:09->14:24:17=128s, 14:30:44->14:32:53=128s, 14:32:53->14:35:02=129s,
+    14:47:24->14:49:33=129s, 14:49:34->14:51:43=129s), try counts up to 6, at least one
+    up_for_retry (proving FAILED attempts, not throttling), and ZERO stage successes -- while
+    discover (100m request, fits in 220m free) succeeded try=1 in 11-23s in ALL FOUR DagRuns.
+    (e) The pilot file customers_20240101.csv sat in meta.ingestion_runs status=PENDING for
+    the full 1800s window: a stage container that ever STARTED would have moved it past
+    PENDING -- direct DB-state proof that no stage container ever ran, ruling out the
+    'pod runs then application fails' alternative. (f) The single global
+    max_active_tis_per_dag=1 stage slot was 100%-occupied by these guaranteed-failing ~130s
+    attempts (288 'task concurrency ... reached' messages, all stage): backfill__05:31 burned
+    ~18-20 attempts x ~130s ~= 40min of slot time before dagrun_timeout killed it at 14:36:44,
+    while scheduled__13:50's ten stage TIs starved completely (try=1, start=None at kill).
+    HONEST GAP: no direct FailedScheduling/Pending event was captured (kubectl events had
+    expired; the cp-monitor only watches the airflow namespace, never etl) -- the (d)+(e)
+    convergence substitutes; next run's diagnostics should add an etl-namespace pod/event
+    capture to close it.
+  implication: >
+    The ROUND 9 residual framed as 'throughput ceiling' is actually INFINITE per-file cost:
+    no corpus size, batch cap, test budget, or concurrency-slot change can make CI drain while
+    stage cannot schedule at all. Every remaining failure template reduces to (14):
+    7x 180s-discovery-window misses (the DAG's max_active_runs=1 slot is pinned by
+    45-min-dagrun_timeout runs that can never progress, so fresh files wait >180s for their
+    next discover), 3x AlreadyRunningBackfill (backfills structurally cannot complete ->
+    overrun test windows -> collide; 12 log occurrences), pilot PENDING-at-1800s, DBT_BUILD
+    never RUNNING, normalized.customers <2 rows, SCD2 preconditions, XCom git_sha '' (its
+    DagRun never completed). Fix (13)'s OOM headroom and fix (12)'s dbt chain remain
+    necessary-but-insufficient; (14) is the next (and plausibly last structural) gate.
+
+- timestamp: 2026-08-25 (ROUND 10 -- corpus-load quantification, Hybrid charter priorities 1-2)
+  checked: >
+    MinIO raw/customers listing from round9-job.log; sweep-corpus generation constants in
+    tests/e2e/slice/test_backfill_2year_sweep.py; discover batching (map_index census in the
+    TI dump); post-fix drain-floor arithmetic from measured pod-lifecycle latencies.
+  found: >
+    (a) CORPUS SIZE IS IRRELEVANT: the sweep corpus is 19 files x 3.1-3.5KiB (~62KiB TOTAL,
+    50 rows/day); COPY cost is nil; pod lifecycle dominates any per-file cost. The user's
+    'and their size' lever has nothing to cut. (b) CORPUS COUNT MATTERS via batch depth:
+    discover's batching cap maps 10 stage TIs per DagRun (map_index 0-9 observed), all
+    serialized through the ONE global stage slot. Corpus shape: _NUM_DAYS=20 with a gap day
+    -> 19 files; feature-bearing days are ONLY indices 5(gap/absent), 7(schema change),
+    10(late event), 12(attribute change), 16(late-correction arrival), 19(missing customer);
+    the other ~13 files are plain filler whose only role is window realism. (c) POST-FIX
+    FLOOR ESTIMATE (once stage schedules): measured pod-task wall time for the same image
+    class is 11-23s (discover, incl. admission+start+xcom); stage adds trivial COPY ->
+    ~15-40s per file; a 10-file DagRun's stage phase ~= 3-7min serialized, plus dbt_build +
+    publish -> ~5-9min per DagRun. A fresh test file's discovery latency = remainder of the
+    in-flight DagRun + next run's discover, i.e. WORST CASE still >180s at 10-file depth --
+    so corpus/batch-depth reduction (the user's preferred lever) is genuinely load-bearing
+    for the 180s windows AFTER schedulability is fixed, but is a NO-OP before it (the pilot
+    test already proves a 1-file workload fails identically today). (d) Slot-redesign
+    (option C proper) assessment: with CI free CPU realistically raisable to only
+    ~350-450m, TWO concurrent 200m-class stage pods plus ambient discover/dbt pods do not
+    fit anyway -- max_active_tis_per_dag=1 on stage/dbt_build/publish is MATCHED to CI
+    capacity, and changing production concurrency would buy CI nothing. Recommend NOT
+    exercising option C proper.
+  implication: >
+    Fix shape for ROUND 10 (pending user decision -- production-code implications): make
+    stage/publish pods schedulable on CI (CPU-request sizing, options quantified in the
+    checkpoint), THEN shrink the corpus filler days (user's preferred lever, preserving all
+    six anomaly features) to bring per-DagRun drain under the 180s test windows; budget
+    adjustments only if a measured floor still exceeds a specific test's window afterward.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -4332,6 +4496,27 @@ root_cause: >
   accounting. Decisive corroboration: the crash-loop STOPS PERMANENTLY at 12:54:44 -- the
   exact moment dagrun_timeout kills the two wedged runs -- and the post-wedge phase peaks at
   1496MiB with pids<=22 and zero further OOMs.
+  (14, ROUND 10, CONFIRMED BY CONVERGENT ANALYSIS (not yet live-falsified; fix pending user
+  decision) -- the mechanism behind the ENTIRE post-(12)/(13) residual failure census): the
+  stage and publish KPO pods are STRUCTURALLY UNSCHEDULABLE on the CI node.
+  _STAGE_RESOURCES (airflow/dags/csv_ingest_customers.py, shared by stage AND publish)
+  requests cpu=500m/memory=1Gi, but the CI node has only ~220m free CPU at steady state
+  (3000m allocatable per kind/cluster-ci.yaml's own derivation, minus 2780m/92% of platform
+  requests -- including rounds 1-2's own deliberate scheduler/dag-processor raises); memory
+  is a non-issue (26% requested). kube-scheduler can never place a 500m-request pod, the KPO
+  default startup_timeout_seconds=120 fires, and the attempt fails after ~129s -- a failure
+  mode kpo.py's own comments already documented as 'routine under this cluster's tight node
+  CPU budget'. Run-32855002333 evidence: every recorded stage attempt lasted 128-130s with
+  try counts to 6 and zero successes ever (discover, 100m request, succeeded try=1 in 11-23s
+  in all 4 DagRuns); the pilot file stayed meta.ingestion_runs status=PENDING through an
+  1800s window (a started stage container would have advanced it -- no stage container has
+  EVER run on CI); the single global max_active_tis_per_dag=1 stage slot was 100%-occupied
+  by these guaranteed-failing attempts (288 throttle messages), starving sibling DagRuns'
+  stage TIs entirely and holding each DagRun to its full 45min dagrun_timeout -- which in
+  turn pins max_active_runs=1, makes fresh-file discovery miss every 180s test window, and
+  makes backfills overrun and collide (AlreadyRunningBackfill x12). Publish shares the same
+  500m profile, so even a staged run could not publish. Corpus size is irrelevant
+  (19 x ~3.3KiB files); corpus count (10-file batch depth) only matters after (14) is fixed.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
