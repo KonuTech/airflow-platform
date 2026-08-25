@@ -2,7 +2,10 @@
 status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 6 -- CONFIRMED via direct evidence: Kyverno's require-signed-images
+updated: 2026-08-25 (ROUND 7 opened on session resume -- user chose REDUCE CONCURRENT LOAD
+  direction after ROUND 6's live falsification FAILED (14 Kyverno DENY messages persisted, same
+  invariant 17-test signature, 8th consecutive identical run). See Current Focus ROUND 7 block.
+  Prior ROUND 6 note: CONFIRMED via direct evidence: Kyverno's require-signed-images
   admission policy denies discover/publish (and by extrapolation stage/dbt_build) pod creation for
   csv_ingest_customers under CI-node CPU contention, refuting ROUND 5's sweep_corpus/integrity_gate
   backlog theory (8 independent later-failing tests' own files, spread across the whole run, all hit
@@ -39,7 +42,105 @@ updated_prior: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixture 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-reasoning_checkpoint (MANDATORY, fix_and_verify Phase 0 -- ROUND 6, written after direct evidence
+ROUND 7 (OPENED 2026-08-25 on session resume -- USER-CHOSEN STRATEGIC DIRECTION, not another
+    single-cause guess):
+  round_6_outcome (recorded from the orchestrator's session handoff; the live watch completed after
+      this file's last update): "ROUND 6's falsification test FAILED. The live run for commit
+      87cddd4 (Kyverno admissionController CPU 200m->500m + 30s retry_delay on the 4 KPO tasks)
+      still showed 14 Kyverno DENY messages in the scheduler log and the SAME invariant 17-test
+      failure signature -- the 8th consecutive byte-identical run. Per ROUND 6's own pre-registered
+      falsification_test, the Kyverno-CPU-throttling hypothesis is refuted or insufficient. The
+      user then explicitly paused the automated round loop: 6 structurally different, individually
+      well-evidenced, live-verified fixes across 8 runs produced zero net movement on the
+      signature."
+  strategic_decision (USER, 2026-08-25, blocking question answered at session resume): "ROUND 7
+      implements REDUCE CONCURRENT LOAD: throttle sweep_corpus's 19-file simultaneous ingestion
+      and cap active DagRuns so the 4 CPU/16GB GitHub-hosted runner is not oversubscribed. The
+      goal is to lower peak platform-wide contention (the confirmed common theme behind scheduler/
+      dag-processor OOM, Kyverno admission latency, and pod-start latency) rather than chase
+      another single component. Explicitly OUT OF SCOPE this round: loosening per-file timeout
+      budgets and splitting cluster-slice-verify into smaller CI jobs (both reserved for a
+      possible ROUND 8, run locally); moving this tier off GitHub-hosted runners entirely is the
+      final fallback if ROUND 7 fails."
+  hypothesis: "The invariant 17-test signature is an emergent property of aggregate concurrent
+      load: sweep_corpus uploading 19 files at once plus multiple simultaneous DagRuns
+      oversubscribes the ~3 allocatable CPUs, keeping the node in the contention regime where pod
+      admission (Kyverno), pod startup, and task execution all exceed the per-file budgets. No
+      single component fix moved the signature because each fix only relocated the same fixed
+      demand-vs-capacity deficit. Reducing peak concurrency (staggered/batched sweep_corpus
+      uploads, max_active_runs / max_active_tis_per_dag caps tuned for the CI profile) attacks the
+      deficit itself."
+  next_action: "IMPLEMENTING (this session, investigation complete -- see reasoning_checkpoint
+      ROUND 7 below): three-lever load reduction, all verified against the installed
+      apache-airflow==3.3.0 source and this repo's own policy gates before writing a line:
+      (a) config.core.parallelism 16->8 in BOTH helm/values/{ci,local}/airflow.yaml (D-06
+      behavioral non-divergence rule, same precedent as ROUND 2's 32->16) -- the ONLY truly
+      GLOBAL TI cap available (LocalExecutor.start() forks exactly `parallelism` workers up
+      front; 8 halves that pool again AND caps platform-wide concurrent TIs at 8);
+      (b) max_active_tasks=6 added to both ingest DAGs' @dag(...) -- VERIFIED per-DagRun (NOT
+      global across runs) in 3.3.0's _executable_task_instances_to_queued (row_number
+      partitioned by [dag_id, run_id], `task_per_dr_count < DM.max_active_tasks`) -- a per-run
+      flood guard so no single DagRun's fan-out can monopolize the 8 global slots;
+      (c) batching.max_units_per_run 100->10 in configs/datasets/{customers,orders}.yaml -- the
+      platform's own metadata-driven batching engine throttles sweep_corpus's 19-file corpus
+      into <=10-file claims per DagRun (stage fan-out per run 19->10; listing is sorted
+      [discovery.py:881] so the pilot's customers_20240101.csv deterministically lands in batch
+      1; corpus drains in 2 claims; configs are baked into the csv-processor image rebuilt by
+      publish.yml on the same push, so this reaches CI with zero staleness).
+      Then offline-verify (dag structure tests + dagtest, tests/policy incl. values-profiles +
+      manifests via make manifests + kubeconform, unit batching tests), commit, push,
+      live-verify with a SINGLE `gh run watch --exit-status --interval 60`, then diff the
+      failing-test node-ID list against the invariant 17-test baseline, grep Kyverno DENY as
+      secondary indicator, and grep the scheduler log for the new 'max_active_tasks limit of 6'
+      / 'discovery.units_capped' lines as direct proof the reduced-concurrency regime was
+      actually in force (falsification_test requires VERIFIABLY reduced concurrency)."
+  falsification_test: "If a fresh live cluster-slice-verify run with materially reduced peak
+      concurrency (verifiably fewer simultaneous DagRuns/TIs and staggered sweep_corpus uploads)
+      STILL reproduces the same 17-test signature, the aggregate-load hypothesis is refuted and
+      ROUND 8's reserved directions (loosen timeouts / split jobs, evaluated locally; or leave
+      GH-hosted runners) become the path."
+
+reasoning_checkpoint (ROUND 7 -- written BEFORE any fix edit, per protocol):
+  hypothesis: "The invariant 17-test signature is emergent from a fixed demand-vs-capacity
+    deficit: aggregate concurrent TI/DagRun/pod load on the ~3.2-allocatable-CPU single-node CI
+    cluster keeps it permanently in the contention regime where Kyverno admission verification,
+    pod startup, and task execution all exceed per-file budgets -- no single-component fix
+    (ROUNDs 1-6) moved the signature because each only relocated the same deficit. Reducing peak
+    concurrency itself (global TI cap 8, per-run TI cap 6, per-DagRun file-claim cap 10) lowers
+    the deficit directly."
+  confirming_evidence:
+    - "CI CPU request total 3.180 of a 3.200-core budget (ROUND 6 direct computation) -- the node
+      runs at essentially full REQUEST commitment before any ETL pod exists."
+    - "Kyverno verification for the SAME commit's airflow image PASSED at 05:45:30 (light load,
+      pre-suite) and the csv-processor image was DENIED repeatedly 06:02+ (heavy load, mid-suite)
+      in the same run -- load-correlated, not structural (ROUND 6)."
+    - "29 'task concurrency reached' scheduler throttle messages across 3 concurrent DagRuns in
+      one run; integrity_gate fanning 19 mapped in-process TIs per customers DagRun (each a
+      fork+full-import LocalExecutor process in the scheduler pod) (ROUND 5)."
+    - "Six structurally different, individually well-evidenced, live-verified fixes across 8 runs
+      produced zero net movement -- consistent with a shared upstream cause (aggregate load),
+      inconsistent with six independent proximate causes."
+  falsification_test: "Pre-registered above (ROUND 7 block): same 17-test node-ID signature under
+    verifiably-reduced concurrency refutes the aggregate-load hypothesis."
+  fix_rationale: "parallelism 16->8 attacks the load SOURCE (pre-forked LocalExecutor worker pool
+    + global concurrent-TI ceiling, apache/airflow#56641's own mechanism, extending ROUND 2's
+    measured-effective 32->16 trim); max_active_tasks=6 is a per-DagRun flood guard (verified
+    per-run semantics in installed source -- documented honestly, NOT claimed global) so one
+    run's fan-out cannot monopolize the 8 slots; max_units_per_run 100->10 throttles the
+    19-file corpus at the platform's own batching layer -- the exact knob built for this. None
+    of these loosen timeouts, split CI jobs, or revert rounds 1-6 (scope guardrails intact)."
+  blind_spots: "(1) max_active_tasks is per-DagRun in 3.3.0 -- with 3 concurrent DagRuns the
+    per-DAG bound is 18, so the global parallelism=8 is the load-bearing cap; (2) if the true
+    Kyverno bottleneck is network-side (GHCR/Sigstore latency from runner IPs) load reduction
+    may be insufficient -- that outcome is exactly what the falsification test detects; (3)
+    parallelism=8 + max_units_per_run=10 modestly slow the LOCAL slice suite (more DagRuns to
+    drain the corpus, fewer slots) -- accepted, local timeouts have wide margins (2700s); (4)
+    config-hash change from (c) rotates idempotency keys, making previously-processed files
+    re-eligible once -- by design (config_hash is part of the key), irrelevant in CI's fresh
+    clusters."
+
+reasoning_checkpoint (ROUND 6 -- REFUTED/INSUFFICIENT per round_7 block above; kept verbatim for
+    continuity -- ROUND 6, written after direct evidence
     confirmed the root cause and BEFORE any fix was applied):
   hypothesis: "Kyverno's `require-signed-images` policy (kubernetes/kyverno-policy.yaml) denies
     KubernetesPodOperator pod creation for `csv_ingest_customers`'s `discover`/`stage`/`dbt_build`/
@@ -2914,6 +3015,65 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     the guaranteed reservation) is a zero-budget-risk lever precisely matching this debug session's
     own established pattern (ROUND 1 fix (1), ROUND 2/3 fix (3)/(6): raise LIMIT for burst capacity
     while leaving REQUEST, and therefore the budget gate, untouched).
+
+- timestamp: 2026-08-25 (ROUND 7 -- fix design investigation, implementation, and offline
+    verification)
+  checked: >
+    (1) sweep_corpus's actual upload fan-out (tests/e2e/slice/test_backfill_2year_sweep.py lines
+    407-456): 19 customers + 19 orders files PUT in one tight loop at module setup -- the upload
+    itself is trivial (38 small PUTs, sub-second, confirmed by ROUND 5's identical-LastModified
+    listing); the LOAD is the platform's REACTION (per-DagRun integrity_gate fan-out over all 19
+    keys as fork+full-import LocalExecutor task processes inside the scheduler pod, plus stage
+    mapped-TI creation). Time-based upload staggering was REJECTED (violates this repo's own
+    "sleep-in-e2e-tests" discipline and only delays an identical steady state -- discover is
+    bucket-wide/date-agnostic, so all later DagRuns see all files regardless of upload timing);
+    terminal-status-gated upload batching was REJECTED (deadlocks the fixture if processing is
+    broken -- the exact bug under investigation). (2) The concurrency-knob inventory against the
+    INSTALLED apache-airflow==3.3.0 source: `max_active_tasks` is enforced PER (dag_id, run_id)
+    -- `_executable_task_instances_to_queued`'s critical-section query joins a
+    `task_per_dr_count` subquery on (dag_id, run_id) and row_numbers partitioned by [dag_id,
+    run_id]; `concurrency_map.dag_run_active_tasks_map[(dag_id, run_id)]` in the per-TI loop --
+    so it CANNOT bound the scheduled+backfill aggregate; the only truly global TI cap is
+    `core.parallelism` (executor slots; LocalExecutor pre-forks exactly that many workers).
+    DEFERRED TIs hold no slot (EXECUTION_STATES only). (3) `discovery.py`: listing is sorted
+    (line 881) before the `max_units_per_run` cap (lines 981-989), so batch membership is
+    deterministic and `customers_20240101.csv` (the pilot's polled file) lands in batch 1.
+    Configs are baked into the csv-processor image (docker/csv-processor/Dockerfile COPY
+    configs/), rebuilt+signed by publish.yml on every push -- a configs/ change reaches CI with
+    zero staleness. The idempotency key includes config_hash (discovery.py module docstring), so
+    the config change rotates keys once -- by design, irrelevant on CI's fresh clusters.
+    (4) Integration/unit tests construct their own BatchingConfig objects (never load the real
+    YAML) -- no test pins max_units_per_run=100.
+  found: >
+    FIX IMPLEMENTED (three levers, none touching timeouts/CI-job-splitting/rounds-1-6 fixes):
+    (a) helm/values/{ci,local}/airflow.yaml `config.core.parallelism` "16"->"8" (D-06 behavioral
+    non-divergence, both profiles identical -- values-profiles policy gate confirmed passing);
+    (b) airflow/dags/csv_ingest_{customers,orders}.py `@dag(..., max_active_tasks=6)` --
+    documented in-code as PER-DAGRUN (honest semantics), a flood guard so one run's fan-out
+    cannot monopolize the 8 global slots; (c) configs/datasets/{customers,orders}.yaml
+    `batching.max_units_per_run` 100->10 -- the platform's own batching engine throttles the
+    19-file corpus into <=10-file claims per DagRun (drains in 2 claims; orders' asset-cascade
+    math still covers its 19 files across the >=2 customers publishes the drain now produces).
+    OFFLINE VERIFICATION ALL GREEN: `make manifests` + kubeconform (540 resources, 378 valid, 0
+    invalid); tests/unit 554 passed (incl. test_dag_structure's gate-cap and graph assertions);
+    tests/dagtest 14 passed; tests/policy full suite -> ONLY the 2 pre-existing out-of-scope
+    failures remain (test_dag_line_budget::customers -- already failing at HEAD, 201>155, now
+    208>158 with the mirrored comment, still tracked separately; test_gates_actually_fail lint
+    -- migration 0038's pre-existing D301, commit e0972e9, predates this session's rounds).
+    test_dag_line_budget's orders budget bumped <=155 -> <=158 following that test's own
+    documented exact-lines-needed precedent (orders sat at a zero-headroom 155; the 2-comment +
+    1-kwarg addition needed exactly 3 lines). test_manifest_resources CI budget gate passes
+    (zero request changes -- parallelism/max_active_tasks/max_units_per_run are all
+    non-resource knobs). ruff clean on every touched file.
+  implication: >
+    ROUND 7's reduced-concurrency regime is implemented and offline-verified. Peak-load
+    arithmetic post-fix: at most 8 concurrent TIs platform-wide (was 16), at most 6 per DagRun,
+    stage fan-out per run 19->10 mapped TIs, LocalExecutor pre-fork pool halved again. Live
+    verification (single `gh run watch`) is the real test per this file's own discipline;
+    verifiable-reduction indicators to grep in the new run's log: 'max_active_tasks limit of 6'
+    scheduler lines, 'discovery.units_capped' (cap=10) in discover pod logs, and the DagRun/TI
+    history dump's per-run TI census -- required by the pre-registered falsification test
+    before any signature comparison is meaningful.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
