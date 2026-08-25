@@ -85,12 +85,19 @@ def aggregate_receipts(receipts: list[dict]) -> None:
 # checks retries -- without this, a DagRun can occupy max_active_runs=1 forever, blocking every
 # later DagRun of this dag_id. 45min reuses this file's own established 2700s backfill-settle
 # precedent (see test_backfill_2year_sweep.py); Airflow force-SKIPs unfinished TIs on timeout.
+# max_active_tasks=6 (debug/ci-pipeline-ingestion-timeout ROUND 7): per-DAGRUN concurrent-TI cap
+# (Airflow 3.3.0 enforces this per (dag_id, run_id), NOT globally across runs -- verified via
+# direct source read of _executable_task_instances_to_queued's row_number partition) -- a flood
+# guard so no single run's fan-out (integrity_gate 3 + discover + small tasks) can monopolize
+# the CI profile's core.parallelism=8 global slots when scheduled+backfill+orders runs coexist.
+# Deferred sensors hold no slot; 6 covers the realistic per-run census with margin.
 @dag(
     dag_id="csv_ingest_customers",
     schedule="*/1 * * * *",
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
+    max_active_tasks=6,
     dagrun_timeout=pendulum.duration(minutes=45),
     tags=["vertical-slice", "customers"],
 )

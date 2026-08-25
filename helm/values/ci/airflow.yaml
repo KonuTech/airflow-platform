@@ -134,8 +134,25 @@ config:
   # documented SUSTAINED per-task-churn growth (still open upstream, no
   # released fix) -- paired with a modest scheduler memory headroom increase
   # below for that residual risk.
+  #
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 7 (2026-08-25): trimmed
+  # again, 16->8 -- the user-chosen REDUCE CONCURRENT LOAD direction after 6
+  # single-component fixes across 8 runs produced zero movement on the
+  # invariant 17-test signature. `parallelism` is the only truly GLOBAL
+  # concurrent-TI cap this platform has (per-DAG max_active_tasks is enforced
+  # PER DAGRUN in Airflow 3.3.0 -- row_number partitioned by [dag_id,
+  # run_id] in _executable_task_instances_to_queued, verified via direct
+  # source read -- so it cannot bound the scheduled+backfill+orders aggregate
+  # by itself). 8 still comfortably covers the realistic per-run census
+  # (integrity_gate 3 + discover 1 + stage 1 + a few small tasks, deferred
+  # sensors hold no slot) while halving the eagerly-pre-forked LocalExecutor
+  # worker pool once more and capping platform-wide simultaneous
+  # fork+full-import task processes -- the dominant reducible CPU load inside
+  # the scheduler pod on this 4-CPU runner. Raised identically in
+  # helm/values/local/airflow.yaml (D-06 behavioral non-divergence, same
+  # precedent as the 32->16 trim above).
   core:
-    parallelism: "16"
+    parallelism: "8"
 
 data:
   metadataSecretName: airflow-metadata

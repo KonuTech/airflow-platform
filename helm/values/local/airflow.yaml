@@ -119,8 +119,17 @@ config:
   # identical here rather than CI-only -- same precedent as
   # scheduler_health_check_threshold/dag_file_processor_timeout directly
   # above.
+  #
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 7 (2026-08-25):
+  # trimmed again, 16->8, mirroring helm/values/ci/airflow.yaml's identical
+  # key -- see that file's comment for the full rationale (parallelism is the
+  # only truly GLOBAL concurrent-TI cap; per-DAG max_active_tasks is
+  # per-DagRun in Airflow 3.3.0). Under this profile's KubernetesExecutor,
+  # 8 caps simultaneous task pods -- this project's own DAG-level ceilings
+  # (integrity_gate 3, stage/dbt_build/publish 1 each) keep the realistic
+  # peak below 8 anyway, so this is a no-op locally in the common case.
   core:
-    parallelism: "16"
+    parallelism: "8"
   # OBS-10, local profile ONLY: CI has no OTel Collector deployed (D-16), so
   # tracing stays off there -- this whole `traces:` block, and the
   # OTEL_EXPORTER_OTLP_ENDPOINT env var below, are a legitimate local/ci

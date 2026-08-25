@@ -49,8 +49,11 @@ load:
   # identical to customers.yaml's (D-17).
   strategy: merge_orders
   target: normalized.orders
+# max_units_per_run 100->10: same debug/ci-pipeline-ingestion-timeout ROUND 7
+# load-throttle as customers.yaml's own batching block (see that file's
+# comment for the full rationale).
 batching:
-  max_units_per_run: 100
+  max_units_per_run: 10
 
 # reconciliation: is D-25's dataset-conditional reconciliation sum-check
 # (VALID-05) -- orders has a natural numeric column (amount) to sum and
