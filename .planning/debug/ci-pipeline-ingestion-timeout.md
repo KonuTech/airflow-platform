@@ -255,14 +255,39 @@ ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- CURRENT STATE):
         ci-set-workload-images.sh runs uses the 500m default -- same already-proven
         eventual-consistency shape as csv_processor_image (dag-processor re-parses
         continuously; the suite starts minutes after cluster-up)."
-  next_action: "Implement the A+B fix: (B) kpo.py stage_pod_resources() reading Airflow
-      Variable stage_cpu_request (default 500m), both DAGs switch to it, CI sets 200m in
-      scripts/ci-set-workload-images.sh; (A) trim helm/values/ci analytics-db 200->100m,
-      minio 100->50m, vault 100->50m; corpus 19->12 files (_NUM_DAYS 20->13, indices
-      re-derived, _MASTER_SEED v4->v5 per the content-hash idempotency precedent);
-      etl-namespace pod/event capture added to the e2e-full cp-monitor + dump step. Then
-      offline battery, commit, push, record run ID, return human-action checkpoint for the
-      60s watcher."
+  live_verification_state: "RECORDED 2026-08-25T16:42Z: fix (14) pushed as commit d0d1ad6
+      (base 55a740a). AUTHORITATIVE ROUND 10 live-verification run: e2e-full.yml run
+      32873456327 (headSha d0d1ad6, created 2026-08-25T16:41:24Z, in_progress at recording
+      time). Companion runs, same headSha: publish.yml 32873456458 (must complete
+      build+sign BEFORE the e2e cluster pulls -- the recurring image-race blind spot;
+      verify its conclusion as POST-RUN CHECK ITEM 0), CI 32873456453, e2e-chaos
+      32873456426 (both out of scope for this signature). The docs push recording this
+      state uses [skip ci] per the ROUND 7 lesson -- no supersession risk.
+      POST-RUN ANALYSIS STEPS (for the continuation agent, once the single 60s-interval
+      watcher reports terminal), judged on INTERNAL diagnostics per the ROUND 10
+      pre-registered falsification test in reasoning_checkpoint above (node-ID diff
+      SECONDARY, saturated instrument):
+      (0) publish.yml 32873456458 conclusion must be success (image race check);
+      (1) FIX-IN-FORCE probes: job log must show ci-set-workload-images output
+      'registering stage_cpu_request=200m' AND the dump step's 'effective
+      stage_cpu_request Airflow Variable' section must print 200m; node describe should
+      show platform requests ~200m lower than ROUND 9's 2780m census;
+      (2) PRIMARY -- first-ever stage success on CI: TI dump must show stage
+      state=success (try>=1) with a start->end wall time well under ~60s; if stage STILL
+      fails every attempt at ~129s with (1) verified, root cause (14) is WRONG;
+      (3) PRIMARY -- FailedScheduling census (NEW etl-monitor.log): Insufficient-cpu
+      FailedScheduling events BEFORE the first success (or none at all) CONFIRM (14)'s
+      mechanism; a census showing stage pods scheduled-but-failing refutes the
+      request-sizing attribution and names the real blocker directly;
+      (4) Kyverno DENY grep: must REMAIN 0 (fix 11 regression check);
+      (5) scheduler/dag-processor/triggerer restarts: must REMAIN 0 (fixes 1-3/13
+      regression check; cp-monitor CSV + kubectl describe);
+      (6) SECONDARY: pytest failure-template census + node-ID diff vs the invariant
+      17-test baseline -- any shrink is signal; per blind_spots (2), if stage succeeds but
+      180s windows still miss at 12-file depth, that is the surgical per-test-budget
+      branch, NOT a refutation of (14)."
+  next_action: "(watcher handoff) Session manager runs the single 60s-interval watcher on
+      run 32873456327; continuation agent executes the post-run analysis steps above."
 
 ROUND 9 OUTCOME (2026-08-25, post-run analysis of run 32855002333 -- SUPERSEDED BY ROUND 10 ABOVE):
   status: "ANALYSIS COMPLETE. Decision-tree branch: mechanisms (12)/(13) CONFIRMED FIXED and
