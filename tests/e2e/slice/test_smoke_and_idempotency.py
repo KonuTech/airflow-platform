@@ -164,8 +164,16 @@ def test_smoke_dag_xcom_contains_built_sha(
     )
     assert "git_sha" in xcom_value, f"XCom return_value has no 'git_sha' key: {xcom_value!r}"
 
-    built_sha = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607 -- fixed argv, no user input
+    # The two build paths bake DIFFERENT sha shapes into `ENV GIT_SHA`:
+    # `make image-csv-processor` uses `git rev-parse --short HEAD` locally,
+    # while publish.yml passes the full 40-char `${{ github.sha }}` on CI.
+    # Both name the same commit, so the pass criterion is prefix identity
+    # against the full sha (min-length-guarded so a degenerate value cannot
+    # trivially match), never string equality against one fixed shape --
+    # equality against the short form failed every CI run with a provably
+    # correct image (debug session ci-pipeline-ingestion-timeout, ROUND 10).
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],  # noqa: S607 -- fixed argv, no user input
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -173,10 +181,16 @@ def test_smoke_dag_xcom_contains_built_sha(
         timeout=10,
     ).stdout.strip()
 
-    assert xcom_value["git_sha"] == built_sha, (
-        f"XCom git_sha {xcom_value['git_sha']!r} does not match this checkout's "
-        f"`git rev-parse --short HEAD` ({built_sha!r}) -- the image running in the cluster "
-        f"was not built from the commit currently checked out"
+    xcom_sha = str(xcom_value["git_sha"])
+    min_abbrev_len = 7  # git's default minimum abbreviated-sha length
+    assert len(xcom_sha) >= min_abbrev_len, (
+        f"XCom git_sha {xcom_sha!r} is shorter than git's minimum abbreviated-sha "
+        f"length ({min_abbrev_len}) -- too short to identify any commit"
+    )
+    assert head_sha.startswith(xcom_sha), (
+        f"XCom git_sha {xcom_sha!r} does not identify this checkout's HEAD "
+        f"({head_sha!r}) -- the image running in the cluster was not built from "
+        f"the commit currently checked out"
     )
 
     _write_u1_spike_doc(repo_root, dag_run_id=run_id, git_sha=xcom_value["git_sha"])
@@ -208,8 +222,10 @@ test_smoke_dag_xcom_contains_built_sha` — do not hand-edit.**
 
 ## Assertion proved
 
-`xcom.value["git_sha"] == subprocess.run(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()`
-evaluated against the checkout this test ran from, read directly from the Airflow
+`git rev-parse HEAD` of the checkout this test ran from starts with
+`xcom.value["git_sha"]` (prefix identity, minimum 7 chars -- the local build bakes
+the short sha, CI's publish.yml bakes the full sha; both name the same commit),
+with the XCom read directly from the Airflow
 metadata database's `xcom` table (`dag_id`, `run_id`, `task_id='{_SMOKE_TASK_ID}'`,
 `key='return_value'`) after the triggered DagRun reached `state='success'`.
 

@@ -82,6 +82,36 @@
      late-arriving row losing against an already-resident silver row, with
      one same shape.
 
+  5. The audit INSERT is guarded on `meta.dataset_id_for_name(...) IS NOT
+     NULL` -- i.e. it writes a row only when the dataset is REGISTERED in
+     `meta.datasets`. On a fresh deployment, `dbt build` runs the WHOLE
+     project, but `meta.datasets` rows are created only by each dataset's
+     own ingestion path (`ConfigRegistry.sync()` / `get_or_create_dataset`
+     -- there is no seed and no config-sync DAG yet), so a dataset whose
+     first file has not yet been ingested has no row, the lookup function
+     returns NULL, and an unguarded INSERT fails `dedup_audit.dataset_id`'s
+     NOT NULL constraint (observed live: CI run 32873456327, silver_orders
+     failing every build on a fresh cluster before orders' first ingest;
+     latent locally only because 'orders' happened to be registered by
+     early local ingests). The guard predicate is exactly "is the dataset
+     registered": rows can only exist in `staging.<dataset>` AFTER that
+     dataset's ingestion registered it, so an unregistered dataset always
+     has an empty `new_bronze` and the skipped row is a zero-information
+     no-op (counts 0, NULL run-id range). Deliberately NOT a
+     skip-when-new_bronze-is-empty guard: `reconciliation_post_hook`'s
+     floor derivation excludes the current build's own audit row BY
+     IDENTITY (`dedup_audit_id < max(dedup_audit_id)` for this model) and
+     therefore RELIES on this macro writing a row on every invocation for
+     a registered dataset -- skipping registered-dataset no-op rows would
+     lower that floor on every idle build and duplicate reconciliation
+     rows. In the unregistered branch the sibling macro is provably
+     unaffected (`max(dedup_audit_id)` over zero rows -> NULL -> floor 0 ->
+     `bronze_files` empty -> zero rows written, its own documented
+     no-phantom-row cross-join). If the registration invariant were ever
+     breached (bronze rows for an unregistered dataset), the
+     `meta.dedup_decisions` INSERT below would fail loudly on its NOT NULL
+     `dedup_audit_id` rather than silently dropping audit data.
+
   Args:
     dataset_name: the dataset's `meta.datasets.dataset_name` (e.g.
       'customers') -- resolved to its surrogate `dataset_id` by a scalar
@@ -150,6 +180,10 @@ audit_insert as (
         (select count(*) from classified where is_current_winner),
         0,
         (select count(*) from classified where not is_current_winner)
+    -- Registration guard -- docstring point 5. Unregistered dataset =>
+    -- resolver returns NULL => write nothing (always a no-op row anyway,
+    -- since staging.<dataset> is necessarily empty before first ingest).
+    where meta.dataset_id_for_name('{{ dataset_name }}') is not null
     returning dedup_audit_id
 )
 

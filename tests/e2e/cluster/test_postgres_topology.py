@@ -34,7 +34,15 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.cluster
 
 NAMESPACE = "data"
-ALLOWED_SCHEMAS = {"pg_catalog", "information_schema", "public", "pg_toast"}
+# `meta` is project-created (migration 0001's `CREATE SCHEMA meta`) and is
+# deliberately visible to the `analytics-db-app` user this test connects as
+# (`analytics_owner` -- migrations 0012/0013/0038 grant it USAGE/SELECT on
+# meta objects for lineage/Grafana reads), so `information_schema.schemata`
+# reports it. The other Alembic-created schemas (staging/silver/normalized)
+# carry no `analytics_owner` USAGE grant and stay invisible here -- if one
+# ever appears, this test should flag it for a fresh decision, so they are
+# deliberately NOT allowlisted.
+ALLOWED_SCHEMAS = {"pg_catalog", "information_schema", "public", "pg_toast", "meta"}
 
 
 def _free_local_port() -> int:
@@ -285,7 +293,7 @@ def test_no_extra_schemas_exist(
     metadata_connection: psycopg.Connection[Any],
     analytics_connection: psycopg.Connection[Any],
 ) -> None:
-    """D-15: DDL has exactly one home (Alembic, Phase 3) — no schema exists yet."""
+    """D-15: DDL has exactly one home (Alembic) — nothing beyond the allowlist may appear."""
     for conn, label in ((metadata_connection, "metadata"), (analytics_connection, "analytical")):
         extra = _schema_names(conn) - ALLOWED_SCHEMAS
         assert not extra, f"the {label} cluster carries unexpected schema(s): {sorted(extra)}"

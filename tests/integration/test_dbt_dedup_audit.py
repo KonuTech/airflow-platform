@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import psycopg
 import pytest
+from testcontainers.community.postgres import PostgresContainer
 
 from dataplat.metadata.postgres import PostgresMetadataRepository
 from dataplat.storage.db import create_pool
@@ -276,3 +277,63 @@ def _existing_dedup_audit_ids(dsn: str) -> list[int]:
     with psycopg.connect(dsn) as conn:
         rows = conn.execute("SELECT dedup_audit_id FROM meta.dedup_audit").fetchall()
     return [row[0] for row in rows]
+
+
+def test_whole_project_build_on_a_fresh_unregistered_database_writes_no_audit_rows(
+    run_migrations: Callable[[str], None],
+    run_dbt_build: Callable[..., object],
+) -> None:
+    """A fresh deployment's first whole-project `dbt build` must no-op cleanly, never NULL-crash.
+
+    Simulates a fresh cluster's exact ordering: migrations applied, ZERO
+    datasets registered in `meta.datasets` (registration happens only via
+    each dataset's own ingestion path — `ConfigRegistry.sync()` /
+    `get_or_create_dataset` — never via migrations or dbt), then a
+    WHOLE-project `dbt build`, which is exactly what the DAGs' `dbt_build`
+    task runs regardless of which dataset triggered it. Before
+    `dedup_audit_post_hook`'s registration guard (its docstring point 5),
+    this failed deterministically: `meta.dataset_id_for_name()` returned
+    NULL for the unregistered dataset and the unconditional audit INSERT
+    violated `meta.dedup_audit.dataset_id`'s NOT NULL constraint (observed
+    live on every fresh-CI-cluster dbt run, e.g. e2e-full run 32873456327's
+    silver_orders; latent locally only because 'orders' happened to be
+    registered by early local ingests — debug session
+    ci-pipeline-ingestion-timeout, ROUND 11). With the guard, both post-hook
+    macros must no-op: build green, zero `meta.dedup_audit` rows, zero
+    `meta.reconciliation_results` rows.
+
+    Runs against its OWN throwaway container, not the shared `migrated_dsn`:
+    other files in this directory register 'customers'/'orders' on the
+    shared database, and this test's whole point is the never-registered
+    state. `migrations/env.py`'s wrong-database guard requires the name
+    'analytics', which the shared container already uses — a second
+    database on the same container cannot satisfy the guard, so a second
+    container is the minimal honest simulation.
+    """
+    with PostgresContainer("postgres:18-bookworm", driver="psycopg", dbname="analytics") as pg:
+        dsn = pg.get_connection_url().replace("postgresql+psycopg://", "postgresql://")
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            # Mirrors conftest.postgres_dsn's bootstrap exactly (the roles
+            # cnpg-analytics.yaml's initdb/postInitApplicationSQL guarantees
+            # exist before migrations ever run on a real cluster).
+            cur.execute("CREATE ROLE etl_app LOGIN")
+            cur.execute("CREATE ROLE analytics_owner LOGIN")
+        run_migrations(dsn)
+
+        run_dbt_build(dsn)
+
+        with psycopg.connect(dsn) as verify_conn:
+            audit_row = verify_conn.execute("SELECT count(*) FROM meta.dedup_audit").fetchone()
+            recon_row = verify_conn.execute(
+                "SELECT count(*) FROM meta.reconciliation_results"
+            ).fetchone()
+        assert audit_row is not None
+        assert audit_row[0] == 0, (
+            f"expected zero meta.dedup_audit rows on a never-registered database "
+            f"(registration guard must skip the write), got {audit_row}"
+        )
+        assert recon_row is not None
+        assert recon_row[0] == 0, (
+            f"expected zero meta.reconciliation_results rows on a never-registered database "
+            f"(empty bronze_files cross join must write nothing), got {recon_row}"
+        )

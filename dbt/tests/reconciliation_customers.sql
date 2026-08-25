@@ -31,8 +31,19 @@
   `warn` outcome, never `error` -- it can never block the build or the
   model's own already-committed write.
 
+  The dataset filter goes through `meta.dataset_id_for_name(text)`
+  (migration 0028's SECURITY DEFINER lookup function) rather than a JOIN
+  against `meta.datasets` -- the same rule both post-hook macros already
+  follow and document: `dbt_app` holds `SELECT, INSERT` on
+  `meta.reconciliation_results` (migration 0032) and `EXECUTE` on the
+  lookup function, but deliberately ZERO grant on `meta.datasets` (D-08's
+  least-privilege boundary, migrations 0021/0028), so a direct join fails
+  a live `dbt_app` build with `permission denied for table datasets`
+  (observed on every fresh-cluster CI dbt run, e.g. run 32873456327, and
+  reproduced 1:1 locally via `SET ROLE dbt_app`).
+
   This test's SQL never literally calls `{{ ref('silver_customers') }}`
-  (it reads `meta.reconciliation_results`/`meta.datasets` directly, not
+  (it reads `meta.reconciliation_results` directly, not
   `silver.customers`), so without an explicit dependency edge dbt's node
   selection graph would not know this test depends on that model --
   `dbt build --select silver_customers` would silently skip it. The
@@ -47,8 +58,7 @@
 with latest as (
     select rr.*
     from meta.reconciliation_results rr
-    join meta.datasets d on d.dataset_id = rr.dataset_id
-    where d.dataset_name = 'customers'
+    where rr.dataset_id = meta.dataset_id_for_name('customers')
       and rr.hop = 'bronze_silver'
     order by rr.checked_at desc, rr.reconciliation_id desc
     limit 1
