@@ -70,13 +70,19 @@ ROUND 7 (OPENED 2026-08-25 on session resume -- USER-CHOSEN STRATEGIC DIRECTION,
       demand-vs-capacity deficit. Reducing peak concurrency (staggered/batched sweep_corpus
       uploads, max_active_runs / max_active_tis_per_dag caps tuned for the CI profile) attacks the
       deficit itself."
-  live_verification_state (2026-08-25T09:52Z): "Fix committed (32d9911 code, 9291e98 docs tip)
-      and pushed to main. e2e-full.yml run 32834232783 (headSha 9291e982fb355b26272d0f243e964f41
-      b94b219d, status pending at +20s) is the ROUND 7 live-verification run -- NOTE it is queued
-      behind in-progress run 32822780401 (headSha 3742be8, the PRE-ROUND-7 wip commit; that run's
-      result is NOT informative for ROUND 7 and must not be confused with 32834232783's).
-      publish.yml run 32834232641 (same headSha) is building/signing the 9291e98 images the DAGs
-      will pull. On resume: a SINGLE `gh run watch 32834232783 --exit-status --interval 60` (never
+  live_verification_state (2026-08-25T09:52Z, CORRECTED 09:55Z): "Fix committed (32d9911 code)
+      and pushed to main. SUPERSESSION NOTE: the first run-ID-recording docs push (84e9c74)
+      itself triggered a new push event, which cancelled pending run 32834232783 (9291e98) via
+      e2e-full.yml's `group: workflow-ref` concurrency -- the AUTHORITATIVE ROUND 7
+      live-verification run is now 32834311083 (headSha 84e9c7457304adf51100ab1d5398416c8f4fb39e,
+      which contains the identical ROUND 7 fix code; only docs commits differ from 32d9911).
+      publish.yml run 32834311181 (same headSha) is building/signing the 84e9c74 images the DAGs
+      will pull. This correction commit is pushed with '[skip ci]' precisely so it cannot
+      supersede the queue again -- the lesson: every ROUND's post-fix docs push must either be
+      bundled into the fix push or marked [skip ci]. NOTE ALSO: 32834311083 is queued behind
+      in-progress run 32822780401 (headSha 3742be8, the PRE-ROUND-7 wip commit; that run's
+      result is NOT informative for ROUND 7 and must not be confused with 32834311083's).
+      On resume: a SINGLE `gh run watch 32834311083 --exit-status --interval 60` (never
       more than one watcher, never the 3s default), then `gh api repos/KonuTech/airflow-platform/
       actions/jobs/<job-id>/logs` and (1) FIRST verify the reduced-concurrency regime was in force
       (falsification-test precondition): grep for 'max_active_tasks limit of 6' scheduler lines,
