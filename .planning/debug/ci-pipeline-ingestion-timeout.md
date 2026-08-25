@@ -1,17 +1,25 @@
 ---
-status: verifying
+status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 10 FIX (14) IMPLEMENTED per user decision A+B COMBINATION (fallback
-  not needed -- Variable leg proven offline): stage/publish CPU request per-profile via
-  Airflow Variable stage_cpu_request (ci=200m set in scripts/ci-set-workload-images.sh,
-  local=500m via the in-code default, limits untouched); CI platform request trims
-  analytics-db 200->100m / minio 100->50m / vault 100->50m (~200m freed at node level,
-  ~220m -> ~420m); sweep corpus 19->12 files (seed v5, all six anomaly features preserved);
-  etl-namespace FailedScheduling rolling capture added to e2e-full.yml. Offline battery all
-  green, zero new regressions. Awaiting live CI verification per the pre-registered
-  falsification criteria in Current Focus reasoning_checkpoint. See ROUND 10 Evidence +
-  Resolution fix (14).)
+updated: 2026-08-25 (ROUND 10 POST-RUN ANALYSIS COMPLETE on run 32873456327 (headSha d0d1ad6):
+  ROOT CAUSE (14) LIVE-CONFIRMED, fix (14) WORKS at mechanism level -- ALL FIVE pre-registered
+  primaries green: (0) publish.yml companion success; (1) fix verifiably in force
+  (stage_cpu_request=200m registered AND effective, node platform requests 2780m->2580m);
+  (2) FIRST-EVER stage successes on CI: 20/20 mapped stage TIs state=success try=1 at ~30-32s
+  wall each (was: zero successes ever, all attempts 128-130s); (3) FailedScheduling census
+  ZERO across the whole run -- pods schedule immediately post-fix; (4) Kyverno DENY 0;
+  (5) control-plane restarts 0 (scheduler peak 1644MiB < 2048Mi, above the old 1536Mi ceiling
+  again). Node-ID set is the SAME 17 for the 12th run (saturated, as pre-registered) but the
+  census shifted decisively: pilot PENDING->STAGED, dbt-build pods now RUN and emit real dbt
+  output failing deterministically with TWO concrete DB errors = NEW RESIDUAL CANDIDATE (15):
+  (15a) silver_orders model: null dataset_id violates dedup_audit NOT NULL; (15b)
+  reconciliation_customers test: permission denied for table datasets under least-privilege
+  dbt_app. The dbt_build retry wedge holds DagRuns to dagrun_timeout=45min, pinning
+  max_active_runs=1 -> the 7 discovery-window misses + 3 AlreadyRunningBackfill + data-state
+  asserts are knock-ons. Two independent test-side artifacts also named: git_sha full-vs-short
+  compare, 'meta' unexpected-schema expectation. DECISION CHECKPOINT returned. See Current
+  Focus ROUND 10 outcome + ROUND 10 post-run Evidence + Resolution (14)/(15).)
 updated_prior_round10_analysis: 2026-08-25 (ROUND 10 THROUGHPUT-CEILING ANALYSIS COMPLETE under the user-chosen Hybrid
   charter: the pre-registered three-branch expectation resolved to a FOURTH branch -- the
   per-file drain floor on CI is INFINITE. NEW ROOT CAUSE (14), arithmetic-decisive from
@@ -286,8 +294,60 @@ ROUND 10 (2026-08-25, opened on user decision: HYBRID charter -- CURRENT STATE):
       17-test baseline -- any shrink is signal; per blind_spots (2), if stage succeeds but
       180s windows still miss at 12-file depth, that is the surgical per-test-budget
       branch, NOT a refutation of (14)."
-  next_action: "(watcher handoff) Session manager runs the single 60s-interval watcher on
-      run 32873456327; continuation agent executes the post-run analysis steps above."
+  outcome (POST-RUN ANALYSIS, run 32873456327, job 97885720167, log 5891 lines archived at
+      scratchpad round10-job.log): "ROOT CAUSE (14) LIVE-CONFIRMED; fix (14) VERIFIED at
+      mechanism level. Pre-registered item-by-item:
+      (0) PASS -- companion publish.yml 32873456458 conclusion=success (no image race).
+      (1) PASS -- fix in force: log line 979 'registering stage_cpu_request=200m', 987
+      'Variable stage_cpu_request created', dump prints effective value '200m' (line 5381);
+      node describe Allocated cpu Requests 2580m (86%) vs ROUND 9's 2780m census -- the full
+      ~200m platform trim landed (free ~420m).
+      (2) PASS (PRIMARY) -- FIRST-EVER stage successes on CI: ALL 20 mapped stage TIs across
+      both backfill DagRuns state=success try=1, wall ~30-32s each (16:51:32->16:56:47 and
+      17:36:34->17:41:56 drain the full 10-file batches back-to-back); publish for orders and
+      discover unchanged-healthy (discover try=1 in 17-22s). Pre-fix: ZERO stage successes
+      ever, every attempt 128-130s.
+      (3) PASS (PRIMARY) -- FailedScheduling census: ZERO FailedScheduling/Insufficient lines
+      captured in etl-monitor.log across the whole run; etl events show immediate
+      Scheduled->Pulled->Started for every stage/dbt-build pod. Matches the
+      'none-at-all-post-fix' confirming branch: pods schedule instantly once request <= free.
+      (4) PASS -- Kyverno DENY 0; every kyverno.io/image-verification-outcomes annotation
+      status=pass.
+      (5) PASS -- restart-count timeline EMPTY; kubectl describe Restart Count 0 on
+      scheduler/dag-processor (+triggerer); scheduler peak 1644MiB/23pids -- above the old
+      1536Mi ceiling, below the 2048Mi limit, fix (13) load-bearing again.
+      (6) SECONDARY -- pytest '17 failed, 21 passed, 6 skipped in 3746.00s'; node-ID diff vs
+      baseline_sorted.txt: IDENTICAL set, 12th consecutive (saturated instrument, as
+      pre-registered: blind_spot-2 branch, NOT a refutation of (14)). CENSUS SHIFTED
+      DECISIVELY: pilot file customers_20240101.csv now 'still non-terminal: STAGED' (was
+      PENDING all session -- stage hop verifiably executes, pilot now blocked at the dbt
+      hop); dbt-build pods now SCHEDULE, START and RUN dbt to completion of its own error
+      handling -- 6 dbt-build pods Failed with REAL dbt output: 'Completed with 2 errors':
+      (15a) 'Database Error in model silver_orders ... null value in column dataset_id of
+      relation dedup_audit violates not-null constraint, DETAIL: Failing row contains
+      (37, null, 79de837c-..., orders, null, null, 0, 0, 0, 0, ...)' -- the dedup_audit
+      insert resolves dataset_id NULL for dataset 'orders' on a fresh CI cluster;
+      (15b) 'Database Error in test reconciliation_customers ... permission denied for table
+      datasets' -- the compiled test SQL reads meta.datasets directly, which the
+      least-privilege dbt_app role (migrations 0021/0028) cannot SELECT. dbt_build fails
+      deterministically every try (~30s wall, tries to 6, then skipped when dagrun_timeout
+      kills the run), holding the first scheduled DagRun + backfill run to the full 45min
+      dagrun_timeout (16:49:34->17:34:34) -- max_active_runs=1 pins the scheduled slot for
+      45min, so the 7 'discovery never registered within 180s' templates, the 3
+      AlreadyRunningBackfill backfill-create failures, DBT_BUILD-never-RUNNING (300s),
+      normalized.customers <2 rows (publish still never ran -- downstream of dbt_build) and
+      both SCD2 precondition templates are ALL knock-ons of the dbt_build wedge. TWO
+      independent test-side artifacts also nameable now: (i) test_smoke_dag_xcom_contains_
+      built_sha compares the XCom's FULL 40-char sha ('d0d1ad6be1...') against `git rev-parse
+      --short HEAD` ('d0d1ad6') -- the image IS built from the checked-out commit this run
+      (same full-vs-short shape in ROUND 9 with ee87708...), a comparison/build-format
+      artifact, not an image race; (ii) test_no_extra_schemas_exist flags schema 'meta' as
+      unexpected -- identical in ROUND 9, likely a stale test allowlist vs the migrations
+      that legitimately create meta.* (needs 1 confirmation read)."
+  next_action: "DECISION CHECKPOINT returned to user: residual cause (15) (dbt-side: 15a
+      dataset_id NULL in dedup_audit for orders + 15b dbt_app permission denied on
+      meta.datasets) named with direct evidence; awaiting user direction before any ROUND 11
+      fix work, per the standing no-new-round-without-checkpoint rule."
 
 ROUND 9 OUTCOME (2026-08-25, post-run analysis of run 32855002333 -- SUPERSEDED BY ROUND 10 ABOVE):
   status: "ANALYSIS COMPLETE. Decision-tree branch: mechanisms (12)/(13) CONFIRMED FIXED and
@@ -4250,6 +4310,52 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     FailedScheduling evidence-gap instrumentation. Ready for live falsification per the
     pre-registered criteria in the reasoning_checkpoint.
 
+- timestamp: 2026-08-25 (ROUND 10 -- post-run analysis of live-verification run 32873456327)
+  checked: >
+    e2e-full.yml run 32873456327 (headSha d0d1ad6, job 97885720167, conclusion=failure at
+    job level -- judged on internals per pre-registration; full 5891-line log archived at
+    scratchpad round10-job.log), companion publish.yml 32873456458 conclusion, the six
+    pre-registered post-run items: fix-in-force probes, TI dump, NEW etl-monitor.log
+    FailedScheduling census, Kyverno DENY grep, cp-monitor restart timeline + describe,
+    pytest failure-template census + node-ID diff vs baseline_sorted.txt.
+  found: >
+    (a) FIX IN FORCE: 'registering stage_cpu_request=200m' + 'Variable stage_cpu_request
+    created' at cluster-up; effective-Variable dump prints 200m; node Allocated cpu Requests
+    2580m/86% vs ROUND 9's 2780m/92% (full ~200m trim landed; ~420m free). (b) FIRST-EVER
+    STAGE SUCCESSES ON CI: all 20 mapped stage TIs (2 backfill DagRuns x 10-file batch)
+    state=success try=1 at ~30-32s wall, draining back-to-back through the single global
+    slot in ~5.5min per batch; discover try=1 in 17-22s as always. Pre-fix: zero stage
+    successes ever, every attempt 128-130s. (c) FailedScheduling census: ZERO lines captured
+    across the entire run; etl events show immediate Scheduled->Started for every
+    stage/dbt-build pod -- the confirming 'none at all post-fix' branch. (d) Kyverno DENY 0
+    (all image-verification-outcomes status=pass). (e) Restarts 0 across
+    scheduler/dag-processor/triggerer; scheduler peak 1644MiB/23pids (>1536Mi old ceiling,
+    <2048Mi new limit -- fix (13) again proven load-bearing). (f) pytest 17/21/6 in 3746s;
+    node-ID set IDENTICAL for the 12th run (saturated) BUT census shifted decisively:
+    pilot PENDING->STAGED; dbt-build pods now RUN (6 pods Failed with real dbt output
+    'Completed with 2 errors'): silver_orders model fails 'null value in column dataset_id
+    of relation dedup_audit violates not-null constraint' (failing row: run 37, dataset_id
+    null, dataset 'orders'), and test reconciliation_customers fails 'permission denied for
+    table datasets' under the least-privilege dbt_app role. dbt_build fails every try
+    (~30s), tries to 6, DagRuns held to dagrun_timeout=45min (16:49:34->17:34:34) ->
+    max_active_runs=1 pins the scheduled slot 45min -> 7 discovery-window misses, 3
+    AlreadyRunningBackfill, DBT_BUILD-never-RUNNING, <2-rows and SCD2 preconditions are all
+    knock-ons. git_sha template: XCom carries the FULL sha OF THE CURRENT COMMIT
+    (d0d1ad6be1...) vs `git rev-parse --short HEAD` (d0d1ad6) -- same full-vs-short shape as
+    ROUND 9 (ee87708...) => comparison/build-format artifact, not a stale image.
+    'meta' unexpected-schema template byte-identical to ROUND 9.
+  implication: >
+    ROOT CAUSE (14) is LIVE-CONFIRMED and its fix VERIFIED at mechanism level -- the
+    structural unschedulability is gone and the ingestion stage hop works on CI for the
+    first time in the session. The residual signature is now dominated by a NEW, nameable,
+    deterministic cause candidate (15): the dbt project/role layer fails on a fresh CI
+    cluster ((15a) dedup_audit dataset_id NULL for 'orders'; (15b) dbt_app lacks SELECT on
+    meta.datasets in the reconciliation test's compiled SQL), and everything else in the
+    17-test set reduces to its 45min-wedge knock-on plus two independent test-side
+    artifacts (git_sha full-vs-short compare; 'meta' schema allowlist). Why (15) was never
+    visible before: dbt had NEVER actually executed on CI until this run (blocked by (12)
+    then (14)). Per the standing rule, no ROUND 11 fix without a decision checkpoint.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -4653,8 +4759,10 @@ root_cause: >
   accounting. Decisive corroboration: the crash-loop STOPS PERMANENTLY at 12:54:44 -- the
   exact moment dagrun_timeout kills the two wedged runs -- and the post-wedge phase peaks at
   1496MiB with pids<=22 and zero further OOMs.
-  (14, ROUND 10, CONFIRMED BY CONVERGENT ANALYSIS (not yet live-falsified; fix pending user
-  decision) -- the mechanism behind the ENTIRE post-(12)/(13) residual failure census): the
+  (14, ROUND 10, LIVE-CONFIRMED by run 32873456327: with the 200m request + platform trims
+  verifiably in force, all 20 stage TIs succeeded try=1 at ~30-32s -- the first stage
+  successes EVER on CI -- with ZERO FailedScheduling events; originally confirmed by
+  convergent analysis -- the mechanism behind the ENTIRE post-(12)/(13) residual failure census): the
   stage and publish KPO pods are STRUCTURALLY UNSCHEDULABLE on the CI node.
   _STAGE_RESOURCES (airflow/dags/csv_ingest_customers.py, shared by stage AND publish)
   requests cpu=500m/memory=1Gi, but the CI node has only ~220m free CPU at steady state
@@ -4674,6 +4782,26 @@ root_cause: >
   makes backfills overrun and collide (AlreadyRunningBackfill x12). Publish shares the same
   500m profile, so even a staged run could not publish. Corpus size is irrelevant
   (19 x ~3.3KiB files); corpus count (10-file batch depth) only matters after (14) is fixed.
+  (15, ROUND 10 post-run, CANDIDATE -- named with direct evidence, NOT yet root-caused to a
+  specific code line; no fix proposed pending user decision checkpoint): with (14) fixed,
+  dbt_build pods run for the first time ever on CI and fail DETERMINISTICALLY every try
+  (~30s wall, 6 pods Failed, dbt 'Completed with 2 errors'): (15a) model silver_orders --
+  'null value in column dataset_id of relation dedup_audit violates not-null constraint'
+  (failing row: run_id 37, dataset 'orders', dataset_id NULL) -- the dedup-audit insert
+  cannot resolve a dataset_id for 'orders' on a fresh CI cluster; (15b) test
+  reconciliation_customers -- 'permission denied for table datasets': the compiled test SQL
+  reads meta.datasets directly, which the least-privilege dbt_app role (migrations
+  0021/0028; 0028's narrow lookup function exists precisely to avoid this) cannot SELECT.
+  Never visible before because dbt had NEVER executed on CI (blocked by (12), then (14)).
+  Knock-on chain (accounts for the rest of the 17-set): dbt_build retries hold each DagRun
+  to dagrun_timeout=45min -> max_active_runs=1 pins the scheduled slot -> 7 discovery-window
+  misses, 3 AlreadyRunningBackfill, publish never runs (<2 rows / SCD2 preconditions),
+  DBT_BUILD never RUNNING. Two INDEPENDENT test-side artifacts, also nameable: (i)
+  test_smoke_dag_xcom_contains_built_sha compares the XCom's full 40-char sha against
+  `git rev-parse --short HEAD` -- the image IS from the checked-out commit (both ROUND 9 and
+  ROUND 10 show the same full-vs-short shape); (ii) test_no_extra_schemas_exist flags
+  schema 'meta' which the project's own migrations create (stale allowlist suspicion,
+  1 confirmation read needed).
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -5068,11 +5196,14 @@ verification: >
   3.200 effective budget (the vault trim additionally lands live-only, outside the rendered
   set); test_values_profiles 6/6; policy not-manifests 157/2 (same 2 pre-existing);
   tests/unit 555/555; tests/dagtest 14/14; ruff/mypy/format/bash -n all clean or
-  byte-identical-pre-existing. LIVE CI VERIFICATION: pending -- judged on INTERNAL
-  diagnostics per the ROUND 10 pre-registered falsification test (first-ever stage success
-  on CI; etl-namespace FailedScheduling census confirming/falsifying (14); Kyverno DENY
-  still 0; control-plane restarts still 0; failure-template census + node-ID diff
-  secondary/saturated).
+  byte-identical-pre-existing. LIVE CI VERIFICATION (run 32873456327, headSha d0d1ad6):
+  ALL FIVE pre-registered primaries PASS -- fix in force (Variable 200m effective, node
+  requests 2780m->2580m), FIRST-EVER stage successes on CI (20/20 TIs try=1 ~30-32s, zero
+  128-130s startup-timeout failures), FailedScheduling census ZERO, Kyverno DENY 0,
+  control-plane restarts 0 (scheduler peak 1644MiB < 2048Mi). Root cause (14) CONFIRMED and
+  its fix verified at mechanism level. Suite NOT yet green: residual candidate (15) (dbt
+  layer -- see root_cause (15) and the ROUND 10 post-run Evidence entry) now dominates the
+  unchanged 17-node-ID set via its dagrun_timeout wedge knock-ons.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
