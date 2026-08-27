@@ -456,6 +456,22 @@ class PostgresMetadataRepository(MetadataRepository):
             ).fetchone()
             return None if row is None else str(row[0])
 
+    def fail_ingestion_run_claim(self, *, run_id: int, pod_name: str) -> bool:
+        """See `MetadataRepository.fail_ingestion_run_claim`."""
+        with self._pool.connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE meta.ingestion_runs
+                   SET status = 'FAILED',
+                       lease_expires_at = now()
+                 WHERE run_id = %(run_id)s
+                   AND status = 'RUNNING'
+                   AND k8s_pod_name = %(pod_name)s
+                """,
+                {"run_id": run_id, "pod_name": pod_name},
+            )
+            return result.rowcount == 1
+
     def claim_run_stage(
         self,
         *,

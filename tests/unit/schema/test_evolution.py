@@ -181,3 +181,73 @@ def test_breaking_change_is_tested() -> None:
 
     assert exc_info.value.context["diagnostic_code"] == "schema-column-disappeared"
     assert exc_info.value.context["column"] == "region"
+
+
+# --- D-13 optional-column absence (debug/ci-pipeline-ingestion-timeout ROUND 15,
+# finding 20): a contract column declared `required: false` (ColumnContract.required)
+# that is absent from a file is NOT a breaking disappearance -- customers.yaml's own
+# signup_country comment states the semantics plainly: "files delivered before this
+# column existed never carried it ... not 'reject files missing it'". The caller
+# (CsvSource._resolve_schema) names its optional columns explicitly via the
+# keyword-only `optional_columns` parameter -- the hashed column mappings themselves
+# are NEVER widened with a `required` key, because `hash_schema` hashes the whole
+# mapping and any new key would silently re-version every dataset's schema history.
+
+
+def test_a_disappeared_optional_column_is_compatible_when_named_in_optional_columns() -> None:
+    old = [
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "signup_country", "type": "string"},
+    ]
+    new = [{"name": "id", "type": "string"}, {"name": "name", "type": "string"}]
+
+    findings = classify_schema_change(old, new, optional_columns=frozenset({"signup_country"}))
+
+    assert findings == []
+
+
+def test_a_disappeared_required_column_still_raises_even_alongside_optional_columns() -> None:
+    old = [
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "signup_country", "type": "string"},
+    ]
+    new = [{"name": "id", "type": "string"}]
+
+    with pytest.raises(IncompatibleSchemaError) as exc_info:
+        classify_schema_change(old, new, optional_columns=frozenset({"signup_country"}))
+
+    assert exc_info.value.context["diagnostic_code"] == "schema-column-disappeared"
+    assert exc_info.value.context["column"] == "name"
+
+
+def test_optional_disappearance_combined_with_a_new_column_reports_only_the_addition() -> None:
+    old = [
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "signup_country", "type": "string"},
+    ]
+    new = [
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "note", "type": "string"},
+    ]
+
+    findings = classify_schema_change(old, new, optional_columns=frozenset({"signup_country"}))
+
+    assert len(findings) == 1
+    assert findings[0].change_type == "column_added"
+    assert findings[0].column == "note"
+
+
+def test_omitting_optional_columns_preserves_the_original_breaking_behavior() -> None:
+    """No `optional_columns` argument == every contract column is required (back-compat)."""
+    old = [{"name": "id", "type": "string"}, {"name": "signup_country", "type": "string"}]
+    new = [{"name": "id", "type": "string"}]
+
+    with pytest.raises(IncompatibleSchemaError) as exc_info:
+        classify_schema_change(old, new)
+
+    assert exc_info.value.context["diagnostic_code"] == "schema-column-disappeared"
+    assert exc_info.value.context["column"] == "signup_country"

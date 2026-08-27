@@ -86,13 +86,19 @@ _ANALYTICS_CLUSTER = "analytics-db"
 _AIRFLOW_DB_CLUSTER = "airflow-db"
 _AIRFLOW_DB_SECRET = "airflow-db-app"  # noqa: S105 -- a K8s Secret's metadata.name, not a credential
 
-# Terminal statuses `dataplat.pipeline.run.run_ingest`/`csv_processor.cli.ingest`
-# ever write to `meta.ingestion_runs.status` (packages/dataplat/src/dataplat/
-# pipeline/run.py's own docstring: SUCCEEDED, and the two `_skipped_receipt`
-# outcomes; csv_processor.cli.ingest's `except DataPlatformError` branch adds
-# FAILED). Any other value means the run is still in flight.
+# Terminal statuses the pipeline ever writes to `meta.ingestion_runs.status`
+# (packages/dataplat/src/dataplat/pipeline/run.py: SUCCEEDED, the
+# `_skipped_receipt` outcomes, FAILED via the CLI's exception branches and
+# ROUND 15's crash-release). QUARANTINED added by debug/ci-pipeline-
+# ingestion-timeout ROUND 15 (it became a terminal status in ROUND 14's
+# trim-ii quarantine semantics, and this set was never truthed up --
+# test_backfill_2year_sweep.py's own local set already carries it): a poll
+# waiting on a QUARANTINED run would otherwise burn its full timeout on an
+# already-decided outcome, exactly candidate (19)'s predicted fail-fast
+# signature turned slow again. Any other value means the run is still in
+# flight.
 _TERMINAL_RUN_STATUSES = frozenset(
-    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT"},
+    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT", "QUARANTINED"},
 )
 
 # Short inter-poll delay used by every deadline loop below — never the WAIT
@@ -654,8 +660,8 @@ def poll_ingestion_run(
 
     Returns:
         `{"status": ..., "rows_loaded": ..., "lease_expires_at": ...}` once
-        `status` is one of `SUCCEEDED`/`FAILED`/`SKIPPED_DUPLICATE`/
-        `SKIPPED_CONCURRENT`.
+        `status` is one of `_TERMINAL_RUN_STATUSES` (`SUCCEEDED`/`FAILED`/
+        `SKIPPED_DUPLICATE`/`SKIPPED_CONCURRENT`/`QUARANTINED`).
 
     Raises:
         AssertionError: `timeout` elapses first — names the timeout and the

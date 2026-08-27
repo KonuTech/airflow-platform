@@ -365,7 +365,20 @@ def stage(assignment: str) -> None:
         heartbeat_interval_seconds = float(
             os.environ.get("DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", "60.0"),
         )
-        receipt = stage_ingest(ctx, heartbeat_interval_seconds=heartbeat_interval_seconds)
+        # (20a) LEG 2 (debug/ci-pipeline-ingestion-timeout ROUND 15): a claim
+        # refused under a live foreign lease WAITS up to this budget for the
+        # lease to resolve (reclaim-and-stage, or verified duplicate) and
+        # otherwise FAILS this pod loudly -- never exit-0 with nothing
+        # staged. Default 420s = one 5-minute lease + margin; same env-var
+        # override idiom as the heartbeat interval above.
+        concurrent_wait_seconds = float(
+            os.environ.get("DATAPLAT_STAGE_CONCURRENT_WAIT_SECONDS", "420.0"),
+        )
+        receipt = stage_ingest(
+            ctx,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            concurrent_wait_seconds=concurrent_wait_seconds,
+        )
         _write_xcom(receipt)
     except DataPlatformError:
         _write_xcom(_failure_receipt(doc))

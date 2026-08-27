@@ -209,8 +209,19 @@ class ColumnContract(BaseModel):
             type-specific normalization instead of a validation error.
         nullable: Whether a present column's value may be empty.
         required: Whether the column must appear in the file's structure at
-            all. ``required: False`` with the column absent from a file is
+            all. ``required: True`` with the column absent from a file is
             the "column disappearance" case (D-04), classified breaking.
+            ``required: False`` with the column absent is a COMPATIBLE
+            absence (D-13: "files delivered before this column existed
+            never carried it") -- loadable when the observed header is a
+            strict prefix of the contract's column order (the loader pads
+            the absent trailing columns with NULL); any non-trailing
+            absence still rejects loudly, since the loader maps values by
+            position. (This sentence previously said ``required: False``
+            absence was "classified breaking" -- under that reading the
+            field would have been behaviorally identical to
+            ``required: True``, i.e. dead; corrected by
+            debug/ci-pipeline-ingestion-timeout ROUND 15, finding 20.)
             ``required`` and ``nullable`` are deliberately two distinct
             fields (D-20), never collapsed into one.
         business_key: Whether this column participates in the dataset's

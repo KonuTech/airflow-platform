@@ -96,6 +96,7 @@ from dataplat.config.model import (
     LoadConfig,
     SourceConfig,
 )
+from dataplat.errors import DataPlatformError
 from dataplat.metadata.postgres import PostgresMetadataRepository
 from dataplat.models.identity import RunContext
 from dataplat.observability import tracing
@@ -698,10 +699,16 @@ def test_already_succeeded_run_returns_skipped_duplicate_and_touches_no_staging_
     assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 0
 
 
-# --- Behavior 3: RUNNING + live lease -> SKIPPED_CONCURRENT -----------------
+# --- Behavior 3: RUNNING + live foreign lease -> wait, then FAIL loudly -----
+# (debug/ci-pipeline-ingestion-timeout ROUND 15, finding 20a: the old
+# immediate-SKIPPED_CONCURRENT return converted a crashed claimant's live
+# lease into task SUCCESS with nothing staged -- a silent drop. The refused
+# claim now waits `concurrent_wait_seconds` for the lease to resolve and
+# otherwise raises; tests/integration/test_stage_ingest.py covers the
+# resolved/reclaimed arms.)
 
 
-def test_running_run_with_a_live_lease_returns_skipped_concurrent(env: _Env) -> None:
+def test_running_run_with_a_live_lease_waits_then_fails_never_silent_success(env: _Env) -> None:
     ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
         env,
         key_suffix="concurrent",
@@ -715,13 +722,13 @@ def test_running_run_with_a_live_lease_returns_skipped_concurrent(env: _Env) -> 
         k8s_pod_name="other-pod-holding-the-lease",
     )
 
-    receipt = stage_ingest(ctx)
+    with pytest.raises(DataPlatformError):
+        stage_ingest(ctx, concurrent_wait_seconds=2.0)
 
-    assert receipt.status == "SKIPPED_CONCURRENT"
-    assert receipt.run_id == run_id
-    assert receipt.rows_loaded == 0
     assert not _staging_table_exists(env.migrated_dsn, run_id)
     assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 0
+    # The foreign claim itself is untouched -- still RUNNING, still leased.
+    assert _read_run_status(env.migrated_dsn, run_id) == "RUNNING"
 
 
 # --- Behavior 4: crash between staging and publish, then a clean retry -----

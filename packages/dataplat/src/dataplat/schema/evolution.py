@@ -82,6 +82,8 @@ class SchemaChangeFinding:
 def classify_schema_change(
     old_columns: Sequence[Mapping[str, object]],
     new_columns: Sequence[Mapping[str, object]],
+    *,
+    optional_columns: frozenset[str] = frozenset(),
 ) -> list[SchemaChangeFinding]:
     """Classify a dataset's schema drift as COMPATIBLE findings or a BREAKING raise.
 
@@ -119,6 +121,21 @@ def classify_schema_change(
             present, is compared for the retype check below.
         new_columns: This file's observed column list, same shape as
             ``old_columns``.
+        optional_columns: Contract column names declared ``required: false``
+            (``ColumnContract.required``, D-13) -- an ``old_columns`` entry
+            named here that is ABSENT from ``new_columns`` is a COMPATIBLE
+            absence ("files delivered before this column existed never
+            carried it", customers.yaml's own signup_country comment), not a
+            breaking disappearance, and produces NO finding. Passed as a
+            SEPARATE parameter -- never as an extra key on the column
+            mappings themselves -- because ``hash_schema`` hashes the whole
+            mapping, and widening the hashed shape would silently re-version
+            every dataset's schema history (debug/ci-pipeline-ingestion-
+            timeout ROUND 15, finding 20). Whether the absence is actually
+            LOADABLE (positional prefix alignment) is the caller's concern,
+            exactly like the reordered-file case above -- see
+            ``CsvSource._resolve_schema``. Defaults to empty: omitting it
+            preserves the original every-column-is-required behavior.
 
     Returns:
         A list of ``SchemaChangeFinding`` values, one per genuinely new
@@ -130,7 +147,8 @@ def classify_schema_change(
 
     Raises:
         IncompatibleSchemaError: A column present in ``old_columns`` is
-            absent from ``new_columns`` (``context["diagnostic_code"] ==
+            absent from ``new_columns`` and not named in
+            ``optional_columns`` (``context["diagnostic_code"] ==
             "schema-column-disappeared"``, ``context["column"]`` names it),
             or a column present in both changed its ``"type"``
             (``context["diagnostic_code"] == "schema-column-retyped"``,
@@ -145,6 +163,10 @@ def classify_schema_change(
         name = str(old_column["name"])
         new_column = new_by_name.get(name)
         if new_column is None:
+            if name in optional_columns:
+                # D-13: a `required: false` contract column absent from the
+                # file is a compatible absence, not a disappearance.
+                continue
             msg = f"column {name!r} present in the recorded schema disappeared from this file"
             raise IncompatibleSchemaError(
                 msg,

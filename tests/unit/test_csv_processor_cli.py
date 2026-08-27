@@ -367,8 +367,13 @@ def _make_fake_stage_ingest(
 ) -> object:
     """Builds a `stage_ingest` stand-in that captures its `ctx` argument and returns a Receipt."""
 
-    def _fake_stage_ingest(ctx: object, *, heartbeat_interval_seconds: float = 60.0) -> Receipt:
-        del heartbeat_interval_seconds
+    def _fake_stage_ingest(
+        ctx: object,
+        *,
+        heartbeat_interval_seconds: float = 60.0,
+        concurrent_wait_seconds: float = 420.0,
+    ) -> Receipt:
+        del heartbeat_interval_seconds, concurrent_wait_seconds
         captured["ctx"] = ctx
         return Receipt(
             run_id=42,

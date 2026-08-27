@@ -48,7 +48,7 @@ from csv_processor.detect.encoding import DEFAULT_MIN_CONFIDENCE, decode_strict,
 from csv_processor.detect.filename import parse_filename
 from csv_processor.detect.header import detect_header
 from dataplat.discovery import open_multipart_stream
-from dataplat.errors import FileInspectionError, IncompatibleSchemaError
+from dataplat.errors import FileInspectionError, IncompatibleSchemaError, StorageError
 from dataplat.models.profile import CsvProfile
 from dataplat.models.record import RecordChunk
 from dataplat.observability import metrics
@@ -785,11 +785,46 @@ class CsvSource(Source):
             )
             return record.schema_version_id, record.compatibility
 
-        findings = classify_schema_change(old_columns, new_columns)
+        # D-13 (debug/ci-pipeline-ingestion-timeout ROUND 15, finding 20):
+        # contract columns declared `required: false` may legitimately be
+        # ABSENT from a file ("files delivered before this column existed
+        # never carried it" -- customers.yaml's own signup_country comment).
+        # Passed to the classifier as a separate parameter, never as a key
+        # on the hashed column mappings (hash_schema hashes the whole
+        # mapping; widening it would re-version every dataset's history).
+        optional_names = frozenset(
+            column.name for column in ctx.config.columns if not column.required
+        )
+        findings = classify_schema_change(old_columns, new_columns, optional_columns=optional_names)
+        new_names_in_order = [str(column["name"]) for column in new_columns]
+        old_names_in_order = [str(column["name"]) for column in old_columns]
         if findings:
             # D-01: a genuinely new column was observed -- detect + record
             # only. The file still loads using its known/contract columns;
             # this new column's own values are never persisted anywhere.
+            # SOUND ONLY when the full contract is intact, in order, as a
+            # PREFIX of the observed header: the loader truncates every row
+            # to len(target_columns) by POSITION, so a new column occupying
+            # an absent optional contract column's slot (or any non-trailing
+            # position) would have its values silently COPY'd into that
+            # contract column -- reject loudly instead (closes a latent
+            # positional-corruption hole alongside the optional-absence
+            # change that made it reachable).
+            if new_names_in_order[: len(old_names_in_order)] != old_names_in_order:
+                msg = (
+                    "this file adds new columns but does not carry the full "
+                    "contract column list, in order, before them -- the loader "
+                    "maps values to columns by position, so this file cannot "
+                    "be loaded without corrupting data"
+                )
+                raise IncompatibleSchemaError(
+                    msg,
+                    context={
+                        "diagnostic_code": "schema-columns-reordered",
+                        "expected_order": old_names_in_order,
+                        "observed_order": new_names_in_order,
+                    },
+                )
             record = schema_repo.sync(
                 self.dataset_id,
                 columns=new_columns,
@@ -799,9 +834,10 @@ class CsvSource(Source):
             )
             return record.schema_version_id, record.compatibility
 
-        # `findings` empty means new_columns and old_columns share the exact
-        # same NAME SET (classify_schema_change compares by name only, never
-        # by position -- evolution.py's own docstring/tests). That does NOT
+        # `findings` empty means every observed column name is a contract
+        # column name (classify_schema_change compares by name only, never
+        # by position -- evolution.py's own docstring/tests; absent
+        # `required: false` columns are a compatible absence). That does NOT
         # mean the file's physical column ORDER matches the contract's:
         # StagingLoader._build_stages/load() maps every row field to its
         # target column by POSITION alone (target_columns.index(...)), with
@@ -814,13 +850,44 @@ class CsvSource(Source):
         # computed over the already-misaligned row. D-02's "reported...
         # never silently adapted to" is taken literally here too: reject
         # loudly, with a named diagnostic, rather than guess an alignment.
-        new_names_in_order = [str(column["name"]) for column in new_columns]
-        old_names_in_order = [str(column["name"]) for column in old_columns]
         if new_names_in_order != old_names_in_order:
+            if new_names_in_order == old_names_in_order[: len(new_names_in_order)] and all(
+                str(column["name"]) in optional_names
+                for column in old_columns[len(new_names_in_order) :]
+            ):
+                # D-13's loadable-narrower case: the observed header is a
+                # STRICT PREFIX of the contract's column order and every
+                # contract column beyond it is optional -- the loader pads
+                # the absent trailing columns with NULL (StagingLoader.
+                # load()'s narrower-row branch). This is the CONTRACT's own
+                # shape with optional columns absent, not a new schema:
+                # resolve to the contract's recorded version rather than
+                # sync()ing an INFERRED narrower version, which would flip
+                # the dataset's CURRENT version -- and, because the
+                # idempotency-key formula reads the current schema version,
+                # re-key and re-eligibilize every already-processed file on
+                # every narrower-file arrival (ROUND 12's measured
+                # replay-wave mechanism, here as a permanent oscillation).
+                contract_hash, _hash_version = hash_schema(old_columns)
+                try:
+                    resolved = schema_repo.resolve_by_hash(self.dataset_id, contract_hash)
+                except StorageError:
+                    # The contract's own hash was never recorded (possible
+                    # only for a history predating the bootstrap branch
+                    # above, or a contract changed since its last sync) --
+                    # record it now, same shape as the bootstrap case.
+                    resolved = schema_repo.sync(
+                        self.dataset_id,
+                        columns=old_columns,
+                        derived_from="CONTRACT",
+                        compatibility="COMPATIBLE",
+                    )
+                return resolved.schema_version_id, resolved.compatibility
             msg = (
                 "this file's columns match the recorded schema's names but not "
-                "their order -- the loader maps values to columns by position, "
-                "so a reordered file cannot be loaded without corrupting data"
+                "their order, or omit a non-trailing/required contract column "
+                "-- the loader maps values to columns by position, so this "
+                "file cannot be loaded without corrupting data"
             )
             raise IncompatibleSchemaError(
                 msg,

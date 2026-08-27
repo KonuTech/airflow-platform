@@ -154,6 +154,11 @@ extend-select = ["D417"]
 "airflow/dags/**" = ["INP001"]                        # DAG folder is not a package
 "scripts/**"      = ["T20", "INP001"]                 # OBS-03 carve-out — scripts only
 "tools/corpus/__main__.py" = ["T20"]                  # CLI entry point may print
+# OBS-03 carve-out 3 (debug/ci-pipeline-ingestion-timeout ROUND 15, rider i):
+# the e2e failure-traceback streaming hook's printed output IS the interface
+# (the streamed CI job log) -- see tests/policy/test_print_ban_scope.py's
+# module docstring for the full rationale and the matching allowlist entry.
+"tests/e2e/conftest.py" = ["T20"]
 # migrations/ is Alembic's own module-loading mechanism (env.py execs each
 # versions/*.py by file path, never `import migrations.versions...`) — never a
 # real Python package, same reasoning as airflow/dags/**. Revision filenames

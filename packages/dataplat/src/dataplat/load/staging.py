@@ -60,9 +60,14 @@ before ``_record_hash`` is computed: this is D-01's "the file still loads
 successfully using its known columns" for a genuinely new, contract-unknown
 TRAILING column, which ``CsvSource.inspect()`` has already classified and
 recorded as a schema-evolution proposal (never auto-DDL) before this method
-ever runs. A row narrower than ``target_columns`` is left untouched -- a
-missing contract column is a BREAKING change ``inspect()`` already raises
-on before ``load()`` is ever reached.
+ever runs. A row narrower than ``target_columns`` is PADDED with ``None`` up
+to the target width (debug/ci-pipeline-ingestion-timeout ROUND 15, finding
+20): ``inspect()`` only admits a narrower file whose header is a strict
+prefix of the contract's column order with every absent column ``required:
+false`` (D-13's "files delivered before this column existed never carried
+it"), so the absent columns are always TRAILING and a ``None`` pad is
+positionally sound; a missing REQUIRED column stays a BREAKING change
+``inspect()`` raises on before ``load()`` is ever reached.
 """
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from dataplat.errors import ConfigurationError
+from dataplat.models.record import StageResult
 from dataplat.normalize.boolean_null import BooleanNormalizer, NullTokenNormalizer
 from dataplat.normalize.dates import DateNormalizer
 from dataplat.normalize.numeric import NumericNormalizer
@@ -87,7 +93,7 @@ if TYPE_CHECKING:
     from psycopg import Connection
 
     from dataplat.config.model import NormalizationConfig, QualityRuleConfig
-    from dataplat.models.record import RejectedRecord
+    from dataplat.models.record import RecordChunk, RejectedRecord
     from dataplat.pipeline.protocol import PipelineContext, StreamingStage
 
 # `ctx.config.quality.rules[].rule_type` values `_build_stages` (plan 08-10)
@@ -197,6 +203,60 @@ class StagingResult:
     rejected_records: list[RejectedRecord] = field(default_factory=list)
 
 
+class _OptionalColumnPadStage:
+    """Pad rows narrower than the target width with ``None`` -- D-13's absence pad.
+
+    A ``StreamingStage`` inserted unconditionally right after
+    ``RaggedRowGuard`` in ``StagingLoader._build_stages`` (debug/
+    ci-pipeline-ingestion-timeout ROUND 15, finding 20): a file whose header
+    is a strict PREFIX of the contract's column order (every absent column
+    ``required: false`` -- the only narrower shape ``CsvSource.inspect()``
+    admits) parses into rows narrower than ``target_columns``, and every
+    later positional consumer (normalizers' ``column_index`` reads, quality
+    stages, the COPY column list) assumes target width. Padding the absent
+    TRAILING columns with ``None`` -- the platform-wide absent-field
+    representation ``NullTokenNormalizer`` itself writes -- makes the
+    narrower file behave exactly like a full-width file whose optional
+    columns are empty. A no-op for full-width and wider rows (wider rows are
+    truncated later, at the hash site in ``load()``).
+    """
+
+    name = "optional_column_pad"
+
+    def __init__(self, *, target_width: int) -> None:
+        """Configure the width every surviving row is padded up to.
+
+        Args:
+            target_width: ``len(StagingLoader._target_columns)`` -- the
+                dataset's full contract/bronze column count.
+        """
+        self._target_width = target_width
+
+    def apply(self, ctx: PipelineContext, chunk: RecordChunk) -> StageResult:  # noqa: ARG002
+        """Pad each row in ``chunk`` shorter than the target width with ``None``.
+
+        Args:
+            ctx: The current pipeline context. Unused -- the pad depends
+                only on ``chunk``; the parameter satisfies
+                ``StreamingStage``.
+            chunk: The chunk to pad.
+
+        Returns:
+            A ``StageResult`` whose ``chunk`` holds every input row at
+            ``max(len(row), target_width)`` fields; ``rejected`` and
+            ``findings`` are always empty -- this stage never drops or
+            flags a row.
+        """
+        width = self._target_width
+        if all(len(row) >= width for row in chunk.rows):
+            return StageResult(chunk=chunk, rejected=[], findings=[])
+        padded = tuple(
+            row if len(row) >= width else (*row, *([None] * (width - len(row))))
+            for row in chunk.rows
+        )
+        return StageResult(chunk=chunk.replace(rows=padded), rejected=[], findings=[])
+
+
 class StagingLoader:
     """Streams a ``Source`` through this run's normalizer stages into a per-run staging table."""
 
@@ -256,7 +316,22 @@ class StagingLoader:
                 schema mismatch this phase's architecture has no other place
                 to catch.
         """
-        stages: list[StreamingStage] = [RaggedRowGuard()]
+        stages: list[StreamingStage] = [
+            RaggedRowGuard(),
+            # Immediately after the row-shape guard, BEFORE any normalizer
+            # (debug/ci-pipeline-ingestion-timeout ROUND 15, finding 20):
+            # RaggedRowGuard validates each row against the FILE's own
+            # header width (`chunk.expected_field_count`), so ragged
+            # detection stays file-relative; every surviving row is then
+            # padded up to the TARGET width here, so a normalizer/quality
+            # stage indexing an absent trailing optional column (e.g.
+            # signup_country's own NullTokenNormalizer at index 5 over a
+            # 5-column file) reads a genuine `None` instead of raising
+            # IndexError. Positionally sound because `CsvSource.inspect()`
+            # only admits narrower files whose header is a strict prefix of
+            # the contract with every absent column `required: false`.
+            _OptionalColumnPadStage(target_width=len(self._target_columns)),
+        ]
         normalization = ctx.config.normalization
 
         for column in ctx.config.columns:
@@ -641,15 +716,31 @@ class StagingLoader:
                     # after -- is what keeps a new column's own value out of
                     # `_record_hash` too, matching this docstring's "row's
                     # business values in target_columns order". A row
-                    # narrower than `target_columns` is a pre-existing,
-                    # separately-guarded case (a missing contract column is
-                    # a BREAKING change `CsvSource.inspect()` already raises
-                    # on before this method ever runs) -- left untouched.
-                    staged_row = (
-                        row[: len(self._target_columns)]
-                        if len(row) > len(self._target_columns)
-                        else row
-                    )
+                    # NARROWER than `target_columns` is D-13's
+                    # optional-column-absence case (debug/ci-pipeline-
+                    # ingestion-timeout ROUND 15, finding 20): normally
+                    # already padded by `_OptionalColumnPadStage` (first
+                    # after RaggedRowGuard in `_build_stages`, so
+                    # normalizers indexing the absent trailing column read
+                    # `None` instead of raising IndexError); the elif below
+                    # is defense-in-depth for any stage that might emit a
+                    # narrower row after the pad ran. Padding BEFORE the
+                    # hash makes a padded row hash identically to a
+                    # full-width row whose optional column is empty (`None`
+                    # renders `""` below) -- the same business record.
+                    # Without the pad, a narrower row desynchronized the
+                    # COPY column list by one-per-missing-column (the crash
+                    # test_stage_ingest.py 10-07's own constant comment
+                    # documented and deferred).
+                    if len(row) > len(self._target_columns):
+                        staged_row = row[: len(self._target_columns)]
+                    elif len(row) < len(self._target_columns):
+                        staged_row = (
+                            *row,
+                            *([None] * (len(self._target_columns) - len(row))),
+                        )
+                    else:
+                        staged_row = row
                     # C6 / Pitfall 10: computed exactly once, in Python, here
                     # -- canonical pipe-joined encoding, fixed column order
                     # from `target_columns`, taken AFTER every stage in

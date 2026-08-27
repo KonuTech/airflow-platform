@@ -80,12 +80,13 @@ _VAULT_SERVICE = "vault"
 _VAULT_PORT = 8200
 _VAULT_INIT_FILE = Path(__file__).resolve().parents[3] / ".secrets" / "vault-init.json"
 
-# Terminal statuses `dataplat.pipeline.run.run_ingest`/`csv_processor.cli.ingest`
-# ever write to `meta.ingestion_runs.status` — copied from
-# tests/e2e/slice/conftest.py's own constant of the same name (see module
-# docstring: a deliberate, minimal duplication, not an import).
+# Terminal statuses the pipeline ever writes to `meta.ingestion_runs.status`
+# — copied from tests/e2e/slice/conftest.py's own constant of the same name
+# (see module docstring: a deliberate, minimal duplication, not an import).
+# QUARANTINED added by debug/ci-pipeline-ingestion-timeout ROUND 15, in step
+# with the slice conftest's own truth-up (terminal since ROUND 14 trim ii).
 _TERMINAL_RUN_STATUSES = frozenset(
-    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT"},
+    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT", "QUARANTINED"},
 )
 
 _POLL_INTERVAL_SECONDS = 0.5

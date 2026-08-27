@@ -1,8 +1,24 @@
 ---
 status: fixing
+round15_status: "ROUND 15 OFFLINE COMPLETE (Option B + riders): root cause (20)
+  CONFIRMED via local RED repro = IncompatibleSchemaError
+  schema-column-disappeared(signup_country) -- ALL wedging e2e fixtures are 5-col
+  customers files vs the 6-col contract whose 6th column is required:false (D-13
+  semantics never implemented in classify_schema_change); raise lands post-claim ->
+  pod crash -> (20a) silent drop (no crash release + SKIPPED_CONCURRENT exit-0).
+  BOTH FIXED red->green: optional-column schema compatibility (strict prefix +
+  optional tail -> CONTRACT version by hash) + loader None-pad stage; crash-release
+  (fail_ingestion_run_claim from stage_ingest's finally) + wait-and-reclaim
+  (SKIPPED_CONCURRENT no longer a possible stage return). Riders in
+  (traceback streaming hook w/ OBS-03 carve-out 3, integrity_gate TI dump),
+  timeout-minutes 190, QUARANTINED poll-terminal truth-up. PRE-REGISTERED: candidate
+  (19) now EXPECTED to fire fast+legible on the live run (lone-file publish vs
+  snapshot semantics -> QUARANTINED) -- a design decision, not a (20) refutation.
+  Awaiting live verification. See Current Focus ROUND 15 + Evidence + Resolution."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
+updated: 2026-08-27 (ROUND 15 OFFLINE COMPLETE -- see round15_status above)
+updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
   IN FULL -- criteria (b)/(c)/(e) MET: the mass-delete fixture was claimed by ONE cron pass
@@ -242,7 +258,203 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 14 OUTCOME (2026-08-27, post-run analysis of run 33080823061 -- CURRENT STATE):
+ROUND 15 (2026-08-27, opened on user decision Option B + both riders -- CURRENT STATE):
+  charter: "(1) Root-cause finding (20)'s inner exception via LOCAL repro -- why does the
+      stage try-1 pod crash seconds after claiming on the single-file CUSTOMERS fixtures?
+      Direct evidence, then fix at the right layer. (2) Fix (20a): a crashed claim must
+      release its lease / be marked FAILED so retries actually re-stage; SKIPPED_CONCURRENT
+      must never convert a crash into task SUCCESS with nothing staged -- production
+      semantics done right ((20b) addressed only if it falls out naturally, else carried).
+      (3) timeout-minutes 150 -> 190 (arithmetic-backed: green projects 158-188).
+      (4) Riders: pytest_runtest_logreport conftest hook streaming failure tracebacks
+      immediately; add integrity_gate to the always()-diagnostics TI dump. Carried
+      unchanged: sidecar mirror, (19) latent, 18b watch, stage-side breaker
+      classification. Usual cycle: offline battery (red/green), commit, push, single 60s
+      watcher run by the session manager, pre-registered criteria."
+  finding_20_root_cause: "SOURCE-CONFIRMED (direct code read, every link; local repro red
+      test to follow as falsification): the inner exception is
+      IncompatibleSchemaError(diagnostic_code='schema-column-disappeared',
+      column='signup_country'). Chain:
+      (i) ALL wedging e2e fixtures are 5-column customers files (header
+      customer_id,name,country,birth_date,event_ts): tests/fixtures/slice-corpus.yaml
+      declares customers_small/large with that exact 5-col header (lines 59/219), and
+      test_backfill_reentry/test_rebuild_from_raw's _build_customers_csv hand-writes the
+      same 5-col header. The sweep corpus (tools/corpus/dated_series.py, plan 10-06)
+      'already always emits all 6 columns' (test_stage_ingest.py docstring) -- which is
+      why every corpus-shaped file staged fine minutes earlier.
+      (ii) configs/datasets/customers.yaml gained a 6th column signup_country in Phase 10
+      (plan 10-01/migration 0035) with required: false EXPLICITLY documented as 'files
+      delivered before this column existed never carried it... not reject files missing
+      it' (D-13).
+      (iii) But dataplat.schema.evolution.classify_schema_change has NO concept of
+      optional columns: ANY old_columns entry absent from the observed header raises
+      IncompatibleSchemaError schema-column-disappeared -- and
+      csv_processor.source.CsvSource._resolve_schema builds old_columns from ALL of
+      ctx.config.columns (6 incl. signup_country), passing no required info.
+      (iv) Timing matches exactly: stage_ingest claims (status=RUNNING + 5-min lease
+      committed), then loader.load -> source.open() -> inspect() -> _resolve_schema ->
+      raise. 'Catches nothing' contract -> CLI exit 1 -> pod phase=Failed seconds after
+      claim, ZERO rows staged. Deterministic on every retry/re-offer. Customers-only
+      (orders e2e-orphan fixture carries orders' full header -> SUCCEEDED). PRE-EXISTING
+      since Phase 10 landed -- explains R13's identical signature.
+      (v) round14-job.log mining confirms the etl-monitor captures carry only
+      name+phase (no container status/exit code), so the CI log alone could never name
+      this -- consistent with the ROUND 14 'inner exception unknown' assessment.
+      DOC CONFLICT RECORDED: dataplat/config/model.py's ColumnContract docstring says
+      'required: False with the column absent ... classified breaking' -- directly
+      contradicting customers.yaml's D-13 comment AND the field's own first sentence
+      ('whether the column must appear in the file's structure at all'). Under the
+      docstring's reading required:false would be behaviorally identical to
+      required:true, i.e. dead. Resolution: implement the D-13 semantics (absence of a
+      required:false column is COMPATIBLE), fix the model docstring."
+  fix_20_design: "RIGHT LAYER = schema classification + loader, honoring positional
+      loading: a file's observed header is loadable iff it is a STRICT PREFIX of the
+      contract's column order and every contract column beyond the prefix is
+      required:false (D-13's append-only evolution case -- old files are prefixes).
+      Changes: (a) classify_schema_change gains keyword-only optional_columns:
+      frozenset[str]; the disappearance raise is skipped for names in it (hash inputs
+      UNTOUCHED -- hash_schema hashes the whole mapping dicts, so old_columns/new_columns
+      must not gain keys). (b) _resolve_schema passes {name for c in config.columns if
+      not c.required}; on the findings (new-column INFERRED) path adds a
+      contract-prefix-intact guard (new_names[:len(old)] == old_names else raise --
+      also closes a PRE-EXISTING latent hole where a file with contract columns present
+      but a NEW column at a non-trailing position would sync INFERRED and then be
+      positionally corrupted by load()'s truncation); on the no-findings path, a
+      narrower header that passes the prefix+optional rule resolves to the CONTRACT
+      version via resolve_by_hash(hash_schema(old_columns)) (StorageError fallback:
+      sync CONTRACT) -- deliberately NOT sync(INFERRED), which would flip the CURRENT
+      version and re-key/re-eligibilize every file (R12's measured replay-wave
+      mechanism) on every narrower-file arrival; anything else keeps raising with the
+      reorder diagnostic extended to name the non-trailing-missing case. (c)
+      StagingLoader.load pads a narrower row to len(target_columns) with None at the
+      existing truncate site, BEFORE _record_hash -- a padded 5-col row hashes
+      identically to a 6-col row with empty signup_country (None renders ''), which is
+      semantically the same business record; no back-compat hash risk because no 5-col
+      row has EVER staged successfully (they all crashed). Docstring truth-ups in
+      staging.py (module + truncate-site comment) and model.py. KNOWN LIMIT (documented,
+      not built): a streaming quality rule configured on an absent optional trailing
+      column would IndexError -- no dataset declares one; noted at the pad site."
+  fix_20a_design: "TWO complementary legs, stage-side only (the measured gap):
+      LEG 1 (crash releases the claim): new guarded repository method
+      fail_ingestion_run_claim(run_id, pod_name) -- UPDATE meta.ingestion_runs SET
+      status='FAILED', lease_expires_at=now() WHERE run_id=%s AND status='RUNNING' AND
+      k8s_pod_name=%s. Called from stage_ingest's existing outer finally when
+      run_status=='failed' (the metrics finally already distinguishes exactly this) --
+      best-effort try/except (a DB-down crash cause would otherwise REPLACE the true
+      in-flight exception in the finally), logged; lease expiry stays the backstop for
+      the SIGKILL class. Guarded by pod_name so a retry never stomps another live
+      claimant. 'Catches nothing' preserved: no except around the body, pure finally
+      side-effect.
+      LEG 2 (retry honesty): stage_ingest's claim-refused path no longer returns
+      SKIPPED_CONCURRENT immediately. New bounded wait-and-reclaim loop
+      (concurrent_wait_seconds kwarg, default 420 = 5-min lease + margin; CLI reads
+      DATAPLAT_STAGE_CONCURRENT_WAIT_SECONDS like the heartbeat precedent): poll
+      status; STAGED/SUCCEEDED -> skipped receipt (the work verifiably exists);
+      otherwise re-attempt the claim (succeeds the moment the lease expires or LEG 1
+      wrote FAILED) -> stage genuinely; deadline expiry -> raise DataPlatformError
+      (task FAILS, Airflow retries with backoff) -- NEVER task SUCCESS with nothing
+      staged. A live heartbeating claimant keeps extending its lease -> we keep
+      waiting until it terminates or our deadline fires; both outcomes honest.
+      (20b) quarantine-silver leakage: does NOT fall out of stage-side work -- stays
+      carried."
+  timeline_expectations: "Post-fix on CI: e2e 5-col fixtures stage try-1 (schema fix);
+      podkill's deliberate SIGKILL mid-load leaves RUNNING+live lease -> retry waits
+      <=~5min for lease expiry -> reclaims -> re-stages (test budget
+      _RETRY_TIMEOUT_SECONDS=600 covers it); exception-crash class releases
+      instantly via LEG 1. The 9 (20)-owned failures should clear."
+  reasoning_checkpoint:
+    hypothesis: "Finding (20)'s inner exception is IncompatibleSchemaError
+        schema-column-disappeared(signup_country): every wedging fixture is a 5-col
+        customers file, the contract has 6 columns since Phase 10, and
+        classify_schema_change treats ANY disappeared contract column as BREAKING
+        regardless of required:false; the crash lands after claim_ingestion_run's
+        commit, and the retry-inside-lease converts it to SKIPPED_CONCURRENT SUCCESS
+        (20a). Fixing prefix-with-optional-tail compatibility + padding, plus
+        crash-release + wait-and-reclaim, clears the 9 (20)-owned failures without
+        touching any other passing path."
+    confirming_evidence:
+      - "slice-corpus.yaml lines 59/219: customers_small/large header is exactly the
+        5-col list; _build_customers_csv hand-writes the same; dated_series corpus
+        emits 6 -- matching 'corpus staged fine, e2e fixtures crash' 1:1."
+      - "evolution.py classify_schema_change docstring+code: disappearance raise has no
+        required-awareness; _resolve_schema passes all 6 contract columns as
+        old_columns."
+      - "test_stage_ingest.py's own module constant comment (10-07 Task 1) documents the
+        SAME 5-vs-6 desync class being hit in the harness and 'fixed' by widening the
+        TEST fixture, explicitly deferring the loader-side fix as out-of-scope then."
+      - "stage() CLI (csv_processor/cli.py): both except branches write a FAILED
+        receipt and re-raise but never touch meta.ingestion_runs -- the run stays
+        RUNNING with a live 5-min lease; claim predicate (postgres.py 390-394) then
+        refuses the retry; _skipped_receipt maps RUNNING -> SKIPPED_CONCURRENT ->
+        exit 0. (20a) confirmed at source."
+      - "R14 timing evidence fits: pods die seconds after claim (16:00:08, 16:15:34
+        captures), retries land inside the lease 15-30s later, stage try=2
+        state=success with zero rows."
+    falsification_test: "RED test: stage_ingest over a 5-col customers file against the
+        6-col contract in the testcontainers harness must fail TODAY with
+        IncompatibleSchemaError schema-column-disappeared naming signup_country. If it
+        stages instead, the hypothesis is wrong -> back to investigation. GREEN after
+        fix: same file reaches STAGED with signup_country NULL. (20a) RED: a run
+        claimed under a live lease by another pod_name must currently yield an
+        immediate SKIPPED_CONCURRENT receipt from stage_ingest; post-fix it must wait
+        and then raise (short wait override) -- and a crashed stage attempt must leave
+        status=FAILED with a successful genuine re-stage on the next call."
+    fix_rationale: "Root-cause layer, not symptom: the contract ALREADY declares the
+        intended semantics (required: false, D-13 comment); the classifier simply never
+        implemented it, and the loader's positional COPY needs the matching pad. The
+        prefix rule is the narrowest possible loosening that keeps positional loading
+        sound (reordered/middle-missing files still rejected loudly). (20a) fixes the
+        task-status lie at its two sources (no release on crash; skip-as-success),
+        preserving lease semantics for genuine concurrency."
+    blind_spots: "(1) The sweep failure (14:48:31) is NOT explained by (20) -- separate
+        adjudication next round if it recurs (the -v traceback rider will carry the
+        WHY). (2) Integrity_gate flake class unexplained -- rider adds it to the TI
+        dump. (3) A live-but-stuck heartbeating claimant makes LEG 2 wait its full
+        budget then fail the task -- honest but slow; acceptable. (4) The 21 offline
+        tests/integration failures on this machine are pre-existing/out of scope.
+        (5) Schema-version interleaving: the narrower shape resolves to the CONTRACT
+        version by hash -- if a dataset's contract hash was never recorded (only
+        possible pre-bootstrap-fix histories), the fallback sync(CONTRACT) flips
+        current once; edge case, documented."
+  pre_registered_criteria:
+    - "(a) The 9 (20)-owned failures clear: test_backfill_reentry(original),
+      test_concurrent_select, test_dbt_silver_pipeline, test_pod_kill_retry (podkill +
+      dbtkill + u3), test_rebuild_from_raw, test_smoke_and_idempotency(idempotent),
+      test_idempotent_reupload -- their e2e runs reach terminal (STAGED->SUCCEEDED or
+      legible QUARANTINED per candidate 19, adjudicated separately if it now fires)."
+    - "(b) Run completes INSIDE timeout-minutes: 190 -- record the measured
+      decomposition either way."
+    - "(c) Guards green: Kyverno DENY 0, control-plane restarts 0, breaker collateral 0
+      (fix 18 holds), fixes 16/17 hold (customers cron wall-to-wall, orders live)."
+    - "(d) Census diffed vs the 17-test baseline: expect >=16/17 with the sweep failure
+      adjudicated separately if it persists (its traceback now streams via the rider)."
+    - "(e) No new silent-drop paths: crashed claims become FAILED/released, never
+      SUCCESS-with-nothing-staged; grep the run for stage SKIPPED_CONCURRENT-with-
+      zero-rows shapes."
+  offline_status: "COMPLETE 2026-08-27: root cause (20) repro'd RED locally
+      (IncompatibleSchemaError schema-column-disappeared(signup_country), exact
+      predicted shape), both fixes implemented and GREEN (4 new stage_ingest tests,
+      3 new schema-resolution tests, 4 new evolution unit tests, behavior-3
+      rewritten), full battery green (unit+regression 560, dagtest 14, policy 157 +
+      only the 2 known pre-existing failures, manifests+kubeconform valid, mypy
+      strict 91 files clean, 74 integration tests across all touched suites).
+      Riders + timeout 190 + QUARANTINED terminal-status truth-up in. See the two
+      ROUND 15 Evidence entries."
+  prediction_19_now_expected: "PRE-REGISTERED before the live run: with (20) fixed,
+      candidate (19) is EXPECTED to fire -- each lone e2e customers fixture stages,
+      then its publish pass sees vanished ~= the whole bronze-known gold roster
+      (ratio ~100% >> 0.10) -> terminal QUARANTINED -> tests fail FAST and LEGIBLY
+      (QUARANTINED is now poll-terminal; tracebacks stream via the rider). (20)'s
+      OWN signature (stage wedge at RUNNING, zero bronze rows, SKIPPED_CONCURRENT
+      try=2, orphaned runs, 73.5min timeout burn) must be ABSENT either way. e2e
+      tests SUCCEEDING would mean union coverage; wedging RUNNING again would REFUTE
+      the (20) fix. (19) stays the user's design decision -- this run supplies its
+      definitive live evidence."
+  next_action: "Commit code + docs, push, record the authoritative e2e-full run ID
+      (+ companion publish.yml as item 0) in live_verification_state, return
+      CHECKPOINT (human-action) -- the session manager runs the single 60s watcher."
+
+ROUND 14 OUTCOME (2026-08-27, post-run analysis of run 33080823061 -- SUPERSEDED BY ROUND 15 ABOVE):
   run: "e2e-full.yml 33080823061, headSha a247b67, conclusion CANCELLED at the NEW
       timeout-minutes: 150 ceiling -- 14:11:06Z -> 16:42:07Z = 2h31m01s (cancel signal
       in-log 16:41:24). Companions, same headSha: publish.yml 33080823116 SUCCESS
@@ -6181,6 +6393,104 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     suite projects ~158-188min: 150 does not hold. Decision checkpoint returned
     (LOCAL repro of (20) +/- timeout raise +/- sweep-failure adjudication)."
 
+- timestamp: 2026-08-27 (ROUND 15, offline root-cause + local repro)
+  checked: "Finding (20)'s inner exception via direct source reads + a wired local
+    reproduction through the REAL CsvSource.inspect() chain (testcontainers
+    PostgreSQL+MinIO, tests/integration/test_schema_resolution.py new D-13 section)."
+  found: "ROOT CAUSE (20) CONFIRMED RED-FIRST: IncompatibleSchemaError: column
+    'signup_country' present in the recorded schema disappeared from this file
+    (diagnostic_code schema-column-disappeared), raised by
+    dataplat.schema.evolution.classify_schema_change during
+    CsvSource._resolve_schema inside inspect() -- which stage_ingest reaches only
+    AFTER claim_ingestion_run commits RUNNING + the 5-min lease (source.open() calls
+    inspect(); StagingLoader.load() calls source.open()). Chain: (i) ALL wedging e2e
+    fixtures are 5-column customers files -- tests/fixtures/slice-corpus.yaml declares
+    customers_small/large with header [customer_id,name,country,birth_date,event_ts]
+    (lines 59/219) and test_backfill_reentry/test_rebuild_from_raw's
+    _build_customers_csv hand-writes the same 5-col header; the sweep corpus
+    (dated_series, plan 10-06) always emits all 6 columns -- exactly why corpus files
+    staged fine minutes earlier in the same CI runs. (ii) customers.yaml gained
+    signup_country (required: false, D-13, plan 10-01/migration 0035) with the comment
+    'files delivered before this column existed never carried it ... not reject files
+    missing it' -- but classify_schema_change has NO optional-column concept: any
+    contract column absent from the observed header raises BREAKING. PRE-EXISTING
+    since Phase 10 landed; customers-only (orders e2e-orphan carries orders' full
+    header). (iii) test_stage_ingest.py's own 10-07 constant comment documents the
+    SECOND leg: a 5-wide row against the 6-wide _TARGET_COLUMNS_BY_DATASET
+    desynchronizes the positional COPY -- the harness widened its TEST fixture and
+    deferred the loader fix. (iv) DOC CONFLICT: config/model.py's ColumnContract
+    docstring said required:False absence is 'classified breaking' -- under that
+    reading required would be behaviorally dead; customers.yaml's D-13 comment and the
+    field's own definition contradict it. (v) (20a) confirmed at source:
+    csv_processor.cli.stage's except branches write a FAILED receipt and re-raise but
+    NEVER touch meta.ingestion_runs -- the run stays RUNNING under the live lease;
+    claim predicate (postgres.py) refuses the retry; _skipped_receipt maps RUNNING ->
+    SKIPPED_CONCURRENT -> exit 0 -> task SUCCESS with zero rows staged. RED tests
+    confirmed both shapes exactly (IncompatibleSchemaError on the 5-col file;
+    status RUNNING + silent-success on the crash/retry path)."
+  implication: "The fix belongs at the schema-classification + loader layer (the
+    contract ALREADY declares the intended semantics; the code never implemented it),
+    plus the claim lifecycle (crash release + honest wait). Not a test-side fixture
+    widen: 5-col files are D-13's real production case (files predating a column)."
+
+- timestamp: 2026-08-27 (ROUND 15, offline fix + battery)
+  checked: "Implemented fixes (20)+(20a), riders, timeout raise; full offline battery."
+  found: "ALL GREEN, red->green proven. FIX (20): (a) classify_schema_change gains
+    keyword-only optional_columns (hashed column mappings deliberately untouched --
+    hash_schema hashes whole dicts); (b) CsvSource._resolve_schema passes
+    {c.name for c in config.columns if not c.required}, adds a contract-prefix-intact
+    guard on the INFERRED/new-column path (closes a latent positional-corruption hole:
+    contract-present-but-new-column-non-trailing used to sync INFERRED then corrupt
+    positionally), and resolves a narrower strict-prefix-with-optional-tail header to
+    the CONTRACT version via resolve_by_hash (StorageError fallback sync CONTRACT) --
+    NEVER sync(INFERRED), which would flip CURRENT and re-key every file (R12's
+    replay-wave mechanism as a permanent oscillation); (c) StagingLoader gains
+    _OptionalColumnPadStage right after RaggedRowGuard (ragged detection stays
+    file-relative; normalizers indexing the absent trailing column -- live-caught
+    RED: boolean_null.py IndexError -- read None) + defense-in-depth pad at the hash
+    site (padded row hashes identically to full-width-with-empty-optional); (d)
+    model.py ColumnContract.required docstring corrected. FIX (20a): LEG 1 --
+    fail_ingestion_run_claim(run_id, pod_name) repository method (guarded UPDATE
+    RUNNING+same-pod -> FAILED + lease expired), called best-effort from
+    stage_ingest's finally when run_status=='failed' (never masks the in-flight
+    exception; lease expiry stays the SIGKILL backstop); LEG 2 -- claim-refused path
+    now waits (_await_concurrent_claim, concurrent_wait_seconds default 420s, CLI env
+    DATAPLAT_STAGE_CONCURRENT_WAIT_SECONDS): STAGED/SUCCEEDED -> verified
+    SKIPPED_DUPLICATE; claim recovers (lease expiry or LEG 1's FAILED) -> genuine
+    re-stage; budget exhausted -> DataPlatformError (task FAILS; Airflow backoff
+    re-enters later). SKIPPED_CONCURRENT is no longer a possible stage_ingest return.
+    RIDERS: tests/e2e/conftest.py pytest_runtest_logreport streams every failure's
+    longreprtext immediately (OBS-03 carve-out 3 added DELIBERATELY in pyproject +
+    test_print_ban_scope.py allowlist -- the hook's output IS the streamed CI log);
+    integrity_gate added to e2e-full.yml's TI dump; timeout-minutes 150 -> 190.
+    TRUTH-UP (budget-critical): _TERMINAL_RUN_STATUSES in slice+observability
+    conftests gains QUARANTINED (terminal since R14 trim ii; sweep module's local set
+    already had it) -- without it, candidate (19) firing post-(20)-fix would burn full
+    poll timeouts on already-decided QUARANTINED runs. BATTERY: unit+regression
+    560 pass; dagtest 14 pass; policy 157 pass + exactly the 2 known pre-existing
+    failures (dag_line_budget, gates_actually_fail); make manifests + kubeconform
+    valid (378/0/0); mypy strict full 91 files clean; ruff check clean on every
+    touched file (repo residual = 4 pre-existing in untouched files); integration:
+    test_stage_ingest (7, incl. 4 new red->green), test_schema_resolution (19, incl.
+    3 new), test_run_ingest (rewritten behavior-3), test_claim_lease_split,
+    test_staging_loader/durability/quality_rules, test_publish_ingest,
+    test_scd_replay_delete_detection, test_scd_delete_detection,
+    test_dbt_silver_dedup -- ALL PASS (74 total). Pre-existing out-of-scope offline
+    failures unchanged (test_staging_normalization target-columns mismatch, confirmed
+    identical on bare HEAD via git stash)."
+  implication: "PRE-REGISTERED PREDICTION for the live run: candidate (19) is now
+    EXPECTED TO FIRE -- with (20) fixed, each lone e2e customers fixture stages and
+    its publish pass computes vanished = every bronze-known gold-current key absent
+    from the pass (find_vanished_customer_ids source-read: lone-file pass vs the
+    sweep's roster -> ratio ~100% >> 0.10) -> terminal QUARANTINED. The customers e2e
+    tests should therefore fail FAST and LEGIBLY (QUARANTINED surfaced by the
+    now-terminal poll + streamed tracebacks) instead of burning 73.5min of
+    wait-timeouts -- (20)'s mechanism (stage wedge, orphaned RUNNING, silent drop)
+    must be ABSENT either way. If they instead SUCCEED, their passes were
+    union-covered; if they wedge RUNNING again, (20)'s fix is refuted. (19) remains
+    the user's design decision (delivery-shape contract vs breaker scoping) -- this
+    run supplies its definitive live evidence."
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -7386,6 +7696,28 @@ verification: >
   mechanism -- finding (20), stage-phase claim-then-crash + retry-inside-lease
   silent drop (see root_cause ROUND 14 POST-RUN). Candidate (19) did not fire.
   (18) CLOSED; decision checkpoint on ROUND 15 direction returned.
+  ROUND 15 (fix 20 + 20a, offline-verified red->green, live verification pending):
+  root cause (20) = IncompatibleSchemaError schema-column-disappeared(signup_country):
+  every wedging e2e fixture is a 5-col customers file vs the 6-col contract whose
+  6th column is required:false (D-13), but classify_schema_change had no
+  optional-column concept -- the raise lands AFTER claim commits RUNNING+lease, the
+  pod exits nonzero, and (20a)'s two gaps (no crash release; SKIPPED_CONCURRENT on
+  refused claim) convert the retry into silent SUCCESS. FIX (20): optional_columns
+  parameter on classify_schema_change (hash inputs untouched);
+  _resolve_schema resolves a strict-prefix-with-optional-tail header to the CONTRACT
+  version by hash (never an INFERRED current-flip) and gains a contract-prefix guard
+  on the new-column path (closes a latent positional-corruption hole);
+  _OptionalColumnPadStage pads absent trailing optional columns with None right
+  after RaggedRowGuard (+ defense-in-depth pad at the hash site); ColumnContract
+  docstring corrected. FIX (20a): LEG 1 fail_ingestion_run_claim (guarded
+  RUNNING+same-pod -> FAILED) called best-effort from stage_ingest's finally; LEG 2
+  _await_concurrent_claim wait-and-reclaim (default 420s,
+  DATAPLAT_STAGE_CONCURRENT_WAIT_SECONDS) -- verified duplicate, genuine re-stage,
+  or loud DataPlatformError; stage_ingest can no longer return SKIPPED_CONCURRENT.
+  Riders: e2e failure-traceback streaming hook (OBS-03 carve-out 3, deliberate);
+  integrity_gate in the TI dump; timeout-minutes 190; QUARANTINED added to the
+  slice/observability terminal-status sets (fail-fast for the now-expected (19)
+  signature). (20b) carried unchanged.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -7428,3 +7760,19 @@ files_changed:
   - packages/dataplat/src/dataplat/pipeline/run.py
   - packages/dataplat/src/dataplat/discovery.py
   - tests/unit/test_discovery.py
+  - packages/dataplat/src/dataplat/schema/evolution.py
+  - packages/csv-processor/src/csv_processor/source.py
+  - packages/dataplat/src/dataplat/load/staging.py
+  - packages/dataplat/src/dataplat/config/model.py
+  - packages/dataplat/src/dataplat/metadata/repository.py
+  - packages/dataplat/src/dataplat/metadata/postgres.py
+  - packages/csv-processor/src/csv_processor/cli.py
+  - tests/e2e/conftest.py
+  - tests/e2e/observability/conftest.py
+  - tests/policy/test_print_ban_scope.py
+  - pyproject.toml
+  - tests/unit/schema/test_evolution.py
+  - tests/unit/test_csv_processor_cli.py
+  - tests/integration/test_stage_ingest.py
+  - tests/integration/test_schema_resolution.py
+  - tests/integration/test_run_ingest.py

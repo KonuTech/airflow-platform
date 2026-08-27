@@ -36,12 +36,13 @@ jobs:
     # boot, 6+ Helm installs, AND a second full historical reprocessing pass
     # for rebuild-from-raw. 120 was the documented starting ceiling; raised
     # to 150 (debug/ci-pipeline-ingestion-timeout ROUND 14, user-chosen
-    # Option C) from MEASURED arithmetic, not a guess: ROUND 13's live run
-    # decomposed to ~2h35m-2h50m as-is, ~1h55m-2h10m with the mass-delete
-    # breaker collateral eliminated (same round's companion trims) -- 150
-    # covers the trimmed projection incl. the never-yet-measured
-    # observability + rebuild-from-raw steps, with margin.
-    timeout-minutes: 150
+    # Option C), then to 190 (ROUND 15, user-chosen Option B) from MEASURED
+    # arithmetic, not a guess: ROUND 14's live run decomposed to a
+    # green-suite projection of ~158-188min (setup 8 + cluster 0.5 + sweep
+    # ~75-80 + 10 post-sweep singles ~45-60 + observability/capstone 25-40)
+    # once finding (20)'s 9 stage-crash failures are fixed -- 150 did not
+    # hold even green; 190 covers the projection's upper bound.
+    timeout-minutes: 190
     permissions:
       contents: read
       issues: write
@@ -276,19 +277,22 @@ jobs:
                   print(dr.run_id, "| type=", dr.run_type, "| state=", dr.state, "| backfill_id=", dr.backfill_id, "| start=", dr.start_date, "| end=", dr.end_date, "| logical_date=", dr.logical_date)
           PYEOF
 
-          echo "===== ROUND 5: csv_ingest_customers key TaskInstance history (wait_for_files/discover/stage/dbt_build/publish) ====="
+          echo "===== ROUND 5: csv_ingest_customers key TaskInstance history (wait_for_files/discover/stage/integrity_gate/dbt_build/publish) ====="
           kubectl -n airflow exec -i airflow-scheduler-0 -c scheduler -- python - <<'PYEOF' 2>&1 | grep -v "DeprecatedImportWarning\|py.warnings" || echo "TaskInstance history query failed"
           from airflow.utils.session import create_session
           from airflow.models import TaskInstance
           with create_session() as session:
-              tasks = ["wait_for_files", "discover", "stage", "dbt_build", "publish"]
+              # integrity_gate added by ROUND 15 (rider): ROUND 14 observed two
+              # isolated cron failures AT the mapped integrity_gate layer with the
+              # task absent from this dump -- a named diagnostics gap.
+              tasks = ["wait_for_files", "discover", "stage", "integrity_gate", "dbt_build", "publish"]
               rows = (
                   session.query(TaskInstance)
                   .filter(TaskInstance.dag_id == "csv_ingest_customers", TaskInstance.task_id.in_(tasks))
                   .order_by(TaskInstance.run_id, TaskInstance.task_id, TaskInstance.map_index)
                   .all()
               )
-              print("TOTAL TaskInstances (5 key tasks):", len(rows))
+              print("TOTAL TaskInstances (6 key tasks):", len(rows))
               for ti in rows:
                   print(ti.run_id, "| task=", ti.task_id, "| map_index=", ti.map_index, "| state=", ti.state, "| try=", ti.try_number, "| start=", ti.start_date, "| end=", ti.end_date)
           PYEOF

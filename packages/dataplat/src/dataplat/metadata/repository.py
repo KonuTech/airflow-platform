@@ -474,6 +474,39 @@ class MetadataRepository(Protocol):
         """
         ...
 
+    def fail_ingestion_run_claim(self, *, run_id: int, pod_name: str) -> bool:
+        """Release THIS pod's own crashed claim: `RUNNING` -> `FAILED`, lease expired.
+
+        Maps to ``UPDATE meta.ingestion_runs SET status = 'FAILED',
+        lease_expires_at = now() WHERE run_id = %s AND status = 'RUNNING'
+        AND k8s_pod_name = %s`` -- self-guarding on BOTH the status and the
+        claiming pod, so a stale caller can never stomp another pod's live
+        claim or regress a terminal status.
+
+        The crash-release half of debug/ci-pipeline-ingestion-timeout
+        ROUND 15's finding (20a): without it, a `stage_ingest` attempt that
+        claims (committing `RUNNING` + a 5-minute lease) and then dies on a
+        run-fatal exception leaves the row `RUNNING` under a live lease, the
+        Airflow retry's refused claim used to convert into an exit-0
+        `SKIPPED_CONCURRENT` "success" with ZERO rows staged, and the run
+        wedged `RUNNING` forever once test/operator teardown removed the
+        source file -- a silent drop at the task-status layer. Called from
+        `stage_ingest`'s `finally` (best-effort: if the crash's own cause is
+        an unreachable database this release fails too, and the 5-minute
+        lease expiry remains the backstop, exactly as for a SIGKILL).
+
+        Args:
+            run_id: The run whose claim this pod is releasing.
+            pod_name: The claiming pod's own name -- must equal the row's
+                `k8s_pod_name` for the release to apply.
+
+        Returns:
+            `True` when a row was released; `False` when the guard matched
+            nothing (already terminal, re-claimed by another pod, or no such
+            row) -- never an exception for the no-op case.
+        """
+        ...
+
     def claim_run_stage(
         self,
         *,

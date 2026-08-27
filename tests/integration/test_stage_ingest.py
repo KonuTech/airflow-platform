@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -42,12 +44,14 @@ from dataplat.config.model import (
     QualityRuleConfig,
     SourceConfig,
 )
-from dataplat.errors import QualityThresholdExceeded
+from dataplat.errors import DataPlatformError, QualityThresholdExceeded
 from dataplat.metadata.postgres import PostgresMetadataRepository
 from dataplat.models.identity import RunContext
 from dataplat.observability.logging import get_logger
+from dataplat.pipeline import run as run_module
 from dataplat.pipeline.protocol import PipelineContext
 from dataplat.pipeline.run import stage_ingest
+from dataplat.schema.repository import SchemaRepository
 from dataplat.storage.db import create_pool
 from dataplat.storage.objectstore import S3ObjectStore
 
@@ -472,3 +476,215 @@ def test_second_call_for_an_already_staged_run_returns_skipped_duplicate(env: _E
     # No second promotion happened -- durable bronze still shows exactly the
     # first call's own 1 row, never 2.
     assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 1
+
+
+# =============================================================================
+# debug/ci-pipeline-ingestion-timeout ROUND 15 -- finding (20) + (20a).
+#
+# (20): a 5-column customers file (no trailing optional signup_country)
+# against the 6-column contract must STAGE with the absent column NULL --
+# never crash with schema-column-disappeared (the inner exception that
+# wedged every e2e single-file customers fixture on CI) and never
+# desynchronize the positional COPY.
+#
+# (20a): a crashed claim must be released (status FAILED) so a retry
+# genuinely re-stages, and a claim refused under a live lease must NEVER
+# convert into a silent exit-0 "success" with nothing staged.
+# =============================================================================
+
+_FIVE_COL_HEADER = "customer_id,name,country,birth_date,event_ts\n"
+
+
+def _five_col_row(customer_id: int) -> str:
+    return f"{customer_id},Name{customer_id},US,1990-01-01,2026-01-01T00:00:00+00:00\n"
+
+
+def _five_col_csv_bytes(rows: int, *, start_id: int) -> bytes:
+    lines = [_FIVE_COL_HEADER, *(_five_col_row(start_id + offset) for offset in range(rows))]
+    return "".join(lines).encode("utf-8")
+
+
+def _sync_contract_schema_baseline(env: _Env, *, dataset_id: int, config: DatasetConfig) -> None:
+    """Record the contract as schema v1, exactly as `CsvSource._resolve_schema` would.
+
+    Mirrors CI's real history: the sweep corpus's full-width files always
+    bootstrap the contract baseline before any narrower e2e fixture
+    arrives -- without this, the bootstrap branch would short-circuit the
+    classification this test exists to exercise.
+    """
+    columns = [
+        {"name": column.name, "type": column.type, "position": position}
+        for position, column in enumerate(config.columns)
+    ]
+    SchemaRepository(env.pool).sync(
+        dataset_id,
+        columns=columns,
+        derived_from="CONTRACT",
+        compatibility="COMPATIBLE",
+    )
+
+
+def test_five_column_file_missing_trailing_optional_column_reaches_staged(env: _Env) -> None:
+    """Finding (20)'s stage-level repro: RED = IncompatibleSchemaError, GREEN = STAGED.
+
+    The staged bronze rows must carry NULL `signup_country` -- padded by the
+    loader, never positionally desynchronized.
+    """
+    key_suffix = "five_col_optional"
+    config = _make_config()
+    run_id, file_id, batch_id, object_key = _seed_pending_run(
+        env,
+        key_suffix=key_suffix,
+        csv_bytes=_five_col_csv_bytes(3, start_id=9_510_001),
+    )
+    dataset_id = env.metadata.get_or_create_dataset(f"stage_ingest_{key_suffix}")
+    _sync_contract_schema_baseline(env, dataset_id=dataset_id, config=config)
+    ctx = PipelineContext(
+        run=RunContext(
+            run_id=run_id,
+            idempotency_key=f"stage_ingest_{key_suffix}:1",
+            file_id=file_id,
+            batch_id=batch_id,
+        ),
+        config=config,
+        metadata=env.metadata,
+        objects=env.objects,
+        db=env.pool,
+        log=get_logger(),
+        # dataset_id wired through, mirroring csv_processor.cli.stage's real
+        # construction -- this is what makes `_resolve_schema` actually run.
+        source=CsvSource(bucket=env.scratch_bucket, key=object_key, dataset_id=dataset_id),
+    )
+
+    receipt = stage_ingest(ctx)
+
+    assert receipt.status == "STAGED"
+    assert receipt.rows_read == 3
+    assert receipt.rows_invalid == 0
+    assert _read_run_status(env.migrated_dsn, run_id) == "STAGED"
+    assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 3
+    with psycopg.connect(env.migrated_dsn) as conn:
+        rows = conn.execute(
+            """
+            SELECT customer_id, name, country, birth_date, event_ts, signup_country
+              FROM staging.customers WHERE _run_id = %s ORDER BY customer_id
+            """,
+            (run_id,),
+        ).fetchall()
+    assert len(rows) == 3
+    for row in rows:
+        # Every business value in its OWN column (no positional shift), the
+        # absent optional column NULL.
+        assert row[0].startswith("951000")
+        assert row[1] == f"Name{row[0]}"
+        assert row[2] == "US"
+        assert row[5] is None
+
+
+def test_crashed_stage_attempt_marks_run_failed_and_a_retry_genuinely_restages(
+    env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(20a) LEG 1: a run-fatal crash after the claim releases it as FAILED.
+
+    RED: the crash leaves the run RUNNING under a live 5-minute lease, and
+    the retry's refused claim converts into a SKIPPED_CONCURRENT exit-0
+    "success" with ZERO rows staged -- the exact silent drop CI observed
+    (stage try=2 state=success, zero bronze rows, run wedged RUNNING
+    forever). GREEN: the crash marks the run FAILED, the retry's claim
+    succeeds, and the file genuinely stages.
+    """
+    ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
+        env,
+        key_suffix="crash_release",
+        csv_bytes=_csv_bytes(2, start_id=9_511_001),
+    )
+
+    class _CrashingLoader:
+        def __init__(self, *, target_columns: tuple[str, ...]) -> None:
+            del target_columns
+
+        def load(self, ctx: object, conn: object, on_progress: object = None) -> object:
+            del ctx, conn, on_progress
+            msg = "simulated stage pod crash seconds after the claim"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(run_module, "StagingLoader", _CrashingLoader)
+    with pytest.raises(RuntimeError, match="simulated stage pod crash"):
+        stage_ingest(ctx)
+
+    # The claim is RELEASED -- never left RUNNING under a live lease.
+    assert _read_run_status(env.migrated_dsn, run_id) == "FAILED"
+
+    monkeypatch.undo()  # the retry runs the REAL loader
+
+    retry_receipt = stage_ingest(ctx)
+
+    assert retry_receipt.status == "STAGED"
+    assert _read_run_status(env.migrated_dsn, run_id) == "STAGED"
+    assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 2
+
+
+def test_claim_refused_under_a_live_foreign_lease_never_returns_silent_success(
+    env: _Env,
+) -> None:
+    """(20a) LEG 2, timeout arm: waiting out a live foreign lease ends in an ERROR.
+
+    A retry that cannot verify the concurrent claimant's work exists must
+    FAIL (Airflow then retries with backoff, and a later try reclaims after
+    lease expiry) -- never report success with nothing staged.
+    """
+    ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
+        env,
+        key_suffix="live_lease_timeout",
+        csv_bytes=_csv_bytes(1, start_id=9_512_001),
+    )
+    env.metadata.update_ingestion_run_status(
+        run_id=run_id,
+        status="RUNNING",
+        lease_expires_at=datetime.now(tz=UTC) + timedelta(minutes=5),
+        k8s_pod_name="other-pod-holding-the-lease",
+    )
+
+    with pytest.raises(DataPlatformError):
+        stage_ingest(ctx, concurrent_wait_seconds=2.0)
+
+    # Nothing staged, the foreign claim untouched.
+    assert _read_run_status(env.migrated_dsn, run_id) == "RUNNING"
+    assert _durable_bronze_count_for_run(env.migrated_dsn, run_id) == 0
+
+
+def test_claim_refused_then_resolved_by_the_other_claimant_returns_skipped_duplicate(
+    env: _Env,
+) -> None:
+    """(20a) LEG 2, verified-complete arm: the concurrent claimant genuinely finishes.
+
+    The waiting retry observes the run reach STAGED and returns the
+    duplicate receipt -- success is only ever reported when the staged work
+    verifiably exists.
+    """
+    ctx, run_id, _file_id, _batch_id = _seed_and_build_ctx(
+        env,
+        key_suffix="live_lease_resolved",
+        csv_bytes=_csv_bytes(1, start_id=9_513_001),
+    )
+    env.metadata.update_ingestion_run_status(
+        run_id=run_id,
+        status="RUNNING",
+        lease_expires_at=datetime.now(tz=UTC) + timedelta(minutes=5),
+        k8s_pod_name="other-pod-holding-the-lease",
+    )
+
+    def _other_claimant_finishes() -> None:
+        env.metadata.update_ingestion_run_status(run_id=run_id, status="STAGED")
+
+    timer = threading.Timer(0.7, _other_claimant_finishes)
+    timer.start()
+    try:
+        receipt = stage_ingest(ctx, concurrent_wait_seconds=15.0)
+    finally:
+        timer.join()
+
+    assert receipt.status == "SKIPPED_DUPLICATE"
+    assert receipt.run_id == run_id
+    assert _read_run_status(env.migrated_dsn, run_id) == "STAGED"

@@ -121,7 +121,7 @@ from dataplat.validate.referential import ReferentialIntegrityBarrier
 from dataplat.validate.volume_anomaly import VolumeAnomalyBarrier
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from decimal import Decimal
 
     from psycopg import Connection
@@ -140,6 +140,19 @@ if TYPE_CHECKING:
 # pass anything but the default.
 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
 _LEASE_DURATION = timedelta(minutes=5)
+
+# (20a) LEG 2 (debug/ci-pipeline-ingestion-timeout ROUND 15): how long a
+# claim-refused `stage_ingest` call waits for a live foreign lease to resolve
+# before FAILING (never silently "succeeding"). Sized to one full lease
+# duration plus margin: a dead claimant's lease expires within 5 minutes (the
+# reclaim then happens inside this same call), while a live claimant keeps
+# heartbeating its lease forward and normally reaches STAGED well within this
+# budget. On expiry the raise fails the Airflow task, whose own retry/backoff
+# machinery re-enters this wait later -- honest at every layer. Overridable
+# per-call for tests, and via DATAPLAT_STAGE_CONCURRENT_WAIT_SECONDS in the
+# `stage` CLI (the DATAPLAT_HEARTBEAT_INTERVAL_SECONDS precedent).
+_DEFAULT_CONCURRENT_WAIT_SECONDS = 420.0
+_CONCURRENT_CLAIM_POLL_SECONDS = 2.0
 
 # A dataset-keyed lookup, not yet a generic config-derived resolution --
 # `DatasetConfig` carries no canonical "business columns in order" field yet
@@ -575,6 +588,190 @@ def _skipped_receipt(ctx: PipelineContext) -> Receipt:
     )
 
 
+def _await_concurrent_claim(
+    ctx: PipelineContext,
+    *,
+    attempt_claim: Callable[[], tuple[int, str] | None],
+    wait_seconds: float,
+) -> tuple[int, str] | Receipt:
+    """Wait out a refused claim honestly: verified-complete, reclaimed, or ERROR.
+
+    (20a) LEG 2 (debug/ci-pipeline-ingestion-timeout ROUND 15): a claim
+    refused because another pod holds a live lease used to return
+    ``SKIPPED_CONCURRENT`` immediately -- task SUCCESS with nothing staged
+    and nothing verified. When the lease-holder had actually CRASHED
+    (SIGKILL/OOM -- the exception class is released by ``stage_ingest``'s
+    own ``finally``), that converted a crash into a silent drop: the run
+    wedged ``RUNNING`` forever once the source file was cleaned up.
+
+    This loop replaces that shortcut with the only three honest outcomes:
+
+    1. The run reaches ``STAGED``/``SUCCEEDED`` -- the concurrent
+       claimant's work verifiably exists; return the skipped ``Receipt``
+       (``SKIPPED_DUPLICATE`` via ``_skipped_receipt``'s own mapping).
+    2. The claim starts succeeding (lease expired, or the crashed claimant
+       was released to ``FAILED``) -- return the claimed ``(run_id,
+       status)`` so the caller stages genuinely.
+    3. ``wait_seconds`` elapses with neither -- raise: the Airflow task
+       FAILS and its own retry/backoff machinery re-enters this wait later.
+       A live, heartbeating-but-stuck claimant therefore costs this task
+       its wait budget and a loud failure -- honest, never a silent pass.
+
+    Args:
+        ctx: The current pipeline context (``ctx.run``/``ctx.metadata``).
+        attempt_claim: Re-invokes ``claim_ingestion_run`` with the caller's
+            exact claim identity (a closure, so this helper never re-builds
+            the claim's trace/dag-context arguments).
+        wait_seconds: Total wait budget before outcome 3.
+
+    Returns:
+        Outcome 1's ``Receipt`` or outcome 2's claimed ``(run_id, status)``.
+
+    Raises:
+        DataPlatformError: Outcome 3 -- the run is still held under a live
+            foreign lease after ``wait_seconds``; reporting success would be
+            a silent drop.
+    """
+    log = get_logger()
+    deadline = time.monotonic() + wait_seconds
+    log.info(
+        "stage_ingest.claim_refused_waiting",
+        run_id=ctx.run.run_id,
+        idempotency_key=ctx.run.idempotency_key,
+        wait_seconds=wait_seconds,
+    )
+    while True:
+        status = ctx.metadata.get_ingestion_run_status(run_id=ctx.run.run_id)
+        if status in ("SUCCEEDED", "STAGED"):
+            return _skipped_receipt(ctx)
+        claimed = attempt_claim()
+        if claimed is not None:
+            log.info(
+                "stage_ingest.claim_recovered_after_wait",
+                run_id=ctx.run.run_id,
+                previous_status=status,
+            )
+            return claimed
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            msg = (
+                "run is still RUNNING under a live lease held elsewhere after the "
+                "full wait budget -- refusing to report success without staged data"
+            )
+            raise DataPlatformError(
+                msg,
+                context={
+                    "run_id": ctx.run.run_id,
+                    "idempotency_key": ctx.run.idempotency_key,
+                    "wait_seconds": wait_seconds,
+                    "last_observed_status": status,
+                },
+            )
+        time.sleep(min(_CONCURRENT_CLAIM_POLL_SECONDS, remaining))
+
+
+def _release_failed_claim(ctx: PipelineContext, *, run_id: int, pod_name: str) -> None:
+    """Best-effort release of this pod's own crashed claim ((20a) LEG 1).
+
+    Called from ``stage_ingest``'s ``finally`` when the claimed body did NOT
+    reach STAGED: this pod committed ``RUNNING`` + a 5-minute lease at claim
+    time, and leaving that in place made the Airflow retry's refused claim
+    convert into a silent ``SKIPPED_CONCURRENT`` "success" with nothing
+    staged. Releasing to ``FAILED`` lets the retry claim genuinely.
+
+    Best-effort by necessity: raising inside a ``finally`` would REPLACE the
+    true in-flight exception, and if the crash's own cause is an unreachable
+    database this write fails too -- the 5-minute lease expiry remains the
+    backstop, exactly as for a SIGKILL'd pod that never runs this line at
+    all. Guarded server-side (``status='RUNNING' AND k8s_pod_name=this
+    pod``, ``fail_ingestion_run_claim``), so it can never stomp another
+    claimant or regress a terminal status.
+
+    Args:
+        ctx: The current pipeline context. Only ``ctx.metadata`` is used.
+        run_id: The run this pod claimed.
+        pod_name: The exact ``pod_name`` this pod claimed with.
+    """
+    log = get_logger()
+    try:
+        released = ctx.metadata.fail_ingestion_run_claim(run_id=run_id, pod_name=pod_name)
+        log.info(
+            "stage_ingest.claim_released_on_failure",
+            run_id=run_id,
+            released=released,
+        )
+    except Exception:  # noqa: BLE001 -- must never mask the in-flight exception (docstring above)
+        log.warning(
+            "stage_ingest.claim_release_failed_lease_expiry_is_backstop",
+            run_id=run_id,
+        )
+
+
+def _claim_or_await(
+    ctx: PipelineContext,
+    *,
+    trace_id: str | None,
+    span_id: str | None,
+    concurrent_wait_seconds: float,
+) -> tuple[int, str] | Receipt:
+    """Attempt the claim; on refusal, wait it out honestly ((20a) LEG 2).
+
+    Split out of ``stage_ingest`` purely to keep that function's statement
+    count under ``PLR0915``'s threshold (the same reasoning
+    ``_find_quality_rule`` records for itself) -- no behavior lives here
+    that ``stage_ingest``'s docstring does not already describe.
+
+    Args:
+        ctx: The current pipeline context.
+        trace_id: The claim's trace id, or ``None`` outside a valid span.
+        span_id: The claim's span id, or ``None`` outside a valid span.
+        concurrent_wait_seconds: ``_await_concurrent_claim``'s wait budget.
+
+    Returns:
+        On a successful (possibly awaited) claim: ``(run_id, pod_name)`` --
+        ``pod_name`` is the exact value the claim row's ``k8s_pod_name`` now
+        holds, which ``stage_ingest``'s ``finally`` later passes to
+        ``fail_ingestion_run_claim`` so the crash-release guard always
+        matches this claim's own row. Otherwise the skipped ``Receipt``
+        (the run's work verifiably already exists).
+
+    Raises:
+        DataPlatformError: Propagated from ``_await_concurrent_claim``'s
+            timeout arm, or from ``_skipped_receipt``'s unexplained-refusal
+            arm.
+    """
+    pod_name = os.environ.get("HOSTNAME", "unknown")
+
+    def _attempt_claim() -> tuple[int, str] | None:
+        return ctx.metadata.claim_ingestion_run(
+            idempotency_key=ctx.run.idempotency_key,
+            try_number=ctx.run.attempt,
+            pod_name=pod_name,
+            trace_id=trace_id,
+            span_id=span_id,
+            dag_id=ctx.run.dag_id,
+            dag_run_id=ctx.run.dag_run_id,
+            task_id=ctx.run.task_id,
+            map_index=ctx.run.map_index,
+            k8s_namespace=ctx.run.k8s_namespace,
+        )
+
+    claimed = _attempt_claim()
+    if claimed is None:
+        # (20a) LEG 2: never an immediate SKIPPED_CONCURRENT "success" --
+        # wait for the foreign claim to resolve, reclaim, or raise.
+        awaited = _await_concurrent_claim(
+            ctx,
+            attempt_claim=_attempt_claim,
+            wait_seconds=concurrent_wait_seconds,
+        )
+        if isinstance(awaited, Receipt):
+            return awaited
+        claimed = awaited
+    run_id, _ = claimed
+    return run_id, pod_name
+
+
 def _find_quality_rule(ctx: PipelineContext, rule_type: str) -> QualityRuleConfig | None:
     """Return this run's first ``ctx.config.quality.rules`` entry matching ``rule_type``.
 
@@ -845,6 +1042,7 @@ def stage_ingest(
     ctx: PipelineContext,
     *,
     heartbeat_interval_seconds: float = _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    concurrent_wait_seconds: float = _DEFAULT_CONCURRENT_WAIT_SECONDS,
 ) -> Receipt:
     """Claim, stage, quality-gate, promote to durable bronze, and mark one run ``STAGED``.
 
@@ -866,23 +1064,40 @@ def stage_ingest(
         heartbeat_interval_seconds: Seconds between lease/row-count
             heartbeats, well under the 5-minute lease duration. Defaults to
             60s. This module's own tests override it directly.
+        concurrent_wait_seconds: (20a) LEG 2 -- total budget for
+            ``_await_concurrent_claim``'s wait-and-reclaim loop when the
+            claim is refused under a live foreign lease. Defaults to one
+            lease duration plus margin (420s); the ``stage`` CLI overrides
+            it via ``DATAPLAT_STAGE_CONCURRENT_WAIT_SECONDS``; tests shrink
+            it directly.
 
     Returns:
         A ``Receipt``: ``status="STAGED"`` after a genuine claim, stage and
         durable-bronze promotion (``rows_loaded=0`` -- staging never writes
-        to gold); ``status="SKIPPED_DUPLICATE"`` or
-        ``status="SKIPPED_CONCURRENT"`` immediately, with no staging
-        attempted, when the claim was refused because the run already
-        reached ``STAGED``/``SUCCEEDED`` or is concurrently in progress
-        elsewhere.
+        to gold); ``status="SKIPPED_DUPLICATE"``, with no staging attempted,
+        when the run already VERIFIABLY reached ``STAGED``/``SUCCEEDED`` --
+        including via a concurrent claimant this call observed finishing
+        during its wait loop. ``status="SKIPPED_CONCURRENT"`` is no longer a
+        possible return: a claim refused under a live foreign lease now
+        WAITS (``_await_concurrent_claim``) and either reclaims-and-stages,
+        returns the verified duplicate, or RAISES -- never task success with
+        nothing staged (debug/ci-pipeline-ingestion-timeout ROUND 15,
+        finding 20a).
 
     Raises:
         DataPlatformError: The claim was refused for a reason
-            ``_skipped_receipt`` cannot explain (see its own docstring), or
-            ``ctx.run.file_id``/``ctx.run.batch_id`` is unset. Any other
-            run-fatal exception raised while staging propagates unmodified
-            -- this function adds no second catch-once boundary; see the
-            module docstring.
+            ``_skipped_receipt`` cannot explain (see its own docstring); the
+            claim stayed refused under a live foreign lease for the whole
+            ``concurrent_wait_seconds`` budget (see
+            ``_await_concurrent_claim`` -- the Airflow retry re-enters the
+            wait later); or ``ctx.run.file_id``/``ctx.run.batch_id`` is
+            unset. Any other run-fatal exception raised while staging
+            propagates unmodified -- this function adds no second catch-once
+            boundary (see the module docstring), though its ``finally`` now
+            best-effort releases this pod's own claim to ``FAILED``
+            (``fail_ingestion_run_claim``) on the way through, so an Airflow
+            retry can genuinely re-stage instead of being refused by the
+            crashed attempt's still-live lease ((20a) LEG 1).
     """
     log = get_logger()
     start = time.monotonic()
@@ -898,21 +1113,15 @@ def stage_ingest(
         )
         span_id = otel_trace.format_span_id(span_context.span_id) if span_context.is_valid else None
 
-        claimed = ctx.metadata.claim_ingestion_run(
-            idempotency_key=ctx.run.idempotency_key,
-            try_number=ctx.run.attempt,
-            pod_name=os.environ.get("HOSTNAME", "unknown"),
+        claim_outcome = _claim_or_await(
+            ctx,
             trace_id=trace_id,
             span_id=span_id,
-            dag_id=ctx.run.dag_id,
-            dag_run_id=ctx.run.dag_run_id,
-            task_id=ctx.run.task_id,
-            map_index=ctx.run.map_index,
-            k8s_namespace=ctx.run.k8s_namespace,
+            concurrent_wait_seconds=concurrent_wait_seconds,
         )
-        if claimed is None:
-            return _skipped_receipt(ctx)
-        run_id, _ = claimed
+        if isinstance(claim_outcome, Receipt):
+            return claim_outcome
+        run_id, pod_name = claim_outcome
 
         # D-04's bounded label set: dataset+stage+status, never an unbounded
         # identity like run_id/file_id/batch_id. Emitted only once a claim
@@ -1058,6 +1267,8 @@ def stage_ingest(
             # Never an `except` -- a run-fatal exception is a pure
             # side-effect observation on the way through, never swallowed or
             # converted (module docstring's "catches nothing" contract).
+            if run_status == "failed":
+                _release_failed_claim(ctx, run_id=run_id, pod_name=pod_name)
             metrics.increment(
                 "runs_finished",
                 1,

@@ -671,3 +671,204 @@ def test_schema_columns_reordered_diagnostic_code_is_in_the_shared_catalog() -> 
     without the other becomes a failing test here, not a silent mismatch.
     """
     assert "schema-columns-reordered" in DIAGNOSTIC_CODES
+
+
+# =============================================================================
+# D-13 optional-column absence (debug/ci-pipeline-ingestion-timeout ROUND 15,
+# finding 20): a file whose header is a STRICT PREFIX of the contract's column
+# order, where every contract column beyond the prefix is `required: false`,
+# is COMPATIBLE and resolves to the CONTRACT's own schema version -- never a
+# BREAKING schema-column-disappeared raise (the crash that wedged every 5-col
+# e2e customers fixture on CI after Phase 10 added the optional
+# signup_country as a 6th contract column), and never a sync(INFERRED) that
+# would flip the dataset's CURRENT version and re-key every file.
+#
+# Own dedicated dataset row (`_D13_DATASET`) -- same isolation reasoning as
+# `_E2E_DATASET` above.
+# =============================================================================
+
+_D13_DATASET = "schema_resolution_optional_prefix"
+
+_D13_FULL_HEADER = "customer_id,name,country,birth_date,event_ts,signup_country"
+_D13_PREFIX_HEADER = "customer_id,name,country,birth_date,event_ts"
+
+
+def _d13_columns() -> list[ColumnContract]:
+    """``_e2e_columns()`` plus a trailing OPTIONAL column -- customers.yaml's real post-Phase-10 shape."""  # noqa: E501, W505
+    return [
+        *_e2e_columns(),
+        ColumnContract(
+            name="signup_country",
+            type="string",
+            nullable=True,
+            required=False,
+            description="Trailing optional column (D-13: accept absence, files predate it)",
+        ),
+    ]
+
+
+def _d13_config(columns: list[ColumnContract] | None = None) -> DatasetConfig:
+    return _e2e_config().model_copy(
+        update={"dataset": _D13_DATASET, "columns": columns or _d13_columns()},
+    )
+
+
+@pytest.fixture(scope="module")
+def d13_dataset_id(e2e_pool: ConnectionPool) -> int:
+    return PostgresMetadataRepository(e2e_pool).get_or_create_dataset(_D13_DATASET)
+
+
+def _d13_source_and_ctx(  # noqa: PLR0913 -- one keyword per identity/config value, mirrors _e2e_source_and_ctx plus the per-test columns override
+    *,
+    dataset_id: int,
+    object_store: S3ObjectStore,
+    pool: ConnectionPool,
+    key: str,
+    run_id: int,
+    columns: list[ColumnContract] | None = None,
+) -> tuple[CsvSource, PipelineContext]:
+    source = CsvSource(bucket=_E2E_BUCKET, key=key, dataset_id=dataset_id)
+    ctx = PipelineContext(
+        run=RunContext(run_id=run_id, idempotency_key=f"schema-resolution-d13:{run_id}"),
+        config=_d13_config(columns),
+        metadata=None,  # type: ignore[arg-type]  # unused by CsvSource.inspect()
+        objects=object_store,
+        db=pool,
+        log=get_logger(),
+        source=source,
+    )
+    return source, ctx
+
+
+def test_a_file_missing_only_a_trailing_optional_column_resolves_to_the_contract_version(
+    d13_dataset_id: int,
+    e2e_object_store: S3ObjectStore,
+    e2e_pool: ConnectionPool,
+    migrated_dsn: str,
+) -> None:
+    """The finding-(20) repro: 5-col file vs 6-col contract with an optional 6th column.
+
+    Bootstraps the dataset's history with a full-width contract-matching
+    file first (mirroring CI, where the sweep corpus's 6-col files always
+    arrive before any e2e fixture), then inspects the 5-col file: it must
+    resolve to the SAME (CONTRACT) schema version, recording NO new
+    version row -- the exact call that crashed every e2e single-file
+    customers stage pod on CI with `schema-column-disappeared:
+    signup_country`.
+    """
+    _upload_e2e_csv(
+        e2e_object_store,
+        key="d13_bootstrap.csv",
+        header=_D13_FULL_HEADER,
+        data_row="1,Alice,US,1990-01-01,2026-01-01T00:00:00+00:00,PL",
+    )
+    bootstrap_source, bootstrap_ctx = _d13_source_and_ctx(
+        dataset_id=d13_dataset_id,
+        object_store=e2e_object_store,
+        pool=e2e_pool,
+        key="d13_bootstrap.csv",
+        run_id=95_601,
+    )
+    bootstrap_profile = bootstrap_source.inspect(bootstrap_ctx)
+    assert bootstrap_profile.schema_version_id is not None
+
+    _upload_e2e_csv(
+        e2e_object_store,
+        key="d13_prefix.csv",
+        header=_D13_PREFIX_HEADER,
+        data_row="2,Bob,US,1985-05-05,2026-02-01T00:00:00+00:00",
+    )
+    source, ctx = _d13_source_and_ctx(
+        dataset_id=d13_dataset_id,
+        object_store=e2e_object_store,
+        pool=e2e_pool,
+        key="d13_prefix.csv",
+        run_id=95_602,
+    )
+
+    profile = source.inspect(ctx)
+
+    assert profile.compatibility == "COMPATIBLE"
+    assert profile.schema_version_id == bootstrap_profile.schema_version_id
+
+    rows = _schema_version_rows(migrated_dsn, d13_dataset_id)
+    assert len(rows) == 1  # no INFERRED flip, no spurious version
+
+
+def test_a_file_missing_a_non_trailing_optional_column_still_raises(
+    d13_dataset_id: int,
+    e2e_object_store: S3ObjectStore,
+    e2e_pool: ConnectionPool,
+) -> None:
+    """A MIDDLE optional column absent breaks positional loading -- must stay rejected.
+
+    Contract order [customer_id, name, optional-middle, country, ...]; the
+    file omits the middle column, so every later value would land one
+    position early under the loader's positional COPY. Loudly rejected,
+    never guessed (D-02).
+    """
+    middle_optional_columns = [
+        _e2e_columns()[0],  # customer_id
+        _e2e_columns()[1],  # name
+        ColumnContract(
+            name="middle_optional",
+            type="string",
+            nullable=True,
+            required=False,
+        ),
+        *_e2e_columns()[2:],  # country, birth_date, event_ts
+    ]
+    _upload_e2e_csv(
+        e2e_object_store,
+        key="d13_middle_missing.csv",
+        header=_D13_PREFIX_HEADER,
+        data_row="3,Carol,GB,1970-07-07,2026-03-01T00:00:00+00:00",
+    )
+    source, ctx = _d13_source_and_ctx(
+        dataset_id=d13_dataset_id,
+        object_store=e2e_object_store,
+        pool=e2e_pool,
+        key="d13_middle_missing.csv",
+        run_id=95_603,
+        columns=middle_optional_columns,
+    )
+
+    with pytest.raises(IncompatibleSchemaError):
+        source.inspect(ctx)
+
+
+def test_a_new_column_combined_with_a_missing_optional_column_still_raises(
+    d13_dataset_id: int,
+    e2e_object_store: S3ObjectStore,
+    e2e_pool: ConnectionPool,
+    migrated_dsn: str,
+) -> None:
+    """The positional-corruption hole the prefix guard closes.
+
+    A file missing the optional trailing contract column but carrying a
+    genuinely NEW column in its position would -- if accepted as an
+    INFERRED evolution -- have the new column's values positionally
+    COPY'd into the absent contract column's slot by the loader's
+    truncate-to-target-width behavior. Must raise, and must record no
+    schema version.
+    """
+    before = _schema_version_rows(migrated_dsn, d13_dataset_id)
+    _upload_e2e_csv(
+        e2e_object_store,
+        key="d13_new_col_in_optional_slot.csv",
+        header=f"{_D13_PREFIX_HEADER},brand_new_column",
+        data_row="4,Dave,PL,1966-06-06,2026-04-01T00:00:00+00:00,surprise",
+    )
+    source, ctx = _d13_source_and_ctx(
+        dataset_id=d13_dataset_id,
+        object_store=e2e_object_store,
+        pool=e2e_pool,
+        key="d13_new_col_in_optional_slot.csv",
+        run_id=95_604,
+    )
+
+    with pytest.raises(IncompatibleSchemaError):
+        source.inspect(ctx)
+
+    after = _schema_version_rows(migrated_dsn, d13_dataset_id)
+    assert after == before

@@ -1,4 +1,4 @@
-"""OBS-03: the console-write ban is repository-wide, with exactly two carve-outs.
+"""OBS-03: the console-write ban is repository-wide, with exactly three carve-outs.
 
 `test_gates_actually_fail.py` proves the ban fires. This proves it still covers
 what it is supposed to cover. The two are different failures: a rule can be
@@ -8,6 +8,13 @@ The agreed carve-outs, and nothing else:
 
 * `scripts/**` — operator scripts whose output IS the interface.
 * `tools/corpus/__main__.py` — the corpus command-line entry point.
+* `tests/e2e/conftest.py` — the CI failure-traceback streaming hook
+  (`pytest_runtest_logreport`), whose printed output IS the interface: it
+  exists solely to put each failure's traceback into the streamed CI job log
+  the moment it is known, so a run cancelled at the job's
+  ``timeout-minutes`` ceiling still carries the WHY, not just the WHICH
+  (debug/ci-pipeline-ingestion-timeout ROUND 15, rider i -- ROUND 14's nine
+  cancelled-run failures lost their tracebacks to exactly this gap).
 
 01-RESEARCH.md Pitfall 2 is the reason this test exists in this shape. The
 natural response to lint noise is to narrow the rule, and narrowing `T20` is the
@@ -36,7 +43,9 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 PRINT_CODES = ("T201", "T203")  # print, pprint
 BLANKET_NOQA_GUARD = "PGH004"
-ALLOWED_CARVE_OUTS = frozenset({"scripts/**", "tools/corpus/__main__.py"})
+ALLOWED_CARVE_OUTS = frozenset(
+    {"scripts/**", "tools/corpus/__main__.py", "tests/e2e/conftest.py"},
+)
 
 SCANNED_SUFFIX = ".py"
 EXCLUDED_DIRS = frozenset(
