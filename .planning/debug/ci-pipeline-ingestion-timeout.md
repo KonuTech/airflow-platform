@@ -395,12 +395,52 @@ ROUND 14 (2026-08-27, opened on user decision Option C -- CURRENT STATE):
         rebuild-from-raw capstone remain unmeasured (+25-40min rough estimate inside the
         150 budget). (6) The 21 offline tests/integration failures on this machine are
         pre-existing and out of scope."
-  next_action: "Implement ROUND 14: e2e-full.yml timeout 150; Makefile pytest -v rider;
-      publish_ingest quarantine branch + discovery QUARANTINED skip; kpo.py
-      publish_retries() + customers publish + ci-set-workload-images.sh publish_retries=3;
-      sweep-module mass-delete test rewrite (no backfill, expect QUARANTINED) +
-      _TERMINAL_RUN_STATUSES; red/green integration + unit coverage; offline battery;
-      commit + push; record run ID; return CHECKPOINT (human-action) for the watcher."
+  live_verification_state: "RECORDED 2026-08-27T14:12Z: fix (18) pushed as commit a247b67
+      (base 4b2c606). AUTHORITATIVE ROUND 14 live-verification run: e2e-full.yml run
+      33080823061 (headSha a247b67, created 2026-08-27T14:11:02Z, in_progress at
+      recording time; timeout-minutes now 150). Companion runs, same headSha:
+      publish.yml 33080823116 = criterion 0 (images must rebuild from a247b67 --
+      csv-processor carries the quarantine semantics IN-IMAGE, so a stale image would
+      silently revert trim ii; verify its success BEFORE judging the e2e run; the DAG
+      files also reach the cluster via the hostPath mount, zero staleness); CI
+      33080823102 (expect the job-for-job pre-existing Quality gate + Integration
+      failure pattern -- anything NEW at job level is a ROUND 14 regression signal);
+      e2e-chaos 33080823098 out of scope for this signature (but note: the chaos
+      suite imports the slice conftest and runs on its own cluster -- if any chaos
+      test uploads partial customers files, candidate (19)'s signature may appear
+      there too; observational only).
+      POST-RUN ANALYSIS STEPS (for the continuation agent once the session manager's
+      single 60s watcher reports terminal), judged on the ROUND 14 pre-registered
+      criteria via the always()-diagnostics + the NEW -v per-test output:
+      (1) CRITERION 0: publish.yml 33080823116 conclusion=success (in-image semantics).
+      (2) FIX-IN-FORCE probes: job log shows 'publish_retries=3' registered
+      (ci-set-workload-images step); any breaker trip in the run must produce a
+      'publish_ingest.quarantined' shape (run status QUARANTINED in the ROUND 12
+      run->file diagnostics dump) with the carrying DagRun SUCCESS and try=1.
+      (3) BUDGET (a): job completes INSIDE 150min -- full decomposition either way.
+      (4) COLLATERAL (b): zero cron wedges/failures/gaps attributable to the
+      mass-delete fixture; the fixture's run terminal QUARANTINED within minutes of
+      its upload; no publish retries of a deterministic trip anywhere.
+      (5) QUARANTINE PATH (c): the mass-delete test PASSES (per-test -v line) --
+      status QUARANTINED + gold unchanged; if instead SUCCEEDED, the claim pool was
+      not empty (union healing) -- investigate which runs co-staged.
+      (6) GUARDS (d): Kyverno 0, restarts 0, scheduler peak vs 2048Mi (18b watch:
+      was 91.9%), FailedScheduling transient-burst class noted not failed.
+      (7) CENSUS (e): the FULL per-test -v record -- diff against the saturated
+      17-test baseline; this is the first measurable census in 4 rounds.
+      (8) CANDIDATE (19): check e2e-idempotent/dbtkill/u3/rebuild runs' terminal
+      statuses -- QUARANTINED there confirms (19) (a pre-existing design tension made
+      legible, NOT a (18) refutation; return a decision item); SUCCEEDED means their
+      passes were union-covered this run (19 stays latent, keep carried).
+      (9) If the mass-delete fixture still burns >5min of collateral or the
+      quarantine path never fires, trim ii's wiring is wrong -- return to
+      investigation per the reasoning_checkpoint falsification test."
+  next_action: "Await the session manager's watcher on run 33080823061; then post-run
+      analysis per live_verification_state. Carried follow-ups: sidecar mirror
+      (follow-up B); stage-side RejectionRateCircuitBreaker deterministic-trip
+      classification (publish-side only this round); candidate (19) adjudication;
+      sweep-assertion-(10) caveat (still unobserved); scheduler memory headroom watch
+      (18b); v_run_recovery next_action wording for QUARANTINED (cosmetic)."
 
 ROUND 13 OUTCOME (2026-08-27, post-run analysis of run 33062702180 -- SUPERSEDED BY ROUND 14 ABOVE):
   verdict: "Fix (17) LIVE-CONFIRMED IN FULL; refutation branch (7) NOT taken. The suite
