@@ -2,7 +2,27 @@
 status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 14 opened on user decision Option C for finding (18a): trim the
+updated: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
+  conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
+  census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
+  IN FULL -- criteria (b)/(c)/(e) MET: the mass-delete fixture was claimed by ONE cron pass
+  and terminally QUARANTINED (run 421, the only QUARANTINED row; test PASSED in 2m12s vs
+  R13's ~40min collateral; 53 wall-to-wall cron DagRuns, zero gaps/wedges/+45:00 deaths,
+  publish try=1 everywhere). Census: baseline 17 -> 7 PASSED / 9 FAILED / 1 unfinished.
+  Criterion (a) BUDGET FAILED for a NEW named mechanism = FINDING (20): every e2e
+  single-file CUSTOMERS fixture wedges at status RUNNING in the STAGE phase -- genuine
+  stage try-1 pods crash seconds after claiming (etl-monitor caught phase=Failed pods in
+  the exact try-1 windows), the retry lands inside the 5-min lease -> SKIPPED_CONCURRENT
+  -> task SUCCESS with zero rows staged (silent drop at task-status layer), every later
+  genuine attempt crashes identically, tests burn 73.5min of wait-timeouts failing, and
+  teardown deletes the fixture leaving the run orphaned RUNNING forever. PRE-EXISTING
+  (identical signature in ROUND 13's dump: runs 461/515/623/666 RUNNING) -- NOT a fix-(18)
+  regression. Candidate (19) did NOT fire (zero e2e QUARANTINED -- the wedge is upstream
+  of publish). Honest as-is total ~3h03m-3h20m; green-suite projection ~158-188min incl.
+  the never-started observability+capstone steps -- 150 does not hold even green.
+  DECISION CHECKPOINT returned. See Current Focus ROUND 14 OUTCOME + ROUND 14 post-run
+  Evidence + Resolution (20).)
+updated_prior_round14_open: 2026-08-27 (ROUND 14 opened on user decision Option C for finding (18a): trim the
   mass-delete collateral (all three complementary shapes, B-ii production change explicitly
   approved) AND raise timeout-minutes to 150, plus the pytest-observability rider. See Current
   Focus ROUND 14.)
@@ -222,7 +242,150 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 14 (2026-08-27, opened on user decision Option C -- CURRENT STATE):
+ROUND 14 OUTCOME (2026-08-27, post-run analysis of run 33080823061 -- CURRENT STATE):
+  run: "e2e-full.yml 33080823061, headSha a247b67, conclusion CANCELLED at the NEW
+      timeout-minutes: 150 ceiling -- 14:11:06Z -> 16:42:07Z = 2h31m01s (cancel signal
+      in-log 16:41:24). Companions, same headSha: publish.yml 33080823116 SUCCESS
+      (criterion 0 MET -- quarantine semantics verifiably in-image); CI 33080823102
+      failure = exactly the pre-existing Quality gate + Integration pattern, no new
+      job-level regressions. Fix-in-force probes MET: 'registering publish_retries=3'
+      + 'Variable publish_retries created' in the cluster-up log; the one breaker trip
+      produced the QUARANTINED shape with the carrying DagRun SUCCESS try=1."
+  round14_criteria_scorecard:
+    - "(a) BUDGET: FAILED -- pytest alone ran 14:18:47->16:41:24 (2h22m37s) and never
+      finished (1 test in flight at cancel); the post-pytest observability check and
+      rebuild-from-raw capstone NEVER STARTED. But the failure is a NEW named mechanism
+      (finding 20 below), NOT the (18a) collateral -- which is verifiably gone."
+    - "(b) ZERO COLLATERAL CRON COST: MET. 53 csv_ingest_customers DagRuns wall-to-wall
+      14:19->16:42, inter-run gap ~1s, ZERO wedges, ZERO +45:00 dagrun_timeout deaths,
+      publish state=success try=1 in every run. The fixture (customers_20240114.csv,
+      uploaded 15:06:28) was claimed by cron scheduled__15:04 and terminally QUARANTINED
+      within ~2.5min; that cron SUCCEEDED at 15:09:06 (3m39s -- designed shape exactly).
+      Two isolated cron failures (scheduled__15:42, scheduled__15:55) failed <2min each
+      at the mapped integrity_gate layer (wait_for_files success try=1; discover/stage/
+      dbt_build upstream_failed try=0) with zero knock-on gap -- NOT mass-delete-related;
+      unexplained flake class, watch item (integrity_gate is NOT in the TI-dump task
+      list -- diagnostics gap to fix)."
+    - "(c) QUARANTINE PATH EXERCISED WHERE DESIGNED: MET. Run 421 = the truncated
+      snapshot = the ONLY QUARANTINED row in meta.ingestion_runs; its 35 bronze rows
+      staged then the pass tripped and quarantined terminally; gold-unchanged assertion
+      passed; test_mass_delete_snapshot_trips_circuit_breaker PASSED in 2m12s (ROUND 13:
+      ~40min collateral + 45min backfill death). The (18a) sink is ELIMINATED."
+    - "(d) GUARDS: Kyverno DENY 0; control-plane restarts 0 (restart timeline empty);
+      scheduler peak 1852981248B = 1767MiB... exact: 1852981248/2^20 = 1767MiB? NO --
+      1852981248 bytes = 1767.1MiB = 86.3% of 2048Mi (below R13's 1881MiB/91.9%,
+      headroom watch continues); FailedScheduling: ONE burst confined to 14:30-14:42
+      (pilot/sweep co-scheduling, 11 unique pods, pendings up to ~9min, ALL reached
+      Running/Succeeded -- pod-level self-heal), ZERO FailedScheduling 14:42->16:41.
+      CAVEAT: the burst overlaps test_full_2year_sweep's window and that test FAILED at
+      14:48:31, so '18b self-heals without test failures' cannot be fully credited this
+      round -- 18b stays open pending the sweep-failure adjudication."
+    - "(e) FULL NODE-ID CENSUS: MET -- first measurable census in 4 rounds (the -v rider
+      worked; 28 newline-terminated result lines survived cancellation). See census in
+      the ROUND 14 post-run Evidence entry."
+    - "(f) WATCH ITEMS: recorded (scheduler headroom; 18b; integrity_gate flake;
+      quarantine-silver leakage 20b below)."
+  candidate_19_adjudication: "DID NOT FIRE as predicted. Predicted signature (e2e-* runs
+      terminal QUARANTINED + tests failing fast on a legible quarantine) is ABSENT: zero
+      e2e QUARANTINED runs. The e2e single-file runs never REACH publish -- they wedge in
+      the STAGE phase (finding 20). (19)'s snapshot-delivery-shape tension remains latent
+      and untested behind (20); keep carried."
+  finding_20: "NEW DOMINANT RESIDUAL MECHANISM (named with evidence, PRE-EXISTING -- not a
+      fix-(18) regression): every e2e single-file CUSTOMERS fixture run wedges at
+      meta.ingestion_runs.status='RUNNING' in the STAGE phase with ZERO bronze rows.
+      Run->file dump: runs 823 (e2e-backfill-original), 863 (e2e-concurrent-select),
+      959 (e2e-dbt-silver), 1015 (e2e-podkill), 1071 (e2e-dbtkill), 1127 (e2e-u3),
+      1211 (e2e-rebuild-original) ALL 'RUNNING'; staging.customers per-run dump has NO
+      rows for any of them; e2e-orphan (ORDERS, run 1212) SUCCEEDED -- customers-only.
+      MECHANISM (each leg evidence-backed):
+      (i) A genuine stage try-1 attempt CRASHES seconds after claim_ingestion_run
+      commits status=RUNNING + a 5-min lease: etl-monitor captured stage pods
+      phase=Failed at 16:00:08 (stage-tabyhjge) and 16:15:34 (stage-1q9yvapa) --
+      exactly the try-1 windows of the 15:57 and 16:12 crons' stage TIs.
+      (ii) Airflow's retry lands ~15-30s later, INSIDE the still-live lease ->
+      claim_ingestion_run refuses -> _skipped_receipt returns SKIPPED_CONCURRENT ->
+      the retry TI reports SUCCESS having staged nothing. TI dump: every cron whose
+      window held a live e2e file shows stage try=2 state=success (15:38, 15:44,
+      15:51, 15:57, 16:05 crons) or try=1 success when a NEIGHBORING cron's
+      crash-lease was still live (15:48, 16:02) -- and the DagRun then SUCCEEDS.
+      (iii) Later crons re-offer the still-present file; every genuine attempt crashes
+      identically (deterministic).
+      (iv) The test's wait loop burns its full timeout (4m41s-13m24s per test,
+      73.5min total across 9 FAILED tests) and fails; teardown deletes the fixture
+      from raw/customers/ (end-of-run MinIO listing confirms only 2 e2e objects
+      remain, both from the final minutes) -> discovery can never re-offer -> the run
+      is orphaned at RUNNING permanently.
+      PRE-EXISTING: ROUND 13's run->file dump (pre-quarantine image 4d3db56) shows the
+      IDENTICAL signature -- runs 461 (e2e-dbtkill), 515 (e2e-u3), 623 (e2e-rebuild),
+      666 (e2e-idempotent) all RUNNING, e2e-orphan orders SUCCEEDED. So the 17-test
+      baseline's e2e members have been failing THIS way at least since R13; the old
+      'discovery never registered it' template is gone (discovery now registers them --
+      rounds 12-14 progress), and (20) is what the census unmasked underneath.
+      INNER EXCEPTION UNKNOWN: pytest prints tracebacks only at session end (cancelled)
+      and the pod/task logs died with the cluster. ELIMINATED as the inner cause by this
+      run's own evidence: filename-mask rejection (customers declares NO filename mask
+      -- config comment explicit), KPO startup-timeout/FailedScheduling (ZERO
+      FailedScheduling events 14:42->16:41), Kyverno (0 denials), stage-side VOLUME
+      barrier (customers.yaml declares no VOLUME rule). NOT eliminated: stage-side
+      RejectionRateCircuitBreaker (rejection_rate_threshold 0.5 -- plausible only for
+      the reentry fixture's deliberate bad row, NOT for the clean fixtures), schema/
+      parse/loader errors specific to the customers_small-derived fixture shape
+      (5-col v1 header + marker-in-name-field + offset customer_ids). Corpus-shaped
+      files -- including v1-shaped 459/486 and the 35-row truncated snapshot 421 --
+      all staged fine minutes earlier, so the trigger is something these fixtures
+      uniquely carry. LOCAL repro is the ROUND 15 move: run the stage path against one
+      generated e2e fixture and capture the exception.
+      DESIGN GAPS surfaced regardless of the inner exception:
+      (20a) claim-then-crash + retry-inside-lease = the retry reports task SUCCESS
+      while the run stays unstaged -- a SILENT DROP at the task-status layer (core-value
+      violation); stage_ingest's 'catches nothing' contract leaves no on-crash status
+      release (claim predicate allows FAILED reclaim but nothing ever writes FAILED).
+      (20b) QUARANTINE-SILVER LEAKAGE: silver.customers retains _run_id=421 (1 row) --
+      dbt consolidates bronze regardless of quarantine, and publisher.publish upserts
+      the ENTIRE silver table with no _run_id filter (documented in run.py itself), so
+      a quarantined run's surviving silver rows are published to gold by the NEXT
+      successful pass. Terminal quarantine currently blocks the PASS, not the DATA.
+      Design follow-up for the quarantine semantics."
+  sweep_failure_note: "test_full_2year_sweep_customers_and_orders FAILED at 14:48:31
+      (11m51s in), the first slice failure. At failure time every customers/orders run
+      was terminal EXCEPT the 4 PENDING zombies (runs 11/12/35/36 -- initial-wave rows
+      superseded after schema v1->v2 evolution by replacement runs 47/48/71/72 under
+      extended idempotency keys, all of which SUCCEEDED); no full-window backfill
+      existed yet (backfill_3 was created seconds AFTER the failure and carried the
+      NEXT test, test_idempotent_rerun, which PASSED). The 14:30-14:42 FailedScheduling
+      burst overlaps its window. Exact assert unknown (no traceback -- see rider
+      recommendation); needs adjudication in ROUND 15."
+  budget_arithmetic_two_points: "R13 (120 ceiling): cancelled at 2h00m49s, projection
+      ~2h35m as-is / ~1h55-2h10 trimmed. R14 (150 ceiling): cancelled at 2h31m01s
+      TRUNCATED -- remaining work at cancel: >=1 test (idempotent_reupload, would fail
+      via (20) at ~7min) + observability step + rebuild capstone (+25-40min est) ->
+      honest as-is ~3h03m-3h20m. Decomposition: setup 7.7min; cluster module 20s
+      (15 pass/6 skip); sweep module 79.5min (dry_run 49s P, pilot 16m44s P, sweep
+      11m51s F, idem_rerun 10m00s P, live_run 7m56s P, mass_delete 2m12s P -- the trim
+      delta, scd 29m57s P); post-sweep singles 62.3min = 8 FAILED via (20) + orphan
+      2m35s F + smoke_xcom 37s P. Passing tests consumed ~68min, failing ~73.5min.
+      GREEN-SUITE PROJECTION with (20) fixed: setup 8 + cluster 0.5 + sweep ~75-80
+      (scd 30 and pilot 17 are honest throughput costs) + 10 singles at ~4-6min each
+      ~45-60 + observability+capstone 25-40 = ~158-188min. VERDICT: 150 does NOT hold
+      even green. Either raise to 180 (arithmetic-backed, covers the projection's
+      upper half thinly -- 190-210 covers with margin) or the sweep module's 47min
+      (scd+pilot) needs its own throughput round (job-splitting direction is retired
+      per scope guardrails)."
+  next_action: "DECISION CHECKPOINT returned to user: choose ROUND 15 direction --
+      (A) root-cause finding (20)'s inner exception via LOCAL repro (generate one
+      e2e-style marked customers_small fixture, drive the stage path against it,
+      capture the exception), fix it PLUS the (20a) silent-drop gap; keep 150 and
+      re-measure. (B) = A + raise timeout-minutes to 180-190 now (arithmetic-backed;
+      avoids another ceiling-cancel while (20) is being fixed). (C) adjudicate the
+      sweep failure first (smaller scope but (20) owns 73.5min of the budget).
+      Riders recommended regardless: stream failure tracebacks immediately via a
+      conftest pytest_runtest_logreport hook (print rep.longreprtext on failure --
+      cancelled runs then carry the WHY, not just the WHICH); add integrity_gate to
+      the always()-diagnostics TI-dump task list; carried follow-ups (sidecar mirror,
+      stage-side breaker classification, (19) latent, 18b, scheduler headroom,
+      v_run_recovery wording, NEW 20b quarantine-silver leakage)."
+
+ROUND 14 (2026-08-27, opened on user decision Option C -- SUPERSEDED BY OUTCOME ABOVE):
   charter: "Fix finding (18a)'s ~40min mass-delete collateral via ALL THREE complementary trim
       shapes AND raise timeout-minutes 120 -> 150, plus the pytest-observability rider.
       (1) timeout-minutes: 150 in e2e-full.yml (fits the ~1h55-2h10 with-trims projection with
@@ -5927,6 +6090,97 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     infrastructure error -> propagate + stay STAGED). Ready for live CI verification
     against the ROUND 14 pre-registered criteria (a)-(f) + candidate (19)."
 
+- timestamp: 2026-08-27 (ROUND 14 post-run -- run 33080823061 analysis, first legible census)
+  checked: "Full job log of e2e-full.yml run 33080823061 (headSha a247b67, conclusion
+    CANCELLED at the NEW 150-min ceiling: 14:11:06Z -> 16:42:07Z = 2h31m01s, cancel
+    signal in-log 16:41:24; companions same headSha: publish.yml 33080823116 SUCCESS,
+    CI 33080823102 = the pre-existing Quality-gate+Integration pattern only). Analyzed:
+    the NEW pytest -v per-test result lines (the rider worked -- newline-terminated
+    lines survived cancellation), the always()-diagnostics (ROUND 5 DagRun/TI dumps,
+    ROUND 10 FailedScheduling census + etl-monitor rolling capture, ROUND 12
+    run->file + silver _run_id dumps, MinIO listing), and the cluster-up
+    fix-in-force probes."
+  found: >
+    (A) FIX-IN-FORCE: 'registering publish_retries=3' 14:18:29 + 'Variable
+    publish_retries created' 14:18:36 in cluster-up; publish.yml SUCCESS = quarantine
+    semantics in-image (criterion 0 MET).
+    (B) CENSUS (criterion e MET -- first measurable census in 4 rounds). Cluster module
+    15 PASSED / 6 SKIPPED, 20s total, zero failures. Against the 17-test baseline:
+    7 PASSED = test_no_extra_schemas_exist (14:19:07), test_pilot_window_drains_
+    without_cpu_starvation (16m44s), test_idempotent_rerun_produces_zero_additional_
+    rows (10m00s), test_live_run_concurrent_with_backfill_same_dataset (7m56s),
+    test_mass_delete_snapshot_trips_circuit_breaker... (2m12s), test_scd_concurrent_
+    attribute_change_and_correction_same_key (29m57s), test_smoke_dag_xcom_contains_
+    built_sha (37s). 9 FAILED = test_full_2year_sweep (11m51s, 14:48:31, first slice
+    failure), test_backfill_resolves_previously_rejected_row (4m41s),
+    test_concurrent_select_never_observes_partial_publish (13m24s),
+    test_fresh_customers_file_flows_through_stage_dbt_build_publish (7m50s),
+    test_pod_kill_mid_load (7m58s), test_pod_kill_mid_dbt_build (7m26s),
+    test_u3_throughput_and_peak_rss_baseline (12m41s), test_rebuild_from_raw (5m06s),
+    test_orphan_order_quarantined_while_valid_rows_publish (2m35s). 1 NEVER FINISHED =
+    test_idempotent_reupload (in flight at cancel). ZERO new failing node-IDs vs
+    baseline -- the quarantine change introduced no regression at test level.
+    (C) MASS-DELETE / QUARANTINE PATH (criteria b+c MET): run 421 is the ONLY
+    QUARANTINED row in the run->file dump (customers_20240114.csv, uploaded 15:06:28,
+    claimed by cron scheduled__15:04, quarantined terminally within ~2.5min; that cron
+    SUCCEEDED 15:09:06 in 3m39s -- the designed shape exactly; ROUND 13's same fixture
+    cost ~40min of collateral + a 45min backfill death). 53 csv_ingest_customers cron
+    DagRuns wall-to-wall 14:19->16:42, inter-run gap ~1s, zero wedges, zero +45:00
+    dagrun_timeout deaths, publish state=success try=1 in every run. Two isolated cron
+    failures (scheduled__15:42, scheduled__15:55) died <2min each at mapped
+    integrity_gate (wait_for_files success try=1; discover/stage/dbt_build
+    upstream_failed try=0), zero knock-on gap -- NOT mass-delete-related; watch item
+    (integrity_gate is absent from the TI-dump task list -- diagnostics gap).
+    (D) GUARDS (criterion d): Kyverno DENY 0; restart timeline empty (0 control-plane
+    restarts); scheduler peak 1852981248B = 1767MiB = 86.3% of 2048Mi (below R13's
+    1881MiB/91.9%); FailedScheduling: ONE burst, 11 unique pods (stage/discover/
+    dbt-build/publish of the pilot+sweep co-scheduling window 14:30-14:42), pendings
+    up to ~9min, all reached Running/Succeeded; the rolling etl-monitor census shows
+    the burst aging out (event ages 0s->60m across samples, pod-name set FIXED at 11)
+    with ZERO fresh FailedScheduling 14:42->16:41. CAVEAT: the burst overlaps
+    test_full_2year_sweep's window and that test FAILED -- 18b cannot be credited
+    'self-heals without test failures' this round.
+    (E) FINDING (20) EVIDENCE CHAIN: run->file dump shows EVERY e2e single-file
+    CUSTOMERS run terminal-state RUNNING with zero bronze rows: runs 823
+    (e2e-backfill-original), 863 (e2e-concurrent-select), 959 (e2e-dbt-silver),
+    1015 (e2e-podkill), 1071 (e2e-dbtkill), 1127 (e2e-u3), 1211 (e2e-rebuild-original)
+    -- while e2e-orphan (ORDERS, run 1212) SUCCEEDED try-count 3. staging.customers
+    per-run dump: NO rows for any of the 7. etl-monitor captured stage pods
+    phase=Failed at 16:00:08 (stage-tabyhjge) and 16:15:34 (stage-1q9yvapa) -- exactly
+    the try-1 windows of the 15:57/16:12 crons' stage TIs; TI dump shows those crons'
+    stage try=2 state=success (retry landed inside the crashed try's still-live 5-min
+    lease -> SKIPPED_CONCURRENT receipt -> task SUCCESS with nothing staged) and the
+    DagRuns SUCCEEDED. End-of-run MinIO listing: only 2 e2e objects remain (both from
+    the final minutes) -- teardown deleted each failed test's fixture, orphaning the
+    RUNNING rows permanently. IDENTICAL signature exists in ROUND 13's dump
+    (pre-quarantine image 4d3db56: runs 461/515/623/666 RUNNING) -- PRE-EXISTING, not
+    a fix-(18) regression. Inner exception NOT capturable this run (pytest prints
+    tracebacks only at session end; pod logs died with the cluster).
+    (F) TIMELINE DECOMPOSITION (criterion a FAILED): setup 7.7min (14:11->14:18:47);
+    cluster module 20s; sweep module 79.5min (dry_run 49s P, pilot 16m44s P, sweep
+    11m51s F, idem_rerun 10m00s P, live_run 7m56s P, mass_delete 2m12s P, scd
+    29m57s P); post-sweep singles 62.3min (8 FAILED via (20) mechanism + orphan
+    2m35s F + smoke_xcom 37s P); cancel with test_idempotent_reupload in flight;
+    observability step + rebuild-from-raw capstone NEVER STARTED. Passing tests
+    ~68min, failing ~73.5min. Honest as-is total ~3h03m-3h20m.
+  implication: >
+    Fix (18) is LIVE-CONFIRMED IN FULL and CLOSED -- the (18a) mass-delete sink is
+    eliminated (2m12s designed-shape PASS vs ~40min collateral), zero cron collateral,
+    quarantine path exercised exactly where designed, zero new failing node-IDs.
+    Candidate (19) did NOT fire (zero e2e QUARANTINED -- the wedge is UPSTREAM of
+    publish; stays latent/carried). The budget criterion failed for a NEW named
+    mechanism, finding (20): stage-phase claim-then-crash + retry-inside-lease
+    silently drops every e2e single-file customers fixture (7 tests, 73.5min of
+    wait-timeout burn), pre-existing since at least R13 and only now unmasked by the
+    census. Two design gaps stand regardless of (20)'s inner exception: (20a) a retry
+    that lands inside a crashed try's live lease reports task SUCCESS with zero rows
+    staged (silent drop -- core-value violation; nothing ever writes FAILED to release
+    the claim); (20b) silver.customers retains _run_id=421 from the QUARANTINED run
+    and publisher.publish upserts the whole silver table with no _run_id filter --
+    terminal quarantine currently blocks the PASS, not the DATA. Even green, the
+    suite projects ~158-188min: 150 does not hold. Decision checkpoint returned
+    (LOCAL repro of (20) +/- timeout raise +/- sweep-failure adjudication)."
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -6472,6 +6726,39 @@ root_cause: >
   (pytest ~2h10m + never-started observability/capstone steps) vs timeout-minutes
   120. (18b) watch-only: transient Insufficient-cpu bursts at first customers+orders
   co-scheduling (7 pods, self-healed) and scheduler peak 1881MiB = 91.9% of 2048Mi.
+  ROUND 14 POST-RUN: (18) LIVE-CONFIRMED AND CLOSED on run 33080823061 (headSha
+  a247b67) -- the mass-delete fixture was claimed by ONE cron pass and terminally
+  QUARANTINED within ~2.5min (run 421, the only QUARANTINED row; carrying cron
+  SUCCEEDED try=1 in 3m39s; test PASSED in 2m12s vs R13's ~40min collateral + 45min
+  backfill death); 53 wall-to-wall cron DagRuns with zero wedges/gaps/+45:00 deaths
+  and publish try=1 everywhere; zero new failing node-IDs. The first legible census
+  (pytest -v rider) unmasked NEW FINDING (20) beneath it (whack-a-mole, 7th layer;
+  PRE-EXISTING -- identical signature in ROUND 13's pre-quarantine dump, so NOT a
+  fix-(18) regression): every e2e single-file CUSTOMERS fixture run wedges at
+  meta.ingestion_runs status=RUNNING in the STAGE phase with zero bronze rows (runs
+  823/863/959/1015/1071/1127/1211; ORDERS e2e-orphan run 1212 SUCCEEDED --
+  customers-only). Mechanism, each leg evidence-backed: a genuine stage try-1 pod
+  CRASHES seconds after claim_ingestion_run commits status=RUNNING + a 5-min lease
+  (etl-monitor caught phase=Failed stage pods in the exact try-1 windows); Airflow's
+  retry lands inside the still-live lease -> SKIPPED_CONCURRENT receipt -> the retry
+  TI reports SUCCESS having staged nothing (SILENT DROP at the task-status layer);
+  later crons re-offer the file and every genuine attempt crashes identically
+  (deterministic); the test burns its wait-timeout (73.5min across 9 FAILED tests)
+  and teardown deletes the fixture, orphaning the run at RUNNING forever. Inner
+  exception UNKNOWN pending LOCAL repro (eliminated by this run's own evidence:
+  filename-mask, FailedScheduling/KPO startup, Kyverno, VOLUME barrier; NOT
+  eliminated: stage-side RejectionRateCircuitBreaker, schema/parse/loader errors
+  specific to the customers_small-derived fixture shape). Design gaps standing
+  regardless: (20a) claim-then-crash + retry-inside-lease = task SUCCESS with the
+  run unstaged (nothing ever writes FAILED to release the claim -- core-value
+  violation); (20b) quarantine-silver leakage: silver retains the quarantined run's
+  rows and publisher.publish upserts the WHOLE silver table with no _run_id filter,
+  so quarantine blocks the PASS, not the DATA. Candidate (19) did NOT fire (zero e2e
+  QUARANTINED -- the wedge is upstream of publish; stays latent). Budget: cancelled
+  at 2h31m01s of 150; honest as-is ~3h03m-3h20m; green-suite projection with (20)
+  fixed ~158-188min -- 150 does not hold even green (raise to ~180-190 or trim the
+  sweep module's 47min scd+pilot throughput cost). Sweep failure at 14:48:31 (exact
+  assert unknown, no traceback) needs ROUND 15 adjudication.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -7089,8 +7376,16 @@ verification: >
   profiles); e2e-full.yml YAML parse + make -n clean. One in-round defect caught by
   the battery itself and fixed (gold-snapshot query referenced nonexistent
   valid_from; event_ts doubles as valid_from per migration 0035). LIVE CI
-  VERIFICATION: pending -- judged on the ROUND 14 pre-registered criteria (a)-(f)
-  plus candidate (19)'s predicted signature (see Current Focus).
+  VERIFICATION: COMPLETE on run 33080823061 -- criteria (b)/(c)/(e) MET (run 421
+  terminally QUARANTINED via one cron pass in ~2.5min, test PASSED 2m12s, 53
+  wall-to-wall cron runs with zero collateral, first legible per-test census: 7 of
+  the 17 baseline PASSED / 9 FAILED / 1 unfinished, zero NEW failing node-IDs);
+  criterion (d) guards clean except the 18b caveat (one self-healed FailedScheduling
+  burst overlapping the failed sweep test; scheduler peak 86.3%); criterion (a)
+  budget FAILED at the new 150 ceiling (cancelled 2h31m01s) for a NEW pre-existing
+  mechanism -- finding (20), stage-phase claim-then-crash + retry-inside-lease
+  silent drop (see root_cause ROUND 14 POST-RUN). Candidate (19) did not fire.
+  (18) CLOSED; decision checkpoint on ROUND 15 direction returned.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
