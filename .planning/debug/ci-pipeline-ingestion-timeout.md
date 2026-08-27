@@ -1,8 +1,11 @@
 ---
 status: fixing
-round16_status: "ROUND 16 OPEN (2026-08-28): full-scope charter (19)-A + 21 + 22 + 23 + 20b
-  per user decision. All five items adjudicated from source reads; implementing. See
-  Current Focus ROUND 16 block."
+round16_status: "ROUND 16 OFFLINE COMPLETE + PUSHED (2026-08-28): full-scope charter
+  (19)-A + 21 + 22 + 23 + 20b all implemented, red/green proven for 21/23/20b, full
+  battery green. Code commit 55c8e41, live headSha 0a69dec. AWAITING LIVE
+  VERIFICATION: e2e-full.yml run 33126343052 (companions: publish 33126343060,
+  CI 33126343071, chaos 33126343043). See Current Focus ROUND 16 block +
+  live_verification_state + the ROUND 16 offline Evidence entry."
 round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha 25b6eb0,
   conclusion FAILURE at 1h44m12s -- FIRST run of the whole session to finish under its
   own steam, 45% of the 190-min ceiling, 86min headroom): fixes (20)+(20a)
@@ -442,9 +445,32 @@ ROUND 16 (2026-08-28, opened on user decision (19)-A + FULL scope 19+21+22+23+20
       157 + 2 known pre-existing, manifests+kubeconform 378/0/0, mypy strict 91
       files, integration 92 across all touched suites, slice collects 17). See the
       ROUND 16 offline Evidence entry."
-  next_action: "Commit + push, record the authoritative e2e-full run ID (+ companion
-      publish.yml as item 0) in live_verification_state, return CHECKPOINT
-      (human-action) -- the session manager runs the single 60s watcher."
+  live_verification_state: "RECORDED 2026-08-28T~09:4xZ: ROUND 16 pushed as code
+      commit 55c8e41 (base 11eaa1d; docs 8d14130; empty trigger commits 642c0fa +
+      0a69dec -- the first trigger was itself skipped because its body quoted the
+      docs commit's skip marker verbatim and GitHub matches skip instructions
+      anywhere in the head commit message; 0a69dec is the clean trigger and the
+      headSha all four workflows run at, tree identical to 55c8e41).
+      AUTHORITATIVE ROUND 16 live-verification run: e2e-full.yml run 33126343052
+      (headSha 0a69dec). Companions same headSha: publish.yml 33126343060
+      (criterion 0 -- fixes must be in-image: migrations 0039-0041 run in the
+      migrate step, dbt project changes ride the dbt image, test changes ride the
+      checkout), CI 33126343071 (expect the pre-existing Quality-gate+Integration
+      pattern only), e2e-chaos 33126343043 (observational). Analysis criteria =
+      pre_registered_criteria above ((a) 8 (19)-owned failures clear; (b) sweep
+      assert 4 passes via the claim ledger; (c) orphan test's owner read works;
+      (d) dbtkill sees DBT_BUILD RUNNING in-window; (e) no QUARANTINED lineage in
+      gold + mass_delete still passes; (f) guards green + inside 190min; (g) fully
+      green census or nameable stragglers -- pre-registered risk: the rebuild
+      test's asset-cascade reprocessing of the retained ~2.35M-row orders raw
+      history inside its two 1800s settle windows). If the job dies without
+      output, always()-diagnostics + the streamed-traceback rider carry the
+      evidence; scratchpad convention: save the job log as round16-job.log."
+  next_action: "CHECKPOINT (human-action) returned: session manager runs the single
+      60s-interval watcher on run 33126343052, then spawn post-run analysis per
+      live_verification_state. Carried follow-ups: sidecar mirror, stage-side
+      RejectionRateCircuitBreaker classification, teardown-race flake class,
+      v_run_recovery wording, ADR-0012's deferred silver disposition."
 
 ROUND 15 OUTCOME (2026-08-27, post-run analysis of run 33103279876 -- SUPERSEDED BY ROUND 16 ABOVE):
   run: "e2e-full.yml 33103279876, headSha 25b6eb0, conclusion FAILURE after 1h44m12s
