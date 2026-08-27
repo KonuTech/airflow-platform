@@ -1,5 +1,8 @@
 ---
 status: fixing
+round16_status: "ROUND 16 OPEN (2026-08-28): full-scope charter (19)-A + 21 + 22 + 23 + 20b
+  per user decision. All five items adjudicated from source reads; implementing. See
+  Current Focus ROUND 16 block."
 round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha 25b6eb0,
   conclusion FAILURE at 1h44m12s -- FIRST run of the whole session to finish under its
   own steam, 45% of the 190-min ceiling, 86min headroom): fixes (20)+(20a)
@@ -266,7 +269,184 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 15 OUTCOME (2026-08-27, post-run analysis of run 33103279876 -- CURRENT STATE):
+ROUND 16 (2026-08-28, opened on user decision (19)-A + FULL scope 19+21+22+23+20b -- CURRENT STATE):
+  charter: "(1) (19)-A delivery-shape-aware fixtures: repoint the lone-file e2e tests at
+      a delivery shape their dataset's contract tolerates. Production breaker semantics
+      untouched; sweep module keeps full-snapshot customers coverage. (2) (21) adjudicate
+      sweep D-05 lineage locally with the dbt SQL; fix at the right layer. (3) (22)
+      one-line grant-vs-etl_app fix per the platform role model. (4) (23) source-read the
+      run_stages DBT_BUILD write path vs the dbtkill 300s poll; fix instrumentation or
+      polling assumption. (5) (20b) conscious disposition design for silver/bronze rows
+      retained from QUARANTINED runs; minimal correct piece + ADR for the rest. Watch 18b
+      (scheduler 93.9% high-water): bump if changes plausibly increase load. Target: first
+      fully green cluster-slice-verify (or census with only nameable stragglers), <=190min."
+  adjudications_from_source_reads:
+    - "(19) DESIGN: the 8 tests split by mechanics. (a) Tests whose mechanics are
+      dataset-generic (concurrent_select, podkill, dbtkill, u3, idempotent_reupload)
+      REPOINT TO ORDERS: orders' merge_orders publish has NO snapshot-vanished check
+      (R15 run 765 SUCCEEDED on a partial delivery), csv_ingest_orders supports manual
+      `airflow dags trigger` (test_referential_orphan's own proven idiom), has the same
+      stage heartbeat env + dbt_build + run_stages wiring. Orders fixtures are generated
+      in-test (order_id offset windows disjoint from orphan test's [1e9,1.499e9)) with
+      customer_ids sampled from live normalized.customers (referential barrier requires
+      real parents; orphan test's _existing_customer_ids precedent). (b) Tests whose
+      mechanics REQUIRE the cron-scheduled customers DAG (reentry: `airflow backfill
+      create` raises DagNonPeriodicScheduleException on asset-scheduled DAGs --
+      rebuild-from-raw.py's own probe documents this; rebuild: the script triggers
+      csv_ingest_customers backfills and snapshots customers SCD2 state) STAY ON CUSTOMERS
+      with SNAPSHOT-COMPLETE fixtures: echo the current gold roster (queried live at
+      fixture-build time) + the test's own new rows => vanished=0, breaker never trips --
+      this IS the delivery shape customers.yaml's snapshot contract declares.
+      test_dbt_silver_pipeline also stays customers (v_customers_lineage has no orders
+      counterpart; roster stays small once all 1M tests move to orders) with the same
+      snapshot-complete echo. (c) Raw-file retention: tests that PUBLISH keep their raw
+      uploads (finally-deletes removed) -- section-63 raw immutability, and
+      test_rebuild_from_raw's D-29 compare is only coherent if raw is complete. Orders
+      sizes: podkill+u3 keep 1M (kill-window + U3 baseline are load-bearing),
+      concurrent_select drops to 250k (property is publish atomicity, not scale) to bound
+      the rebuild capstone's reprocessing mass. (d) test_rebuild_from_raw additionally
+      gains dataset-wide terminal settle waits (sweep's _wait_for_dataset_files_terminal
+      shape) before its post-rebuild snapshots -- orders rebuilds via the ASSET CASCADE
+      (script source: _dry_run_supports_backfill skips orders), so orders_after taken
+      right after the customers backfill completes races the cascade."
+    - "(21) VERDICT: REAL correctness bug (silent-drop class), not a test artifact.
+      Mechanism, confirmed by source read of dbt/models/silver/silver_customers.sql
+      lines 39-45 + round15-job.log traceback (assert at test line 1289): the
+      incremental filter `_run_id > max(_run_id) from {{ this }}` is a GLOBAL max
+      watermark; any run whose rows are staged AFTER a higher _run_id already landed in
+      silver is excluded FOREVER. Run 42 (late file's newest replay run, staged late in
+      the replay wave while runs >42 had already been dbt-built) never entered the
+      ranking; silver kept the initial wave's attribution => assert 4 failed with content
+      present and correct (assertion 1 passed). Retro-explains R14's blind sweep failure
+      (same assert). The same shape can drop GENUINELY NEW rows: a stage retry/lease
+      reclaim (exactly the (20a) wait-and-reclaim path built in R15) that completes after
+      a higher run's dbt pass is permanently invisible -- no-silent-drops violation.
+      dedup_audit_post_hook + reconciliation_post_hook share the same max(max_run_id)
+      floor => audit counts have the same gap. FIX at the model layer: new
+      meta.dbt_processed_runs ledger claimed by a PRE-hook INSERT (invocation-scoped,
+      statically-rendered SQL -- the macros' own documented deferred-render constraint
+      forbids run_query-computed args); model filter becomes `_run_id IN (SELECT run_id
+      FROM ledger WHERE dataset=X AND dbt_invocation_id='{{ invocation_id }}')` under
+      is_incremental; both post-hook macros switch from the max-floor to the same
+      invocation-scoped set. Pre-hook INSERT freezes the batch in the SAME transaction
+      the model reads it => exact under READ COMMITTED (no committed-between-statements
+      race); concurrent builds (both DAGs build both models) serialize on the ledger's
+      PK, loser claims nothing and no-ops. dbt_app grants mirror meta.dedup_audit's own
+      precedent (migration 0024)."
+    - "(22) VERDICT: missing SCHEMA USAGE, exact 0038 precedent. R15's error is
+      'permission denied for SCHEMA normalized' -- migration 0019 granted analytics_owner
+      TABLE SELECT on normalized.customers/orders but schema `normalized` (owned by the
+      migration superuser) never got USAGE for analytics_owner; 0038 fixed the identical
+      gap for schema meta and its docstring even flags 0019 as 'apparently worked some
+      other way (unconfirmed)'. Platform role model says analytics_owner IS supposed to
+      read normalized (0019's own rationale) => fix is migration 0039 GRANT USAGE ON
+      SCHEMA normalized TO analytics_owner, not a test-side etl_app switch."
+    - "(23) VERDICT: instrumentation bug in wire_dbt_build_tracking
+      (airflow/dags/_common/run_stage_recorder.py): list_run_ids_pending_dbt_build has NO
+      upstream edge -- the scheduler runs it at DagRun start, BEFORE the same DagRun's
+      stage completes, so a run staged by its own DagRun is never in the pending list and
+      its DBT_BUILD row is deferred to the NEXT DagRun (which for run 668 landed after the
+      test's 300s poll expired; contributing: podkill's 1M re-stage delayed 668's claim to
+      the 19:46 pass). The function's own docstring already claims 'stage >> mark_running
+      >> dbt_build' ordering -- the eligibility QUERY just isn't constrained by it. FIX:
+      add `stage >> pending_run_ids` in wire_dbt_build_tracking so eligibility is computed
+      post-stage; the staging DagRun then writes RUNNING before its own dbt_build pod
+      launches (also fixes v_run_recovery's one-DagRun-behind DBT_BUILD visibility)."
+    - "(20b) VERDICT: real leak paths confirmed at source, quarantine currently blocks
+      only the PASS, not the DATA. (i) SCDPublisher Step C (_BRONZE_HISTORY_SQL) reads a
+      key's ENTIRE bronze history unscoped -- a QUARANTINED run's bronze rows are folded
+      into gold by ANY later pass touching the key. (ii) merge_orders/_PUBLISH_SQL
+      publishes the WHOLE silver table -- quarantined orders runs' silver rows leak into
+      gold on the next pass. (iii) silver retains 3M+ rows attributed to QUARANTINED runs
+      (R15 census: corpus keys attributed to quarantined 397/450 via the byte-identical
+      tie-break). MINIMAL CORRECT PIECE this round: exclusion predicate `_run_id NOT IN
+      (SELECT run_id FROM meta.ingestion_runs WHERE status='QUARANTINED')` in (i) scd
+      _BRONZE_HISTORY_SQL and (ii) merge.py + merge_orders.py _PUBLISH_SQL (NOT-IN shape
+      so harness rows without metadata stay included), + identifiability view
+      meta.v_quarantined_artifacts (bronze/silver row counts per quarantined run), +
+      red/green integration test. ADR records the deferred silver disposition (dbt-side
+      exclusion needs status visibility for dbt_app; retro-deletion must re-materialize
+      displaced keys; bronze rows stay per raw-immutability/traceability, excluded from
+      all consumers)."
+  pre_registered_criteria:
+    - "(a) The 8 (19)-owned failures clear: repointed orders tests reach SUCCEEDED
+      (podkill/dbtkill/u3/concurrent/idempotent), snapshot-complete customers tests
+      (reentry, dbt_silver, rebuild step 0) publish without QUARANTINE."
+    - "(b) (21) sweep assert 4 passes (silver attribution follows the newest replay run
+      once its bronze is claimable) -- sweep test goes green end-to-end."
+    - "(c) (22) orphan test passes its normalized.orders read as analytics_owner."
+    - "(d) (23) dbtkill observes DBT_BUILD RUNNING inside its poll window on the
+      staging DagRun itself."
+    - "(e) (20b) guards: no gold row carries a QUARANTINED _run_id lineage
+      (spot-check via v_quarantined_artifacts); mass_delete test still passes."
+    - "(f) Guards green: Kyverno 0, restarts 0, breaker collateral 0, fixes
+      16/17/18/20/20a hold; run completes inside 190min."
+    - "(g) TARGET: fully green census, or failures reduced to nameable stragglers with
+      streamed tracebacks. Known pre-registered risk: the rebuild test now reprocesses
+      the kept ~2.25M-row orders raw history via the asset cascade inside its 1800s
+      settle -- if it blows the budget it is a nameable straggler with a clear knob."
+  scheduler_memory_18b: "DONE: scheduler memory limit 2048Mi -> 2560Mi in
+      helm/values/ci/airflow.yaml (requests untouched -- zero CI-budget-gate effect),
+      justified in-file: R15 peak 93.9% new high-water AND this round makes 1M-row
+      runs succeed + the rebuild capstone reprocesses the retained raw mass."
+  reasoning_checkpoint:
+    hypothesis: "The 10 remaining failures decompose into exactly five independent
+        mechanisms, each with a source-pinned cause: (19) fixture delivery shape vs
+        customers' snapshot contract (design, not bug); (21) global-max _run_id
+        watermark drops out-of-order-staged runs (real silent-drop bug); (22) missing
+        schema USAGE for analytics_owner on normalized (grant-history gap); (23)
+        eligibility query unordered vs stage (instrumentation gap); (20b) quarantine
+        blocks the pass, not the data (real gold-leak bug). Fixing all five yields a
+        green (or nameable-stragglers-only) cluster-slice-verify."
+    confirming_evidence:
+      - "(21): red/green local repro -- the EXACT out-of-order shape fails on pre-fix
+        models and passes with the claim ledger; run 42's traceback + end-of-session
+        silver census match the mechanism 1:1."
+      - "(22): the R15 error is schema-level ('permission denied for schema
+        normalized'); 0019 granted only table SELECTs; 0038 closed the identical gap
+        for schema meta and its own docstring flags 0019's unexplained survival."
+      - "(23): red/green -- the new structure assertion fails on pre-fix wiring;
+        list_run_ids_pending_dbt_build provably had no upstream edge; 668's timing
+        (staged 19:49 by its own DagRun, row never written in-window) fits exactly."
+      - "(20b): red/green -- pre-fix publishers deliver a QUARANTINED run's row to
+        gold in both the SCD-recompute and whole-silver-merge paths under
+        testcontainers; R15 census showed silver lineage attributed to quarantined
+        397/450 live."
+      - "(19): R15 pre-registered prediction fired exactly (all 8 lone-file runs
+        QUARANTINED); orders' contract tolerance proven live by run 765 SUCCEEDED on
+        a partial delivery; manual-trigger idiom proven live by the orphan test."
+    falsification_test: "Live run: any repointed orders test wedging or quarantining
+        refutes the (19) adjudication; sweep assert 4 still failing refutes the (21)
+        mechanism; the orphan test still hitting InsufficientPrivilege refutes (22);
+        dbtkill's 300s poll still expiring refutes (23); any gold row carrying a
+        QUARANTINED _run_id refutes (20b)."
+    fix_rationale: "Each fix is at its mechanism's own layer: (21) replaces the
+        broken eligibility PREDICATE (not the tie-break, which was already correct);
+        (22) completes the established grant model rather than rerouting the test;
+        (23) orders the existing instrumentation rather than changing what it
+        records; (20b) enforces quarantine's meaning at every gold-feeding read
+        while retaining the artifacts for traceability; (19) changes TEST deliveries
+        to honor production contracts rather than weakening any breaker."
+    blind_spots: "(1) The rebuild test's live cost is unmeasured: it now reprocesses
+        ~2.35M retained orders rows via the asset cascade inside two 1800s settle
+        windows -- pre-registered as the round's nameable-straggler risk. (2)
+        Snapshot-complete fixtures race concurrent roster changes between build and
+        publish (accepted: during singles only this suite publishes customers). (3)
+        dbt pre-hook/model same-transaction assumption is dbt-postgres default
+        behavior; the integration harness exercises it for real, but a future dbt
+        major could change it (the out_of_order test would catch that). (4) The 2
+        offline policy failures and test_publish_orders TypeErrors are pre-existing
+        and out of scope, unchanged on bare HEAD."
+  offline_status: "COMPLETE 2026-08-28: all five items implemented; red/green proven
+      for (21)/(23)/(20b); battery green (unit+regression 560, dagtest 14, policy
+      157 + 2 known pre-existing, manifests+kubeconform 378/0/0, mypy strict 91
+      files, integration 92 across all touched suites, slice collects 17). See the
+      ROUND 16 offline Evidence entry."
+  next_action: "Commit + push, record the authoritative e2e-full run ID (+ companion
+      publish.yml as item 0) in live_verification_state, return CHECKPOINT
+      (human-action) -- the session manager runs the single 60s watcher."
+
+ROUND 15 OUTCOME (2026-08-27, post-run analysis of run 33103279876 -- SUPERSEDED BY ROUND 16 ABOVE):
   run: "e2e-full.yml 33103279876, headSha 25b6eb0, conclusion FAILURE after 1h44m12s
       (18:24:15Z -> 20:08:27Z) -- FIRST run of the entire session to finish under its
       own steam rather than hitting a job-timeout ceiling. Companions same headSha:
@@ -6737,6 +6917,95 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     lineage, (22) normalized-schema grant, (23) dbtkill instrumentation own one
     each; (20b) is now 3M rows of quarantined-run silver residue. Decision
     checkpoint returned on (19) + residuals.
+
+- timestamp: 2026-08-28 (ROUND 16 offline -- full-scope 19-A+21+22+23+20b implemented, battery green)
+  checked: "Source adjudication + implementation + offline battery for all five items.
+    Adjudication reads: dbt/models/silver/*.sql + both post-hook macros (watermark
+    mechanism), tests/e2e/slice/* (all 8 failing tests' mechanics),
+    scripts/rebuild-from-raw.py (orders rebuilds via asset cascade, backfill probe
+    skips asset DAGs), load/publish/{scd,merge,merge_orders}.py + scd/delete_detection.py
+    (quarantine leak paths + vanished scoping), migrations 0019/0038 (grant history),
+    airflow/dags/_common/run_stage_recorder.py (eligibility-query wiring),
+    round15-job.log traceback lines 1300-1375 (sweep assert 4 exact shape)."
+  found: >
+    ALL FIVE ITEMS IMPLEMENTED, red->green where feasible. (21) REAL BUG CONFIRMED
+    RED->GREEN: new tests/integration/test_dbt_silver_out_of_order.py reproduces the
+    exact shape (run A id<B staged after B built; pre-fix silver never gets A's key --
+    RED verified against stashed pre-fix models; GREEN with fix). FIX: migration 0040
+    meta.dbt_processed_runs claim ledger + dbt/macros/claim_dbt_processed_runs.sql
+    (pre-hook INSERT, same transaction) + both silver models filter on claimed_txid =
+    txid_current() (NEVER a Jinja invocation_id -- reconciliation_post_hook's own
+    documented partial-parse stale-literal hazard) + both post-hook macros scope
+    new_bronze/bronze_files to the same claimed set (their old max(max_run_id) audit
+    floor shared the bug); bronze _run_id btree indexes added (FK never auto-indexed).
+    Rider adjudicated while regressing: test_dbt_reconciliation's `discrepancy == 0`
+    only ever held because the old {{ this }}-scoped watermark DROPPED when the
+    harness cleanup deleted max-holding silver rows (accidental re-materialization);
+    rescoped to build-local balance with the mechanism documented in-test.
+    (22) MECHANISM PINNED: 0019 granted analytics_owner TABLE SELECTs on
+    normalized.* but schema USAGE was never granted (0038's exact meta-schema
+    precedent; its docstring even flagged 0019 as 'covered some other way,
+    unconfirmed' -- the other way was local hand-state). FIX: migration 0039 GRANT
+    USAGE ON SCHEMA normalized TO analytics_owner.
+    (23) INSTRUMENTATION BUG CONFIRMED RED->GREEN: list_run_ids_pending_dbt_build had
+    NO upstream edge -> scheduler ran it at DagRun start -> a run staged by its own
+    DagRun never got a DBT_BUILD row until the NEXT DagRun (668's row landed after the
+    300s poll). FIX: `stage >> pending_run_ids` in wire_dbt_build_tracking + new
+    test_dag_structure assertion (verified RED on stashed pre-fix wiring).
+    (20b) LEAK PATHS CONFIRMED RED->GREEN: new
+    tests/integration/test_publish_quarantine_exclusion.py proves (i) SCD Step C's
+    unscoped bronze-history read folded a QUARANTINED run's row into the gold chain
+    and (ii) merge_orders' whole-silver upsert published a quarantined run's silver
+    row (both RED on stashed pre-fix publishers). FIX: `_run_id NOT IN (SELECT run_id
+    FROM meta.ingestion_runs WHERE status='QUARANTINED')` in scd/_BRONZE_HISTORY_SQL +
+    merge.py + merge_orders.py _PUBLISH_SQL (NOT-IN shape: metadata-less harness rows
+    stay included; operator re-open re-includes automatically) + migration 0041
+    meta.v_quarantined_artifacts (identifiability view, grants to
+    etl_app/analytics_owner/grafana_reader) + ADR-0012 recording the deferred silver
+    disposition (dbt-side status visibility + displaced-key re-materialization).
+    (19)-A IMPLEMENTED AS ADJUDICATED: orders repoint for the dataset-agnostic five
+    (concurrent_select 250k rows, podkill 1M, dbtkill 120, u3 1M, idempotent_reupload
+    120 -- in-test generated fixtures via conftest build_orders_csv_bytes with
+    live-sampled normalized.customers parents, manual `airflow dags trigger
+    csv_ingest_orders` per the orphan test's proven idiom, disjoint random order_id
+    windows); snapshot-complete customers fixtures for the three that structurally
+    need the cron DAG (reentry + rebuild need `airflow backfill create` --
+    DagNonPeriodicScheduleException on asset DAGs, rebuild script's own probe;
+    dbt_silver keeps the v_customers_lineage assertions) via conftest
+    snapshot_complete_customers_csv (echoes the breaker's exact denominator roster --
+    _CURRENT_COUNT_SQL scoping -- so vanished==0 by construction; echoed rows carry
+    current values at current event_ts -> no new SCD versions). Raw uploads of
+    published data are no longer deleted (section 63/ADR-0011 alignment; rebuild's
+    D-29 compare is only coherent with a complete raw history), and
+    test_rebuild_from_raw gained _wait_for_all_raw_files_settled for BOTH datasets
+    before its post-rebuild snapshots (orders rebuilds via the ASSET CASCADE, so the
+    old snapshot-right-after-customers-backfill raced it; duplicates carve-out
+    included). 18b: scheduler memory limit 2048Mi->2560Mi in helm/values/ci
+    (requests untouched; justified in-file -- R15 peak 93.9% + this round makes 1M
+    runs succeed + rebuild capstone reprocesses the retained raw mass).
+    BATTERY: unit+regression 560 pass (incl. new stage>>pending structure assert);
+    dagtest 14 pass; policy 157 pass + exactly the 2 known pre-existing failures;
+    make manifests + kubeconform valid (378/0/0, incl. the bumped scheduler limit);
+    mypy strict 91 files clean; ruff clean on all touched files (repo residual = 3
+    pre-existing in untouched files); integration battery 92 pass across
+    test_dbt_* (incl. new out_of_order), test_migrations (EXPECTED_TABLES +
+    dbt_app/grafana grant surfaces truthed up for 0040/0041), test_publish_scd,
+    test_publish_quarantine_exclusion, test_scd_*, test_stage_ingest,
+    test_schema_resolution, test_run_recovery_view, test_claim_lease_split;
+    slice suite collects 17 node-IDs clean. Pre-existing out-of-scope offline
+    failures unchanged (test_publish_orders staged_run_ids TypeError x3, confirmed
+    identical on bare HEAD via git stash).
+  implication: >
+    All five ROUND 16 items are implemented with the pre-registered criteria
+    testable live: (a) the 8 (19)-owned failures should clear (5 via orders repoint,
+    3 via snapshot-complete fixtures); (b) sweep assert 4 should pass (the claim
+    ledger makes run 42's replay bronze claimable at its staging DagRun's own dbt
+    pass; the _run_id desc tie-break then attributes silver to the newest run --
+    also retro-explains R14's blind sweep failure, same assert); (c) orphan test's
+    owner read works with schema USAGE; (d) dbtkill observes DBT_BUILD RUNNING in
+    its own staging DagRun; (e) no gold row can carry QUARANTINED lineage. Known
+    pre-registered risk: the rebuild test now reprocesses the retained ~2.35M-row
+    orders raw history through the asset cascade inside its 1800s settle windows.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
