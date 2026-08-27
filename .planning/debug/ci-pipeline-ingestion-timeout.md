@@ -2,7 +2,28 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 13 opened on user decision A+B+C for root cause (17): csv_ingest_orders
+updated: 2026-08-27 (ROUND 13 POST-RUN ANALYSIS COMPLETE on run 33062702180 (headSha 4d3db56,
+  conclusion CANCELLED by job timeout-minutes: 120 after exactly 2h00m49s -- partial log +
+  always()-diagnostics fully recovered, 7280 lines): fix (17) LIVE-CONFIRMED IN FULL --
+  cluster-up's layer-B unpause line fired 10:28:07 ("csv_ingest_orders unpaused"), FIRST-EVER
+  orders execution on CI: all 12 orders corpus files SUCCEEDED (initial wave runs 25-34 +
+  replay wave 49-60 incl. days 12/13; orders schema v1 CONTRACT -> v2 INFERRED evolution
+  mirrored customers'), the sweep's orders-terminal wait DRAINED (87.6min in R12 -> minutes),
+  and the suite progressed through FOUR further test modules to the LAST one
+  (test_smoke_and_idempotency, run 666 RUNNING at cancel) -- deepest CI progress ever, by far.
+  The 120min went to: 6.8min cluster-up/setup + ~75min of tests running correctly + ONE
+  measured avoidable sink = ~40min MASS-DELETE BREAKER COLLATERAL (root-cause-(18a) shape:
+  test_mass_delete_snapshot_trips_circuit_breaker's deliberately-truncated snapshot was ALSO
+  ingested by the */1 cron run scheduled__11:09, whose publish retried a DETERMINISTIC
+  QualityThresholdExceeded 7x over 42min and held max_active_runs=1 -- cron gap 11:09->11:53
+  stalled every later cron-dependent wait) + a permanent orders co-scheduling tax
+  (steady-state cron runs 96-104s -> 2.3-3.7min). Transient FailedScheduling burst
+  10:42-10:47 (7 pods, Insufficient cpu, self-healed) = guard (d) strictly failed;
+  scheduler peak 1881MiB = 91.9% of 2048Mi (new high-water). Projected honest total
+  ~2h35m as-is / ~2h with the collateral eliminated -- the timeout-vs-trim decision is
+  now LIVE with real arithmetic. DECISION CHECKPOINT returned. See Current Focus
+  ROUND 13 OUTCOME + ROUND 13 post-run Evidence.)
+updated_prior_round13_postrun: 2026-08-27 (ROUND 13 opened on user decision A+B+C for root cause (17): csv_ingest_orders
   registers paused on fresh clusters and silently drops asset events. Implementing all three
   layers: (A) csv_ingest_orders added to tests/e2e/slice/conftest.py::_unpause_slice_dags +
   docstring truth-up (auto-covers chaos via its conftest import); (B) Makefile cluster-up gains a
@@ -197,7 +218,113 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 13 (2026-08-27, opened on user decision: A+B+C -- CURRENT STATE):
+ROUND 13 OUTCOME (2026-08-27, post-run analysis of run 33062702180 -- CURRENT STATE):
+  verdict: "Fix (17) LIVE-CONFIRMED IN FULL; refutation branch (7) NOT taken. The suite
+      reached its FINAL test module for the first time ever on CI and was cancelled at
+      the 120-min job timeout mid-way through test_smoke_and_idempotency. The budget was
+      consumed by (i) the honest, now-longer suite (orders live = every phase does 2x
+      datasets) and (ii) ONE measured avoidable sink: ~40min of mass-delete
+      deterministic-breaker-trip collateral on the */1 cron DAG. The
+      raise-timeout-vs-trim decision is now LIVE with measured arithmetic."
+  round13_criteria_scorecard:
+    - "(1) FIX-IN-FORCE: MET. Job log line 886 @10:28:07Z: '==> csv_ingest_orders
+      unpaused (asset-triggered runs enabled)' (layer B retry loop succeeded at
+      cluster-up; DAG file at 4d3db56 carries layer C's flag; layer A active for the
+      pytest session)."
+    - "(2) PRIMARY (a) orders pods/runs: MET -- FIRST EVER on CI. meta.ingestion_runs:
+      initial orders wave runs 25-34 (files 37-46 = orders_20240101-11) ALL SUCCEEDED
+      with schema evolution v1 CONTRACT (10:37:56) -> v2 INFERRED (10:39:29) for
+      dataset_id 55, mirroring customers' predicted term-flip shape; replay wave runs
+      49-60 ALL SUCCEEDED incl. days 12/13 (runs 59/60, no replay_of = first-pass);
+      later, run 624 (s3://raw/orders/e2e-orphan-*.csv) SUCCEEDED = the
+      referential-orphan test's orders pipeline ran end-to-end on demand."
+    - "(3) PRIMARY (b) sweep drains: MET. The orders-terminal wait that consumed
+      87.6min in ROUND 12 completed within the sweep phase (~10:45-11:03); the next
+      test's backfill (id=4) started 11:03:27. Suite then executed
+      idempotent_rerun (backfill_4, 3 runs, 11:03-11:10), mass-delete breaker
+      (backfill_5), then the pod_kill (fixtures e2e-dbtkill run 461, e2e-u3 run 515),
+      rebuild_from_raw (e2e-rebuild run 623), referential_orphan (e2e-orphan run 624
+      SUCCEEDED), and smoke_and_idempotency (e2e-idempotent run 666 RUNNING) modules --
+      1301 meta.files rows and 666+ ingestion runs by cancel vs 50/60 in ROUND 12."
+    - "(4) BUDGET (c): FAILED at 120min -- full decomposition in
+      round13_budget_decomposition below; this is the decision input."
+    - "(5) REGRESSION GUARDS (d): MOSTLY GREEN, two flags. Kyverno DENY 0;
+      control-plane restarts 0 (restart timeline EMPTY); dag-processor peak 771MiB;
+      triggerer 419MiB; zero unwanted breaker trips in job log (fix (16) held: no
+      vanished-mass false positives anywhere; the ONLY trips were the mass-delete
+      test's DELIBERATE truncated-snapshot trip + its cron collateral, below).
+      FLAG 1: FailedScheduling NOT zero -- transient burst 10:42:22-10:47:08, 7 pods
+      (stage-4d21bnsk/ubwp6p9s/jgio5oqj/i53so4ae, publish-5sztukiv/5rha8oxg,
+      discover-q8lhyk5t) all 'Insufficient cpu', first-ever customers+orders
+      co-scheduling peak; self-healed via retries (backfill_3's first stage tries
+      state=removed, re-ran try=2 successfully 10:54+; no test failed from it; ~9min
+      recovery cost). FLAG 2: scheduler peak 1881MiB/26pids = 91.9% of the 2048Mi
+      limit (was 1415MiB = 69% in R12) -- 167MiB headroom under orders-live load."
+    - "(6) CENSUS (e): NOT MEASURABLE for the 3rd consecutive round -- pytest -q
+      emitted zero flushed output before cancel (the carried observability rider).
+      Sweep-assertion-(10) caveat: cannot be judged without the summary; carried.
+      Indirect: the suite RAN PAST the sweep into 4 later modules, so the sweep test
+      itself terminated (pass or fail unobservable)."
+    - "(7) REFUTATION BRANCH: NOT taken -- orders triggered immediately once unpaused."
+  round13_budget_decomposition: "Job 10:21:52 -> cancel 12:22:05 (2h00m13s of work):
+      [1] 10:21:52-10:27:59 install+cluster-up = 6.1min.
+      [2] 10:27:59-10:28:40 images Variable + migrations + vault = 0.7min.
+      [3] 10:28:40 pytest starts (cluster tests + slice session setup; first cron
+      DagRun 10:29:24).
+      [4] ~10:30-10:45 pilot test: backfill_1 (2 runs) 10:30:04-10:43:02 = ~14min.
+      [5] 10:42-10:47 FailedScheduling burst (first customers+orders co-scheduling);
+      backfill_3's first tries removed -> ~9min recovery folded into [6].
+      [6] ~10:45-11:03 full_2year_sweep: backfill_3 (3 runs) 10:54-11:02; customers
+      wait + ORDERS WAIT BOTH DRAINED (orders replay 49-60 incl. days 12/13
+      SUCCEEDED) = ~18min.
+      [7] 11:03-11:10 idempotent_rerun: backfill_4 (3 runs) = 7min.
+      [8] 11:10-11:55 MASS-DELETE WINDOW = ~45min, the avoidable sink:
+      backfill__08:40 (backfill_5, = the offset_minutes=150 window) publish tripped
+      the DESIGNED QualityThresholdExceeded, retried to skipped try=6
+      (11:12->11:42:49), DagRun failed at +45:00 (11:55:54). COLLATERAL: the */1 cron
+      run scheduled__11:09 ALSO discovered the truncated snapshot (fresh file in
+      raw/customers/ enters the cron window within a minute), publish failed try=7
+      over 42min (11:11:51->11:54:00), holding max_active_runs=1 -- cron gap
+      11:09->11:53 stalled every subsequent cron-dependent test wait. Designed cost
+      ~5min; actual cost ~45min; AVOIDABLE ~40min.
+      [9] 11:55-12:22:05 four remaining modules: pod_kill (dbtkill 461, u3 515),
+      rebuild_from_raw (623), referential_orphan (624 SUCCEEDED), and
+      smoke_and_idempotency IN-FLIGHT at cancel (test_idempotent_reupload, run 666
+      RUNNING) = 27min and nearly done.
+      [10] Steady-state tax: cron runs 2.3-3.7min each (was 96-104s in R12) --
+      orders co-scheduling doubles background load in perpetuity.
+      PROJECTION: pytest alone needed ~10-15 more min => ~2h10m total from job start.
+      The observability step (install trimmed monitoring + tests/e2e/observability +
+      teardown) and the rebuild-from-raw capstone step NEVER STARTED -- unmeasured,
+      rough estimate +25-40min combined. Projected honest job total AS-IS:
+      ~2h35m-2h50m. With the ~40min collateral eliminated: ~1h55m-2h10m. 120min
+      cannot hold either way without trimming AND margin."
+  new_findings_named:
+    - "(18a) DESIGN, measured price tag for the carried quarantine-vs-retry follow-up:
+      retrying a DETERMINISTIC QualityThresholdExceeded breaker trip (publish
+      retries=6 + capped backoff) burns ~40min of wall per poisoned DagRun on CI and
+      holds the dag_id's max_active_runs=1 slot throughout; the mass-delete test
+      makes this structural (its truncated snapshot is unavoidably also cron-visible).
+      Fix directions (user decision): fail-fast/quarantine on breaker-class errors
+      (production semantics -- needs approval), and/or test-scoped: make the
+      mass-delete fixture invisible to the cron window (e.g., cleanup/finalize the
+      poisoned file's PENDING run before the cron picks it up), and/or CI-profile
+      retries reduction for publish."
+    - "(18b) CAPACITY, watch-only: orders-live co-scheduling => transient
+      Insufficient-cpu bursts (7 pods, 10:42-10:47, self-healed) and 2-3x slower
+      steady-state runs; scheduler peak 91.9% of 2048Mi. No failures caused this
+      round; flag for the next round's guards (a repeat WITH failures upgrades it)."
+  next_action: "DECISION CHECKPOINT returned to user: choose ROUND 14 direction --
+      (A) raise timeout-minutes to measured+margin (180min covers the as-is
+      projection; 150min only if paired with trims); (B) trim the ~40min mass-delete
+      collateral (test-scoped or production quarantine semantics -- the latter needs
+      explicit approval) and keep/raise less; (C) combination A+B (e.g., collateral
+      trim + 150min). Carried: quarantine-vs-retry design (now priced), sidecar
+      mirror, pytest progress observability (3rd blind round -- consider bumping
+      priority), sweep-wait legibility, sweep-assertion-(10) caveat (still
+      unobserved), scheduler memory headroom watch (18b)."
+
+ROUND 13 (2026-08-27, opened on user decision: A+B+C -- SUPERSEDED BY ROUND 13 OUTCOME ABOVE):
   charter: "Fix root cause (17) at all three layers, C explicitly user-approved as a
       production-semantics change: (A) test-scoped -- add csv_ingest_orders to
       tests/e2e/slice/conftest.py::_unpause_slice_dags and truth-up its docstring (the chaos
@@ -5409,6 +5536,91 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     sweep drains; duration vs 120min measured; regression guards; node-ID census vs the
     17-set with the carried sweep-assertion-(10) caveat).
 
+- timestamp: 2026-08-27 (ROUND 13 -- post-run analysis of live-verification run 33062702180)
+  checked: >
+    Authoritative ROUND 13 run 33062702180 (headSha 4d3db56, created 10:21:48Z, job
+    98485143753 'Full local E2E suite + rebuild-from-raw capstone' 10:21:52->12:22:41Z,
+    conclusion CANCELLED at exactly the 2h job timeout, 3rd consecutive 120-min cancel).
+    Partial job log FULLY recovered via gh api actions/jobs/98485143753/logs -- 7280
+    lines (vs 5939 in R12) incl. the complete always()-diagnostics battery: cp-monitor
+    time series + per-role peaks + restart timeline, etl-monitor rolling pod/event
+    census (365 polls), FailedScheduling census, customers DagRun/TI DB dumps,
+    scheduler/triggerer log greps, meta.ingestion_runs->meta.files mapping,
+    schema_versions history, silver _run_id distribution, staging per-run counts.
+    Saved to scratchpad round13-job.log. Greps run: csv_ingest_orders/unpause;
+    QualityThresholdExceeded/mass_delete_circuit_breaker/vanished; FailedScheduling;
+    Kyverno DENY; per-pod FS first/last-seen extraction; poll-by-poll pod census.
+  found: >
+    (i) FIX (17) IN FORCE: cluster-up printed '==> csv_ingest_orders unpaused
+    (asset-triggered runs enabled)' at 10:28:07Z (layer B loop succeeded; ROUND 13
+    Makefile comment block visible at lines 876-886).
+    (ii) FIRST-EVER ORDERS EXECUTION ON CI: meta.ingestion_runs rows for dataset=orders:
+    runs 25-34 (files 37-46, orders_20240101-11) ALL SUCCEEDED, schema_versions rows 3/4
+    (dataset_id 55) = v1 CONTRACT 10:37:56 -> v2 INFERRED 10:39:29 (the same term-flip
+    shape customers showed in R12); replay wave runs 49-60 ALL SUCCEEDED with
+    replay_of_run_id 25-34, plus days 12/13 (runs 59/60, files 49/50) SUCCEEDED
+    first-pass. Later run 624 (raw/orders/e2e-orphan-*.csv) SUCCEEDED -- orders pipeline
+    re-ran on demand for the referential-orphan test. Criterion (a) MET; refutation
+    branch (7) NOT taken.
+    (iii) SWEEP DRAINED: the orders-terminal wait that ate 87.6min in R12 completed
+    inside the sweep phase (~10:45-11:03); backfill_4 (next test) started 11:03:27.
+    Criterion (b) MET.
+    (iv) SUITE DEPTH RECORD: by cancel, meta.files reached id 1301 and ingestion_runs
+    id 666 (R12: 50/36). Fixture trail proves module progression:
+    e2e-dbtkill run 461 + e2e-u3 run 515 (test_pod_kill_retry), e2e-rebuild run 623
+    (test_rebuild_from_raw), e2e-orphan run 624 SUCCEEDED (test_referential_orphan),
+    e2e-idempotent-...-1 run 666 RUNNING (test_smoke_and_idempotency::
+    test_idempotent_reupload -- the LAST test file in tests/e2e/slice). pytest was
+    mid-final-module at cancel; the observability and rebuild-from-raw workflow steps
+    never started.
+    (v) THE 45-MIN SINK: customers DagRun dump (31 total, 29 success, 2 failed, 1
+    running at cancel): backfill__2026-08-27T08:40 (backfill_id=5 = the mass-delete
+    test's offset_minutes=150/span=0 window; test source confirms it EXPECTS a
+    deliberate truncated-snapshot QualityThresholdExceeded trip and a hard FAILED run)
+    ran 11:10:53->11:55:54 failed at +45:00 with publish state=skipped try=6
+    (11:42:20->11:42:49); COLLATERAL: cron run scheduled__11:09 (started 11:09:42,
+    discover/stage/dbt_build all success try=1 by 11:12:15) had publish FAIL try=7
+    (last try 11:53:31->11:54:00.02), DagRun failed 11:54:00.7 -- the truncated
+    snapshot entered the cron discovery window too. Cron gap 11:09->11:53 (next
+    scheduled run 11:53 started 11:54:01) = max_active_runs=1 held 44min, stalling all
+    later cron-dependent waits. Job-log greps for QualityThresholdExceeded/vanished =
+    0 hits because task-pod logs never reach the job log; the mechanism is the test's
+    own documented design + TI shape (publish-only failure, 6-7 deterministic tries,
+    both runs in the same window). Zero OTHER failed TIs anywhere: 187 customers TIs =
+    success/skipped/removed except these two publish chains.
+    (vi) FAILEDSCHEDULING (guard flag): burst 10:42:22-10:47:08, 7 unique pods (4
+    stage, 2 publish, 1 discover) 'Insufficient cpu... no preemption victims';
+    first-ever customers+orders co-scheduling peak. Self-healed: backfill_3's first
+    stage tries state=removed at 10:45-10:46, re-ran try=2 to success from 10:54;
+    no test failed from it. Event lines aged out by 11:47 (1h TTL); no NEW FS pods
+    after 10:47.
+    (vii) OTHER GUARDS: Kyverno DENY 0; restart timeline EMPTY (0 restarts all
+    roles); scheduler peak 1972506624 bytes = 1881MiB = 91.9% of the 2048Mi limit,
+    26 pids (R12: 1415MiB = 69%) -- new high-water under orders-live load, 167MiB
+    headroom; dag-processor 771MiB; triggerer 419MiB. Fix (16) held: zero unwanted
+    breaker trips; silver _run_id distribution {409:1, 460:49} deterministic; run
+    460 = 50 bronze rows / 49 distinct keys published clean.
+    (viii) PACE: steady-state cron DagRuns 2.3-3.7min each (R12: 96-104s) = the
+    permanent orders co-scheduling tax; 9 clean steady-state runs 11:54->12:18:49+
+    after the poison cleared, all success.
+    (ix) CENSUS: unmeasurable AGAIN (pytest -q, zero flushed output in a cancelled
+    job -- 3rd blind round). Companion runs already pre-cleared at recording time:
+    publish.yml 33062702191 success (images at 4d3db56); CI 33062702164 failure =
+    same 2 pre-existing out-of-scope jobs as the 794db33 baseline.
+  implication: >
+    Root cause (17) is CLOSED: unpaused orders triggers, runs, evolves schema,
+    drains, and re-runs on demand on ephemeral CI. No new hidden mechanism appeared
+    beneath it -- the remaining gap is pure BUDGET ARITHMETIC plus one priced design
+    defect: (18a) deterministic-breaker-trip retrying cost a measured ~40min of the
+    120 (designed ~5min vs actual ~45min window), and the honest as-is job needs
+    ~2h35m-2h50m (pytest ~2h10m + unmeasured observability/capstone steps ~25-40min);
+    with the collateral trimmed, ~1h55m-2h10m. The deferred timeout-minutes decision
+    is now LIVE: raise to 180 as-is, or trim the collateral (test-scoped fixture
+    hygiene or production quarantine semantics -- needs explicit user approval) plus
+    150, or both. Secondary watches: (18b) transient Insufficient-cpu bursts and
+    scheduler at 91.9% of its memory limit under doubled load; pytest progress
+    observability now blocking census measurement 3 rounds running.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -5941,6 +6153,19 @@ root_cause: >
   csv_ingest_orders per the recorded asset-vs-cron survey); fix (17) implemented and
   offline-verified, awaiting live CI verification against the ROUND 13 pre-registered
   criteria.
+  ROUND 13 POST-RUN: (17) LIVE-CONFIRMED AND CLOSED on run 33062702180 (headSha
+  4d3db56) -- cluster-up's unpause line fired 10:28:07; FIRST-EVER orders execution on
+  CI (runs 25-34 + replay 49-60 + on-demand 624 ALL SUCCEEDED; orders schema v1->v2
+  evolution; days 12/13 drained); the sweep's orders wait completed in minutes (was
+  87.6min) and the suite reached its FINAL test module before the 120-min cancel.
+  Remaining, NOT a root-cause failure but a priced decision: (18a) the mass-delete
+  breaker test's deliberately-truncated snapshot is also cron-visible, and retrying a
+  DETERMINISTIC QualityThresholdExceeded (publish retries=6/7 + backoff) held the
+  cron dag's max_active_runs=1 slot for 44min (cron gap 11:09->11:53) -- ~40min of
+  avoidable budget burn per run; and the honest as-is job projects to ~2h35m-2h50m
+  (pytest ~2h10m + never-started observability/capstone steps) vs timeout-minutes
+  120. (18b) watch-only: transient Insufficient-cpu bursts at first customers+orders
+  co-scheduling (7 pods, self-healed) and scheduler peak 1881MiB = 91.9% of 2048Mi.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -6492,11 +6717,15 @@ verification: >
   74 error lines both pre- and post-change (all pre-existing
   common_kpo_kwargs/XComArg idiom, zero new). Heavy tests/integration suites
   deliberately NOT re-run: no dataplat/dbt/csv_processor code touched this round
-  (DAG kwarg + test fixture + Makefile only). LIVE CI VERIFICATION: pending --
-  judged on the ROUND 13 pre-registered criteria (orders pods appear on CI for the
-  first time; sweep orders-terminal wait drains; suite duration measured vs
-  timeout-minutes: 120; regression guards hold; node-ID census vs the 17-set with
-  the carried sweep-assertion-(10) caveat).
+  (DAG kwarg + test fixture + Makefile only). LIVE CI VERIFICATION: COMPLETE on run
+  33062702180 -- criteria (1)/(a)/(b) MET (unpause line 10:28:07; orders runs 25-34 +
+  49-60 + 624 SUCCEEDED; sweep drained, suite reached the final module); criterion (c)
+  budget FAILED at 120min with full decomposition recorded (honest projection
+  ~2h35m-2h50m as-is, ~1h55m-2h10m with the (18a) collateral trimmed); guards: Kyverno
+  0, restarts 0, fix (16) zero unwanted trips, but FailedScheduling burst 10:42-10:47
+  (7 pods, transient, self-healed) and scheduler peak 91.9% of limit; census
+  unmeasurable (3rd blind round, pytest -q). (17) CLOSED; decision checkpoint on
+  timeout-vs-trim returned.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
