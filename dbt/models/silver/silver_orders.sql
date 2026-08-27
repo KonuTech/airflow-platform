@@ -98,7 +98,11 @@ business_key_ranked as (
         *,
         row_number() over (
             partition by order_id
-            order by order_date::date desc nulls last, _source_row_number desc, _file_id desc
+            {# `_run_id desc` final tie-break: see silver_customers.sql's own
+               comment (ROUND 12) -- deterministic winner under a D-18
+               byte-identical replay, mirrored here verbatim. #}
+            order by order_date::date desc nulls last, _source_row_number desc,
+                     _file_id desc, _run_id desc
         ) as rn
     from all_contenders
 )

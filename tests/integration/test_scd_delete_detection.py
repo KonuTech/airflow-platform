@@ -2,12 +2,22 @@
 
 Proves this plan's own ``must_haves.truths`` against a real testcontainers
 PostgreSQL: Finding F-2's run-scoped snapshot diff never misclassifies a
-key that is merely absent from silver's whole cumulative history (only one
+key that is merely absent from bronze's whole cumulative history (only one
 absent from THIS pass's own staged runs counts as vanished); the
 mass-delete circuit breaker raises exactly above threshold and passes
 exactly at/below it; and all three ``ScdConfig.delete_semantics`` values
 (ignore/invalidate/new_record) act correctly and use the snapshot's own
 ``event_ts``, never wall-clock time, for effective dating.
+
+ROUND 12 (debug ci-pipeline-ingestion-timeout, root cause 16): the pass's
+staged snapshot is now read from ``staging.customers`` (bronze) scoped by
+``staged_run_ids``, never from ``silver.customers`` -- silver's dedup-tie
+winner carries an arbitrary ``_run_id`` under a byte-identical D-18 replay,
+which live-tripped the breaker at 54% on correct traffic (run 32884691063).
+The vanished-detection tests below seed BRONZE rows to define "what this
+pass delivered"; silver rows are deliberately irrelevant to the computation
+(``test_replayed_key_with_stale_silver_lineage_is_never_vanished`` is the
+dedicated regression proof).
 
 Every ``customer_id`` used below is drawn from disjoint, high (900000+)
 ranges per scenario -- ``normalized.customers``/``silver.customers`` are
@@ -274,13 +284,18 @@ def _make_context() -> PipelineContext:
 def test_a_real_vanished_customer_id_is_correctly_detected(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """3 gold-current customers, 2 confirmed by this pass's silver snapshot -> the 3rd vanished.
+    """3 gold-current customers, 2 delivered by this pass's staged bronze -> the 3rd vanished.
 
-    All 3 also get a ``staging.customers`` (bronze) row -- 10-07-PLAN.md Task 1's own
+    All 3 have SOME ``staging.customers`` (bronze) presence -- 10-07-PLAN.md Task 1's own
     ``bronze_known`` scoping fix means a customer_id with no bronze presence is excluded from
-    vanished-detection entirely, regardless of its silver/gold state (see
+    vanished-detection entirely, regardless of its gold state (see
     ``test_pre_bronze_legacy_rows_are_never_reported_vanished`` for that exclusion's own proof).
+    900003's only bronze row belongs to an OLDER, un-staged run: this pass's own files did not
+    deliver it, so it vanishes.
     """
+    old_run_id, old_file_id, old_batch_id = _seed_run(
+        repository, migrated_dsn, key_suffix="real_vanish_old"
+    )
     run_id, file_id, batch_id = _seed_run(repository, migrated_dsn, key_suffix="real_vanish")
 
     with psycopg.connect(migrated_dsn) as conn:
@@ -304,17 +319,10 @@ def test_a_real_vanished_customer_id_is_correctly_detected(
             conn, customer_id="900002", run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=2,
         )
+        # 900003's bronze presence is REAL but belongs to the older pass only.
         _insert_staging_customer(
-            conn, customer_id="900003", run_id=run_id, file_id=file_id, batch_id=batch_id,
-            source_row_number=3,
-        )
-        _insert_silver_customer(
-            conn, customer_id="900001", run_id=run_id, file_id=file_id, batch_id=batch_id,
-            source_row_number=1,
-        )
-        _insert_silver_customer(
-            conn, customer_id="900002", run_id=run_id, file_id=file_id, batch_id=batch_id,
-            source_row_number=2,
+            conn, customer_id="900003", run_id=old_run_id, file_id=old_file_id,
+            batch_id=old_batch_id, source_row_number=1,
         )
         conn.commit()
 
@@ -331,14 +339,15 @@ def test_a_real_vanished_customer_id_is_correctly_detected(
 
 
 @pytest.mark.integration
-def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
+def test_bronze_rows_from_an_older_unstaged_run_never_count_as_present(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """F-2's regression guard: a silver row tagged with an OLDER, un-staged run still vanishes.
+    """F-2's regression guard, bronze edition: cumulative bronze history never confirms a key.
 
-    All 3 also get a ``staging.customers`` (bronze) row -- 10-07-PLAN.md Task 1's own
-    ``bronze_known`` scoping fix means a customer_id with no bronze presence is excluded from
-    vanished-detection entirely (see ``test_pre_bronze_legacy_rows_are_never_reported_vanished``).
+    ``staging.customers`` is durable and cumulative -- 900013 has a real bronze row from an
+    OLDER pass, but THIS pass's own staged runs did not deliver it, so it vanishes. An
+    unscoped read of the cumulative table would (wrongly) see it as "still present" forever
+    -- the exact permanently-poisoned-result failure mode Finding F-2 names.
     """
     old_run_id, old_file_id, old_batch_id = _seed_run(
         repository, migrated_dsn, key_suffix="unscoped_old"
@@ -366,21 +375,9 @@ def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
             conn, customer_id="900012", run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=2,
         )
-        _insert_staging_customer(
-            conn, customer_id="900013", run_id=run_id, file_id=file_id, batch_id=batch_id,
-            source_row_number=3,
-        )
-        _insert_silver_customer(
-            conn, customer_id="900011", run_id=run_id, file_id=file_id, batch_id=batch_id,
-            source_row_number=1,
-        )
-        _insert_silver_customer(
-            conn, customer_id="900012", run_id=run_id, file_id=file_id, batch_id=batch_id,
-            source_row_number=2,
-        )
-        # 900013 IS present in silver, but tagged with an older, un-staged
+        # 900013 IS present in bronze, but only under an older, un-staged
         # run -- an unscoped read would (wrongly) see it as "still present".
-        _insert_silver_customer(
+        _insert_staging_customer(
             conn, customer_id="900013", run_id=old_run_id, file_id=old_file_id,
             batch_id=old_batch_id, source_row_number=1,
         )
@@ -391,6 +388,59 @@ def test_unscoped_silver_rows_never_count_as_present_for_vanished_detection(
     assert "900013" in vanished
     assert "900011" not in vanished
     assert "900012" not in vanished
+
+
+@pytest.mark.integration
+def test_replayed_key_with_stale_silver_lineage_is_never_vanished(
+    repository: PostgresMetadataRepository, migrated_dsn: str
+) -> None:
+    """ROUND 12 root cause (16)'s exact unit-level regression guard.
+
+    The live CI wedge (run 32884691063, 27/50 = 54% breaker trip): a D-18 replay re-staged
+    byte-identical content under new run_ids, silver's full-tie dedup kept the OLD ``_run_id``
+    on ~half the keys, and the then-silver-scoped snapshot misread every tie-loser as
+    vanished. Here: 900051 is delivered by THIS pass's own bronze rows, while its silver row
+    still carries the OLD run's lineage (the tie-loser shape). It must NEVER be reported
+    vanished -- the pass's staged snapshot is what its files delivered (bronze), not which
+    run's copy happened to win silver's ranking tie.
+    """
+    old_run_id, old_file_id, old_batch_id = _seed_run(
+        repository, migrated_dsn, key_suffix="replay_old"
+    )
+    run_id, _file_id, _batch_id = _seed_run(repository, migrated_dsn, key_suffix="replay_new")
+
+    with psycopg.connect(migrated_dsn) as conn:
+        _insert_normalized_customer(
+            conn, customer_id=900051, run_id=old_run_id, file_id=old_file_id,
+            batch_id=old_batch_id, source_row_number=1,
+        )
+        # Wave 1's bronze row...
+        _insert_staging_customer(
+            conn, customer_id="900051", run_id=old_run_id, file_id=old_file_id,
+            batch_id=old_batch_id, source_row_number=1,
+        )
+        # ...and THIS pass's byte-identical replay of it (same file/batch --
+        # discovery's create_file/get_or_create_batch are idempotent by
+        # object_uri/content -- only the run differs).
+        _insert_staging_customer(
+            conn, customer_id="900051", run_id=run_id, file_id=old_file_id,
+            batch_id=old_batch_id, source_row_number=1,
+        )
+        # Silver's dedup-tie winner kept the OLD run's lineage (the
+        # arbitrary-tie outcome observed live on 27 of 50 keys).
+        _insert_silver_customer(
+            conn, customer_id="900051", run_id=old_run_id, file_id=old_file_id,
+            batch_id=old_batch_id, source_row_number=1,
+        )
+        conn.commit()
+
+        vanished = find_vanished_customer_ids(conn, staged_run_ids=[run_id])
+
+    assert "900051" not in vanished, (
+        "a key delivered by this pass's own staged bronze rows was reported vanished -- "
+        "the staged-snapshot read is leaking silver dedup-tie lineage again (root cause 16, "
+        "live CI signature: 27/50 = 54% mass-delete breaker trip on a byte-identical replay)"
+    )
 
 
 @pytest.mark.integration
@@ -445,7 +495,7 @@ def test_pre_bronze_legacy_rows_are_never_reported_vanished(
 def test_nothing_vanished_returns_empty_set(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """Every gold-current key confirmed by this pass's silver snapshot -> never reported vanished.
+    """Every gold-current key delivered by this pass's staged bronze -> never reported vanished.
 
     Asserts non-membership rather than whole-set emptiness -- see this
     file's own module docstring on why exact-set equality is unsafe here.
@@ -461,11 +511,11 @@ def test_nothing_vanished_returns_empty_set(
             conn, customer_id=900022, run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=2,
         )
-        _insert_silver_customer(
+        _insert_staging_customer(
             conn, customer_id="900021", run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=1,
         )
-        _insert_silver_customer(
+        _insert_staging_customer(
             conn, customer_id="900022", run_id=run_id, file_id=file_id, batch_id=batch_id,
             source_row_number=2,
         )

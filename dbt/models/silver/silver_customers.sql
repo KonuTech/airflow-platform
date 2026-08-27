@@ -132,9 +132,21 @@ all_contenders as (
 business_key_ranked as (
     select
         *,
+        {#
+          `_run_id desc` final tie-break (debug ci-pipeline-ingestion-timeout
+          ROUND 12, root cause 16): a D-18 replay re-stages BYTE-IDENTICAL
+          rows (same event_ts/_source_row_number/_file_id -- discovery's
+          create_file is idempotent by object_uri) under a new _run_id, so
+          without this term the resident row and its replay tie on ALL
+          ranking terms and the winner's _run_id lineage is arbitrary
+          (observed live: a 23/27 split across 50 keys, run 32884691063) --
+          a determinism violation (README section 67). Newest run wins:
+          identical content, freshest lineage, deterministic result.
+        #}
         row_number() over (
             partition by customer_id
-            order by event_ts::timestamptz desc nulls last, _source_row_number desc, _file_id desc
+            order by event_ts::timestamptz desc nulls last, _source_row_number desc,
+                     _file_id desc, _run_id desc
         ) as rn
     from all_contenders
 )

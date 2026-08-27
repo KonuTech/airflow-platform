@@ -305,6 +305,36 @@ jobs:
           ROUND5_MINIO_ROOT_PASS=$(kubectl -n data get secret minio-root -o jsonpath='{.data.rootPassword}' 2>/dev/null | base64 -d)
           kubectl -n data exec deploy/minio -- sh -c "mc alias set diag http://localhost:9000 '$ROUND5_MINIO_ROOT_USER' '$ROUND5_MINIO_ROOT_PASS' >/dev/null 2>&1 && mc ls diag/raw/customers/ --recursive" 2>&1 | tail -80 || echo "MinIO listing failed"
 
+          # ROUND 12 (debug/ci-pipeline-ingestion-timeout): the run->file mapping evidence
+          # gap named by ROUND 11 -- which files each ingestion run staged, each run's
+          # status/replay lineage, the dataset's schema-version history (the D-18 replay
+          # trigger), and silver's per-run_id row distribution (the dedup-tie split root
+          # cause 16 hinged on). Read straight from the analytics DB's persistent rows via
+          # psql inside the CNPG primary -- one end-of-run snapshot reconstructs the whole
+          # session, same reasoning as the ROUND 5 DB dumps above.
+          echo "===== ROUND 12: meta.ingestion_runs -> meta.files mapping (customers, full session) ====="
+          ROUND12_PRIMARY=$(kubectl -n data get pod -l cnpg.io/cluster=analytics-db,cnpg.io/instanceRole=primary -o name 2>/dev/null | head -1)
+          # Older CNPG releases label the primary `role=primary` instead -- fall back.
+          [ -n "$ROUND12_PRIMARY" ] || ROUND12_PRIMARY=$(kubectl -n data get pod -l cnpg.io/cluster=analytics-db,role=primary -o name 2>/dev/null | head -1)
+          echo "primary pod: ${ROUND12_PRIMARY:-NOT FOUND}"
+          kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
+            SELECT r.run_id, r.status, r.replay_of_run_id, f.file_id, f.object_uri,
+                   left(r.idempotency_key, 20) AS idem_prefix, r.schema_version_id
+              FROM meta.ingestion_runs r JOIN meta.files f USING (file_id)
+              ORDER BY r.run_id;" 2>&1 | tail -120 || echo "run->file mapping query failed"
+          echo "===== ROUND 12: meta.schema_versions history (the discovery idempotency-key term) ====="
+          kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
+            SELECT schema_version_id, dataset_id, version, left(schema_hash, 12) AS hash_prefix,
+                   derived_from, compatibility, valid_from, valid_to
+              FROM meta.schema_versions ORDER BY schema_version_id;" 2>&1 | tail -40 || echo "schema_versions query failed"
+          echo "===== ROUND 12: silver.customers _run_id distribution (dedup-tie lineage census) ====="
+          kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
+            SELECT _run_id, count(*) AS silver_rows FROM silver.customers GROUP BY _run_id ORDER BY _run_id;" 2>&1 | tail -40 || echo "silver distribution query failed"
+          echo "===== ROUND 12: staging.customers per-run row counts (bronze deliveries per pass) ====="
+          kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
+            SELECT _run_id, count(*) AS bronze_rows, count(DISTINCT customer_id) AS distinct_keys
+              FROM staging.customers GROUP BY _run_id ORDER BY _run_id;" 2>&1 | tail -60 || echo "bronze per-run query failed"
+
       - name: Install trimmed monitoring, run tests/e2e/observability, tear down
         run: make observability-verify-ci
 

@@ -11,13 +11,35 @@ customer this dataset has ever ingested, which makes naive DELETE-detection
 can vanish from a source file forever and this check would still see it,
 via its stale row from some earlier pass. ``find_vanished_customer_ids``
 below scopes its read to ``_run_id = ANY(staged_run_ids)`` -- THIS pass's
-own staged runs only -- so a key silver is not RE-CONFIRMING this pass
-correctly reads as vanished, even though it is still sitting in silver's
+own staged runs only -- so a key this pass's files did not deliver
+correctly reads as vanished, even though it is still sitting in the
 cumulative history. This mirrors ``metadata/repository.py``'s own
 ``record_watermark`` run-scoping precedent (its own docstring, cited in this
 plan's ``<interfaces>``), for the identical reason: an unscoped read of a
 shared, cumulative, append/upsert table produces a permanently-poisoned
 result.
+
+Debug session ci-pipeline-ingestion-timeout ROUND 12 (root cause 16, live
+run 32884691063): the run-scoped snapshot MUST be read from
+``staging.customers`` (bronze), never from ``silver.customers``. Silver's
+incremental dedup keeps exactly one row per business key, ranked by
+``(event_ts desc, _source_row_number desc, _file_id desc)``, and the
+winning row keeps its OWN ``_run_id`` -- so when a pass re-stages content
+BYTE-IDENTICAL to already-resident rows (exactly what D-18's
+idempotency-key formula produces after ``meta.schema_versions`` changes:
+every already-SUCCEEDED file becomes eligible again and is re-staged under
+a new ``_run_id`` but the SAME ``event_ts``/``_source_row_number``/
+``_file_id``), every ranking term ties and the winner is ARBITRARY. A
+silver-scoped snapshot then silently drops every tie-loser key from "this
+pass's snapshot" even though the pass's own files contain it -- observed
+live as a deterministic 54% (27/50) vanished ratio tripping
+``MassDeleteCircuitBreaker`` on every replay pass, wedging every DagRun,
+and reproduced 1:1 by
+``tests/integration/test_scd_replay_delete_detection.py`` (48% locally --
+the split is genuinely arbitrary). Bronze scoped by ``staged_run_ids`` IS
+the pass's delivered key set by construction -- immune to dedup-tie
+lineage -- and is the same table/scoping Step B's touched-key discovery
+(``load/publish/scd.py``'s ``_TOUCHED_KEYS_SQL``) has always used.
 
 10-07-PLAN.md Task 1 (Rule 4, user-approved live finding): a SECOND, related
 unscoped-read bug, found live against the real cluster's own
@@ -98,14 +120,25 @@ if TYPE_CHECKING:
 
     from dataplat.pipeline.protocol import PipelineContext
 
-# `staged_run_ids` is the ONLY value here -- `silver.customers`/
-# `staging.customers`/`normalized.customers`/`customer_id`/`is_current` are
-# all literal, hand-written identifiers (T-10-01). The cast to `::text` on
-# the `normalized.customers` side is required because `normalized.customers.
-# customer_id` is `integer` (migration 0005) while `silver.customers`/
-# `staging.customers`'s own `customer_id` is `text` (migrations 0022/0023,
-# staging's own all-text convention) -- comparing them directly would raise
-# `operator does not exist: integer = text`.
+# `staged_run_ids` is the ONLY value here -- `staging.customers`/
+# `normalized.customers`/`customer_id`/`is_current` are all literal,
+# hand-written identifiers (T-10-01). The cast to `::text` on the
+# `normalized.customers` side is required because `normalized.customers.
+# customer_id` is `integer` (migration 0005) while `staging.customers`'s
+# own `customer_id` is `text` (migration 0022, staging's own all-text
+# convention) -- comparing them directly would raise `operator does not
+# exist: integer = text`.
+#
+# `staged_snapshot` reads BRONZE (`staging.customers`), never
+# `silver.customers` -- ROUND 12 fix for root cause (16), see the module
+# docstring: silver's dedup-tie winner keeps an arbitrary `_run_id` when a
+# pass re-stages byte-identical content (D-18 replay), silently dropping
+# tie-loser keys from a silver-scoped snapshot and manufacturing a
+# mass-delete trip out of a correct replay. Bronze scoped by
+# `staged_run_ids` is exactly the key set this pass's files delivered.
+# The `customer_id IS NOT NULL` guard is defensive: staging's all-text
+# columns are nullable, and a single NULL inside a `NOT IN (...)` subquery
+# would silently empty the whole vanished set.
 #
 # `bronze_known` (10-07-PLAN.md Task 1, live finding): scopes the vanished
 # candidate set to customer_ids that have EVER appeared in `staging.
@@ -119,8 +152,9 @@ if TYPE_CHECKING:
 _VANISHED_SQL = """
 WITH staged_snapshot AS (
     SELECT DISTINCT customer_id
-    FROM   silver.customers
+    FROM   staging.customers
     WHERE  _run_id = ANY(%(staged_run_ids)s)
+      AND  customer_id IS NOT NULL
 ),
 bronze_known AS (
     SELECT DISTINCT customer_id
@@ -137,12 +171,16 @@ WHERE  is_current
 def find_vanished_customer_ids(
     conn: Connection[Any], *, staged_run_ids: Sequence[int]
 ) -> set[str]:
-    """Return every currently-current ``customer_id`` missing from THIS pass's own silver snapshot.
+    """Return every currently-current ``customer_id`` missing from THIS pass's staged bronze.
 
     Scoped to keys that have ever appeared in ``staging.customers`` (bronze)
     -- see the module docstring's live-cluster finding on why an unscoped
     read across ``normalized.customers``' full history is permanently
-    poisoned by pre-bronze legacy rows.
+    poisoned by pre-bronze legacy rows. The pass's own snapshot is read from
+    bronze scoped by ``staged_run_ids``, never from ``silver.customers`` --
+    see the module docstring's ROUND 12 paragraph: silver's dedup-tie winner
+    carries an arbitrary ``_run_id`` under a byte-identical replay, so a
+    silver-scoped snapshot misreports every tie-loser key as vanished.
 
     Args:
         conn: An already-open connection. Read-only -- never committed or
@@ -156,7 +194,7 @@ def find_vanished_customer_ids(
         ``PublishResult.published_business_keys``'s own string convention)
         of every ``normalized.customers`` row with ``is_current = true``
         AND a bronze presence in ``staging.customers``, whose key does not
-        appear in ``silver.customers`` among rows tagged with one of
+        appear in ``staging.customers`` among rows tagged with one of
         ``staged_run_ids``. Empty when ``normalized.customers`` has no
         bronze-known current rows at all (nothing can vanish from nothing).
     """

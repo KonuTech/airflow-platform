@@ -127,10 +127,18 @@ SELECT count(*)
    AND customer_id::text IN (SELECT DISTINCT customer_id FROM staging.customers)
 """
 
-# `staged_run_ids` is the only value below.
+# `staged_run_ids` is the only value below. Reads BRONZE, never
+# `silver.customers` -- debug ci-pipeline-ingestion-timeout ROUND 12 (root
+# cause 16), same reasoning as `delete_detection._VANISHED_SQL`'s own
+# bronze-scoped snapshot: silver's dedup-tie winner keeps an arbitrary
+# `_run_id` under a byte-identical D-18 replay, so a silver-scoped read of
+# "this pass's snapshot" can be empty/partial even though the pass staged a
+# full snapshot. Bronze scoped by `staged_run_ids` is exactly this pass's
+# delivered rows, so `max(event_ts)` is the snapshot's own true maximum
+# (SCD-06 effective dating, never wall-clock time).
 _SNAPSHOT_MAX_EVENT_TS_SQL = """
 SELECT max(event_ts::timestamptz)
-FROM   silver.customers
+FROM   staging.customers
 WHERE  _run_id = ANY(%(staged_run_ids)s)
 """
 
