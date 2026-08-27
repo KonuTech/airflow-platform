@@ -289,12 +289,46 @@ ROUND 13 (2026-08-27, opened on user decision: A+B+C -- CURRENT STATE):
         surface beneath a running orders pipeline (whack-a-mole precedent: 6 layers so
         far). (4) The 21 offline tests/integration failures on this machine are
         pre-existing and out of scope."
-  next_action: "Implement A (slice conftest tuple + docstring), B (Makefile cluster-up
-      retried unpause), C (is_paused_upon_creation=False on orders @dag + line-budget bump
-      per that test's own precedent); run offline battery (manifests+kubeconform, unit,
-      dagtest, policy expecting the 2 pre-existing failures); commit + push; record the
-      authoritative e2e-full run ID + companion publish.yml; return CHECKPOINT (human-action)
-      for the session manager's watcher."
+  live_verification_state: "RECORDED 2026-08-27T10:25Z: fix (17) pushed as commit 4d3db56
+      (base 4bc09b1). AUTHORITATIVE ROUND 13 live-verification run: e2e-full.yml run
+      33062702180 (headSha 4d3db56, created 2026-08-27T10:21:48Z, in_progress at
+      recording time). Companion runs, same headSha: publish.yml 33062702191 ALREADY
+      conclusion=success (criterion 0 image-race check PRE-CLEARED -- csv-processor,
+      dbt AND airflow images rebuilt from 4d3db56, which carries the
+      is_paused_upon_creation flag in the DAG file, before the e2e cluster pulls; note
+      the DAG itself also reaches the CI cluster via the hostPath mount, zero
+      staleness); CI 33062702164 failure = job-for-job IDENTICAL conclusion pattern to
+      the 794db33 baseline (Quality gate + Integration tests failing, all else green --
+      the SAME pre-existing out-of-scope failures, zero ROUND 13 regressions at job
+      level); e2e-chaos 33062702107 out of scope for this signature. The docs push
+      recording this state uses [skip ci] (ROUND 7 lesson -- no supersession).
+      POST-RUN ANALYSIS STEPS (for the continuation agent once the session manager's
+      single 60s watcher reports terminal), judged on the ROUND 13 pre-registered
+      criteria via the always()-diagnostics:
+      (1) FIX-IN-FORCE probe: csv_ingest_orders must register UNPAUSED (cluster-up log
+      shows the ROUND 13 unpause line succeeding AND/OR the DagModel/diagnostics show
+      is_paused=false; the DAG file at 4d3db56 carries the flag);
+      (2) PRIMARY (a): orders pods appear on CI for the first time -- rolling
+      etl-namespace pod census shows orders discover/stage/dbt_build/publish pods;
+      meta.ingestion_runs gains dataset=orders rows;
+      (3) PRIMARY (b): test_full_2year_sweep_customers_and_orders' orders-terminal wait
+      (timeout=5400) DRAINS instead of consuming 87+ min;
+      (4) BUDGET (c): suite duration measured against timeout-minutes: 120 -- record the
+      full decomposition either way (the deferred timeout decision's input);
+      (5) REGRESSION GUARDS (d): breaker trips 0, FailedScheduling 0, Kyverno DENY 0,
+      control-plane restarts 0, stage/dbt_build success try=1, scheduler peak < 2048Mi;
+      (6) CENSUS (e): pytest node-ID census vs the saturated 17-set -- expect
+      substantial clearing; CARRIED CAVEAT: sweep assertion (10) may legitimately still
+      fail on days-11+12 publish-pass consolidation (consolidation-semantics test-design
+      issue, independent of (17) -- name it, do not treat it as a (17) refutation);
+      (7) If orders is verifiably unpaused AND customers publish emits asset events yet
+      orders DagRuns still never trigger, (17)'s attribution is wrong -- return to
+      investigation."
+  next_action: "Await the session manager's watcher on run 33062702180; then post-run
+      analysis per live_verification_state. Carried decision follow-ups for the user:
+      quarantine/park-vs-retry on deterministic breaker trips; sidecar mirror (follow-up
+      B); pytest progress observability (-q dots never flush in a cancelled job);
+      sweep-wait legibility (module worst-case waits vs job budget)."
 
 ROUND 12 OUTCOME (2026-08-27, post-run analysis of run 33051719850 -- SUPERSEDED BY ROUND 13
     ABOVE, retained as the root-cause-(17) evidence record):
