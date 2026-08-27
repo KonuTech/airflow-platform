@@ -2,7 +2,19 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-25 (ROUND 11 POST-RUN ANALYSIS COMPLETE on run 32884691063 (headSha 377c068,
+updated: 2026-08-27 (ROUND 12 COMPLETE offline: root cause (16) CONFIRMED via local red/green
+  reproduction -- the 54% vanished mass is silver dedup-tie lineage on a BYTE-IDENTICAL
+  D-18 replay wave (schema_version_term ''->'2' re-eligibilizes all files after pass 1;
+  replayed rows full-tie the silver ranking; the then-silver-scoped _VANISHED_SQL read
+  every tie-loser as vanished; local repro 24/50=48% pre-fix, 0 post-fix). Fix (16):
+  bronze-scoped staged snapshot (_VANISHED_SQL + _SNAPSHOT_MAX_EVENT_TS_SQL) +
+  deterministic _run_id desc tie-break in both silver models + red/green regression test
+  + e2e-full.yml run->file/schema-version diagnostics. Riders resolved as non-bugs
+  (dagrun_timeout force-skip; try-7 backoff past +45:00). B-leg: corpus churn 2% max --
+  corpus/threshold correctly sized, no change. Offline battery green, zero regressions
+  (whole-directory A/B byte-identical to HEAD baseline). Awaiting live CI verification.
+  See Current Focus ROUND 12 + the two ROUND 12 Evidence entries + Resolution (16).)
+updated_prior_round12: 2026-08-25 (ROUND 11 POST-RUN ANALYSIS COMPLETE on run 32884691063 (headSha 377c068,
   conclusion CANCELLED by the job-level timeout-minutes: 120 after exactly 2h00m42s -- partial
   logs + always()-diagnostics fully recovered): fix (15) LIVE-CONFIRMED -- criteria (a)/(b)/(d)
   ALL MET: dbt_build state=success try=1 in ALL 7 DagRuns that reached it (first-ever CI dbt
@@ -152,7 +164,193 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 11 (2026-08-25, opened on user decision: SCOPE B -- CURRENT STATE):
+ROUND 12 (2026-08-27, opened on user decision: A+B -- mechanism AND design -- CURRENT STATE):
+  charter: "A leg (mechanism): root-cause residual (16) -- the deterministic 54% vanished-key
+      mass_delete_circuit_breaker trip that self-sustains the publish wedge. Close the
+      evidence gap first (bronze _run_id->file mapping dump in diagnostics and/or local
+      repro against a fresh warehouse); test the leading hypothesis (re-publication of an
+      older day-window snapshot against gold evolved past it). Riders: why publish ends
+      skipped try=6; why wedged runs sat to exactly +45:00 after publish resolved.
+      B leg (design): compute per-window churn for seed v5's 12-file corpus analytically --
+      does any legal re-publish ordering structurally exceed the 10% threshold? Assess
+      whether a breaker trip should quarantine/park instead of retrying a deterministic
+      quality-gate trip (retry-on-deterministic-trip is the wedge fuel); any
+      production-semantics change requires a decision checkpoint BEFORE implementation
+      (CI/test-config-scoped fixes may land directly). Timeout decision stays deferred to
+      post-fix measurement. Standing rules: rounds 1-11 fixes stay; runner migration/job
+      splitting retired; offline battery before push; one 60s watcher (session manager);
+      judge by internals + census; commit docs per convention."
+  hypothesis: "H16: publish's vanished-key computation identifies 'this pass's snapshot' as
+      silver rows WHERE _run_id = ANY(staged_run_ids) (delete_detection._VANISHED_SQL).
+      silver_customers dedups per key by (event_ts desc, _source_row_number desc, _file_id
+      desc) and the winning row keeps ITS OWN _run_id -- so any publish pass whose staged
+      rows LOSE the dedup to already-resident newer-day rows sees those keys as 'vanished'
+      even though its own staged files contain them. Combined with (a) discovery's
+      max_units_per_run=10 cap over a 12-file corpus (candidates sorted deterministically,
+      cap trims the tail) and (b) tripped passes never finalizing their runs (files stay
+      un-SUCCEEDED, re-discovered forever), the trip is deterministic and self-sustaining.
+      EVIDENCE SO FAR (direct, from round11-job.log TI history): EVERY DagRun staged 10
+      mapped files (map 0-9) -- including runs AFTER backfill__10:24's publish finalized 10
+      runs SUCCEEDED at 18:50:51 (10:25's discover at 18:51:54 still emitted 10 units, which
+      contradicts a simple '2 leftovers' model and is not yet explained -- the exact
+      run->file mapping is the remaining gap). The 54%=27/50 arithmetic is not yet
+      reproduced from first principles; needs the local replay."
+  falsification_criteria_preregistered:
+    - "(a) Local replay of the corpus in CI ordering (batches of 10, publish between
+      batches) either reproduces a >10% vanished ratio on the second publish pass
+      (mechanism confirmed, exact numbers explain 27/50) or it does not (H16 attribution
+      wrong -- return to investigation)."
+    - "(b) For the live verification run (if a CI/test-config fix lands): zero breaker
+      trips OR breaker trips handled without wedging; multiple complete DagRuns; no
+      +45:00 dagrun_timeout deaths."
+    - "(c) Regression guards hold: stage/dbt successes try=1 persist, FailedScheduling 0,
+      Kyverno DENY 0, control-plane restarts 0."
+    - "(d) Suite duration measured against the 120-min budget (post-fix measurement for
+      the deferred timeout decision)."
+    - "(e) Node-ID census: expect substantial clearing of the saturated 17-set."
+  reasoning_checkpoint:
+    hypothesis: "H16 (refined): the vanished-key computation's silver-scoped staged
+        snapshot misreads dedup-tie-loser keys as vanished on any byte-identical replay
+        wave; the replay wave itself is deterministic on a fresh cluster (schema term
+        '' -> '2' after pass 1); the trip aborts finalization, making the wave permanent."
+    confirming_evidence:
+      - "Local red reproduction: fresh PG18 + alembic + real dbt build + real
+        SCDPublisher, byte-identical replay wave -> 24/50 = 48% vanished,
+        QualityThresholdExceeded at threshold 0.10 (pre-fix); 26/24 arbitrary tie split
+        measured directly in silver _run_id lineage."
+      - "round11-job.log TI history: every DagRun's discover emitted 10 units including
+        one minute after 10 runs were finalized SUCCEEDED -- only explicable by an
+        idempotency-key term change (schema_version_term '' -> '2'), source-confirmed in
+        discovery.py line 909 + csv_processor source.py _resolve_schema."
+      - "Byte-identical 54% (27/50) trips across all observed tries and passes in the
+        live run -- matches the frozen-silver arithmetic exactly (no new bronze after the
+        replay wave's build -> ratio frozen)."
+    falsification_test: "Pre-registered (a): if the local replay had shown vanished==0
+        (ties all breaking toward the new runs), H16's attribution would be wrong. It
+        showed 48% -- H16 confirmed. Live criteria (b)-(e) above remain the CI-level
+        falsification for the fix."
+    fix_rationale: "Root-cause layer, not symptom: the staged snapshot's DEFINITION was
+        wrong (silver lineage proxy instead of the pass's delivered bronze keys) -- the
+        fix restates it as bronze-scoped, which is exact by construction and matches
+        Step B's existing _TOUCHED_KEYS_SQL scoping; the dbt _run_id tie-break separately
+        removes the nondeterminism (section 67) rather than masking it. NOT raising the
+        threshold, NOT shrinking the corpus (B-leg analysis: genuine churn is 2%max --
+        the data was never the problem), NOT touching retries/timeouts."
+    blind_spots: "(1) Sweep assertion (10) (missing-customer invalidated on the final
+        day's own pass) requires day 12 to publish in a pass whose bronze union lacks
+        member 32 -- if days 11+12 consolidate into one pass (likely under cap-10
+        batching: pass 3 = exactly those 2 files together), the closure never fires and
+        that node-ID stays red for a CONSOLIDATION-SEMANTICS reason independent of (16);
+        judge from the run, name it if observed. (2) The replay wave adds one full extra
+        pass (~3-7min) to every fresh-cluster suite -- expected D-18 behavior, budgeted.
+        (3) The 21 full-directory tests/integration failures on the LOCAL machine are
+        PRE-EXISTING (byte-identical failure set on clean HEAD, A/B-verified twice) --
+        local-env/order condition, out of scope. (4) Whether further residuals surface
+        beneath the unwedged publish (whack-a-mole precedent) -- post-run analysis."
+  investigation_state: "COMPLETE -- root cause (16) CONFIRMED with a local red/green
+      reproduction. Full causal chain (every link source-read + the core link reproduced
+      empirically): (1) first discovery on a fresh cluster mints idempotency keys with
+      schema_version_term='' (no meta.schema_versions row exists yet -- discovery.py line
+      909); (2) staging registers v1 (CONTRACT baseline, csv_processor source.py
+      _resolve_schema) and day-5+'s extra-column files record v2 (INFERRED; days 6-12
+      no-op on the same hash; pass-2 restages of S1 days resolve_by_hash to historical v1
+      -- NO flip-flop, version is stable at 2 after pass 1); (3) the NEXT discovery
+      computes keys with term '2' != '' -> ALL 12 files re-eligible -> full replay wave
+      with replay_of_run_id lineage (D-18, BY DESIGN -- explains the observed 10 units on
+      every discover incl. 10:25's at 18:51:54, one minute AFTER 10 runs were finalized
+      SUCCEEDED); (4) replayed bronze rows are BYTE-IDENTICAL to wave-1 rows: same
+      event_ts, same _source_row_number, same _file_id (create_file idempotent by
+      object_uri) -- only _run_id differs; (5) silver_customers.sql ranks (event_ts desc,
+      _source_row_number desc, _file_id desc) -> FULL TIE between resident and replayed
+      row per key -> ARBITRARY winner keeps its own _run_id (LOCAL REPRO: 26/24 split;
+      CI: 23/27); (6) _VANISHED_SQL defined 'this pass's snapshot' as silver rows with
+      _run_id ANY staged_run_ids -> every tie-loser key reads vanished -> 27/50=54%>10%
+      trip (LOCAL REPRO: 24/50=48% -- the split is genuinely arbitrary, the >10% trip is
+      structurally guaranteed at roster scale); (7) QualityThresholdExceeded rolls back
+      the whole publish tx -> runs stay STAGED -> identical staged_run_ids + frozen
+      silver next pass -> byte-identical trip forever (self-sustaining poison confirmed).
+      BOTH RIDERS RESOLVED, no separate bugs: 'skipped try=6' = dagrun_timeout's
+      force-skip of the up_for_retry TI (the TI dump shows try 6's own start/end with
+      the overwritten state); 'sat to +45:00' = try 7's exponential-backoff delay
+      (30s base doubling -> ~16min after try 6) reached past dagrun_timeout -- publish
+      had NOT resolved at 19:22, it was waiting for try 7. B-LEG ANSWERS: corpus churn
+      analysis -- roster is FIXED at 50, resent in full every non-gap day; the only
+      genuine key churn is the missing-customer member (1/50 = 2% from day 12) -- NO
+      legal re-publish ordering can exceed the 10% threshold under a CORRECT vanished
+      computation; corpus and threshold are correctly sized, ROUND 10's shrink did NOT
+      structurally break anything, no corpus/threshold change made. The deliberate
+      mass-delete fixture (15/50 = 30%) still trips post-fix (its staged file genuinely
+      lacks those keys)."
+  fixes_implemented: "(16a) dataplat/scd/delete_detection.py _VANISHED_SQL: staged_snapshot
+      CTE now reads staging.customers (bronze) scoped by staged_run_ids -- bronze IS the
+      pass's delivered key set by construction, immune to silver dedup-tie lineage; +
+      NULL-guard in the CTE (a NULL inside NOT IN would silently empty the vanished set).
+      (16b) load/publish/scd.py _SNAPSHOT_MAX_EVENT_TS_SQL: same silver->staging rescope
+      (the effective-dating timestamp had the same tie hazard: silver scoped to a
+      tie-losing pass could return NULL/partial max). (16c) dbt silver_customers.sql +
+      silver_orders.sql: ranking gains a final '_run_id desc' tie-break -- deterministic
+      winner (newest run) under byte-identical replays; fixes the section-67 determinism
+      violation independently (silver lineage was nondeterministic under replay).
+      (16d) NEW regression test tests/integration/test_scd_replay_delete_detection.py
+      (own fresh PG18 container + alembic + REAL dbt builds + real SCDPublisher at
+      threshold 0.10): red/green-proven -- pre-fix it reproduces the trip (24/50=48%
+      vanished on a byte-identical replay wave), post-fix vanished==0 and publish
+      succeeds; also logs the tie split (post-16c: 50/0 deterministic).
+      (16e) tests/integration/test_scd_delete_detection.py updated to bronze-scoped
+      semantics (vanish = absent from this pass's staged BRONZE) incl. a dedicated (16)
+      unit-level guard test_replayed_key_with_stale_silver_lineage_is_never_vanished.
+      (16f) e2e-full.yml always()-diagnostics: ROUND 12 block dumps
+      meta.ingestion_runs->meta.files mapping (+replay_of_run_id), meta.schema_versions
+      history, silver _run_id distribution, and per-run bronze counts via psql in the
+      CNPG primary -- closes ROUND 11's named evidence gap for all future runs.
+      DELIBERATELY NOT implemented (production semantics -- decision checkpoint item):
+      quarantine/park-on-deterministic-breaker-trip instead of retrying (retries=6 with
+      exponential backoff is still wedge fuel if any future deterministic trip appears);
+      with (16) fixed CI has no deterministic trips left, so this is a design follow-up,
+      not a blocker. No timeout-minutes change (per charter: post-fix measurement
+      first; arithmetic says ~3 passes x 3-7min + sweep backfills should fit 120min)."
+  live_verification_state: "RECORDED 2026-08-27T07:56Z: fix (16) pushed as commit 794db33
+      (base 89bacea). AUTHORITATIVE ROUND 12 live-verification run: e2e-full.yml run
+      33051719850 (headSha 794db33, created 2026-08-27T07:54:53Z, in_progress at
+      recording time). Companion runs, same headSha: publish.yml 33051719760 ALREADY
+      conclusion=success (criterion 0 image-race check PRE-CLEARED -- both the
+      csv-processor image (carries dataplat fixes 16a/16b) and the dbt image (carries
+      16c via COPY dbt/) rebuilt from 794db33 before the e2e cluster pulls); CI
+      33051719761 failure = the SAME 21 pre-existing integration failures as the local
+      clean-HEAD baseline (byte-identical list; out of scope per charter, zero ROUND 12
+      regressions); e2e-chaos 33051719758 out of scope for this signature. The docs
+      push recording this state uses [skip ci] (ROUND 7 lesson -- no supersession).
+      POST-RUN ANALYSIS STEPS (for the continuation agent once the session manager's
+      single 60s watcher reports terminal), judged on the ROUND 12 pre-registered
+      criteria via the always()-diagnostics:
+      (1) FIX-IN-FORCE probe: the ROUND 12 diagnostics block must show
+      meta.schema_versions history (expect v1 CONTRACT + v2 INFERRED) AND the
+      run->file mapping with replay_of_run_id lineage; silver _run_id distribution
+      should show the replay wave's runs winning deterministically (16c);
+      (2) PRIMARY: zero mass_delete_circuit_breaker trips (grep vanished-key) OR any
+      trip NOT wedging (no publish retries-exhausted); MULTIPLE complete DagRuns
+      (state=success), publish success try=1 in each; NO DagRun failing at exactly
+      start+45:00;
+      (3) REGRESSION GUARDS: stage/dbt_build successes try=1 persist, FailedScheduling
+      census 0, Kyverno DENY 0, control-plane restarts 0, scheduler peak < 2048Mi;
+      (4) BUDGET MEASUREMENT (deferred timeout decision input): total pytest wall vs
+      the 120-min job budget; expect ~1 extra full replay pass (~3-7min, D-18 by
+      design) + the days-11/12 pass;
+      (5) SECONDARY: pytest node-ID census vs the saturated 17-set -- expect
+      substantial clearing; PRE-REGISTERED CAVEAT: sweep assertion (10)
+      (missing-customer invalidated on the final day's own pass) may legitimately
+      still fail if days 11+12 consolidate into one publish pass (bronze union then
+      contains member 32) -- that is a consolidation-semantics test-design issue
+      INDEPENDENT of (16); name it, do not treat it as a (16) refutation;
+      (6) If dbt_build or publish fails with the 794db33 images verifiably pulled and
+      vanished-key text present, (16)'s fix attribution is wrong -- return to
+      investigation."
+  next_action: "Await the session manager's watcher on run 33051719850; then post-run
+      analysis per live_verification_state; decision checkpoint follow-up item for the
+      user: quarantine/park-vs-retry on deterministic breaker trips (production
+      semantics, proposed NOT implemented)."
+
+ROUND 11 (2026-08-25, opened on user decision: SCOPE B -- SUPERSEDED BY ROUND 12 ABOVE):
   charter: "User-chosen scope B: (1) 15a silver_orders/dedup_audit null dataset_id -- fix the
       orders dataset_id resolution on a fresh cluster at the right layer (registration
       ordering vs seed vs the model's lookup), NOT a nullable-column workaround. (2) 15b
@@ -4743,8 +4941,107 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     free-tier runner -- current evidence argues AGAINST reviving runner migration/job
     splitting.
 
+- timestamp: 2026-08-27 (ROUND 12 -- root-cause investigation of residual (16), source
+    reads + round11 TI-history mining + LOCAL red/green reproduction)
+  checked: >
+    (a) dataplat/scd/delete_detection.py (_VANISHED_SQL silver scoping, breaker),
+    load/publish/scd.py (publish steps A-D, _CURRENT_COUNT/_SNAPSHOT_MAX SQL),
+    pipeline/run.py publish_ingest (claims ALL currently-STAGED runs),
+    metadata/repository.py (run lifecycle PENDING->RUNNING->STAGED->SUCCEEDED; stage
+    claim requires PENDING/FAILED/expired-lease; SKIPPED_DUPLICATE for SUCCEEDED),
+    discovery.py (idempotency-key formula incl. schema_version_term resolved from
+    schema.get_current at line 909; create_file/get_or_create_batch idempotent;
+    deterministic sort + max_units_per_run cap; ALREADY_SUCCEEDED skip; replay_of_run_id),
+    csv_processor source.py _resolve_schema (CONTRACT v1 bootstrap; INFERRED v2 on new
+    column; resolve_by_hash for historical schemas -- no version flip-flop),
+    schema/repository.py sync() (hash-compare, no-op on same hash),
+    dbt silver_customers.sql (incremental floor = max(_run_id) in silver; ranking
+    event_ts desc/_source_row_number desc/_file_id desc; winner keeps its own _run_id),
+    tools/corpus/dated_series.py (fixed 50-member roster resent in full every non-gap
+    day; include_extra = day_index >= 5 so days 5-12 all carry the extra column; missing
+    member only from day 12), test_backfill_2year_sweep.py seed-v5 parameters.
+    (b) round11-job.log TI history: stage map counts per DagRun, discover/publish
+    timings, publish end-states. (c) NEW local reproduction
+    tests/integration/test_scd_replay_delete_detection.py: fresh PG18 container +
+    alembic + REAL dbt builds + real SCDPublisher at threshold 0.10, wave 1 (10
+    day-files x 50-key roster) published, then a byte-identical replay wave under new
+    run_ids.
+  found: >
+    ROOT CAUSE (16) CONFIRMED, full chain: fresh cluster -> first discovery mints keys
+    with schema term '' -> staging registers v1 then v2 (day-5+ extra column) -> next
+    discovery's term '2' re-eligibilizes ALL files (D-18 replay by design; explains
+    every discover emitting 10 units, incl. 10:25's at 18:51:54 one minute AFTER 10
+    runs were SUCCEEDED) -> replayed bronze rows are byte-identical (same
+    event_ts/_source_row_number/_file_id, only _run_id differs) -> silver's ranking
+    FULL-TIES and the winner's _run_id is ARBITRARY (live 23/27, local repro 26/24) ->
+    _VANISHED_SQL's silver-scoped snapshot reads every tie-loser as vanished (live
+    27/50=54%, local repro 24/50=48% -- red reproduction of the exact trip class) ->
+    trip rolls back the tx -> runs stay STAGED -> identical staged_run_ids + frozen
+    silver -> byte-identical trip forever. RIDERS RESOLVED (not separate bugs):
+    'skipped try=6' is dagrun_timeout's force-skip of the up_for_retry TI; the +45:00
+    sit is try 7's ~16min exponential backoff reaching past the timeout -- publish had
+    not resolved at 19:22, it was up_for_retry. B-LEG: roster churn is structurally
+    1/50=2% max (missing member, day 12 only) -- NO legal ordering exceeds the 10%
+    threshold under a correct computation; corpus/threshold correctly sized, ROUND 10
+    shrink blameless; the deliberate mass-delete fixture (15/50=30%) still trips
+    post-fix.
+  implication: >
+    Production-shaped platform defect, not a test/corpus problem: ANY deployment doing
+    a D-18 formula-driven replay (schema evolution, config change, processor bump) of
+    snapshot-semantics data would trip the breaker on correct traffic -- or WORSE, at a
+    permissive threshold, apply delete semantics to keys that are actually present
+    (silent SCD closure of live keys). Fix at the definition layer: the pass's staged
+    snapshot is its BRONZE (staging.customers scoped by staged_run_ids -- exact by
+    construction, same scoping Step B always used), never silver's tie-lineage proxy;
+    plus a deterministic _run_id desc final tie-break in both silver models (section-67
+    determinism). Quarantine-vs-retry on deterministic breaker trips left as a design
+    decision item (production semantics, checkpoint), not needed for CI to go green.
+
+- timestamp: 2026-08-27 (ROUND 12 -- fix implementation + offline verification)
+  checked: >
+    Red/green falsification of fix (16): the new replay regression test run pre-fix
+    (red) and post-fix (green); tie-split diagnostic pre/post 16c; full offline battery
+    incl. an A/B of the whole tests/integration directory against clean HEAD.
+  found: >
+    RED (pre-fix): test_scd_replay_delete_detection fails exactly as live CI --
+    'replay of identical content read 24/50 keys as vanished (48%)'; tie split 26
+    new / 24 old (arbitrary). GREEN (post-fix): vanished==0, publish succeeds at
+    threshold 0.10, tie split deterministic 50/0 (16c working). One implementation
+    defect caught by the battery and fixed: the first silver_orders.sql edit used
+    Jinja '{#- -#}' trim markers between 'partition by' and 'order by', gluing them
+    into invalid SQL ('order_idorder by') -- switched both models to non-trimming
+    '{# #}' comments; all dbt suites re-green. Battery: tests/unit 555/555;
+    tests/dagtest 14/14; tests/policy -m 'not manifests' 157 pass / 2 fail (SAME 2
+    pre-existing out-of-scope); make manifests kubeconform 540 resources / 0 invalid
+    / 0 errors; test_manifest_resources 5/5; test_values_profiles 6/6; targeted
+    integration: test_scd_delete_detection 14/14 (semantics updated + new (16) guard
+    test), test_dbt_{silver_dedup,dedup_audit,silver_incremental,reconciliation} +
+    replay test 11/11 + 1/1; FULL tests/integration A/B: failure set with fix is
+    BYTE-IDENTICAL to clean-HEAD baseline (21 pre-existing local-env/order failures,
+    diff empty) -- zero regressions; ruff clean; ruff format diffs byte-identical
+    pre-existing drift; mypy errors identical-class pre-existing test idiom
+    (type-ignore-with-suffix, test_publish_scd precedent); e2e-full.yml yaml parse OK.
+  implication: >
+    Fix (16) is offline-proven at the strongest level this session can produce (genuine
+    red/green against a fresh-database reproduction of the live failure). Remaining
+    verification is the live CI run (pre-registered criteria in Current Focus).
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
+
+- hypothesis: "ROUND 12 alternates for (16)'s 54%: (i) the mass-delete test fixture's own
+    15/50 snapshot leaked into the sweep corpus; (ii) per-window roster churn in seed v5
+    structurally exceeds 10%; (iii) re-publication of an older day-window against evolved
+    gold with CORRECT snapshot computation."
+  evidence: "(i) raw/customers listing at cancel: exactly the 12 corpus files, no fixture
+    object (ROUND 11 evidence). (ii) dated_series.py roster model: fixed 50 members,
+    full resend every non-gap day; only genuine churn = missing member 1/50 = 2% from
+    day 12 -- structurally cannot exceed 10%. (iii) the older-window hypothesis was
+    half-right (re-publication IS the trigger) but the vanished mass comes from
+    dedup-tie lineage on BYTE-IDENTICAL replays, not from genuine window differences --
+    proven by the local repro where every wave contains identical full-roster content
+    yet 48% still 'vanished' pre-fix."
+  timestamp: 2026-08-27 (ROUND 12)
 
 - hypothesis: "The K8s livenessProbe/startupProbe.timeoutSeconds:60 fix already applied this session (commit 5abe533/99197cf) fully resolved the CPU-contention-driven scheduler/dag-processor instability."
   evidence: "Live diagnostic capture from run 32675592471 (job 97283007457), which already included that exact commit, still shows airflow-dag-processor with 5 restarts and airflow-scheduler-0 not fully Ready, with 'No alive jobs found' / liveness-probe-failed / BackOff events -- the fix reduced (perhaps) but did not eliminate the crash-loop, because it addressed K8s probe-command latency, not Airflow's own internal scheduler_health_check_threshold (30s default) that independently governs the same 'is the scheduler alive' verdict."
@@ -5213,11 +5510,28 @@ root_cause: >
   publish retries=6 exhaust, DagRun wedges to exactly dagrun_timeout=45min, and because
   tripped runs never publish their files are never marked ingested -> re-discovered next
   run -> SELF-SUSTAINING poison; 4x45min wedges blew the job's timeout-minutes: 120
-  (conclusion cancelled at 2h00m42s). Leading (partly INFERRED) mechanism: re-publication
-  of a day-window snapshot against gold evolved past it fails to re-confirm >10% of
-  current keys; WHICH files each run staged is the ROUND 12 evidence gap. Open
-  sub-questions: publish end-state skipped-at-try-6 mechanism; wedged runs sitting to
-  +45:00 after publish resolved.
+  (conclusion cancelled at 2h00m42s).
+  ROUND 12 UPDATE: (16) is now CONFIRMED (upgraded from candidate) with a local
+  red/green reproduction and every chain link source-read. Actual mechanism (the
+  ROUND 11 'older day-window' inference was only the trigger half): on a fresh cluster
+  the first discovery mints idempotency keys with schema_version_term='' (no schema
+  version exists yet); staging registers v1 then v2 (the corpus' day-5+ extra column,
+  INFERRED); the next discovery's term '2' makes ALL files -- including SUCCEEDED ones
+  -- eligible again (D-18 formula replay, BY DESIGN, replay_of_run_id set), producing a
+  full replay wave of BYTE-IDENTICAL bronze rows (same event_ts/_source_row_number/
+  _file_id via idempotent create_file -- only _run_id differs). silver_customers'
+  dedup ranking (event_ts desc, _source_row_number desc, _file_id desc) FULL-TIES
+  between each resident row and its replay, the arbitrary winner keeps its own
+  _run_id (live: 23 new/27 old; local repro: 26/24), and _VANISHED_SQL's then
+  silver-scoped 'staged snapshot' read every tie-loser as vanished: 27/50 = 54% (local
+  repro: 24/50 = 48%) > 10% -> trip -> tx rollback -> runs stay STAGED -> identical
+  trip forever. Riders resolved as non-bugs: 'skipped try=6' is dagrun_timeout
+  force-skipping the up_for_retry TI; the +45:00 sit is try 7's ~16min exponential
+  backoff reaching past dagrun_timeout (publish was up_for_retry, not resolved).
+  Production-shaped: any D-18 replay (schema/config/processor change) of
+  snapshot-semantics data would trip on correct traffic -- or, under a permissive
+  threshold, silently apply delete semantics to keys that are present. B-leg: corpus
+  churn is structurally 2% max; corpus/threshold correctly sized; no corpus change.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -5443,6 +5757,31 @@ fix: >
   exactly why information_schema.schemata reports it); staging/silver/normalized
   deliberately NOT allowlisted (no analytics_owner USAGE -- if one ever appears the test
   should flag it); stale Phase-3 'no schema exists yet' docstring corrected.
+  (16, ROUND 12, user-chosen A+B charter): (16a)
+  packages/dataplat/src/dataplat/scd/delete_detection.py: _VANISHED_SQL's
+  staged_snapshot CTE reads staging.customers (bronze) scoped by staged_run_ids --
+  bronze IS the pass's delivered key set by construction, immune to silver dedup-tie
+  lineage -- plus a customer_id IS NOT NULL guard (one NULL inside NOT IN silently
+  empties the vanished set); module + function docstrings document the replay-tie
+  mechanism. (16b) packages/dataplat/src/dataplat/load/publish/scd.py:
+  _SNAPSHOT_MAX_EVENT_TS_SQL same silver->staging rescope (SCD-06 effective dating from
+  the pass's own delivered rows; the silver-scoped read could return NULL/partial under
+  a tie-losing pass). (16c) dbt/models/silver/silver_customers.sql +
+  silver_orders.sql: ranking gains a final '_run_id desc' tie-break (deterministic
+  newest-run winner under byte-identical D-18 replays; fixes the section-67 determinism
+  violation in silver lineage). (16d) NEW
+  tests/integration/test_scd_replay_delete_detection.py: fresh-PG18 red/green replay
+  regression (wave 1 published, byte-identical replay wave, asserts vanished==0 AND a
+  clean publish at customers.yaml's real 0.10 threshold; logs the tie split). (16e)
+  tests/integration/test_scd_delete_detection.py updated to bronze-scoped semantics +
+  new unit-level (16) guard test_replayed_key_with_stale_silver_lineage_is_never_
+  vanished. (16f) .github/workflows/e2e-full.yml: ROUND 12 always()-diagnostics block
+  (run->file mapping incl. replay_of_run_id, schema_versions history, silver _run_id
+  distribution, per-run bronze counts via psql in the CNPG primary) -- closes ROUND
+  11's evidence gap permanently. Deliberately NOT changed: retries/quarantine behavior
+  on deterministic breaker trips (production semantics -- proposed as a decision item),
+  timeout-minutes (deferred to post-fix measurement per charter), corpus/threshold
+  (B-leg analysis proved them correctly sized).
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -5681,6 +6020,31 @@ verification: >
   NEW residual (16) (publish mass-delete-breaker poison, 45-min wedges); criterion (e)
   node-ID diff unmeasurable (cancelled step's streamed stdout not archived). Suite NOT
   yet green: (16) dominates.
+  Fix (16), ROUND 12: offline battery ALL GREEN with a genuine red/green falsification
+  and a whole-directory A/B -- RED: the NEW fresh-database replay regression reproduces
+  the exact live trip class pre-fix ('replay of identical content read 24/50 keys as
+  vanished (48%)', QualityThresholdExceeded at threshold 0.10; measured arbitrary tie
+  split 26/24). GREEN post-fix: vanished==0, publish succeeds, tie split deterministic
+  50/0 (16c load-bearing). Battery: tests/unit 555/555; tests/dagtest 14/14;
+  tests/policy -m 'not manifests' 157 passed / 2 failed -- the SAME 2 pre-existing
+  out-of-scope failures as every prior round; make manifests kubeconform -strict 540
+  resources / 0 invalid / 0 errors; test_manifest_resources 5/5 (no chart values
+  touched); test_values_profiles 6/6; targeted integration
+  test_scd_delete_detection 14/14, dbt suites (silver_dedup/dedup_audit/
+  silver_incremental/reconciliation) + replay test 12/12; FULL tests/integration
+  directory A/B against clean HEAD: failure set BYTE-IDENTICAL (21 pre-existing
+  local-env/order-dependent failures, empty diff -- zero regressions; these 21 fail on
+  unmodified HEAD on this machine and are out of this session's scope); ruff check
+  clean; ruff format diffs byte-identical pre-existing drift; mypy errors
+  identical-class pre-existing test idiom (test_publish_scd precedent); e2e-full.yml
+  YAML parse clean. Implementation defect caught by the battery itself and fixed
+  in-round: Jinja '{#- -#}' trim markers in the first silver_orders.sql edit glued
+  'partition by order_id' to 'order by' -- switched to non-trimming '{# #}', all dbt
+  suites re-green. LIVE CI VERIFICATION: pending -- judged on the ROUND 12
+  pre-registered criteria (zero breaker trips or trips without wedging; multiple
+  complete DagRuns; no +45:00 dagrun_timeout deaths; regression guards; suite duration
+  vs the 120-min budget; node-ID census clearing), with the ROUND 12 diagnostics block
+  (16f) providing the run->file/schema-version/silver-lineage evidence directly.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -5712,3 +6076,9 @@ files_changed:
   - tests/integration/test_dbt_dedup_audit.py
   - tests/e2e/slice/test_smoke_and_idempotency.py
   - tests/e2e/cluster/test_postgres_topology.py
+  - packages/dataplat/src/dataplat/scd/delete_detection.py
+  - packages/dataplat/src/dataplat/load/publish/scd.py
+  - dbt/models/silver/silver_customers.sql
+  - dbt/models/silver/silver_orders.sql
+  - tests/integration/test_scd_replay_delete_detection.py
+  - tests/integration/test_scd_delete_detection.py
