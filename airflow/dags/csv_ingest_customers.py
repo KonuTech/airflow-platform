@@ -27,7 +27,7 @@ from kubernetes.client import models as k8s
 
 from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
-from _common.kpo import common_kpo_kwargs, stage_pod_resources
+from _common.kpo import common_kpo_kwargs, publish_retries, stage_pod_resources
 from _common.run_stage_recorder import wire_dbt_build_tracking
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
@@ -178,15 +178,15 @@ def csv_ingest_customers() -> None:
             include_dataplat_credentials=False,
         ),
     )
-    # retries=6 (not the DAG's usual 2-3): same KubernetesJobWatcher request-timeout race as
-    # `stage` above -- live-confirmed 2026-08-22 during plan 10-08's concurrency test to also
-    # hit publish, which (unlike dbt_build) has no equivalent resolve_*_status resilience of its
-    # own, so it needs the retry headroom directly.
+    # publish_retries() (debug/ci-pipeline-ingestion-timeout ROUND 14 trim iii; was a hardcoded
+    # 6 for the KubernetesJobWatcher race `stage` documents above): local keeps 6 verbatim; CI
+    # sets Variable publish_retries=3 -- retries now serve ONLY the transient class, since
+    # deterministic breaker trips quarantine + exit 0 (see _common/kpo.py's own comment).
     publish = KubernetesPodOperator(
         task_id="publish",
         cmds=["dataplat"],
         arguments=["publish", "--dataset", "customers"],
-        retries=6,
+        retries=publish_retries(),
         retry_exponential_backoff=True,
         retry_delay=_KYVERNO_RETRY_DELAY,
         outlets=[customers_asset],

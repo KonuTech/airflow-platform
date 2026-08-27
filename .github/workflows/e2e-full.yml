@@ -34,11 +34,14 @@ jobs:
     # on an ALREADY-WARM cluster (STATE.md's own resolved-incident log). This
     # job additionally runs cluster+slice (incl. the 2-year sweep), kind
     # boot, 6+ Helm installs, AND a second full historical reprocessing pass
-    # for rebuild-from-raw — plausibly 45-90+ minutes. 120 is a documented
-    # starting ceiling (not a guess dressed as a fact), to be tuned down
-    # after real runs, mirroring e2e-smoke.yml's own timeout-comment
-    # convention.
-    timeout-minutes: 120
+    # for rebuild-from-raw. 120 was the documented starting ceiling; raised
+    # to 150 (debug/ci-pipeline-ingestion-timeout ROUND 14, user-chosen
+    # Option C) from MEASURED arithmetic, not a guess: ROUND 13's live run
+    # decomposed to ~2h35m-2h50m as-is, ~1h55m-2h10m with the mass-delete
+    # breaker collateral eliminated (same round's companion trims) -- 150
+    # covers the trimmed projection incl. the never-yet-measured
+    # observability + rebuild-from-raw steps, with margin.
+    timeout-minutes: 150
     permissions:
       contents: read
       issues: write

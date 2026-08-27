@@ -380,8 +380,17 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice 
 # problem. This is a disclosed, CI-workflow-specific narrowing, not a
 # replacement -- mirroring smoke-verify's own "deliberately narrower"
 # precedent above.
+#
+# `-v`, not `-q` (debug/ci-pipeline-ingestion-timeout ROUND 14 rider): three
+# consecutive cancelled e2e-full.yml jobs left ZERO pytest output -- `-q`'s
+# dot-progress never completes a line, and GitHub Actions' log capture is
+# line-buffered, so a cancelled job shows nothing at all (the node-ID census
+# was unmeasurable for 3 rounds running). `-v` emits one newline-terminated
+# line per finished test, so even a job killed by timeout-minutes leaves a
+# legible per-test progress record. CI-only by construction: this target
+# exists ONLY for e2e-full.yml (see above); local `cluster-verify` keeps -q.
 cluster-slice-verify:           ## Quick task 260824-ayw: cluster+slice only, no observability -- exists ONLY for .github/workflows/e2e-full.yml's CONTEXT.md-locked staggering strategy
-	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice -q
+	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice -v
 
 # Quick task 260824-ayw: CONTEXT.md's locked CPU-contention decision -- the
 # CI node has ~3 allocatable CPU shared by Airflow, 2x Postgres, MinIO,
@@ -417,7 +426,7 @@ observability-verify-ci:        ## Quick task 260824-ayw: install trimmed monito
 	set -e; \
 	ctx="kind-$$CLUSTER_NAME"; \
 	PROFILE=ci KUBECTL_CONTEXT="$$ctx" scripts/monitoring-install.sh; \
-	$(RUN_CLUSTER) pytest tests/e2e/observability -q; \
+	$(RUN_CLUSTER) pytest tests/e2e/observability -v; \
 	KUBECTL_CONTEXT="$$ctx" scripts/monitoring-teardown.sh
 
 smoke-verify:                   ## D-20: fast PR-gating subset (4 checks) against the live cluster — distinct from cluster-verify's full suite [plan 11-04]

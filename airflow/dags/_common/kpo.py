@@ -61,6 +61,31 @@ _OTEL_COLLECTOR_ENDPOINT = (
 # first) the image Variables already exercise offline.
 _DEFAULT_STAGE_CPU_REQUEST = "500m"
 
+# debug/ci-pipeline-ingestion-timeout ROUND 14 (finding 18a, trim iii): CI
+# trims customers' publish retries via Airflow Variable publish_retries=3
+# (scripts/ci-set-workload-images.sh, the stage_cpu_request precedent above);
+# local never sets it and keeps this default -- byte-identical to the
+# retries=6 the DAG hardcoded before this change. Post-ROUND-14, publish
+# retries exist ONLY for the transient-infrastructure class (the
+# KubernetesJobWatcher 30s-read-timeout race, Kyverno admission hiccups,
+# co-scheduling CPU bursts) -- deterministic quality-gate trips no longer
+# consume retries at all (publish_ingest quarantines the batch and exits 0),
+# so the CI value is sized against the measured transient burst window
+# (~5min self-healed, ROUND 13), not against breaker-trip burn.
+_DEFAULT_PUBLISH_RETRIES = "6"
+
+
+def publish_retries() -> int:
+    """Resolve the publish task's Airflow ``retries`` count, per profile.
+
+    CI sets the ``publish_retries`` Variable to a smaller value (see the
+    module comment above); local falls back to the historical default of 6.
+    Resolved at DAG-parse time through the same layered chain
+    (``AIRFLOW_VAR_PUBLISH_RETRIES`` env backend first) the image Variables
+    already exercise offline.
+    """
+    return int(Variable.get("publish_retries", default=_DEFAULT_PUBLISH_RETRIES))
+
 
 def stage_pod_resources() -> k8s.V1ResourceRequirements:
     """Build the heavy stage/publish pod resource profile, CPU request per profile.

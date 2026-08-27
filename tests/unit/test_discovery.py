@@ -419,6 +419,58 @@ def test_discover_files_re_offers_pending_runs_but_excludes_succeeded_ones() -> 
     assert first_units[0].run_id not in {unit.run_id for unit in second_units}
 
 
+def test_discover_files_never_re_offers_a_quarantined_run() -> None:
+    """Debug ci-pipeline-ingestion-timeout ROUND 14 (finding 18a): QUARANTINED is terminal.
+
+    `publish_ingest` writes `QUARANTINED` when a pass trips a deterministic quality gate
+    (mass-delete breaker). Discovery must treat it exactly like `SUCCEEDED` -- never
+    re-offered -- otherwise every subsequent discover call (one */1 cron tick at a time, on
+    the live cluster) would re-claim the refused batch and re-run an identical, deterministic
+    trip forever. Mirrors the `excludes_succeeded_ones` test above, substituting the new
+    terminal status.
+    """
+    objects = _FakeObjectStore()
+    objects.put("raw", "customers/a.csv", b"a content")
+    objects.put("raw", "customers/b.csv", b"b content")
+    objects.put("raw", "customers/c.csv", b"c content")
+    metadata = _FakeMetadataRepository()
+
+    first_units = discover_files(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=_DATASET_ID,
+        dataset_name=_DATASET_NAME,
+        config=_skip_config(),
+        config_version_id=_CONFIG_VERSION_ID,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
+    )
+    assert len(first_units) == 3
+    # Simulate publish_ingest's quarantine disposition on exactly one run.
+    metadata.force_run_status(first_units[0].run_id, "QUARANTINED")
+
+    second_units = discover_files(
+        metadata=metadata,
+        objects=objects,
+        dataset_id=_DATASET_ID,
+        dataset_name=_DATASET_NAME,
+        config=_skip_config(),
+        config_version_id=_CONFIG_VERSION_ID,
+        config_hash=_CONFIG_HASH,
+        processor_image=_PROCESSOR_IMAGE,
+        processor_version=_PROCESSOR_VERSION,
+        schema=_fake_schema(),
+    )
+
+    assert len(second_units) == 2
+    assert first_units[0].run_id not in {unit.run_id for unit in second_units}
+    # A quarantined run is also never a replay source: find_latest_succeeded_run_for_file
+    # matches status = 'SUCCEEDED' only, so no re-created row points replay_of_run_id at it.
+    assert all(row.replay_of_run_id is None for row in metadata.runs_by_key.values())
+
+
 def test_discover_files_marks_a_content_duplicate_under_a_different_object_uri() -> None:
     objects = _FakeObjectStore()
     objects.put("raw", "customers/original.csv", b"identical content")

@@ -113,6 +113,20 @@ _PIPELINE_VERSION = "2"
 # bytes, not a row count.
 _HASH_CHUNK_BYTES = 1_048_576
 
+# The run statuses discovery must NEVER re-offer (debug session
+# ci-pipeline-ingestion-timeout ROUND 14): historically only `SUCCEEDED` --
+# "a run already SUCCEEDED is skipped, everything else is re-offered".
+# `QUARANTINED` (written by `dataplat.pipeline.run.publish_ingest` when a
+# pass trips a deterministic quality gate, e.g. the mass-delete circuit
+# breaker) joins it: a quarantined batch was deliberately REFUSED by a
+# business rule whose inputs are a pure function of the batch itself --
+# re-offering it would re-run an identical computation forever (one cron
+# tick at a time), and re-staging it would re-inject the identical poisoned
+# key set into every subsequent publish pass of the dataset. Recovery is an
+# explicit operator action (re-open the run, or land a corrected file as a
+# NEW raw object per section-63), never silent rediscovery.
+_TERMINAL_NON_REOFFERABLE_STATUSES = frozenset({"SUCCEEDED", "QUARANTINED"})
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredUnit:
@@ -321,7 +335,7 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
     Returns:
         A new `DiscoveredUnit` for this group, or `None` when ANY part was a
         content duplicate (D-13, T-06-33 -- the WHOLE group is withheld this
-        call) or the group's run already `SUCCEEDED`.
+        call) or the group's run already `SUCCEEDED`/`QUARANTINED`.
     """
     parts: list[_PartRegistration] = []
     any_duplicate = False
@@ -419,11 +433,11 @@ def _process_multipart_group(  # noqa: PLR0913 -- one keyword per genuinely dist
         replay_of_run_id=replay_of_run_id,
     )
 
-    if status == "SUCCEEDED":
+    if status in _TERMINAL_NON_REOFFERABLE_STATUSES:
         log.info(
             "discovery.object_evaluated",
             dataset=dataset_name,
-            decision="ALREADY_SUCCEEDED",
+            decision="ALREADY_SUCCEEDED" if status == "SUCCEEDED" else "QUARANTINED",
             group_key=group.group_key,
         )
         return None
@@ -532,7 +546,7 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
 
     Returns:
         A new `DiscoveredUnit` for this object, or `None` when it was a
-        content duplicate (D-13) or its run already `SUCCEEDED`.
+        content duplicate (D-13) or its run already `SUCCEEDED`/`QUARANTINED`.
     """
     object_uri = f"s3://{config.source.bucket}/{obj.key}"
 
@@ -609,13 +623,13 @@ def _process_ungrouped_object(  # noqa: PLR0913 -- one keyword per genuinely dis
         replay_of_run_id=replay_of_run_id,
     )
 
-    if status == "SUCCEEDED":
+    if status in _TERMINAL_NON_REOFFERABLE_STATUSES:
         log.info(
             "discovery.object_evaluated",
             dataset=dataset_name,
             object_uri=object_uri,
             content_sha256_prefix=content_sha256_hex[:12],
-            decision="ALREADY_SUCCEEDED",
+            decision="ALREADY_SUCCEEDED" if status == "SUCCEEDED" else "QUARANTINED",
             business_date=business_date_facet,
         )
         return None
@@ -802,8 +816,9 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
     multipart group, one batch spanning every part -- this phase's
     documented one-file-one-batch simplification generalizes to
     one-group-one-batch), pre-allocate an ingestion run (idempotent -- a run
-    already ``SUCCEEDED`` is skipped, everything else is re-offered), and
-    freeze an ``AssignmentDocument`` to
+    already ``SUCCEEDED`` or ``QUARANTINED`` is skipped
+    (``_TERMINAL_NON_REOFFERABLE_STATUSES``), everything else is
+    re-offered), and freeze an ``AssignmentDocument`` to
     ``s3://metadata/assignments/<dataset_name>/<run_id>.json``. (5) Cap the
     result at ``config.batching.max_units_per_run``, deterministically
     (never by listing order, which S3-compatible stores do not guarantee
@@ -874,8 +889,8 @@ def discover_files(  # noqa: PLR0913 -- one keyword per genuinely distinct input
     Returns:
         Up to ``config.batching.max_units_per_run`` ``DiscoveredUnit``
         objects, deterministically ordered, ready for Dynamic Task
-        Mapping. Files already ``SUCCEEDED`` or marked duplicate are
-        excluded.
+        Mapping. Files already ``SUCCEEDED`` or ``QUARANTINED``, or marked
+        duplicate, are excluded.
     """
     log = get_logger()
     listed = sorted(

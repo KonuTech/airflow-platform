@@ -1,8 +1,12 @@
 ---
-status: investigating
+status: fixing
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 13 POST-RUN ANALYSIS COMPLETE on run 33062702180 (headSha 4d3db56,
+updated: 2026-08-27 (ROUND 14 opened on user decision Option C for finding (18a): trim the
+  mass-delete collateral (all three complementary shapes, B-ii production change explicitly
+  approved) AND raise timeout-minutes to 150, plus the pytest-observability rider. See Current
+  Focus ROUND 14.)
+updated_prior_round14: 2026-08-27 (ROUND 13 POST-RUN ANALYSIS COMPLETE on run 33062702180 (headSha 4d3db56,
   conclusion CANCELLED by job timeout-minutes: 120 after exactly 2h00m49s -- partial log +
   always()-diagnostics fully recovered, 7280 lines): fix (17) LIVE-CONFIRMED IN FULL --
   cluster-up's layer-B unpause line fired 10:28:07 ("csv_ingest_orders unpaused"), FIRST-EVER
@@ -218,7 +222,187 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 13 OUTCOME (2026-08-27, post-run analysis of run 33062702180 -- CURRENT STATE):
+ROUND 14 (2026-08-27, opened on user decision Option C -- CURRENT STATE):
+  charter: "Fix finding (18a)'s ~40min mass-delete collateral via ALL THREE complementary trim
+      shapes AND raise timeout-minutes 120 -> 150, plus the pytest-observability rider.
+      (1) timeout-minutes: 150 in e2e-full.yml (fits the ~1h55-2h10 with-trims projection with
+      margin; 120 cannot hold even the trimmed projection). (2) Trim i (test-scoped): the
+      mass-delete breaker fixture must be invisible/short-lived to the */1 cron window.
+      (3) Trim ii (production semantics, EXPLICITLY USER-APPROVED): deterministic
+      breaker-class errors (QualityThresholdExceeded-style trips) fail fast / quarantine the
+      batch per the section-51 quarantine concept instead of burning exponential-backoff
+      retries; retries stay for the transient-infrastructure class. (4) Trim iii (CI config):
+      reduce publish retry attempts in the CI profile. (5) Rider: replace/augment pytest -q so
+      cancelled runs leave legible per-test progress. User's complementarity condition: all
+      three trims land PROVIDED they are complementary; on a genuine conflict prefer the safer
+      subset and record why. Standing rules: rounds 1-13 fixes stay; runner migration/job
+      splitting retired; offline battery before push; single 60s watcher run by the session
+      manager; judge by internals + census; commit docs per convention."
+  complementarity_and_trim_i_letter_conflict: "RECORDED PER THE USER'S OWN RULE. Trims i/ii/iii
+      are complementary (i test-side, ii production semantics, iii CI config) -- no
+      contradiction BETWEEN them. But trim i's LETTER ('no cron run should ever see the
+      truncated snapshot') is structurally unachievable inside the current platform topology,
+      confirmed by direct source read of discovery.py: discover_files lists the ENTIRE
+      config.source.bucket/path prefix on EVERY call (objects.list_objects, no time-window
+      filter of any kind), re-offering every non-terminal run; the fixture MUST live in
+      raw/customers/ for the customers pipeline to ingest it at all (one dataset = one source
+      prefix = one DAG); an ingest takes >=2-3min through the 1-slot stage/publish queue; the
+      cron fires every 60s. Some cron discover therefore ALWAYS lists the object -- ROUND 13's
+      live evidence (cron scheduled__11:09 claimed it within ~60s of upload, BEFORE the test's
+      own backfill_5 pipeline reached publish) is the direct proof. SAFER-SUBSET RESOLUTION:
+      implement trim i's INTENT -- zero collateral COST (no cron wedge, no cron failure, no
+      retry burn, no max_active_runs hold, no cron gap) -- which trim ii's terminal-quarantine
+      semantics deliver structurally: the FIRST publish pass that trips quarantines the batch
+      in seconds with exit 0 (the DagRun that performs it SUCCEEDS -- a quality-gate refusal
+      is a data disposition, recorded in meta, not an infrastructure failure), and QUARANTINED
+      runs are never re-offered by discovery, so the fixture is 'short-lived to the cron
+      window': claimable for exactly ONE pipeline pass, permanently invisible after.
+      Consequently the test's own backfill machinery (backfill_5) is REMOVED as redundant --
+      the cron claims the fixture within 60s regardless (that WAS the collateral; post-ii it
+      is the designed, zero-cost path), which also deletes backfill_5's own observed +45:00
+      dagrun_timeout death from the budget."
+  trim_ii_design_note: "CLASSIFICATION BOUNDARY (the user asked for this recorded): the
+      platform's own error hierarchy ALREADY encodes it -- errors.py's PublicationError
+      docstring: 'distinct from QualityThresholdExceeded, which is a deliberate business-rule
+      rollback, not an infrastructure failure.' Trim ii operationalizes exactly that line:
+      publish_ingest catches QualityThresholdExceeded ONLY (deterministic by construction: a
+      pure function of staged bronze + gold state + configured threshold -- rerunning it is
+      rerunning an identical computation, which is what burned 7 tries x 42min in ROUND 13);
+      every other exception (PublicationError, psycopg OperationalError, ConfigurationError,
+      ...) propagates unchanged -> KPO pod fails -> Airflow retries stay fully in force for
+      the transient-infrastructure class. ON TRIP: the publish transaction has already rolled
+      back (breaker is a pre-mutation barrier; gold untouched); publish_ingest then marks
+      every run of the tripped pass status='QUARANTINED' (new app-level status value --
+      meta.ingestion_runs.status is sa.Text with NO CHECK constraint, migration 0004, so no
+      migration needed), logs the breaker context, and returns
+      {'status': 'QUARANTINED', 'runs_quarantined': [...], ...} -> CLI writes it to XCom and
+      exits 0. WHY TERMINAL (not left STAGED): a run left STAGED re-enters EVERY subsequent
+      publish pass (list_staged_run_ids has no other filter), so one poisoned batch
+      deterministically re-trips every later pass until a co-staged union happens to cover
+      gold -- ROUND 11's self-sustaining-poison shape at lower cost. Terminal quarantine
+      removes the poison from all future passes: subsequent innocents publish clean. WHY
+      PASS-SCOPED (all staged runs of the tripped pass, not 'the guilty run'): the vanished
+      mass is the ABSENCE of keys from the pass's union -- attribution to a single run is
+      structurally impossible; an innocent run co-staged with a poisoned one is quarantined
+      WITH it (bounded, loud, recorded in meta, operator-recoverable by re-opening the run;
+      raw file untouched per section-63 immutability -- corrections arrive as new files). WHY
+      EXIT 0: with KubernetesPodOperator, a nonzero exit is indistinguishable from a transient
+      pod failure at the Airflow layer (no exit-code->no-retry mapping without brittle custom
+      operator logic); section-51's quarantine concept says bad data is diverted + recorded
+      and the pipeline CONTINUES -- the task evaluated the batch, refused it, and recorded the
+      refusal = the task did its job. Loudness lives in meta (ingestion_runs.status
+      QUARANTINED + structured log with ratio/threshold), the platform's system of record for
+      business state (business metrics read the analytical DB by design). SCOPE BOUNDARY:
+      publish-side only (the measured sink). The stage-side RejectionRateCircuitBreaker also
+      raises QualityThresholdExceeded deterministically; its retry burn was NOT the measured
+      collateral -- named as a documented follow-up, not changed this round. Change surface:
+      publish_ingest's except branch + discovery's two skip sites + one new status value."
+  trim_iii_design_note: "publish retries stay 6 by default (LOCAL unchanged); CI sets Airflow
+      Variable publish_retries=3 in scripts/ci-set-workload-images.sh (the exact
+      stage_cpu_request per-profile precedent). Post-trim-ii, publish retries exist ONLY for
+      the transient class (KubernetesJobWatcher 30s-read-timeout race, Kyverno admission
+      hiccups, co-scheduling CPU bursts): with retry_delay=30s exponential, retries=3 spans 4
+      attempts over ~12min -- covering ROUND 13's measured 5-min self-healed FailedScheduling
+      burst (18b) with margin, while halving the worst-case burn of any not-yet-classified
+      deterministic failure. Applied to customers' publish (the measured burn site; orders'
+      publish is already retries=3 and asset-triggered, left alone)."
+  pre_registered_criteria:
+    - "(a) BUDGET: run completes INSIDE timeout-minutes: 150 (projection ~1h55-2h10 with the
+      collateral eliminated). Record the full decomposition either way."
+    - "(b) ZERO COLLATERAL CRON COST: no cron run wedges/fails/stalls on the mass-delete
+      fixture -- no cron gap, no 42min publish-retry burn, no max_active_runs hold. (The
+      letter 'no cron run ever sees it' is structurally unachievable -- see
+      complementarity_and_trim_i_letter_conflict; ONE cron pass processing-and-quarantining
+      it in seconds at exit 0 is the designed shape.)"
+    - "(c) QUARANTINE PATH EXERCISED WHERE DESIGNED: the deliberate breaker test passes, now
+      fast -- terminal meta.ingestion_runs.status QUARANTINED for the truncated snapshot,
+      gold byte-for-byte unchanged, no Airflow task failure, no retries burned."
+    - "(d) GUARDS GREEN: Kyverno DENY 0, control-plane restarts 0; FailedScheduling -- the
+      known transient co-scheduling burst class (18b) may recur; it self-healing without
+      test failures keeps fixes (16)/(17) 'holding'; a repeat WITH failures upgrades (18b)."
+    - "(e) FULL NODE-ID CENSUS finally measurable end-to-end (pytest -v rider): diff against
+      the saturated 17-test baseline; per-test lines survive even a cancelled job."
+    - "(f) WATCH ITEMS RECORDED: scheduler peak vs 2048Mi (18b was 91.9%); co-scheduling
+      burst behavior; plus NEW pre-registered candidate (19) below."
+  pre_registered_candidate_19: "(19) STRUCTURAL, named BEFORE the run, adjudicated BY the run:
+      lone partial-file deliveries to the snapshot-semantics customers dataset may
+      structurally trip the mass-delete breaker when their publish pass is not co-staged with
+      roster-covering runs (vanished = gold-current minus the pass's few keys -> ratio near
+      100%). The sweep module's OWN docstring already knows this ('a lone single-row file
+      would make DELETE-detection wrongly treat every other roster member as vanished' -- its
+      full-roster fixtures are sized accordingly), but the OLDER e2e single-file fixtures
+      (test_smoke_and_idempotency e2e-idempotent-*, test_pod_kill_retry e2e-dbtkill-*/e2e-u3-*,
+      test_rebuild_from_raw e2e-rebuild-*) upload small partial files and expect SUCCEEDED.
+      Pre-ROUND-14 such passes wedge 45min and MAY self-heal when a later pass co-stages
+      roster-covering leftovers (this is exactly how ROUND 13's run 409 -- the truncated
+      snapshot itself -- ended SUCCEEDED at the 11:53 cron: union healing, live-observed);
+      post-ROUND-14 they would QUARANTINE legibly (ratio ~90%+ in the log, status QUARANTINED,
+      test fails fast with a readable message). PREDICTED SIGNATURE IF REAL: e2e-* single-file
+      runs terminal QUARANTINED + their tests failing on 'not SUCCEEDED' within minutes, suite
+      still completing inside budget. If it fires it is a PRE-EXISTING test-fixture/design
+      tension (partial deliveries to a snapshot dataset) made visible -- a design decision for
+      its own round (per-dataset delivery-shape contract vs breaker scoping), deliberately NOT
+      expanded into ROUND 14's scope. NOT a (18a)-fix refutation."
+  reasoning_checkpoint:
+    hypothesis: "The ~40min/run mass-delete collateral (18a) is caused by Airflow-level
+        exponential-backoff retries of a DETERMINISTIC QualityThresholdExceeded trip
+        (publish retries=6/7 re-running an identical pure computation) plus the tripped
+        pass's runs staying STAGED (re-entering every later publish pass) -- so classifying
+        the trip as a terminal, non-retryable, non-reofferable quarantine disposition
+        removes the entire collateral class, and the honest suite then fits inside a 150-min
+        budget (~1h55-2h10 measured projection)."
+    confirming_evidence:
+      - "ROUND 13 live run 33062702180: cron scheduled__11:09 publish retried the identical
+        trip 7x over 42min (11:11:51->11:54:00), holding max_active_runs=1 (cron gap
+        11:09->11:53); backfill_5 burned its own 6 tries to the +45:00 dagrun_timeout --
+        ~45min actual vs ~5min designed cost, ONE avoidable ~40min sink."
+      - "Determinism of the trip: MassDeleteCircuitBreaker.apply is a pure function of
+        (staged bronze keys, gold is_current keys, threshold) -- source-read; every retry
+        re-evaluates identical inputs (rollback restores them); ROUND 11 observed the
+        identical 54% ratio on every attempt of every wedged run."
+      - "Re-offer mechanics: list_staged_run_ids selects ALL status='STAGED' runs per
+        dataset (repository source-read) and discovery re-offers every non-SUCCEEDED run
+        (discovery.py source-read) -- a tripped pass's runs poison every later pass until
+        union healing; run 409's late SUCCEEDED at the 11:53 cron (co-staged
+        roster-covering leftovers) live-confirms the union-healing mechanism AND its
+        fragility."
+      - "Budget arithmetic: ROUND 13 decomposition -- ~2h35-2h50 as-is projection vs
+        ~1h55-2h10 with the collateral eliminated; 150min covers the trimmed projection
+        with margin, 120 covers neither."
+    falsification_test: "Live run with ROUND 14 in force: if the mass-delete fixture still
+        produces >5min of cron-visible collateral (any cron DagRun failed/wedged on it, any
+        publish retry of a breaker trip, any cron gap), trim ii's classification or the
+        quarantine wiring is wrong. If the deliberate test does not reach terminal
+        QUARANTINED (e.g. union-healed SUCCEEDED because the claim pool was not empty), the
+        isolation assumption is wrong -- both return to investigation. Criterion (a) failing
+        with zero collateral means the budget model itself is wrong -> re-measure."
+    fix_rationale: "Root-cause layer, not symptom: the collateral's mechanism is
+        retry-of-a-deterministic-computation + re-offer-of-a-poisoned-batch; trim ii removes
+        both legs at the semantic source (the platform's own error hierarchy already
+        declares this exception class 'a deliberate business-rule rollback, not an
+        infrastructure failure'), rather than papering over it with a bigger timeout alone.
+        The timeout raise to 150 covers the HONEST suite the fixes have now uncovered
+        (orders live = 2x datasets everywhere), per measured arithmetic, not as a blind
+        bump. Trim iii trims the remaining transient-retry worst case within the class where
+        retries remain correct. The rider ends the 3-round census blindness."
+    blind_spots: "(1) Candidate (19) above -- single-file e2e fixtures may quarantine
+        legibly; pre-registered, out of scope. (2) An innocent run co-staged into a tripped
+        pass is quarantined with it (pass-scoped attribution is the only honest option);
+        bounded + recorded + operator-recoverable. (3) The quarantined-batch operator
+        re-open path is manual (SQL status flip) -- no tooling this round. (4) Exit-0
+        quarantine means Airflow-only observers see green; loudness lives in meta by
+        design (business metrics read the analytical DB). (5) The observability step +
+        rebuild-from-raw capstone remain unmeasured (+25-40min rough estimate inside the
+        150 budget). (6) The 21 offline tests/integration failures on this machine are
+        pre-existing and out of scope."
+  next_action: "Implement ROUND 14: e2e-full.yml timeout 150; Makefile pytest -v rider;
+      publish_ingest quarantine branch + discovery QUARANTINED skip; kpo.py
+      publish_retries() + customers publish + ci-set-workload-images.sh publish_retries=3;
+      sweep-module mass-delete test rewrite (no backfill, expect QUARANTINED) +
+      _TERMINAL_RUN_STATUSES; red/green integration + unit coverage; offline battery;
+      commit + push; record run ID; return CHECKPOINT (human-action) for the watcher."
+
+ROUND 13 OUTCOME (2026-08-27, post-run analysis of run 33062702180 -- SUPERSEDED BY ROUND 14 ABOVE):
   verdict: "Fix (17) LIVE-CONFIRMED IN FULL; refutation branch (7) NOT taken. The suite
       reached its FINAL test module for the first time ever on CI and was cancelled at
       the 120-min job timeout mid-way through test_smoke_and_idempotency. The budget was
@@ -5621,6 +5805,88 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     scheduler at 91.9% of its memory limit under doubled load; pytest progress
     observability now blocking census measurement 3 rounds running.
 
+- timestamp: 2026-08-27 (ROUND 14 -- Option C implemented, offline battery green)
+  checked: "Implemented the user-chosen Option C (trims i+ii+iii + timeout 150 + -v rider)
+    and ran the full offline battery. Key mechanism facts established by source read BEFORE
+    implementing (all recorded in Current Focus ROUND 14):
+    (i) discovery has NO time-window filter -- discover_files lists the whole
+    config.source prefix every call and re-offers every non-SUCCEEDED run; trim i's letter
+    ('no cron run ever sees the fixture') is therefore structurally unachievable; the
+    safer-subset resolution (user's own rule) routes the fixture through ONE
+    quarantining pass instead (complementarity_and_trim_i_letter_conflict block).
+    (ii) publish_ingest claims ALL currently-STAGED runs per dataset
+    (list_staged_run_ids has no other filter) -- a tripped pass left STAGED re-poisons
+    every later pass; terminal quarantine is the only shape that removes the poison.
+    (iii) errors.py ALREADY declares the classification line: PublicationError's docstring
+    distinguishes 'deliberate business-rule rollback' (QualityThresholdExceeded) from
+    infrastructure failure -- trim ii operationalizes the hierarchy's own boundary.
+    (iv) meta.ingestion_runs.status is sa.Text with NO CHECK constraint (migration 0004)
+    -- the new QUARANTINED value needs no migration.
+    (v) ROUND-13-log archaeology resolving the run-409 puzzle: the truncated snapshot's
+    run 409 ended SUCCEEDED because the 11:53 cron pass co-staged leftover
+    replay-eligible corpus runs whose union covered the roster (vanished below
+    threshold) -- live proof of the union-healing dynamic AND its fragility; terminal
+    quarantine deliberately trades that away for determinism (recorded in the design
+    note).
+    (vi) The e2e single-partial-file fixtures (e2e-idempotent/dbtkill/u3/rebuild) violate
+    the snapshot-delivery shape the sweep module's own docstring warns about ('a lone
+    single-row file would make DELETE-detection wrongly treat every other roster member
+    as vanished') -- pre-registered as candidate (19) with its predicted post-ROUND-14
+    signature (legible QUARANTINED instead of 45-min wedges), deliberately NOT expanded
+    into this round's scope."
+  found: "CHANGES: (1) e2e-full.yml timeout-minutes 120->150 (measured-arithmetic comment).
+    (2) Makefile cluster-slice-verify + observability-verify-ci pytest -q -> -v (CI-only
+    targets; -q dots never complete a line so cancelled jobs showed zero output 3 rounds
+    running; -v emits newline-terminated per-test lines that survive cancellation).
+    (3) dataplat/pipeline/run.py: publish_ingest catches QualityThresholdExceeded ONLY --
+    marks every run of the tripped pass QUARANTINED via update_ingestion_run_status,
+    logs breaker context, returns {'status': 'QUARANTINED', runs_quarantined, reason}
+    (CLI writes it to XCom and exits 0 -- no csv_processor change needed); success path
+    moved to try/else (ruff TRY300); module + function docstrings document the carve-out.
+    (4) discovery.py: new _TERMINAL_NON_REOFFERABLE_STATUSES = {SUCCEEDED, QUARANTINED}
+    applied at both skip sites (ungrouped + multipart), decision label 'QUARANTINED'.
+    (5) kpo.py publish_retries() (Variable publish_retries, default '6' = pre-fix
+    literal); customers publish retries=publish_retries() (net-zero lines, file stays
+    208); ci-set-workload-images.sh sets publish_retries=3 (transient-class sizing
+    comment: 4 attempts over ~12min vs the measured ~5min burst).
+    (6) test_backfill_2year_sweep.py: mass-delete test rewritten -- NO backfill (cron
+    delivery is the designed path), expects terminal QUARANTINED, gold-unchanged
+    assertion kept, module docstring REDESIGNED paragraph; _TERMINAL_RUN_STATUSES +=
+    QUARANTINED.
+    (7) NEW tests/integration/test_scd_replay_delete_detection.py::
+    test_breaker_trip_quarantines_the_pass_while_transient_errors_still_raise -- fresh
+    PG18 + real dbt: PHASE 1 trip (35/50 keys = 30% > 0.10 through publish_ingest's REAL
+    pass-claiming path) -> QUARANTINED return + terminal statuses + list_staged empty +
+    gold byte-identical + follow-up publish clean no-op; PHASE 2 PublicationError from a
+    monkeypatched publisher -> propagates, runs stay STAGED (retry budget intact).
+    (8) NEW tests/unit/test_discovery.py::test_discover_files_never_re_offers_a_
+    quarantined_run (mirrors the SUCCEEDED-exclusion test; also asserts no
+    replay_of_run_id ever points at a quarantined run).
+    OFFLINE BATTERY ALL GREEN, zero new regressions: tests/unit 556/556 (was 555, +1 new);
+    tests/policy -m 'not manifests' 157 passed / 2 failed -- the SAME 2 pre-existing
+    out-of-scope failures (customers line budget 208>158 A/B-confirmed unchanged at 208
+    both sides; test_gates_actually_fail); tests/dagtest 14/14; make manifests
+    kubeconform -strict 540/0/0; test_manifest_resources 5/5; test_values_profiles 6/6;
+    sweep module collect-only 7/7 same order; replay integration file 2/2 (one in-round
+    defect caught by the battery itself and fixed: the gold-snapshot query referenced a
+    nonexistent valid_from column -- normalized.customers' event_ts doubles as
+    valid_from per migration 0035); publish-path integration A/B: failing set
+    BYTE-IDENTICAL to clean HEAD (5 of the known 21 pre-existing local-env failures,
+    diff empty); test_publish_scd 7/7; ruff clean on touched files (2 remaining findings
+    = pre-existing untouched sweep line 1075, stash-A/B-confirmed; run.py format drift
+    pre-existing byte-identical on HEAD); mypy dataplat clean, DAG files 71 errors both
+    pre/post (identical pre-existing idiom), test files identical-class pre-existing
+    type-ignore idiom; DagBag per-profile proof EXACT: no Variable -> customers publish
+    retries=6 (byte-identical to pre-fix), AIRFLOW_VAR_PUBLISH_RETRIES=3 -> 3, orders
+    publish 3 and stage 6 untouched in both. Accepted cosmetic residue:
+    meta.v_run_recovery's next_action CASE says 'retry stage PUBLISH' for a QUARANTINED
+    run (view predates the status; run_status column exposes QUARANTINED alongside, so
+    the state is legible -- no migration this round)."
+  implication: "ROUND 14 fix (18) is implemented and offline-verified end-to-end,
+    including a genuine both-branches classification proof (trip -> quarantine;
+    infrastructure error -> propagate + stay STAGED). Ready for live CI verification
+    against the ROUND 14 pre-registered criteria (a)-(f) + candidate (19)."
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -6437,6 +6703,41 @@ fix: >
   NOT changed: timeout-minutes stays 120 (measured this round per charter); no
   schedule-based DAG touched; carried follow-ups remain captured (quarantine-vs-retry,
   sidecar mirror, pytest progress observability, sweep-wait legibility).
+  (18, ROUND 14, user-chosen Option C -- trim ii explicitly approved as production
+  semantics): (18-ii, PRODUCTION) packages/dataplat/src/dataplat/pipeline/run.py:
+  publish_ingest catches QualityThresholdExceeded ONLY (the error hierarchy's own
+  'deliberate business-rule rollback, not an infrastructure failure' line,
+  errors.PublicationError docstring) -- quarantines the tripped pass terminally
+  (every claimed run -> status='QUARANTINED' via update_ingestion_run_status; no
+  migration needed, meta.ingestion_runs.status is unconstrained Text) and returns
+  {'status': 'QUARANTINED', runs_quarantined, reason} so the CLI exits 0: a
+  quality-gate refusal is a recorded data DISPOSITION (section-51 quarantine), not a
+  task failure -- no Airflow retries, no max_active_runs hold, no re-poisoned later
+  passes; ALL other exceptions keep propagating (transient class retains its full
+  retry budget). packages/dataplat/src/dataplat/discovery.py: new
+  _TERMINAL_NON_REOFFERABLE_STATUSES = {SUCCEEDED, QUARANTINED} at both re-offer skip
+  sites -- a quarantined batch is permanently invisible to discovery (recovery =
+  explicit operator re-open, or a corrected file as a NEW raw object per section-63).
+  (18-i, TEST-SCOPED) tests/e2e/slice/test_backfill_2year_sweep.py: mass-delete test
+  rewritten -- fixture delivered via the live */1 cron (backfill machinery removed;
+  the letter 'no cron run ever sees it' is structurally unachievable given
+  whole-prefix discovery, recorded conflict resolution per the user's safer-subset
+  rule), expects terminal QUARANTINED, gold-unchanged assertion kept;
+  _TERMINAL_RUN_STATUSES += QUARANTINED. (18-iii, CI CONFIG)
+  airflow/dags/_common/kpo.py publish_retries() (Variable, default '6' = the pre-fix
+  literal; LOCAL unchanged) + csv_ingest_customers.py publish
+  retries=publish_retries() (net-zero lines) + scripts/ci-set-workload-images.sh sets
+  publish_retries=3 on CI (transient-class sizing: 4 attempts over ~12min covers the
+  measured ~5min burst). (18-timeout) .github/workflows/e2e-full.yml timeout-minutes
+  120 -> 150 (measured arithmetic: ~1h55-2h10 trimmed projection + margin).
+  (18-rider) Makefile cluster-slice-verify + observability-verify-ci pytest -q -> -v
+  (CI-only targets; newline-terminated per-test lines survive job cancellation --
+  ends the 3-round census blindness). NEW COVERAGE: integration
+  test_breaker_trip_quarantines_the_pass_while_transient_errors_still_raise (both
+  classification branches against fresh PG18 + real dbt) + unit
+  test_discover_files_never_re_offers_a_quarantined_run. PRE-REGISTERED alongside:
+  candidate (19) -- lone partial-file e2e fixtures may now quarantine legibly
+  (pre-existing snapshot-delivery-shape tension, NOT expanded into this round).
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -6726,6 +7027,30 @@ verification: >
   (7 pods, transient, self-healed) and scheduler peak 91.9% of limit; census
   unmeasurable (3rd blind round, pytest -q). (17) CLOSED; decision checkpoint on
   timeout-vs-trim returned.
+  Fix (18), ROUND 14: offline battery ALL GREEN, zero new regressions, with a genuine
+  BOTH-BRANCHES classification proof: the new fresh-PG18 integration test drives the
+  REAL publish_ingest pass-claiming path -- a 35/50-key truncated pass at the real
+  0.10 threshold returns {'status': 'QUARANTINED', 'runs_quarantined': [run]}, the
+  run's status is terminally QUARANTINED, list_staged_run_ids comes back empty (no
+  re-poisoned later pass), gold is byte-for-byte unchanged (pre-mutation barrier),
+  and a follow-up publish_ingest is a clean SUCCEEDED no-op; a monkeypatched
+  publisher raising PublicationError (the infrastructure class) propagates OUT with
+  the pass still STAGED (retry budget intact). Full battery: tests/unit 556/556 (+1
+  new discovery non-reoffer test); tests/dagtest 14/14; tests/policy -m 'not
+  manifests' 157/2 -- the SAME 2 pre-existing out-of-scope failures (customers
+  line-budget A/B-confirmed 208 lines both sides = net-zero DAG change);
+  make manifests kubeconform -strict 540/0/0; test_manifest_resources 5/5 (no chart
+  values touched); test_values_profiles 6/6; publish-path integration failing set
+  BYTE-IDENTICAL to clean HEAD (diff empty; 5 of the known 21 pre-existing local-env
+  failures); test_publish_scd 7/7; sweep module collect-only 7/7 same order; ruff/
+  format/mypy clean or byte-identical-pre-existing (stash A/B); DagBag per-profile
+  proof EXACT (no Variable -> publish retries 6 byte-identical pre-fix;
+  AIRFLOW_VAR_PUBLISH_RETRIES=3 -> 3; orders publish 3 / stage 6 untouched both
+  profiles); e2e-full.yml YAML parse + make -n clean. One in-round defect caught by
+  the battery itself and fixed (gold-snapshot query referenced nonexistent
+  valid_from; event_ts doubles as valid_from per migration 0035). LIVE CI
+  VERIFICATION: pending -- judged on the ROUND 14 pre-registered criteria (a)-(f)
+  plus candidate (19)'s predicted signature (see Current Focus).
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -6765,3 +7090,6 @@ files_changed:
   - tests/integration/test_scd_delete_detection.py
   - tests/e2e/slice/conftest.py
   - Makefile
+  - packages/dataplat/src/dataplat/pipeline/run.py
+  - packages/dataplat/src/dataplat/discovery.py
+  - tests/unit/test_discovery.py

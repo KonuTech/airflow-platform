@@ -206,9 +206,25 @@ seeding, so none of the below was exercised until this plan's own live run):
 D-06's mass-delete circuit-breaker-trip fixture (Task 3) is a SEPARATE, single-day
 `generate_dated_series("customers", ...)` call — same `master_seed`/`rows_per_day` as
 `sweep_corpus`'s own call (so the roster is byte-identical), `start_date` set to the day
-immediately after this module's own extended window — uploaded and processed OUTSIDE the main
-sweep's own backfill window, deliberately (a deliberately-truncated snapshot is expected to fail
-that one day's run loudly, not blend into the successful sweep).
+immediately after this module's own extended window — deliberately a distinct, later day (a
+deliberately-truncated snapshot is expected to be refused loudly, not blend into the successful
+sweep).
+
+**REDESIGNED (`.planning/debug/ci-pipeline-ingestion-timeout.md`, ROUND 14, finding 18a): the
+fixture is now delivered via the live `*/1` cron schedule, NOT a test-created backfill, and the
+expected terminal status is `QUARANTINED`, not `FAILED`.** ROUND 13's live run measured the old
+design's true cost: the truncated snapshot is unavoidably ALSO visible to the cron's own
+discovery (discover_files lists the whole `raw/customers/` prefix on every call — there is no
+time-window filter, so "keep the fixture outside the cron's window" is structurally impossible
+for an object that must live in the dataset's one source prefix), and retrying the DETERMINISTIC
+`QualityThresholdExceeded` trip burned ~40min of wall per poisoned DagRun while holding
+`max_active_runs=1` (cron gap 11:09->11:53, plus the test backfill's own +45:00 dagrun_timeout
+death). The production fix (user-approved): `publish_ingest` now classifies a breaker trip as a
+quality-gate DISPOSITION, not an infrastructure failure — the pass's runs go terminally
+`QUARANTINED` (never re-offered by discovery, never re-staged, never retried) and the publish
+task exits 0. With that, the cron claiming the fixture within ~60s of upload is the DESIGNED,
+zero-cost path: exactly one pipeline pass processes and quarantines it, the carrying cron DagRun
+still SUCCEEDS, and the test-created backfill became pure overhead — removed.
 
 ## Plan 10-08: D-10's dedicated same-key concurrency test
 
@@ -366,8 +382,12 @@ _SCD_CONCURRENCY_MEMBER_INDEX = 48
 _SCD_VALID_TO_SENTINEL = datetime(9999, 12, 31, tzinfo=UTC)
 
 _POLL_INTERVAL_SECONDS = 2.0
+# QUARANTINED (debug/ci-pipeline-ingestion-timeout ROUND 14): the terminal
+# disposition publish_ingest writes when a pass trips a deterministic
+# quality gate (mass-delete breaker) -- fail-fast + section-51 quarantine,
+# never retried, never re-offered by discovery.
 _TERMINAL_RUN_STATUSES = frozenset(
-    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT"}
+    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT", "QUARANTINED"}
 )
 
 _DRY_RUN_TICK_PATTERN = re.compile(
@@ -1779,22 +1799,17 @@ def test_live_run_concurrent_with_backfill_same_dataset(
 # ---------------------------------------------------------------------------
 
 
-def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(  # noqa: PLR0913, PLR0917
-    # one param per fixture this test genuinely needs (corpus ordering, cross-test state,
-    # kubectl, s3, 2 DB conns) -- mirrors test_pilot_window_drains_without_cpu_starvation's own
-    # precedent for this exact lint exception, elsewhere in this module.
+def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(
     sweep_corpus: _Corpus,  # noqa: ARG001 -- ensures test_full_2year_sweep's own gold state exists first
-    sweep_state: _SweepState,
-    kubectl: Callable[..., subprocess.CompletedProcess[str]],
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
-    airflow_metadata_connection: psycopg.Connection[Any],
 ) -> None:
     """D-06: a real, deliberately-truncated customers snapshot trips the mass-delete circuit
-    breaker against the real cluster -- the run fails LOUDLY (a hard `FAILED` terminal status,
-    never a silent partial success, never merely `SKIPPED_DUPLICATE`) and gold state for every
-    removed roster member is left byte-for-byte UNCHANGED, proving `MassDeleteCircuitBreaker`
-    (plan 10-03) is a pre-mutation barrier stage, not a partial-apply-then-fail race.
+    breaker against the real cluster -- the batch is refused LOUDLY (a hard `QUARANTINED`
+    terminal `meta.ingestion_runs.status`, never a silent partial success, never merely
+    `SKIPPED_DUPLICATE`) and gold state for every removed roster member is left byte-for-byte
+    UNCHANGED, proving `MassDeleteCircuitBreaker` (plan 10-03) is a pre-mutation barrier stage,
+    not a partial-apply-then-fail race.
 
     Runs AFTER `test_full_2year_sweep_customers_and_orders` has established real, current SCD2
     gold state for the sweep's roster (this file's own Task-ordering convention: pytest's
@@ -1805,12 +1820,25 @@ def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(
     customer_ids and baseline attribute values are IDENTICAL to what the main sweep already
     published; roster baselines are customer-scoped, not day-scoped, per plan 10-06 Task 1),
     `start_date` set to the day immediately following the extended sweep's own last day, so this
-    fixture sits OUTSIDE the successful sweep's own window (tripping the breaker is expected to
-    fail this one day's run loudly, not blend into the successful sweep). Triggers a single
-    fresh customers DagRun for this one file (mirroring
-    `test_live_run_concurrent_with_backfill_same_dataset`'s own "trigger one fresh DagRun
-    outside the main window and poll" pattern, NOT `test_full_2year_sweep_customers_and_orders`'s
-    whole-window backfill CLI usage), then polls `_wait_for_dataset_files_terminal` for it.
+    fixture is a distinct, later-day snapshot (refusing it is expected to quarantine this one
+    day's batch loudly, not blend into the successful sweep).
+
+    Delivery is the live `*/1` cron schedule itself -- NO test-created backfill (ROUND 14
+    redesign, see the module docstring's own "REDESIGNED" paragraph): the cron's discovery
+    claims the fixture within ~60s of upload regardless of what this test does (whole-prefix
+    listing, no window filter -- ROUND 13's measured collateral), so post-quarantine-semantics
+    that IS the designed, zero-cost path. The one pipeline pass that reaches publish trips the
+    breaker, `publish_ingest` quarantines the batch terminally (discovery never re-offers a
+    `QUARANTINED` run, so no later cron run ever sees this snapshot again) and exits 0 -- the
+    carrying cron DagRun SUCCEEDS, burns zero retries, holds no `max_active_runs` slot, and
+    this test simply polls `_wait_for_dataset_files_terminal` for the terminal status.
+
+    PRECONDITION this test leans on (and the sweep's own ordering already guarantees): every
+    other claimable customers file is terminal by the time the fixture is uploaded, so the
+    tripping publish pass contains EXACTLY the truncated snapshot -- a co-staged
+    roster-covering file would union-heal the pass (vanished below threshold) and this test
+    would fail legibly on a `SUCCEEDED` status, which is the honest signal that the claim pool
+    was not empty.
     """
     mass_delete_start_date = _START_DATE + timedelta(days=_NUM_DAYS)
     mass_delete_files, mass_delete_manifest = generate_dated_series(
@@ -1853,40 +1881,25 @@ def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(
         Body=mass_delete_files[mass_delete_filename],
     )
 
-    # A SEPARATE, small window OUTSIDE test_full_2year_sweep's own window -- mirroring
-    # test_live_run_concurrent_with_backfill_same_dataset's own "one fresh DagRun" pattern.
-    # span_minutes=0 -- exactly one tick (verified live elsewhere in this module: a window's
-    # tick count is inclusive on both ends).
-    from_dt, to_dt = _window(offset_minutes=150, span_minutes=0)
-    since_id = _latest_backfill_id(airflow_metadata_connection, dag_id=_CUSTOMERS_DAG_ID)
-    _invoke_backfill_create(
-        kubectl,
-        dag_id=_CUSTOMERS_DAG_ID,
-        from_iso=from_dt.isoformat(),
-        to_iso=to_dt.isoformat(),
-        max_active_runs=sweep_state.max_active_runs,
-    )
-    # Sizing: a single-file DagRun -- one integrity_gate/stage/dbt_build/publish pod chain, not
-    # a multi-file sweep -- but under this cluster's documented CPU contention, budget the same
-    # generous headroom this module's own other single-window tests use.
-    _wait_for_new_backfill_completed(
-        airflow_metadata_connection,
-        dag_id=_CUSTOMERS_DAG_ID,
-        since_backfill_id=since_id,
-        timeout=1800,
-    )
-
+    # No backfill, no window arithmetic (ROUND 14 redesign, docstring above): the live */1
+    # cron's own next discovery claims this file within ~60s, and the resulting single
+    # pipeline pass (discover -> stage -> dbt_build -> publish) reaches its terminal
+    # disposition in minutes. Sizing: the same generous headroom this module's other
+    # single-file waits use, under this cluster's documented CPU contention.
     results = _wait_for_dataset_files_terminal(
         analytics_connection,
         dataset=_CUSTOMERS_DATASET,
         filenames=[mass_delete_filename],
         timeout=1800,
     )
-    assert results[mass_delete_filename]["status"] == "FAILED", (
+    assert results[mass_delete_filename]["status"] == "QUARANTINED", (
         f"expected the deliberately-truncated snapshot's terminal meta.ingestion_runs.status "
-        f"to be exactly 'FAILED' (the mass-delete circuit breaker raised "
-        f"QualityThresholdExceeded inside the SCD publish stage, propagating to a hard run "
-        f"failure -- never a silent partial success, never merely SKIPPED_DUPLICATE), got "
+        f"to be exactly 'QUARANTINED' (the mass-delete circuit breaker raised "
+        f"QualityThresholdExceeded inside the SCD publish pass and publish_ingest applied the "
+        f"section-51 quarantine disposition -- never a silent partial success, never merely "
+        f"SKIPPED_DUPLICATE, and never a retry-burning task failure; a SUCCEEDED here means "
+        f"the pass was union-healed by a co-staged roster-covering file, i.e. the claim pool "
+        f"was not empty when this fixture was uploaded), got "
         f"{results[mass_delete_filename]['status']!r}"
     )
 

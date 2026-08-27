@@ -56,18 +56,35 @@ are kept genuinely live during a long staging load (refreshed on an
 interval, alongside the crash-recovery lease), not left ``NULL`` until the
 final status update runs at the very end.
 
-Neither function catches anything: a run-fatal exception (a genuinely broken
-staging table create, a claim upsert failing for a reason other than
-"already claimed", a publish-transaction failure) propagates OUT, uncaught,
-to whichever CLI command called it -- the "always write a receipt, even on a
-run-fatal failure" contract belongs to that call site, not to this module. On
-every exit path, success or failure, ``stage_ingest``/``publish_ingest`` each
-guarantee two things: their own heartbeat/claim-adjacent state is left
+Neither function catches anything -- with ONE deliberate, narrowly-scoped
+carve-out (debug session ci-pipeline-ingestion-timeout ROUND 14, finding 18a,
+user-approved production-semantics change): ``publish_ingest`` catches
+``QualityThresholdExceeded`` -- and ONLY that class -- because the platform's
+own error hierarchy already declares it "a deliberate business-rule rollback,
+not an infrastructure failure" (``errors.PublicationError``'s docstring). A
+breaker trip is DETERMINISTIC: a pure function of (this pass's staged bronze
+keys, gold's current keys, the configured threshold) -- an Airflow-level
+retry re-runs an identical computation, observed live burning 7 tries x 42
+minutes per poisoned pass while holding the dag's ``max_active_runs=1`` slot.
+On a trip, ``publish_ingest`` quarantines the pass (every claimed run ->
+``status='QUARANTINED'``, a terminal status discovery never re-offers) and
+returns a ``{"status": "QUARANTINED", ...}`` payload -- the section-51
+quarantine disposition: bad data is refused, diverted and RECORDED (loudness
+lives in ``meta``, the platform's system of record), and the pipeline
+continues. Every OTHER run-fatal exception (a genuinely broken staging table
+create, a claim upsert failing for a reason other than "already claimed", a
+``PublicationError``/connection loss mid-transaction) propagates OUT,
+uncaught, to whichever CLI command called it -- the transient-infrastructure
+class keeps its full retry budget, and the "always write a receipt, even on
+a run-fatal failure" contract belongs to that call site, not to this module.
+On every exit path, success or failure, ``stage_ingest``/``publish_ingest``
+each guarantee two things: their own heartbeat/claim-adjacent state is left
 consistent, and -- once real work has genuinely begun -- a ``runs_finished``
 counter increment is observed (D-03's live "runs currently in-flight"/"recent
-failure rate" gauges). The latter is emitted from a ``finally`` block, never
-an ``except``, so a run-fatal exception is a pure side-effect observation on
-the way through -- never swallowed, never converted.
+failure rate" gauges). The latter is emitted from a ``finally`` block, so a
+run-fatal exception is a pure side-effect observation on the way through --
+never swallowed, never converted (the quarantine carve-out above CONVERTS
+deliberately, by design, for exactly one exception class).
 
 ``stage_ingest`` runs inside its own ``pipeline.stage_ingest`` span (renamed
 from ``pipeline.run_ingest``, OBS-10): a genuine CHILD of whatever parent
@@ -93,7 +110,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from opentelemetry import trace as otel_trace
 
-from dataplat.errors import ConfigurationError, DataPlatformError
+from dataplat.errors import ConfigurationError, DataPlatformError, QualityThresholdExceeded
 from dataplat.load.publish.registry import resolve_publisher
 from dataplat.load.staging import StagingLoader
 from dataplat.models.receipt import Receipt
@@ -1074,13 +1091,21 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
     Returns:
         A plain ``dict``, not a ``Receipt`` -- a ``Receipt`` is
         single-``run_id``-shaped, and this function may finalize several
-        runs per invocation. Keys: ``"status"`` (always ``"SUCCEEDED"`` on a
-        normal return -- a run-fatal exception propagates uncaught, same
-        "catches nothing" contract as ``stage_ingest``), ``"runs_finalized"``
-        (the list of ``run_id``s this call finalized, possibly empty),
+        runs per invocation. Keys: ``"status"`` (``"SUCCEEDED"`` on a normal
+        return; ``"QUARANTINED"`` when this pass tripped a deterministic
+        quality gate -- see the module docstring's ROUND 14 carve-out; any
+        OTHER run-fatal exception propagates uncaught, same "catches
+        nothing" contract as ``stage_ingest``), ``"runs_finalized"`` (the
+        list of ``run_id``s this call finalized, possibly empty),
         ``"rows_loaded"`` (this pass's total affected-row count -- see the
         aggregate-attribution note at this function's own
-        ``finalize_publication`` call site), ``"duration_ms"``.
+        ``finalize_publication`` call site), ``"duration_ms"``. The
+        ``"QUARANTINED"`` shape additionally carries ``"runs_quarantined"``
+        (every run of the tripped pass -- attribution is PASS-scoped by
+        necessity: the vanished mass is the absence of keys from the pass's
+        union, structurally unattributable to a single run) and
+        ``"reason"`` (the breaker's own message, with its observed
+        ratio/threshold context logged alongside).
     """
     log = get_logger()
     start = time.monotonic()
@@ -1277,6 +1302,46 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
                     resolution_type="REDRIVEN",
                 )
 
+    except QualityThresholdExceeded as exc:
+        # The ONE deliberate carve-out from this module's "catches nothing"
+        # contract -- see the module docstring's ROUND 14 paragraph for the
+        # full classification rationale (deterministic business-rule trip vs
+        # transient infrastructure failure; the error hierarchy itself draws
+        # this exact line in `errors.PublicationError`'s docstring). The
+        # publish transaction has ALREADY rolled back by the time control
+        # reaches here (the `conn.transaction()` context exited on the
+        # raise; the breaker is a pre-mutation barrier, so gold is
+        # untouched). Quarantine is TERMINAL and PASS-scoped: every run this
+        # pass claimed goes to 'QUARANTINED' (never re-offered by discovery,
+        # never claimable by stage, never re-listed by list_staged_run_ids)
+        # -- leaving them 'STAGED' would re-inject the identical poisoned
+        # union into EVERY later publish pass of this dataset (ROUND 11's
+        # self-sustaining-poison shape), and retrying is re-running an
+        # identical pure computation. Recovery is a recorded operator
+        # action: re-open the run (status flip) after investigating, or land
+        # a corrected file as a NEW raw object (section-63: corrections
+        # arrive as new files, never overwrites).
+        quarantine_duration_ms = int((time.monotonic() - start) * 1000)
+        for run_id, _file_id, _batch_id, _report_uri in staged:
+            ctx.metadata.update_ingestion_run_status(run_id=run_id, status="QUARANTINED")
+        log.warning(
+            "publish_ingest.quarantined",
+            dataset=ctx.config.dataset,
+            runs_quarantined=staged_run_ids,
+            reason=str(exc),
+            breaker_context=exc.context,
+            duration_ms=quarantine_duration_ms,
+        )
+        run_status = "quarantined"
+        return {
+            "status": "QUARANTINED",
+            "runs_finalized": [],
+            "runs_quarantined": staged_run_ids,
+            "rows_loaded": 0,
+            "reason": str(exc),
+            "duration_ms": quarantine_duration_ms,
+        }
+    else:
         log.info(
             "publish_ingest.succeeded",
             dataset=ctx.config.dataset,
@@ -1292,8 +1357,10 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
             "duration_ms": duration_ms,
         }
     finally:
-        # Never an `except` -- same "catches nothing" contract as
-        # `stage_ingest` (module docstring).
+        # Never an `except` for the transient-infrastructure class -- same
+        # "catches nothing" contract as `stage_ingest` (module docstring;
+        # the QualityThresholdExceeded quarantine branch above is that
+        # contract's one documented, deliberate carve-out).
         metrics.increment(
             "runs_finished",
             1,

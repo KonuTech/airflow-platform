@@ -66,4 +66,17 @@ echo "==> registering stage_cpu_request=200m (CI profile; local default is 500m)
 "${kubectl_bin}" --context "${ctx}" exec -n airflow deploy/airflow-api-server -- \
   airflow variables set stage_cpu_request "200m"
 
-echo "==> ci-set-workload-images complete: csv_processor_image/dbt_image now point at tag=${tag}; stage_cpu_request=200m"
+# debug/ci-pipeline-ingestion-timeout ROUND 14 (finding 18a, trim iii): CI
+# trims customers' publish retries 6 -> 3. Post-ROUND-14, deterministic
+# quality-gate trips (mass-delete breaker) quarantine + exit 0 and never
+# consume a retry, so publish retries serve ONLY the transient class
+# (KubernetesJobWatcher read-timeout race, Kyverno hiccups, co-scheduling
+# CPU bursts). With retry_delay=30s exponential backoff, retries=3 spans 4
+# attempts over ~12min -- covering ROUND 13's measured ~5min self-healed
+# FailedScheduling burst with margin. Local never runs this script and
+# keeps the DAG's own default of 6 (airflow/dags/_common/kpo.py).
+echo "==> registering publish_retries=3 (CI profile; local default is 6)"
+"${kubectl_bin}" --context "${ctx}" exec -n airflow deploy/airflow-api-server -- \
+  airflow variables set publish_retries "3"
+
+echo "==> ci-set-workload-images complete: csv_processor_image/dbt_image now point at tag=${tag}; stage_cpu_request=200m; publish_retries=3"
