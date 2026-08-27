@@ -2,7 +2,19 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 12 POST-RUN ANALYSIS COMPLETE on run 33051719850 (headSha 794db33,
+updated: 2026-08-27 (ROUND 13 opened on user decision A+B+C for root cause (17): csv_ingest_orders
+  registers paused on fresh clusters and silently drops asset events. Implementing all three
+  layers: (A) csv_ingest_orders added to tests/e2e/slice/conftest.py::_unpause_slice_dags +
+  docstring truth-up (auto-covers chaos via its conftest import); (B) Makefile cluster-up gains a
+  retried csv_ingest_orders unpause (smoke-verify's 24x5s idiom -- NOT smoke-verify itself, which
+  e2e-full.yml never runs; cluster-up is the only site that covers the rebuild-from-raw capstone);
+  (C, explicitly user-approved production-semantics change) is_paused_upon_creation=False on the
+  csv_ingest_orders @dag -- an asset-triggered downstream that silently drops events while paused
+  violates the platform's no-silent-drops core value. DAG survey: orders is the ONLY
+  asset-scheduled DAG (customers=cron */1, smoke/retention=@daily, chaos probes=None) -- C applies
+  to orders alone. timeout-minutes stays 120, measured this round per budget arithmetic (33min
+  honest floor + orders drain should fit). See Current Focus ROUND 13.)
+updated_prior_round13: 2026-08-27 (ROUND 12 POST-RUN ANALYSIS COMPLETE on run 33051719850 (headSha 794db33,
   conclusion CANCELLED by job-level timeout-minutes: 120 after exactly 2h00m42s -- partial log +
   always()-diagnostics fully recovered): fix (16) LIVE-CONFIRMED IN FULL -- ZERO breaker trips
   (0 grep hits for QualityThresholdExceeded/mass_delete_circuit_breaker/vanished in 5939 lines),
@@ -185,7 +197,107 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 12 OUTCOME (2026-08-27, post-run analysis of run 33051719850 -- CURRENT STATE):
+ROUND 13 (2026-08-27, opened on user decision: A+B+C -- CURRENT STATE):
+  charter: "Fix root cause (17) at all three layers, C explicitly user-approved as a
+      production-semantics change: (A) test-scoped -- add csv_ingest_orders to
+      tests/e2e/slice/conftest.py::_unpause_slice_dags and truth-up its docstring (the chaos
+      suite auto-inherits via tests/e2e/chaos/conftest.py's import); (B) platform-scoped --
+      unpause csv_ingest_orders at cluster-up in the Makefile so EVERY consumer of a
+      freshly-booted ephemeral cluster (pytest suites, the rebuild-from-raw capstone, manual
+      use) sees deterministic asset-trigger behavior; (C) DAG-definition --
+      is_paused_upon_creation=False on the csv_ingest_orders @dag, recorded rationale: an
+      asset-triggered downstream that silently drops events while paused violates the
+      platform's no-silent-drops core value ('no data is ever silently dropped'). Survey
+      requirement: apply C ONLY where the asset-triggered-downstream argument holds -- do not
+      blanket-change schedule-based DAGs. timeout-minutes: 120 KEPT, measure the suite
+      against it this round (budget arithmetic: 33min honest floor + post-fix orders drain
+      plausibly fits). Standing rules: rounds 1-12 fixes stay; runner migration/job
+      splitting retired; offline battery before push; single 60s watcher run by the session
+      manager; judge by internals + census; commit docs per convention; carried follow-ups
+      stay captured (quarantine-vs-retry design, sidecar mirror, pytest progress
+      observability, sweep-wait legibility)."
+  hypothesis: "H17-fix: with csv_ingest_orders unpaused end-to-end (born unpaused via C,
+      belt-and-braces unpaused via A for pytest sessions and via B for every cluster-up),
+      customers' ~60 asset events per run actually trigger orders DagRuns; orders pods
+      appear on CI for the first time; _wait_for_dataset_files_terminal(dataset=orders,
+      timeout=5400) drains instead of sitting 87.6min; the suite plausibly completes inside
+      timeout-minutes: 120 at the measured post-(16) pace (steady-state runs 96-104s,
+      backfills 2-8min)."
+  dag_survey_for_C: "airflow/dags inventory (direct grep of every @dag schedule):
+      csv_ingest_orders = schedule=[customers_asset] -- ASSET-SCHEDULED, C applies (a paused
+      asset consumer drops events silently, unrecoverable except by manual unpause + event
+      re-emission); csv_ingest_customers = cron '*/1 * * * *' -- pausing delays visibly (next
+      tick runs on unpause), no silent drop, Airflow default KEPT; smoke_kubernetes_pod +
+      platform_retention = '@daily' -- same cron reasoning, default KEPT; chaos_probe x3 =
+      schedule=None -- manually-triggered only, pause state irrelevant, default KEPT.
+      Conclusion: C applies to csv_ingest_orders ALONE."
+  preregistered_criteria:
+    - "(a) PRIMARY: orders pods appear on CI for the first time (etl-namespace rolling pod
+      census shows csv_ingest_orders discover/stage/dbt_build/publish pods; meta.ingestion_runs
+      gains dataset=orders rows)."
+    - "(b) PRIMARY: test_full_2year_sweep_customers_and_orders drains -- the orders-terminal
+      wait completes instead of consuming 87+ min; no 5400s wait exhaustion."
+    - "(c) BUDGET: suite completes within timeout-minutes: 120 -- record the measured
+      duration decomposition either way (this is the deferred timeout decision's input)."
+    - "(d) REGRESSION GUARDS: breaker trips 0, FailedScheduling 0, Kyverno DENY 0,
+      control-plane restarts 0, stage/dbt_build success try=1, scheduler peak < 2048Mi."
+    - "(e) NODE-ID CENSUS vs the saturated 17-test baseline: expect substantial clearing.
+      CARRIED CAVEAT: sweep assertion (10) (missing-customer invalidated on the final day's
+      own pass) may legitimately still fail if days 11+12 consolidate into one publish pass
+      (consolidation-semantics test-design issue, independent of (17) -- name it, do not
+      treat it as a (17) refutation)."
+  reasoning_checkpoint:
+    hypothesis: "csv_ingest_orders registers is_paused=True on every fresh cluster (Airflow
+        default dags_are_paused_at_creation=true, no repo override, no
+        is_paused_upon_creation on the @dag) and NO repo code path unpauses it
+        (_unpause_slice_dags covers only smoke+customers; Makefile unpauses only smoke,
+        and only in smoke-verify which e2e-full.yml never runs) -- and a paused
+        Asset-scheduled DAG silently consumes no asset events, so orders can never run on
+        CI, which is exactly why zero orders pods appeared while ~60 customers_asset
+        events were emitted in ROUND 12's run."
+    confirming_evidence:
+      - "STRUCTURAL (source-read): csv_ingest_orders.py schedule=[customers_asset], no
+        is_paused_upon_creation; repo-wide grep confirms no dags_are_paused_at_creation
+        override and no unpause site reaching csv_ingest_orders (slice conftest tuple =
+        smoke+customers only; Makefile:440 = smoke only, inside smoke-verify)."
+      - "BEHAVIORAL (run 33051719850): customers' publish (outlets=[customers_asset])
+        succeeded ~60 times across the run, yet the full-run etl pod monitor shows ZERO
+        orders pods ever; the sweep's orders-terminal wait sat 87.6min to job cancel."
+      - "DIFFERENTIAL (live query 2026-08-27): the long-lived LOCAL cluster's
+        csv_ingest_orders is_paused='False' -- hand-unpaused in an earlier session, state
+        persisted; ephemeral CI starts fresh+paused. Same
+        local-hand-state-vs-ephemeral-CI class as root cause (12), which was confirmed."
+    falsification_test: "If, on a run with the fix verifiably in force (orders registered
+        unpaused -- checkable via the always()-diagnostics DB dumps), orders DagRuns STILL
+        never trigger despite customers publish emitting asset events, the paused-DAG
+        attribution is wrong and something else drops the events (return to
+        investigation). Pre-registered criteria (a)/(b) are the live falsification."
+    fix_rationale: "Root-cause layer, not symptom: the paused flag IS the mechanism (a
+        paused DAG's asset events are dropped by design in Airflow's scheduler), so
+        unpausing at DAG definition (C) removes the failure mode for every fresh
+        deployment -- production-shaped, matching the platform's no-silent-drops core
+        value. A and B are defense-in-depth for the two consumer classes that previously
+        relied on hand state (pytest sessions; cluster-up consumers incl. the capstone) and
+        keep the guarantee even if C's flag is ever regressed or a cluster's DagModel row
+        predates the flag. NOT touching schedule-based DAGs (survey above), NOT changing
+        timeout-minutes (measure first), NOT reverting any prior round's fix."
+    blind_spots: "(1) Sweep assertion (10) consolidation caveat carried from ROUND 12 --
+        judged from the run, not blocking. (2) Suite duration vs 120min is a measurement,
+        not a guarantee -- orders' own drain (backfill-equivalent volume through the
+        global stage slot) has never been observed on CI; if it structurally cannot fit,
+        that is a NEW budget finding, not a (17) refutation. (3) Whether further residuals
+        surface beneath a running orders pipeline (whack-a-mole precedent: 6 layers so
+        far). (4) The 21 offline tests/integration failures on this machine are
+        pre-existing and out of scope."
+  next_action: "Implement A (slice conftest tuple + docstring), B (Makefile cluster-up
+      retried unpause), C (is_paused_upon_creation=False on orders @dag + line-budget bump
+      per that test's own precedent); run offline battery (manifests+kubeconform, unit,
+      dagtest, policy expecting the 2 pre-existing failures); commit + push; record the
+      authoritative e2e-full run ID + companion publish.yml; return CHECKPOINT (human-action)
+      for the session manager's watcher."
+
+ROUND 12 OUTCOME (2026-08-27, post-run analysis of run 33051719850 -- SUPERSEDED BY ROUND 13
+    ABOVE, retained as the root-cause-(17) evidence record):
   verdict: "BRANCH (b): fix (16) LIVE-CONFIRMED IN FULL; the 120 minutes were consumed by a NEW,
       previously-masked mechanism = ROOT CAUSE (17): csv_ingest_orders never unpaused on
       ephemeral CI clusters. This is NOT a DagRun wedge (zero wedges this run) -- it is a
@@ -5205,6 +5317,64 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     DagRun pace (96s-8min), but unproven until the next run; timeout-minutes decision
     stays deferred per charter.
 
+- timestamp: 2026-08-27 (ROUND 13 -- fix (17) implemented A+B+C, offline battery green)
+  checked: >
+    Implementation of the user-approved A+B+C fix shape for root cause (17), plus the
+    C-scope survey and the full offline battery. SURVEY (which DAGs get
+    is_paused_upon_creation=False): direct grep of every @dag schedule in airflow/dags/ --
+    csv_ingest_orders schedule=[customers_asset] (ASSET-scheduled: paused => asset events
+    silently dropped, unrecoverable without manual unpause + re-emission => the
+    no-silent-drops argument HOLDS); csv_ingest_customers cron '*/1 * * * *',
+    smoke_kubernetes_pod + platform_retention '@daily' (cron/interval: pausing delays runs
+    VISIBLY -- next tick fires on unpause -- no silent drop => argument does NOT hold =>
+    Airflow default kept); chaos_probe x3 schedule=None (manual-trigger only, pause state
+    irrelevant => default kept). C applied to csv_ingest_orders ALONE. SITE CHECK for B:
+    the only pre-existing Makefile unpause (line ~440, smoke) lives in smoke-verify, which
+    e2e-full.yml NEVER runs (its steps: cluster-up -> migrate-analytics ->
+    vault-unseal/bootstrap -> cluster-slice-verify -> observability-verify-ci ->
+    rebuild-from-raw) -- so B landed in the cluster-up target itself (the only site that
+    covers the rebuild-from-raw capstone), with a 24x5s retry loop copied from
+    smoke-verify's own trigger idiom (right after the stages finish, the dag-processor may
+    not have parsed the DAG yet; `airflow dags unpause` exits non-zero on DagNotFound),
+    hard-failing after 120s (a silent skip would recreate exactly the bug being fixed).
+    Also confirmed: tests/e2e/chaos/conftest.py imports _unpause_slice_dags from the slice
+    conftest, so A auto-covers the chaos suite; NO dagtest/unit test asserts paused state
+    anywhere (grep), so no test updates needed beyond the line-budget bump;
+    tests/policy/test_no_manual_kubectl_surgery.py scans only *.sh files, so the Makefile
+    kubectl-exec follows the established smoke-verify precedent cleanly.
+  found: >
+    FILES CHANGED: (A) tests/e2e/slice/conftest.py -- _ORDERS_DAG_ID added, unpause tuple
+    now (smoke, customers, orders), docstring truth-up documents the ROUND 13 mechanism
+    (the old text claimed 'both this phase's DAGs' while covering only two). (B) Makefile
+    cluster-up target -- retried csv_ingest_orders unpause appended after
+    scripts/cluster-up.sh, ROUND 13 comment block, hard fail if never registered within
+    120s. (C) airflow/dags/csv_ingest_orders.py -- is_paused_upon_creation=False + 2-line
+    comment (exactly 3 lines at the zero-headroom 158 ceiling);
+    tests/policy/test_dag_line_budget.py budget <=158 -> <=161 with the precedent-style
+    docstring paragraph recording the survey rationale (deliberately NOT mirrored to
+    cron-scheduled customers). OFFLINE BATTERY ALL GREEN, zero new regressions: throwaway
+    DagBag proof via the tests/unit conftest fixture -- csv_ingest_orders
+    is_paused_upon_creation is False, every OTHER DAG stays None (default) -- 2/2 passed;
+    tests/unit 555/555; tests/dagtest 14/14 (real dag.test() accepts the new kwarg);
+    tests/policy -m 'not manifests' 157 passed / 2 failed -- the SAME 2 pre-existing
+    out-of-scope failures as every prior round (test_dag_line_budget customers 208>158
+    tracked separately; test_gates_actually_fail), and the ORDERS budget test passes at
+    exactly 161/161; make manifests kubeconform -strict 540 resources / 0 invalid / 0
+    errors (no helm changes this round); test_manifest_resources 5/5;
+    test_values_profiles 6/6; make -n cluster-up parses; py_compile + ruff check + ruff
+    format --check clean on all touched files; mypy A/B via git stash: 74 error lines
+    both pre- and post-change (all pre-existing common_kpo_kwargs/XComArg idiom -- zero
+    new). timeout-minutes: 120 deliberately unchanged (measure this round).
+    NOT STAGED (not mine): .planning/HANDOFF.json deletion + .planning/STATE.md
+    modification present in the working tree from the session manager.
+  implication: >
+    Fix (17) is implemented at all three layers with the C-scope survey recorded.
+    Remaining: commit + push, record the authoritative e2e-full run ID + companion
+    publish.yml run for the pushed sha, then hand the single 60s watcher to the session
+    manager. Judged next run on the ROUND 13 pre-registered criteria (orders pods appear;
+    sweep drains; duration vs 120min measured; regression guards; node-ID census vs the
+    17-set with the carried sweep-assertion-(10) caveat).
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -5731,10 +5901,12 @@ root_cause: >
   87.6min of the 120min budget (job cancel beat the test's own deadline by ~2min,
   destroying the pytest summary). Differential: the long-lived LOCAL cluster has
   is_paused=False from an earlier session's hand-unpause -- same
-  local-hand-state-vs-ephemeral-CI class as root cause (12). Fix NOT yet implemented:
-  three candidate shapes (slice-conftest tuple add / Makefile cluster-up unpause /
-  is_paused_upon_creation=False on the DAG -- the last is production semantics) returned
-  to the user as a ROUND 13 decision checkpoint.
+  local-hand-state-vs-ephemeral-CI class as root cause (12). ROUND 13 UPDATE: the user
+  approved ALL THREE candidate shapes (A+B+C; C explicitly approved as a
+  production-semantics change on the no-silent-drops rationale, applied ONLY to
+  csv_ingest_orders per the recorded asset-vs-cron survey); fix (17) implemented and
+  offline-verified, awaiting live CI verification against the ROUND 13 pre-registered
+  criteria.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -5985,6 +6157,27 @@ fix: >
   on deterministic breaker trips (production semantics -- proposed as a decision item),
   timeout-minutes (deferred to post-fix measurement per charter), corpus/threshold
   (B-leg analysis proved them correctly sized).
+  (17, ROUND 13, user-chosen A+B+C -- C explicitly approved as production semantics):
+  (17A) tests/e2e/slice/conftest.py: _ORDERS_DAG_ID added and the _unpause_slice_dags
+  session-autouse tuple extended to (smoke, customers, orders); docstring truthed-up
+  (previously claimed 'both this phase's DAGs' while covering only two) and now
+  documents the paused-asset-consumer silent-drop mechanism; tests/e2e/chaos/conftest.py
+  inherits automatically via its existing import. (17B) Makefile cluster-up target:
+  retried csv_ingest_orders unpause appended after scripts/cluster-up.sh (24x5s
+  DagNotFound retry loop, smoke-verify's own idiom; hard fail after 120s -- a silent
+  skip would recreate the bug), sited at cluster-up because e2e-full.yml never runs
+  smoke-verify and only cluster-up covers ALL fresh-cluster consumers including the
+  rebuild-from-raw capstone. (17C) airflow/dags/csv_ingest_orders.py:
+  is_paused_upon_creation=False on the @dag (2-line comment + kwarg; recorded
+  rationale: a paused Asset-scheduled DAG silently drops its upstream's asset events,
+  violating the platform's no-silent-drops core value on every fresh deployment);
+  applied to csv_ingest_orders ALONE per the survey (customers/smoke/retention are
+  cron/interval -- pausing delays runs visibly, no silent drop; chaos probes
+  schedule=None, pause state irrelevant); tests/policy/test_dag_line_budget.py orders
+  budget <=158 -> <=161 (exact 3 lines, precedent-style justification). Deliberately
+  NOT changed: timeout-minutes stays 120 (measured this round per charter); no
+  schedule-based DAG touched; carried follow-ups remain captured (quarantine-vs-retry,
+  sidecar mirror, pytest progress observability, sweep-wait legibility).
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -6251,6 +6444,25 @@ verification: >
   honest floor 33min, remainder consumed by NEW root cause (17) (orders DAG paused on
   ephemeral CI -- see root_cause); (e) node-ID census: not measurable (cancelled job has
   no pytest summary; -q dots never flush). (16) CLOSED.
+  Fix (17), ROUND 13: offline battery ALL GREEN, zero new regressions -- throwaway
+  DagBag proof via the tests/unit conftest fixture: csv_ingest_orders
+  is_paused_upon_creation is False AND every other DAG stays None (default), 2/2
+  passed; tests/unit 555/555; tests/dagtest 14/14 (real dag.test() accepts the new
+  kwarg); tests/policy -m 'not manifests' 157 passed / 2 failed -- the SAME 2
+  pre-existing out-of-scope failures as every prior round (test_dag_line_budget
+  customers 208>158 tracked separately; test_gates_actually_fail), with the ORDERS
+  budget test passing at exactly 161/161; make manifests kubeconform -strict 540
+  resources / 0 invalid / 0 errors (no helm changes); test_manifest_resources 5/5;
+  test_values_profiles 6/6; make -n cluster-up parses cleanly; py_compile + ruff
+  check + ruff format --check clean on all touched files; mypy A/B via git stash --
+  74 error lines both pre- and post-change (all pre-existing
+  common_kpo_kwargs/XComArg idiom, zero new). Heavy tests/integration suites
+  deliberately NOT re-run: no dataplat/dbt/csv_processor code touched this round
+  (DAG kwarg + test fixture + Makefile only). LIVE CI VERIFICATION: pending --
+  judged on the ROUND 13 pre-registered criteria (orders pods appear on CI for the
+  first time; sweep orders-terminal wait drains; suite duration measured vs
+  timeout-minutes: 120; regression guards hold; node-ID census vs the 17-set with
+  the carried sweep-assertion-(10) caveat).
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -6288,3 +6500,5 @@ files_changed:
   - dbt/models/silver/silver_orders.sql
   - tests/integration/test_scd_replay_delete_detection.py
   - tests/integration/test_scd_delete_detection.py
+  - tests/e2e/slice/conftest.py
+  - Makefile

@@ -129,13 +129,14 @@ def slice_fixtures_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 _SMOKE_DAG_ID = "smoke_kubernetes_pod"
 _CUSTOMERS_DAG_ID = "csv_ingest_customers"
+_ORDERS_DAG_ID = "csv_ingest_orders"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _unpause_slice_dags(
     kubectl: Callable[..., subprocess.CompletedProcess[str]],  # noqa: F811 -- fixture-injection param name
 ) -> None:
-    """Unpause both this phase's DAGs once per session — a paused DAG never runs.
+    """Unpause all three of this phase's DAGs once per session — a paused DAG never runs.
 
     Discovered live: `test_smoke_dag_xcom_contains_built_sha` already
     unpauses `smoke_kubernetes_pod` itself before triggering it explicitly
@@ -151,8 +152,21 @@ def _unpause_slice_dags(
     "discovery never registered it" message that looks like a pipeline bug.
     Session-scoped and autouse so every test in this suite gets a running
     DAG regardless of which file pytest happens to collect first.
+
+    `csv_ingest_orders` was added by debug/ci-pipeline-ingestion-timeout
+    ROUND 13 (root cause 17): this docstring used to say "both this phase's
+    DAGs" while the tuple below covered only smoke + customers — but orders
+    is a phase DAG too, and as an ASSET-scheduled DAG
+    (`schedule=[customers_asset]`) the failure shape while paused is even
+    quieter than the cron case described above: a paused DAG silently
+    consumes no asset events at all, so on every fresh/ephemeral cluster
+    (Airflow default `dags_are_paused_at_creation=true`) orders never ran
+    once, and the sweep test's orders-terminal wait burned 87 minutes of CI
+    budget polling for a dataset whose DAG could never run. Belt-and-braces
+    with the DAG's own `is_paused_upon_creation=False` (same round): this
+    fixture also repairs clusters whose DagModel row predates that flag.
     """
-    for dag_id in (_SMOKE_DAG_ID, _CUSTOMERS_DAG_ID):
+    for dag_id in (_SMOKE_DAG_ID, _CUSTOMERS_DAG_ID, _ORDERS_DAG_ID):
         result = kubectl(
             "-n",
             "airflow",

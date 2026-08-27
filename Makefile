@@ -165,6 +165,32 @@ cluster-up: doctor             ## Create/update the kind cluster and every stage
 	# hard prerequisite (D-10): a broken host must never reach ten minutes of
 	# image pulls before failing.
 	PROFILE=$(PROFILE) scripts/cluster-up.sh
+	# debug/ci-pipeline-ingestion-timeout ROUND 13 (root cause 17): csv_ingest_orders is
+	# Asset-scheduled (schedule=[customers_asset]) -- while paused it silently consumes NO
+	# asset events (no error, no queued run, just silence), so a fresh cluster where it
+	# registers paused can never run orders at all. Unpause it HERE, not only in test
+	# fixtures, so every consumer of a freshly-booted cluster (pytest suites, the
+	# rebuild-from-raw capstone, manual use) sees deterministic asset-trigger behavior.
+	# Belt-and-braces with the DAG's own is_paused_upon_creation=False (same round): this
+	# also repairs clusters whose DagModel row predates that flag. Retry loop: right after
+	# the stages finish the dag-processor may not have parsed the DAG yet (same 24x5s
+	# idiom as smoke-verify's own trigger loop below). Idempotent on re-runs.
+	@set -a; . helm/versions.env; set +a; \
+	ctx="kind-$$CLUSTER_NAME"; \
+	unpaused=0; \
+	for _ in $$(seq 1 24); do \
+	  if $(KUBECTL) --context "$$ctx" -n airflow exec deploy/airflow-api-server -- airflow dags unpause csv_ingest_orders >/dev/null 2>&1; then \
+	    unpaused=1; \
+	    break; \
+	  fi; \
+	  echo "    csv_ingest_orders not yet registered in DagModel (dag-processor still parsing) -- retrying"; \
+	  sleep 5; \
+	done; \
+	if [ "$$unpaused" != "1" ]; then \
+	  echo "ERROR: airflow dags unpause csv_ingest_orders never succeeded within 120s -- a paused asset-scheduled DAG silently drops every asset event" >&2; \
+	  exit 1; \
+	fi; \
+	echo "==> csv_ingest_orders unpaused (asset-triggered runs enabled)"
 
 cluster-down:                  ## Delete the kind cluster if it exists, else no-op [plan 02-01]
 	scripts/cluster-down.sh

@@ -79,6 +79,8 @@ def aggregate_receipts(receipts: list[dict]) -> None:
 # csv_ingest_customers.py's own @dag() (see that file's comment for the full rationale).
 # max_active_tasks=6: same debug/ci-pipeline-ingestion-timeout ROUND 7 per-DagRun flood guard as
 # csv_ingest_customers.py's own @dag() (see that file's comment for the full rationale).
+# is_paused_upon_creation=False (debug/ci-pipeline-ingestion-timeout ROUND 13, root cause 17): a
+# paused ASSET-scheduled DAG silently drops asset events -- fresh deployments must not start deaf.
 @dag(
     dag_id="csv_ingest_orders",
     schedule=[customers_asset],
@@ -87,6 +89,7 @@ def aggregate_receipts(receipts: list[dict]) -> None:
     max_active_runs=1,
     max_active_tasks=6,
     dagrun_timeout=pendulum.duration(minutes=45),
+    is_paused_upon_creation=False,
     tags=["vertical-slice", "orders"],
 )
 def csv_ingest_orders() -> None:
