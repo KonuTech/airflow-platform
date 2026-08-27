@@ -2,7 +2,28 @@
 status: investigating
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 12 COMPLETE offline: root cause (16) CONFIRMED via local red/green
+updated: 2026-08-27 (ROUND 12 POST-RUN ANALYSIS COMPLETE on run 33051719850 (headSha 794db33,
+  conclusion CANCELLED by job-level timeout-minutes: 120 after exactly 2h00m42s -- partial log +
+  always()-diagnostics fully recovered): fix (16) LIVE-CONFIRMED IN FULL -- ZERO breaker trips
+  (0 grep hits for QualityThresholdExceeded/mass_delete_circuit_breaker/vanished in 5939 lines),
+  63/63 customers DagRuns state=success (62 complete + 1 running at cancel), ZERO +45:00
+  dagrun_timeout deaths, 344 TIs = 226 success + 114 skipped (empty-window short-circuits) + 4
+  running, ZERO failures, ZERO retries; fix-in-force probe exact-matched predictions
+  (schema_versions v1 CONTRACT + v2 INFERRED; runs 25-34 carry replay_of_run_id; silver _run_id
+  distribution 35->1/36->49 = deterministic newest-run winner per 16c; run 36's 49-key pass
+  published clean = bronze-scoped 16a working). All regression guards green (FailedScheduling 0,
+  Kyverno 0, restarts 0, scheduler peak 1415MiB<2048Mi). VERDICT: BRANCH (b) -- a NEW mechanism
+  consumed the budget = ROOT CAUSE (17): csv_ingest_orders (Asset-scheduled off customers_asset)
+  is NEVER unpaused on ephemeral CI clusters (Airflow default dags_are_paused_at_creation=true;
+  _unpause_slice_dags unpauses only smoke+customers; repo-wide grep: no other unpause site) -- a
+  paused DAG silently consumes no asset events, so the sweep's orders-terminal wait
+  (timeout=5400s) sat 87.6min (08:27:38->09:55:12 cancel) with zero orders pods ever, while the
+  job timeout fired ~2min before the test's own deadline. Differential clincher: local cluster's
+  csv_ingest_orders is_paused=False (hand-state from an earlier session -- same class as root
+  cause 12). Honest-work floor measured: everything through the full-sweep backfill = 33min.
+  DECISION CHECKPOINT returned. See Current Focus ROUND 12 OUTCOME + ROUND 12 post-run Evidence
+  + Resolution (16)/(17).)
+updated_prior_round12_postrun: 2026-08-27 (ROUND 12 COMPLETE offline: root cause (16) CONFIRMED via local red/green
   reproduction -- the 54% vanished mass is silver dedup-tie lineage on a BYTE-IDENTICAL
   D-18 replay wave (schema_version_term ''->'2' re-eligibilizes all files after pass 1;
   replayed rows full-tie the silver ranking; the then-silver-scoped _VANISHED_SQL read
@@ -164,7 +185,89 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 12 (2026-08-27, opened on user decision: A+B -- mechanism AND design -- CURRENT STATE):
+ROUND 12 OUTCOME (2026-08-27, post-run analysis of run 33051719850 -- CURRENT STATE):
+  verdict: "BRANCH (b): fix (16) LIVE-CONFIRMED IN FULL; the 120 minutes were consumed by a NEW,
+      previously-masked mechanism = ROOT CAUSE (17): csv_ingest_orders never unpaused on
+      ephemeral CI clusters. This is NOT a DagRun wedge (zero wedges this run) -- it is a
+      test-level 5400s wait polling for a dataset whose DAG can never run."
+  round12_criteria_scorecard:
+    - "(1) FIX-IN-FORCE probe: MET exactly. meta.schema_versions = v1 CONTRACT
+      (08:05:08, valid_to 08:07:06) + v2 INFERRED (08:07:06, open) -- the predicted ''->'2'
+      term flip. Run->file mapping shows the full predicted 3-wave shape: pass1 runs 1-12
+      (10 SUCCEEDED + days-12/13 PENDING), pass2 runs 13-24 (same shape, replay wave),
+      wave3 runs 25-34 with replay_of_run_id set (13,14,3,4,5-10), runs 35/36 = days 12/13
+      SUCCEEDED. silver _run_id distribution: 35->1 row, 36->49 rows = deterministic
+      newest-run winner (16c tie-break working; contrast ROUND 11/12's arbitrary 26/24 and
+      23/27 splits). Run 36 delivered 49 bronze keys and published CLEAN (1/50=2% vanished
+      under bronze-scoped 16a, below 10%)."
+    - "(2) PRIMARY: MET. ZERO mass_delete_circuit_breaker / QualityThresholdExceeded /
+      vanished hits anywhere in the 5939-line log. 63 customers DagRuns: 62 success + 1
+      running at cancel -- first run in 13 CI runs where EVERY DagRun succeeded. Zero
+      +45:00 deaths. publish state=success try=1 in every run that ran it. 344 TIs: 226
+      success, 114 skipped (empty-window stage/dbt short-circuit, correct), 0 failed, 0
+      retried."
+    - "(3) REGRESSION GUARDS: ALL GREEN. FailedScheduling census EMPTY; Kyverno DENY 0;
+      restart-count timeline EMPTY (0 restarts); scheduler peak 1415MiB/24pids < 2048Mi;
+      dag-processor 872MiB; triggerer 426MiB. Stage 32/32 ingestion-run deliveries
+      succeeded try=1 (~30s each); dbt_build success try=1 in every run that reached it."
+    - "(4) BUDGET MEASUREMENT: honest-work floor = 33min (cluster-up 07:54:59->08:01:42 =
+      6.7min; migrations+vault ~0.6min; pytest 08:02:15; corpus upload 08:03:07; cluster
+      tests + pilot backfill (2 runs: 7m50s+7m53s) done 08:19:15; full-sweep backfill
+      (3 runs: 3m41s+2m04s+1m59s) done 08:27:38; customers fully drained SUCCEEDED incl.
+      files 12/13 by ~08:27). The REMAINING 87.6min (08:27:38->09:55:12) was ONE wait:
+      _wait_for_dataset_files_terminal(dataset=orders, timeout=5400) -- job timeout fired
+      ~2min before the test's own 90-min deadline would have failed it legibly. Post-fix
+      DagRun pace is FAST: steady-state scheduled runs 96-104s each; backfill runs
+      2-8min each."
+    - "(5) NODE-ID CENSUS: NOT MEASURABLE -- pytest -q emitted zero flushed output before
+      cancel (progress dots never complete a line; no summary block exists in a cancelled
+      job). Sweep-assertion-(10) caveat: NEVER REACHED (test still inside wait 3); carry
+      the caveat forward to ROUND 13."
+  root_cause_17_evidence: "(i) STRUCTURAL: airflow/dags/csv_ingest_orders.py schedule=
+      [customers_asset], no is_paused_upon_creation override; repo has no
+      dags_are_paused_at_creation override anywhere -> Airflow default TRUE -> orders
+      registers PAUSED on every fresh cluster. tests/e2e/slice/conftest.py::
+      _unpause_slice_dags (session-autouse) unpauses ONLY (_SMOKE_DAG_ID,
+      _CUSTOMERS_DAG_ID) -- its docstring says 'both this phase's DAGs' but orders is a
+      phase DAG too and is absent; repo-wide grep: NO other unpause site for
+      csv_ingest_orders (Makefile:440 unpauses only smoke). (ii) BEHAVIORAL: customers'
+      publish (outlets=[customers_asset], customers DAG line 192) emitted asset events
+      ~60 times across the run (2 pilot + 3 sweep backfill publishes + ~56 steady-state
+      publishes, one KPO publish pod per ~96s scheduled run) yet ZERO orders pods appear
+      in the full-run etl monitor (every observed pod maps to customers: 1 discover + 1
+      publish per steady-state run, stage/dbt clusters only 08:04-08:25). A paused DAG
+      consumes no asset events -- silence by design, exactly the failure shape
+      _unpause_slice_dags's own docstring warns about for customers. (iii) DIFFERENTIAL:
+      live query of the long-lived LOCAL cluster (kind-airflow-platform, 2026-08-27):
+      csv_ingest_orders is_paused='False' -- hand-unpaused during some earlier phase's
+      live session, state persisted; ephemeral CI starts fresh+paused. Same
+      local-hand-state-vs-ephemeral-CI class as root cause (12) (analytics_db_default).
+      Only unobservable link: the dead CI cluster's is_paused flag itself; every other
+      link is direct."
+  riders_and_notes: "(a) pytest silence is an OBSERVABILITY defect of the harness, not a
+      bug: -q dot-progress never flushes a partial line, so a cancelled job shows zero
+      test progress; consider -v or --timeout-style progress output for CI (decision
+      item, cosmetic). (b) The customers */1 schedule + ~96s runtime means CI burns one
+      no-op KPO publish pod per ~1.6min in perpetuity after drain -- not a bug (publish
+      must run to emit the asset event that feeds orders), but it is permanent background
+      load worth knowing about. (c) sweep test module's waits are 1800-5400s -- the
+      trigger's '180s fixed timeouts' premise no longer describes tests/e2e/slice/
+      test_backfill_2year_sweep.py; the job-level 120min budget and the module's summed
+      worst-case waits (up to ~4.5h) are structurally inconsistent -- fixing (17) makes
+      the happy path fast, but any future silent-DAG regression re-produces exactly this
+      illegible cancel."
+  next_action: "DECISION CHECKPOINT returned to user: choose ROUND 13 direction --
+      (A) test-scoped fix: add csv_ingest_orders to _unpause_slice_dags (1-line + docstring
+      truth-up; auto-covers chaos suite via its conftest import); (B) platform-scoped:
+      unpause orders at cluster-up in Makefile next to smoke (covers the D-24
+      rebuild-from-raw capstone step independent of pytest fixtures); (C) DAG-definition
+      is_paused_upon_creation=False (production-semantics change -- requires explicit
+      user approval per charter). Also carry: quarantine-vs-retry design follow-up
+      (unchanged), sweep-assertion-(10) caveat (unobserved, carried), pytest progress
+      observability (cosmetic)."
+
+ROUND 12 (2026-08-27, opened on user decision: A+B -- mechanism AND design -- SUPERSEDED BY
+    ROUND 12 OUTCOME ABOVE):
   charter: "A leg (mechanism): root-cause residual (16) -- the deterministic 54% vanished-key
       mass_delete_circuit_breaker trip that self-sustains the publish wedge. Close the
       evidence gap first (bronze _run_id->file mapping dump in diagnostics and/or local
@@ -5026,6 +5129,82 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     red/green against a fresh-database reproduction of the live failure). Remaining
     verification is the live CI run (pre-registered criteria in Current Focus).
 
+- timestamp: 2026-08-27 (ROUND 12 -- post-run analysis of live-verification run 33051719850)
+  checked: >
+    Run 33051719850 (headSha 794db33): conclusion=cancelled at job timeout-minutes:120,
+    job 98448606061 ran 07:54:59Z->09:55:41Z = 2h00m42s. Partial log (5939 lines, 736KB)
+    fetched via gh api jobs/<id>/logs to scratchpad round12-job.log; all always()-
+    diagnostics present incl. the new ROUND 12 blocks. Cross-checked against source
+    (tests/e2e/slice/conftest.py, tests/e2e/slice/test_backfill_2year_sweep.py,
+    airflow/dags/csv_ingest_orders.py, airflow/dags/csv_ingest_customers.py, Makefile)
+    and a live query of the LOCAL cluster's orders DAG paused flag.
+  found: >
+    (1) BREAKER: 0 grep hits for QualityThresholdExceeded / mass_delete_circuit_breaker /
+    vanished in the entire log -- zero trips (was: byte-identical 27/50=54% trip in every
+    post-first publish of ROUND 11).
+    (2) DAGRUNS: 63 total csv_ingest_customers DagRuns -- 62 state=success + 1 running at
+    cancel; ZERO failed; ZERO at +45:00. Pilot backfill_id=1: 2 runs (7m50s, 7m53s,
+    08:03:31->08:19:15). Sweep backfill_id=2: 3 runs (3m41s, 2m04s, 1m59s,
+    08:19:53->08:27:38). First scheduled run 18m24s (overlapped both backfills);
+    thereafter ~56 steady-state scheduled runs at 96-104s each, back-to-back (*/1
+    schedule + ~96s runtime = always exactly one active run).
+    (3) TASKINSTANCES: 344 total across 5 key tasks: 226 success, 114 skipped, 4
+    running/blank, 0 failed, 0 up_for_retry; every recorded try= 1 (skips try=0). The
+    114 skipped = stage+dbt_build in the ~57 empty-window runs (correct short-circuit);
+    publish RAN in every scheduled run (one KPO publish pod per ~96s -- it must, to emit
+    the customers_asset event).
+    (4) FIX-IN-FORCE DIAGNOSTICS (new ROUND 12 blocks, all present): meta.schema_versions
+    = exactly 2 rows: v1 CONTRACT (valid 08:05:08->08:07:06) + v2 INFERRED (08:07:06,
+    open) -- the predicted ''->'2' idempotency-term flip. meta.ingestion_runs->files: 36
+    runs in the predicted 3-wave shape -- runs 1-12 pass 1 (10 SUCCEEDED, days-12/13
+    PENDING), 13-24 pass 2, 25-34 replay wave with replay_of_run_id=(13,14,3,4,5,6,7,8,
+    9,10), 35/36 = days 12/13 SUCCEEDED. staging.customers per-run: 32 delivered runs,
+    50 keys each (49 for run 36 -- the day-13 missing-member file; 51 rows/50 keys for
+    the in-file-dup runs 10/22/34). silver _run_id distribution: {35: 1, 36: 49} --
+    fully deterministic newest-run lineage (16c tie-break live-confirmed; ROUND 11 had
+    arbitrary 23/27). Run 36's 49-key pass published CLEAN: 1/50=2% vanished under
+    bronze-scoped (16a) < 10% threshold -- exactly the B-leg churn arithmetic.
+    (5) REGRESSION GUARDS: FailedScheduling census EMPTY; Kyverno denials 0; restart
+    timeline EMPTY; peaks scheduler 1415MiB/24pids (<2048Mi), dag-processor 872MiB,
+    triggerer 426MiB. All 32 stage deliveries ~30s try=1.
+    (6) THE 120 MINUTES: cluster-up 6.7min (07:54:59->08:01:42); migrate+vault 0.6min;
+    pytest starts 08:02:15; corpus upload 08:03:07 (12 customers files, MinIO listing);
+    all test-driven pipeline work COMPLETE by 08:27:38 (last stage pod 08:25; customers
+    12/12 files terminal SUCCEEDED incl. 35/36). Then 87.6min (08:27:38->09:55:12) with
+    ZERO test-driven artifacts: no new backfills (only ids 1,2 exist), no uploads, no
+    orders pods -- only the customers steady-state discover+publish churn. pytest emitted
+    ZERO flushed output the whole step (-q dots never complete a line; no summary in a
+    cancelled job) -- node-ID census NOT measurable this round.
+    (7) THE WEDGE: test_full_2year_sweep_customers_and_orders (alphabetically the 2nd
+    slice module test to run) passed wait 1 (backfill complete, 08:27:38) and wait 2
+    (customers files terminal, ~immediately after) and entered wait 3:
+    _wait_for_dataset_files_terminal(dataset=orders, timeout=5400) (line 1168). Orders
+    drains ONLY via csv_ingest_orders (schedule=[customers_asset], Deviation 1: CLI
+    backfill impossible -- DagNonPeriodicScheduleException). csv_ingest_orders is PAUSED
+    on every fresh cluster (Airflow default dags_are_paused_at_creation=true, no repo
+    override, no is_paused_upon_creation on the @dag) and NOTHING unpauses it:
+    _unpause_slice_dags loops over (_SMOKE_DAG_ID, _CUSTOMERS_DAG_ID) only
+    (conftest.py:155); Makefile:440 unpauses only smoke; repo-wide grep finds no other
+    site. ~60 customers_asset events were emitted (publish outlets, line 192) -- a
+    paused DAG consumes none, silently. The wait would have failed legibly at its own
+    5400s deadline ~09:57; the job-level 120min timeout cancelled at 09:55:12, ~2min
+    earlier, destroying the pytest summary. DIFFERENTIAL: local long-lived cluster
+    queried live 2026-08-27: csv_ingest_orders is_paused='False' (hand-state from an
+    earlier session) -- explains why this has never been seen locally. Same class as
+    root cause (12).
+  implication: >
+    BRANCH (b) holds with direct evidence at every link but one (the dead CI cluster's
+    own is_paused flag, unobservable post-mortem). Fix (16) is fully live-confirmed;
+    root cause (16) is CLOSED. NEW ROOT CAUSE (17): csv_ingest_orders never unpaused on
+    ephemeral CI. The fix is small and test/platform-scoped (three candidate shapes --
+    conftest tuple, Makefile cluster-up, or is_paused_upon_creation=False; the last is a
+    production-semantics change requiring explicit approval). Budget outlook after (17):
+    measured honest floor 33min through the sweep backfill + an estimated 5-15min orders
+    drain (13 files, ~30s stage each, integrity_gate capped at 3) + the module's
+    remaining tests + 6 other slice modules -- plausibly fits 120min given post-fix
+    DagRun pace (96s-8min), but unproven until the next run; timeout-minutes decision
+    stays deferred per charter.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -5532,6 +5711,30 @@ root_cause: >
   snapshot-semantics data would trip on correct traffic -- or, under a permissive
   threshold, silently apply delete semantics to keys that are present. B-leg: corpus
   churn is structurally 2% max; corpus/threshold correctly sized; no corpus change.
+  ROUND 12 POST-RUN: (16) LIVE-CONFIRMED AND CLOSED on run 33051719850 (headSha 794db33)
+  -- zero breaker trips in the whole run, 63/63 DagRuns success, zero +45:00 deaths,
+  zero failed TIs (344 total), publish success try=1 everywhere; the new diagnostics
+  match every prediction exactly (schema_versions ''->'2' flip as v1 CONTRACT + v2
+  INFERRED; replay wave runs 25-34 with replay_of_run_id lineage; silver _run_id
+  distribution {35:1, 36:49} = deterministic 16c winner; run 36's 49-key pass = 2%
+  vanished, clean publish). NEW ROOT CAUSE (17) exposed beneath it (whack-a-mole
+  continues, 6th layer): csv_ingest_orders -- Asset-scheduled off customers_asset
+  (schedule=[customers_asset], the ONLY way orders can run; CLI backfill structurally
+  impossible per DagNonPeriodicScheduleException) -- is PAUSED on every fresh/ephemeral
+  cluster (Airflow default dags_are_paused_at_creation=true; no repo override; no
+  is_paused_upon_creation on the @dag) and NOTHING in the repo unpauses it
+  (_unpause_slice_dags covers only smoke+customers despite its 'both this phase's DAGs'
+  docstring; Makefile cluster-up unpauses only smoke). A paused DAG silently consumes
+  no asset events, so orders never ran (~60 emitted events, zero orders pods all run),
+  meta.ingestion_runs never gained orders rows, and test_full_2year_sweep's
+  _wait_for_dataset_files_terminal(dataset=orders, timeout=5400) consumed the final
+  87.6min of the 120min budget (job cancel beat the test's own deadline by ~2min,
+  destroying the pytest summary). Differential: the long-lived LOCAL cluster has
+  is_paused=False from an earlier session's hand-unpause -- same
+  local-hand-state-vs-ephemeral-CI class as root cause (12). Fix NOT yet implemented:
+  three candidate shapes (slice-conftest tuple add / Makefile cluster-up unpause /
+  is_paused_upon_creation=False on the DAG -- the last is production semantics) returned
+  to the user as a ROUND 13 decision checkpoint.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -6040,11 +6243,14 @@ verification: >
   YAML parse clean. Implementation defect caught by the battery itself and fixed
   in-round: Jinja '{#- -#}' trim markers in the first silver_orders.sql edit glued
   'partition by order_id' to 'order by' -- switched to non-trimming '{# #}', all dbt
-  suites re-green. LIVE CI VERIFICATION: pending -- judged on the ROUND 12
-  pre-registered criteria (zero breaker trips or trips without wedging; multiple
-  complete DagRuns; no +45:00 dagrun_timeout deaths; regression guards; suite duration
-  vs the 120-min budget; node-ID census clearing), with the ROUND 12 diagnostics block
-  (16f) providing the run->file/schema-version/silver-lineage evidence directly.
+  suites re-green. LIVE CI VERIFICATION: COMPLETE on run 33051719850 (2026-08-27) --
+  criteria (b) zero breaker trips + zero wedges + zero +45:00 deaths: MET; (c)
+  regression guards all green (FailedScheduling 0, Kyverno 0, restarts 0, scheduler
+  1415MiB<2048Mi): MET; (16f) diagnostics matched every prediction (schema-term flip,
+  replay lineage, deterministic silver winner, 2% churn clean publish): MET; (d) budget:
+  honest floor 33min, remainder consumed by NEW root cause (17) (orders DAG paused on
+  ephemeral CI -- see root_cause); (e) node-ID census: not measurable (cancelled job has
+  no pytest summary; -q dots never flush). (16) CLOSED.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
