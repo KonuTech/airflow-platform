@@ -2,16 +2,21 @@
 
 Honest limit: both tests below prove their claim for ONE triggered run /
 ONE uploaded pair, against whatever `csv_processor_image` Variable and
-`customers` `DatasetConfig` are live on the cluster at test time — they do
+`orders` `DatasetConfig` are live on the cluster at test time — they do
 not re-verify the image was built from a clean tree, nor that no other
-process is concurrently mutating `raw/customers/` (04-09-PLAN.md runs
+process is concurrently mutating `raw/orders/` (04-09-PLAN.md runs
 E2E-adjacent work against the SAME live cluster in this wave; see that
 plan's own note about shared-infrastructure interference).
+
+The reupload proof was repointed from customers to ORDERS by
+debug/ci-pipeline-ingestion-timeout ROUND 16 (finding 19-A): content-hash
+duplicate detection is dataset-agnostic, and a lone-file delivery honors
+orders' contract, where customers' full-snapshot contract makes the same
+lone file a -- correct -- mass-delete breaker trip.
 """
 
 from __future__ import annotations
 
-import contextlib
 import datetime
 import subprocess
 import time
@@ -20,7 +25,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
+from tests.e2e.slice.conftest import (
+    build_orders_csv_bytes,
+    existing_customer_ids,
+    poll_file_discovered,
+    poll_ingestion_run,
+    poll_run_for_file,
+    trigger_orders_dagrun,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -32,9 +44,19 @@ pytestmark = pytest.mark.cluster
 
 _SMOKE_DAG_ID = "smoke_kubernetes_pod"
 _SMOKE_TASK_ID = "print_version_to_xcom"
-_CUSTOMERS_DATASET = "customers"
+_ORDERS_DATASET = "orders"
 _DAG_RUN_TIMEOUT_SECONDS = 180
 _INGEST_TIMEOUT_SECONDS = 180
+
+# `order_id` is `sa.Integer()` (migration 0016) -- this file's own random
+# window base range, disjoint from test_referential_orphan.py's
+# [1_000_000_000, 1_499_000_000) order_id band; shares the [2_000_000,
+# 1_000_000_000) convention the other repointed orders tests use (collision
+# odds across a handful of <=1M-row windows in a ~1e9 space are negligible,
+# the same accepted odds the customers offsets always carried).
+_ORDER_ID_LOW = 2_000_000
+_ORDER_ID_HIGH = 1_000_000_000
+_IDEMPOTENT_FIXTURE_ROWS = 120
 
 
 def _run_id_state(
@@ -241,122 +263,118 @@ def test_idempotent_reupload(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     analytics_owner_connection: psycopg.Connection[Any],
-    slice_fixtures_dir: Path,
+    kubectl: Callable[..., Any],
 ) -> None:
     """D-07/LOAD-03/QUAL-09: re-uploading identical content under a new key adds zero rows.
 
-    Uploads `customers_small.csv`'s bytes (with a unique per-test-run marker
-    embedded in the first data row's `name` field, so this test is safe to
-    re-run against a live cluster that already carries a prior run's data --
-    a stale content-hash match from an EARLIER test run would otherwise make
-    the "first" upload look like a duplicate too) to `raw/customers/`, waits
-    for it to succeed, records `normalized.customers`'s row count, uploads
-    the SAME bytes under a second key, and asserts `meta.files` marks the
-    second arrival a duplicate of the first, no second `meta.ingestion_runs`
-    row is created, and `normalized.customers`'s row count is unchanged.
+    Repointed at ORDERS (debug/ci-pipeline-ingestion-timeout ROUND 16,
+    finding 19-A): content-hash duplicate detection is dataset-agnostic, and
+    a lone-file delivery honors orders' contract (no snapshot mass-delete
+    breaker), where the same lone file against customers' full-snapshot
+    contract is -- correctly -- a mass-delete signal. Builds a fresh
+    orders payload (a random `order_id` window makes every run's content
+    genuinely new -- the reason this test is safe to re-run against a live
+    cluster carrying prior runs' data), uploads it, triggers
+    `csv_ingest_orders` (asset-scheduled -- `trigger_orders_dagrun`'s own
+    docstring), waits for SUCCEEDED, records `normalized.orders`'s row
+    count, uploads the SAME bytes under a second key, triggers again, and
+    asserts `meta.files` marks the second arrival a duplicate of the first,
+    no second `meta.ingestion_runs` row is created, and `normalized.orders`'s
+    row count is unchanged.
+
+    The two raw uploads are deliberately NOT deleted afterwards: raw is
+    append-only (section 63/ADR-0011), and `make rebuild-from-raw`'s
+    reconstruct-from-raw premise is only coherent if published data's raw
+    files persist.
     """
     app = s3_client("app")
-    admin = s3_client("admin")
 
-    base_bytes = (slice_fixtures_dir / "customers_small.csv").read_bytes()
-    payload = _unique_small_csv_bytes(base_bytes)
+    parent_ids = existing_customer_ids(analytics_connection, count=3)
+    assert parent_ids, (
+        "normalized.customers is empty on this live cluster -- orders fixtures need real "
+        "parent customer_ids (the sweep corpus on CI, or any earlier customers ingest "
+        "locally, populates it)"
+    )
+
+    rng = uuid.uuid4().int
+    order_id_start = _ORDER_ID_LOW + (rng % (_ORDER_ID_HIGH - _ORDER_ID_LOW))
+    payload = build_orders_csv_bytes(
+        order_id_start=order_id_start,
+        row_count=_IDEMPOTENT_FIXTURE_ROWS,
+        customer_ids=parent_ids,
+    )
 
     marker = uuid.uuid4().hex[:12]
-    key_1 = f"customers/e2e-idempotent-{marker}-1.csv"
-    key_2 = f"customers/e2e-idempotent-{marker}-2.csv"
+    key_1 = f"orders/e2e-idempotent-{marker}-1.csv"
+    key_2 = f"orders/e2e-idempotent-{marker}-2.csv"
     object_uri_1 = f"s3://raw/{key_1}"
     object_uri_2 = f"s3://raw/{key_2}"
 
-    try:
-        app.put_object(Bucket="raw", Key=key_1, Body=payload)
+    app.put_object(Bucket="raw", Key=key_1, Body=payload)
+    trigger_orders_dagrun(kubectl, run_id=f"e2e-idempotent-{marker}-1")
 
-        file_1 = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=object_uri_1,
-            timeout=_DAG_RUN_TIMEOUT_SECONDS,
+    file_1 = poll_file_discovered(
+        analytics_connection,
+        dataset=_ORDERS_DATASET,
+        object_uri=object_uri_1,
+        timeout=_DAG_RUN_TIMEOUT_SECONDS,
+    )
+    assert file_1["duplicate_of_file_id"] is None, (
+        f"the FIRST upload of a fresh, uniquely-windowed payload was already marked a "
+        f"duplicate (of file_id={file_1['duplicate_of_file_id']!r}) -- the random order_id "
+        f"window did not make this content genuinely new"
+    )
+
+    run_1 = poll_run_for_file(analytics_connection, file_id=file_1["file_id"], timeout=30)
+    outcome_1 = poll_ingestion_run(
+        analytics_connection,
+        run_1["idempotency_key"],
+        timeout=_INGEST_TIMEOUT_SECONDS,
+    )
+    assert outcome_1["status"] == "SUCCEEDED", (
+        f"first upload's ingestion run finished {outcome_1['status']!r}, not SUCCEEDED"
+    )
+
+    row_count_before = _orders_row_count(analytics_connection)
+
+    app.put_object(Bucket="raw", Key=key_2, Body=payload)
+    trigger_orders_dagrun(kubectl, run_id=f"e2e-idempotent-{marker}-2")
+
+    file_2 = poll_file_discovered(
+        analytics_connection,
+        dataset=_ORDERS_DATASET,
+        object_uri=object_uri_2,
+        timeout=_DAG_RUN_TIMEOUT_SECONDS,
+    )
+    assert file_2["duplicate_of_file_id"] == file_1["file_id"], (
+        f"second upload's meta.files row has duplicate_of_file_id="
+        f"{file_2['duplicate_of_file_id']!r}, expected {file_1['file_id']!r} "
+        f"(the first upload's file_id)"
+    )
+
+    with analytics_owner_connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM meta.ingestion_runs WHERE file_id = %s",
+            (file_2["file_id"],),
         )
-        assert file_1["duplicate_of_file_id"] is None, (
-            f"the FIRST upload of a fresh, uniquely-marked payload was already marked a "
-            f"duplicate (of file_id={file_1['duplicate_of_file_id']!r}) -- the uniqueness "
-            f"marker did not make this content genuinely new"
-        )
+        count_row = cur.fetchone()
+        assert count_row is not None
+        second_file_run_count = count_row[0]
+    assert second_file_run_count == 0, (
+        f"expected NO meta.ingestion_runs row for the duplicate file "
+        f"(file_id={file_2['file_id']!r}), found {second_file_run_count}"
+    )
 
-        run_1 = poll_run_for_file(analytics_connection, file_id=file_1["file_id"], timeout=30)
-        outcome_1 = poll_ingestion_run(
-            analytics_connection,
-            run_1["idempotency_key"],
-            timeout=_INGEST_TIMEOUT_SECONDS,
-        )
-        assert outcome_1["status"] == "SUCCEEDED", (
-            f"first upload's ingestion run finished {outcome_1['status']!r}, not SUCCEEDED"
-        )
-
-        row_count_before = _customers_row_count(analytics_connection)
-
-        app.put_object(Bucket="raw", Key=key_2, Body=payload)
-
-        file_2 = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=object_uri_2,
-            timeout=_DAG_RUN_TIMEOUT_SECONDS,
-        )
-        assert file_2["duplicate_of_file_id"] == file_1["file_id"], (
-            f"second upload's meta.files row has duplicate_of_file_id="
-            f"{file_2['duplicate_of_file_id']!r}, expected {file_1['file_id']!r} "
-            f"(the first upload's file_id)"
-        )
-
-        with analytics_owner_connection.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM meta.ingestion_runs WHERE file_id = %s",
-                (file_2["file_id"],),
-            )
-            count_row = cur.fetchone()
-            assert count_row is not None
-            second_file_run_count = count_row[0]
-        assert second_file_run_count == 0, (
-            f"expected NO meta.ingestion_runs row for the duplicate file "
-            f"(file_id={file_2['file_id']!r}), found {second_file_run_count}"
-        )
-
-        row_count_after = _customers_row_count(analytics_connection)
-        assert row_count_after == row_count_before, (
-            f"normalized.customers row count changed after the duplicate reupload: "
-            f"{row_count_before} -> {row_count_after}"
-        )
-    finally:
-        # Best-effort cleanup: S3 DELETE is idempotent (a missing key is not
-        # an error), so this only needs to tolerate an infra-level failure
-        # (network, credential) without masking a real assertion failure
-        # above with a cleanup exception.
-        for key in (key_1, key_2):
-            with contextlib.suppress(Exception):
-                admin.delete_object(Bucket="raw", Key=key)
+    row_count_after = _orders_row_count(analytics_connection)
+    assert row_count_after == row_count_before, (
+        f"normalized.orders row count changed after the duplicate reupload: "
+        f"{row_count_before} -> {row_count_after}"
+    )
 
 
-def _unique_small_csv_bytes(base_bytes: bytes) -> bytes:
-    """Return `base_bytes` with a fresh, unique marker in the first data row's `name` field.
-
-    Keeps the file's shape (121 lines, 5 columns) byte-identical to the
-    generated fixture except for this one field, so `content_sha256` is
-    guaranteed different from any PRIOR test run's upload of the same base
-    fixture -- the reason `test_idempotent_reupload` is safe to re-run
-    against a live cluster that already carries earlier runs' data.
-    """
-    lines = base_bytes.decode("utf-8").splitlines(keepends=True)
-    header, first_row, *rest = lines
-    fields = first_row.rstrip("\r\n").split(",")
-    terminator = first_row[len(first_row.rstrip("\r\n")) :]
-    fields[1] = f"E2E-{uuid.uuid4().hex[:16]}"
-    lines = [header, ",".join(fields) + terminator, *rest]
-    return "".join(lines).encode("utf-8")
-
-
-def _customers_row_count(conn: psycopg.Connection[Any]) -> int:
+def _orders_row_count(conn: psycopg.Connection[Any]) -> int:
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM normalized.customers")
+        cur.execute("SELECT count(*) FROM normalized.orders")
         row = cur.fetchone()
         assert row is not None
         return int(row[0])

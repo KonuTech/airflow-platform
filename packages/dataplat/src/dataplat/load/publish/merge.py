@@ -49,6 +49,16 @@ if TYPE_CHECKING:
 # `staging_table` is built by `StagingLoader` from `ctx.config.dataset` + a
 # numeric `run_id`, never from CSV row content. Every column/table name
 # below is a literal, hardcoded against normalized.customers's real schema.
+#
+# QUARANTINE EXCLUSION (debug/ci-pipeline-ingestion-timeout ROUND 16,
+# finding 20b): `publish_ingest` hands this publisher the CUMULATIVE
+# `silver.<dataset>` table, which retains rows staged by runs that were
+# later terminally QUARANTINED -- without this predicate those rows leak
+# into gold on the NEXT successful pass. NOT IN (never an inner join) so a
+# row whose `_run_id` has no `meta.ingestion_runs` row at all (test
+# harnesses, per-run scratch tables) stays INCLUDED by default; an operator
+# re-opening a quarantined run (status flip) re-includes its rows
+# automatically. Same predicate in `merge_orders.py` and `scd.py`.
 _PUBLISH_SQL = """
 INSERT INTO normalized.customers (
     customer_id, name, country, birth_date, event_ts,
@@ -60,6 +70,9 @@ SELECT DISTINCT ON (customer_id)
        _run_id, _file_id, _batch_id, _source_row_number,
        _record_hash, _record_hash_version
 FROM   {staging_table}
+WHERE  _run_id NOT IN (
+           SELECT run_id FROM meta.ingestion_runs WHERE status = 'QUARANTINED'
+       )
 ORDER  BY customer_id, event_ts DESC, _source_row_number DESC
 ON CONFLICT (customer_id) DO UPDATE
    SET name = EXCLUDED.name, country = EXCLUDED.country,

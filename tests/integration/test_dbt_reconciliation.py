@@ -255,7 +255,49 @@ def test_reconciliation_post_hook_writes_a_row_with_the_correct_discrepancy_form
     )
     assert written_file_id == file_id
     assert discrepancy == input_count - (output_count + dedup_count)
-    assert discrepancy == 0
+    # BUILD-LOCAL balance, deliberately NOT `discrepancy == 0` (changed by
+    # debug/ci-pipeline-ingestion-timeout ROUND 16, finding 21): the counts
+    # feeding `discrepancy` are SESSION-SHARED whole-table aggregates, and
+    # this suite's own per-test cleanup fixture deletes prior dbt tests'
+    # non-numeric silver keys out-of-band while their bronze rows remain --
+    # an out-of-band delete the real platform never performs. The old
+    # absolute-zero assertion only ever held because the pre-finding-21
+    # `max(_run_id) from {{ this }}` watermark DROPPED when cleanup deleted
+    # the max-holding silver rows, accidentally re-materializing the cleaned
+    # keys on this test's own build; the meta.dbt_processed_runs claim
+    # ledger (exact eligibility, no accidental self-healing) makes the
+    # session-global figure honestly nonzero here. The load-bearing D-22
+    # property -- THIS build silently lost nothing -- is asserted
+    # build-locally instead: both of this test's rows are winners, resident
+    # in silver, and this build's own audit row balances exactly.
+    with psycopg.connect(migrated_dsn) as conn:
+        resident = conn.execute(
+            "SELECT count(*) FROM silver.customers WHERE customer_id IN ('1', '2') "
+            "AND _run_id = %s",
+            (run_id,),
+        ).fetchone()
+        audit = conn.execute(
+            """
+            SELECT records_received, records_accepted, records_deduplicated
+            FROM meta.dedup_audit
+            WHERE model_name = 'customers'
+            ORDER BY dedup_audit_id DESC
+            LIMIT 1
+            """,
+        ).fetchone()
+    assert resident is not None
+    assert resident[0] == 2, (
+        f"expected both of this build's rows resident in silver, found {resident!r}"
+    )
+    assert audit is not None
+    received, accepted, deduplicated = (int(audit[0]), int(audit[1]), int(audit[2]))
+    assert received == accepted + deduplicated, (
+        f"this build's own audit row does not balance: received={received}, "
+        f"accepted={accepted}, deduplicated={deduplicated}"
+    )
+    assert received == 2, (
+        f"expected this build to have processed exactly its own 2 rows, got {received}"
+    )
 
 
 def test_reconciliation_post_hook_writes_one_row_per_file_grain(

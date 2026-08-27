@@ -212,3 +212,13 @@ def test_dbt_build_runs_between_stage_and_publish(dagbag: DagBag) -> None:
         assert "mark_dbt_build_done" in dag.task_dict["publish"].upstream_task_ids, (
             f"{dag_id}: publish is not gated by mark_dbt_build_done"
         )
+        # debug/ci-pipeline-ingestion-timeout ROUND 16, finding (23): the
+        # ELIGIBILITY QUERY itself must run after this DagRun's own stage --
+        # without this edge the scheduler runs it at DagRun start, so a run
+        # staged by its own DagRun never gets a DBT_BUILD run_stages row until
+        # the NEXT DagRun (observed live: run 668's row never appeared inside
+        # the dbt-kill test's 300s poll on CI run 33103279876).
+        assert "stage" in dag.task_dict["list_run_ids_pending_dbt_build"].upstream_task_ids, (
+            f"{dag_id}: list_run_ids_pending_dbt_build is not gated by stage -- its "
+            f"eligibility snapshot would exclude runs staged by its own DagRun (finding 23)"
+        )

@@ -99,12 +99,29 @@ ORDER  BY customer_id
 # had must be visible to the recompute, not just this pass's own new rows.
 # `customer_id::int`/`event_ts::timestamptz` cast bronze's all-TEXT
 # convention (migration 0022) into the types `BronzeRecord` declares.
+#
+# QUARANTINE EXCLUSION (debug/ci-pipeline-ingestion-timeout ROUND 16,
+# finding 20b): a run terminally QUARANTINED at publish time (ROUND 14's
+# breaker semantics) has already staged its bronze rows -- without this
+# predicate, ANY later pass touching one of its keys silently folds the
+# quarantined delivery's rows into the recomputed gold chain, i.e.
+# quarantine blocked the PASS but not the DATA (observed at 3M+-row scale
+# on CI run 33103279876). Quarantined bronze rows stay in the table
+# (raw-immutability/traceability -- identifiable via
+# meta.v_quarantined_artifacts, migration 0041) but must never reach gold
+# unless an operator re-opens the run (status flip -- which this NOT IN
+# predicate honors automatically). Shape is NOT IN (never an inner join to
+# meta.ingestion_runs) so a bronze row whose run_id has no metadata row at
+# all -- test harnesses, partial rebuilds -- stays INCLUDED by default.
 _BRONZE_HISTORY_SQL = """
 SELECT customer_id::int, name, country, birth_date, signup_country,
        event_ts::timestamptz, _source_row_number,
        _run_id, _file_id, _batch_id, _record_hash, _record_hash_version
 FROM   staging.customers
 WHERE  customer_id = %(customer_id)s
+  AND  _run_id NOT IN (
+           SELECT run_id FROM meta.ingestion_runs WHERE status = 'QUARANTINED'
+       )
 """
 
 # 10-07-PLAN.md Task 1 (Rule 4, user-approved live finding): scoped to

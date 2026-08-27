@@ -4,9 +4,23 @@
 
   `is_incremental()`-guarded, keyed off `_run_id` (never `event_ts`, D-06's
   hard constraint): a late-arriving bronze row with an OLD `event_ts` but a
-  NEW `_run_id` is still picked up by the `where _run_id > {{
-  watermark_floor }}` filter below -- `event_ts` decides ordering AMONG
-  rows this filter already selected, never which rows get selected.
+  NEW `_run_id` is still picked up by the claimed-run filter below --
+  `event_ts` decides ordering AMONG rows this filter already selected,
+  never which rows get selected.
+
+  Eligibility is a CLAIM LEDGER, not a max-`_run_id` watermark (debug
+  ci-pipeline-ingestion-timeout ROUND 16, finding 21): the old
+  `where _run_id > max(_run_id) from {{ this }}` floor silently and
+  PERMANENTLY excluded any run whose bronze rows committed after a higher
+  `_run_id` had already been built (out-of-order staging is routine: capped
+  claim batches, stage retries, lease reclaims, replay waves -- observed
+  live as run 42's replay rows never reaching silver, run 33103279876).
+  `claim_dbt_processed_runs` (pre-hook, same transaction) claims every
+  not-yet-claimed bronze `_run_id` into `meta.dbt_processed_runs`
+  (migration 0040) and the filter below selects exactly THIS transaction's
+  claimed set via `claimed_txid = txid_current()` -- see that macro's own
+  docstring for why txid, never `{{ invocation_id }}` (partial-parsing
+  stale-literal hazard, reconciliation_post_hook.sql point 3).
 
   D-07 layer 1 (business-key primary dedup): `row_number() over (partition
   by customer_id order by event_ts desc, _source_row_number desc)` -- this
@@ -36,13 +50,20 @@
   `server_default`.
 #}
 
-{% set watermark_floor = 0 %}
-{% if is_incremental() %}
-  {% set watermark_floor_query %}
-    select coalesce(max(_run_id), 0) from {{ this }}
-  {% endset %}
-  {% set watermark_floor = run_query(watermark_floor_query).columns[0].values()[0] | int %}
-{% endif %}
+{#-
+  `pre_hook_sql` is eagerly captured the same way `post_hook_sql` below is
+  (and for the same two-pass-render reason). The claim macro's rendered SQL
+  is fully static -- no `run_query()`, no `{{ this }}`, no
+  `{{ invocation_id }}` -- so even a partial-parse cache reuse of this
+  string is byte-identical and harmless.
+-#}
+{% set pre_hook_sql %}
+{{ claim_dbt_processed_runs(
+    dataset_name='customers',
+    source_schema='staging',
+    source_identifier='customers'
+) }}
+{% endset %}
 
 {#-
   `post_hook_sql` is rendered HERE, eagerly, in the model's own primary
@@ -90,6 +111,7 @@
     on_schema_change='append_new_columns',
     contract={'enforced': True},
     alias='customers',
+    pre_hook=pre_hook_sql,
     post_hook=post_hook_sql
 ) }}
 
@@ -100,7 +122,12 @@ with new_bronze as (
         _record_hash, _record_hash_version
     from {{ source('bronze', 'customers') }}
     {% if is_incremental() %}
-    where _run_id > {{ watermark_floor }}
+    where _run_id in (
+        select run_id
+        from meta.dbt_processed_runs
+        where dataset_name = 'customers'
+          and claimed_txid = txid_current()
+    )
     {% endif %}
 ),
 

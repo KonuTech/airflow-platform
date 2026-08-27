@@ -10,11 +10,12 @@ Per D-30, this test does NOT seed a large corpus -- it seeds a SMALL, fully-trac
 customers files of its own (mirroring `test_backfill_reentry.py`'s own `_build_customers_csv`
 shape) specifically so the D-34 assertion has a known, controlled business key to track across
 the drop, rather than depending on whatever quarantine-resolution history the rest of the suite
-happened to leave lying around. Neither file is ever deleted (unlike most of this suite's own
-`finally: admin.delete_object(...)` convention) -- this test's OWN premise (INCR-07's whole point)
-requires both to still be present in `raw/` for the rebuild's own triggered backfill to reprocess
-them, since `rebuild-from-raw.py` reconstructs strictly from raw plus versioned configuration
-(D-28), never from anything this suite deletes out from under it.
+happened to leave lying around. Neither file is ever deleted -- and since
+debug/ci-pipeline-ingestion-timeout ROUND 16 (finding 19-A) NO test in this suite deletes a raw
+upload whose data published (section 63/ADR-0011 raw immutability): this test's OWN premise
+(INCR-07's whole point) requires the FULL raw history to still be present in `raw/` for the
+rebuild's own reprocessing, since `rebuild-from-raw.py` reconstructs strictly from raw plus
+versioned configuration (D-28), never from anything this suite deletes out from under it.
 
 ## Why the correction resolves to REDRIVEN before the drop, but reverts to PENDING after it
 
@@ -63,7 +64,12 @@ from dataplat.pipeline.rebuild_reconciliation import (
     snapshot_table_state,
 )
 from dataplat.pipeline.run import _TARGET_COLUMNS_BY_DATASET  # reuse, never re-derive (T-09-03)
-from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
+from tests.e2e.slice.conftest import (
+    poll_file_discovered,
+    poll_ingestion_run,
+    poll_run_for_file,
+    snapshot_complete_customers_csv,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -101,12 +107,26 @@ _CUSTOMER_ID_LOW = 2_101_000_000
 _CUSTOMER_ID_HIGH = 2_140_000_000
 
 
-def _build_customers_csv(*, base_customer_id: int, bad_row_name: str) -> bytes:
-    """Build a `customers.yaml`-shaped CSV: 3 valid rows + 1 row with an empty `name`.
+def _build_customers_csv(
+    conn: psycopg.Connection[Any],
+    *,
+    base_customer_id: int,
+    bad_row_name: str,
+) -> bytes:
+    """Build a SNAPSHOT-COMPLETE customers CSV: roster echo + 3 valid rows + 1 empty-`name` row.
 
     Verbatim shape of `test_backfill_reentry.py`'s own `_build_customers_csv` (same column
-    order, same live-proven `QUALITY_COMPLETENESS` trip on `name`) -- not re-derived, copied,
-    matching this codebase's own per-tier-copy convention for small test-fixture builders.
+    order, same live-proven `QUALITY_COMPLETENESS` trip on `name`, same
+    `conftest.snapshot_complete_customers_csv` roster echo -- debug/ci-pipeline-ingestion-
+    timeout ROUND 16, finding 19-A: customers' full-snapshot contract makes a lone 4-row
+    file a -- correct -- mass-delete breaker trip, ROUND 15's live run 764) -- not
+    re-derived, copied, matching this codebase's own per-tier-copy convention for small
+    test-fixture builders.
+
+    NOTE the rebuild-time property this preserves: during the rebuild's own backfill the
+    raw history reprocesses in lexicographic key order with the schemas EMPTY, so each
+    echo fixture is a superset snapshot of everything staged before it (corpus files sort
+    before `e2e-*` keys) -- vanished stays 0 during reprocessing too.
     """
     rows = [
         (base_customer_id, "Anna Kowalski", "PL", "1950-03-14", "2026-01-05T08:15:00Z"),
@@ -114,9 +134,12 @@ def _build_customers_csv(*, base_customer_id: int, bad_row_name: str) -> bytes:
         (base_customer_id + 2, "Sophie Muller", "GB", "1974-03-19", "2026-03-16T22:37:52Z"),
         (base_customer_id + 3, bad_row_name, "PL", "1988-12-01", "2026-04-13T16:49:05Z"),
     ]
-    lines = ["customer_id,name,country,birth_date,event_ts"]
-    lines.extend(f"{cid},{name},{country},{bdate},{ets}" for cid, name, country, bdate, ets in rows)
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return snapshot_complete_customers_csv(
+        conn,
+        extra_rows=[
+            (str(cid), name, country, bdate, ets) for cid, name, country, bdate, ets in rows
+        ],
+    )
 
 
 def _dataset_id(conn: psycopg.Connection[Any], name: str) -> int:
@@ -266,6 +289,92 @@ def _wait_for_new_backfill_completed(
     raise AssertionError(msg)
 
 
+def _wait_for_all_raw_files_settled(
+    conn: psycopg.Connection[Any],
+    s3_app: Any,
+    *,
+    dataset: str,
+    prefix: str,
+    timeout: float,
+) -> None:
+    """Poll until EVERY raw `.csv` object under `prefix` is discovered AND terminal in meta.
+
+    Added by debug/ci-pipeline-ingestion-timeout ROUND 16 (finding 19-A's
+    rebuild leg): `rebuild-from-raw.py` only *triggers* the customers
+    backfill -- `orders` rebuilds via the ASSET CASCADE (the script's own
+    `_dry_run_supports_backfill` probe skips asset-scheduled DAGs by
+    design), so a post-rebuild snapshot taken the moment the customers
+    `backfill.completed_at` lands RACES the still-draining orders (and any
+    trailing customers) reprocessing. This wait closes that race honestly:
+    the authoritative "everything raw has been reprocessed" signal is every
+    raw object having a `meta.files` row that is either a DUPLICATE
+    (`duplicate_of_file_id` set -- no run is ever allocated for one,
+    discovery's own D-13 semantics) or whose NEWEST `meta.ingestion_runs`
+    row is terminal. Query shape copied from
+    `test_backfill_2year_sweep.py::_wait_for_dataset_files_terminal`
+    (DISTINCT ON + `run_id DESC` -- the newest attempt is the one that
+    matters), extended with the duplicate carve-out because this wait runs
+    against the WHOLE bucket prefix, not a manifest of known-unique files.
+    """
+    paginator = s3_app.get_paginator("list_objects_v2")
+    filenames = [
+        obj["Key"].rsplit("/", 1)[-1]
+        for page in paginator.paginate(Bucket="raw", Prefix=prefix)
+        for obj in page.get("Contents", [])
+        if obj["Key"].endswith(".csv")
+    ]
+    if not filenames:
+        # A dataset with no raw history has nothing to settle (e.g. a bare
+        # cluster where nothing ever uploaded orders) -- an empty prefix is
+        # a legitimate no-op here, not a failure: this test's OWN seeded
+        # files guarantee the customers call is never empty.
+        return
+
+    deadline = time.monotonic() + timeout
+    pending: dict[str, str | None] = {}
+    while time.monotonic() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (f.filename)
+                       f.filename, f.duplicate_of_file_id, ir.status
+                  FROM meta.files f
+                  JOIN meta.datasets d ON d.dataset_id = f.dataset_id
+                  LEFT JOIN meta.ingestion_runs ir ON ir.file_id = f.file_id
+                 WHERE d.dataset_name = %s AND f.filename = ANY(%s)
+                 ORDER BY f.filename, ir.run_id DESC NULLS LAST
+                """,
+                (dataset, filenames),
+            )
+            rows = cur.fetchall()
+        settled: set[str] = set()
+        pending = {}
+        for filename, duplicate_of_file_id, status in rows:
+            if duplicate_of_file_id is not None or status in _SETTLE_TERMINAL_RUN_STATUSES:
+                settled.add(filename)
+            else:
+                pending[filename] = status
+        missing = set(filenames) - settled - pending.keys()
+        if not pending and not missing:
+            return
+        for name in missing:
+            pending[name] = "<undiscovered>"
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    msg = (
+        f"dataset={dataset!r}: {len(pending)} of {len(filenames)} raw files never settled "
+        f"within {timeout}s after the rebuild backfill completed -- still pending: "
+        f"{dict(sorted(pending.items()))}"
+    )
+    raise AssertionError(msg)
+
+
+# Same terminal set as conftest._TERMINAL_RUN_STATUSES (copied per this file's own
+# already-established local-copy convention for sweep helpers).
+_SETTLE_TERMINAL_RUN_STATUSES = frozenset(
+    {"SUCCEEDED", "FAILED", "SKIPPED_DUPLICATE", "SKIPPED_CONCURRENT", "QUARANTINED"},
+)
+
+
 def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa: PLR0915
     repo_root: Path,
     s3_client: Callable[[str], Any],
@@ -307,9 +416,8 @@ def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa:
     bad_customer_id = base_customer_id + 3
     bad_business_key = str(bad_customer_id)
 
-    original_payload = _build_customers_csv(base_customer_id=base_customer_id, bad_row_name="")
-    corrected_payload = _build_customers_csv(
-        base_customer_id=base_customer_id, bad_row_name="Corrected Name"
+    original_payload = _build_customers_csv(
+        analytics_connection, base_customer_id=base_customer_id, bad_row_name=""
     )
 
     # Lexicographic "corrected" < "original" is load-bearing -- see module docstring's "Why the
@@ -353,6 +461,9 @@ def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa:
         f"customer_id value), got {pending_reject['business_key']!r}"
     )
 
+    corrected_payload = _build_customers_csv(
+        analytics_connection, base_customer_id=base_customer_id, bad_row_name="Corrected Name"
+    )
     app.put_object(Bucket="raw", Key=corrected_key, Body=corrected_payload)
 
     corrected_file = poll_file_discovered(
@@ -417,6 +528,25 @@ def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa:
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_backfill_id=since_backfill_id,
+        timeout=_BACKFILL_SETTLE_TIMEOUT_SECONDS,
+    )
+    # ROUND 16 (finding 19-A): the customers backfill completing does NOT mean the whole
+    # rebuild has drained -- orders reprocesses via the asset cascade, trailing the
+    # customers publishes, and late customers claims can trail the backfill's own DagRuns
+    # too (capped claim batches). Snapshotting before BOTH datasets settle races the
+    # cascade -- see `_wait_for_all_raw_files_settled`'s own docstring.
+    _wait_for_all_raw_files_settled(
+        analytics_connection,
+        app,
+        dataset=_CUSTOMERS_DATASET,
+        prefix="customers/",
+        timeout=_BACKFILL_SETTLE_TIMEOUT_SECONDS,
+    )
+    _wait_for_all_raw_files_settled(
+        analytics_connection,
+        app,
+        dataset="orders",
+        prefix="orders/",
         timeout=_BACKFILL_SETTLE_TIMEOUT_SECONDS,
     )
 

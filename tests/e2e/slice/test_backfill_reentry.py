@@ -83,7 +83,6 @@ failure is never confused with this known-transient race again.
 
 from __future__ import annotations
 
-import contextlib
 import random
 import time
 import uuid
@@ -91,7 +90,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
+from tests.e2e.slice.conftest import (
+    poll_file_discovered,
+    poll_ingestion_run,
+    poll_run_for_file,
+    snapshot_complete_customers_csv,
+)
 
 if TYPE_CHECKING:
     import datetime
@@ -136,19 +140,34 @@ _CUSTOMER_ID_LOW = 2_000_000_000
 _CUSTOMER_ID_HIGH = 2_100_000_000
 
 
-def _build_customers_csv(*, base_customer_id: int, bad_row_name: str) -> bytes:
-    """Build a `customers.yaml`-shaped CSV: 3 valid rows + 1 row with an empty `name`.
+def _build_customers_csv(
+    conn: psycopg.Connection[Any],
+    *,
+    base_customer_id: int,
+    bad_row_name: str,
+) -> bytes:
+    """Build a SNAPSHOT-COMPLETE customers CSV: roster echo + 3 valid rows + 1 empty-`name` row.
 
     Column order (`customer_id,name,country,birth_date,event_ts`) matches
     `configs/datasets/customers.yaml`'s own `columns:` block and
     `tests/fixtures/slice-corpus.yaml`'s own header, verbatim -- positional
-    correspondence only (04-04-SUMMARY.md precedent). A 1-in-4 (25%)
-    rejection rate stays comfortably under `customers.yaml`'s own
+    correspondence only (04-04-SUMMARY.md precedent). A single rejected row
+    among roster+4 stays far under `customers.yaml`'s own
     `rejection_rate_threshold: 0.5` circuit breaker -- this test needs the
     run to reach SUCCEEDED with one genuine PENDING reject, not FAIL (which
     would roll back the reject row too, D-11).
 
+    Wrapped in `conftest.snapshot_complete_customers_csv` by
+    debug/ci-pipeline-ingestion-timeout ROUND 16 (finding 19-A): customers'
+    contract is FULL-SNAPSHOT (`change_semantics: snapshot` + the
+    mass-delete breaker), so this delivery must echo the current gold
+    roster or the breaker -- correctly -- quarantines the whole pass as a
+    mass delete (ROUND 15's live run 544). The corrected re-upload, built
+    seconds later, re-queries the roster itself; the 3 keys the original
+    published are among its OWN 4 rows either way, so vanished stays 0.
+
     Args:
+        conn: An open analytics connection (roster echo query).
         base_customer_id: The first of 4 consecutive customer_ids this file
             uses.
         bad_row_name: The `name` value for the 4th (bad) row -- `""` for
@@ -163,9 +182,12 @@ def _build_customers_csv(*, base_customer_id: int, bad_row_name: str) -> bytes:
         (base_customer_id + 2, "Sophie Muller", "GB", "1974-03-19", "2026-03-16T22:37:52Z"),
         (base_customer_id + 3, bad_row_name, "PL", "1988-12-01", "2026-04-13T16:49:05Z"),
     ]
-    lines = ["customer_id,name,country,birth_date,event_ts"]
-    lines.extend(f"{cid},{name},{country},{bdate},{ets}" for cid, name, country, bdate, ets in rows)
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return snapshot_complete_customers_csv(
+        conn,
+        extra_rows=[
+            (str(cid), name, country, bdate, ets) for cid, name, country, bdate, ets in rows
+        ],
+    )
 
 
 def _fetch_pending_completeness_reject(
@@ -620,16 +642,13 @@ def test_backfill_resolves_previously_rejected_row(
     pointing at the corrected file's own new `meta.ingestion_runs.run_id`.
     """
     app = s3_client("app")
-    admin = s3_client("admin")
 
     rng = random.SystemRandom()
     base_customer_id = rng.randint(_CUSTOMER_ID_LOW, _CUSTOMER_ID_HIGH)
     bad_customer_id = base_customer_id + 3
 
-    original_payload = _build_customers_csv(base_customer_id=base_customer_id, bad_row_name="")
-    corrected_payload = _build_customers_csv(
-        base_customer_id=base_customer_id,
-        bad_row_name="Corrected Name",
+    original_payload = _build_customers_csv(
+        analytics_connection, base_customer_id=base_customer_id, bad_row_name=""
     )
 
     marker = uuid.uuid4().hex[:12]
@@ -638,135 +657,139 @@ def test_backfill_resolves_previously_rejected_row(
     original_uri = f"s3://raw/{original_key}"
     corrected_uri = f"s3://raw/{corrected_key}"
 
-    try:
-        app.put_object(Bucket="raw", Key=original_key, Body=original_payload)
+    # Raw uploads are deliberately never deleted (section 63/ADR-0011 raw
+    # immutability; rebuild-from-raw's premise needs published data's raw
+    # files to persist) -- the old try/finally delete-both-keys block was
+    # removed by ROUND 16 alongside the snapshot-complete fixture change.
+    app.put_object(Bucket="raw", Key=original_key, Body=original_payload)
 
-        original_file = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=original_uri,
-            timeout=_DISCOVERY_TIMEOUT_SECONDS,
-        )
-        assert original_file["duplicate_of_file_id"] is None, (
-            f"the freshly-marked original customers file was already flagged a duplicate of "
-            f"file_id={original_file['duplicate_of_file_id']!r} -- the uuid marker did not "
-            f"make this content genuinely new"
-        )
+    original_file = poll_file_discovered(
+        analytics_connection,
+        dataset=_CUSTOMERS_DATASET,
+        object_uri=original_uri,
+        timeout=_DISCOVERY_TIMEOUT_SECONDS,
+    )
+    assert original_file["duplicate_of_file_id"] is None, (
+        f"the freshly-marked original customers file was already flagged a duplicate of "
+        f"file_id={original_file['duplicate_of_file_id']!r} -- the uuid marker did not "
+        f"make this content genuinely new"
+    )
 
-        original_run = poll_run_for_file(
-            analytics_connection,
-            file_id=original_file["file_id"],
-            timeout=60,
-        )
-        original_outcome = poll_ingestion_run(
-            analytics_connection,
-            original_run["idempotency_key"],
-            timeout=_INGEST_TIMEOUT_SECONDS,
-        )
-        assert original_outcome["status"] == "SUCCEEDED", (
-            f"original bad-row run finished {original_outcome['status']!r}, not SUCCEEDED -- "
-            f"a single QUALITY_COMPLETENESS/REJECT_RECORD violation out of 4 rows (25%) must "
-            f"stay under customers.yaml's own rejection_rate_threshold (0.5) and SUCCEED"
-        )
+    original_run = poll_run_for_file(
+        analytics_connection,
+        file_id=original_file["file_id"],
+        timeout=60,
+    )
+    original_outcome = poll_ingestion_run(
+        analytics_connection,
+        original_run["idempotency_key"],
+        timeout=_INGEST_TIMEOUT_SECONDS,
+    )
+    assert original_outcome["status"] == "SUCCEEDED", (
+        f"original bad-row run finished {original_outcome['status']!r}, not SUCCEEDED -- "
+        f"a single QUALITY_COMPLETENESS/REJECT_RECORD violation out of 4 rows (25%) must "
+        f"stay under customers.yaml's own rejection_rate_threshold (0.5) and SUCCEED"
+    )
 
-        pending_reject = _fetch_pending_completeness_reject(
-            analytics_owner_connection,
-            run_id=original_run["run_id"],
-        )
-        assert pending_reject["resolution_type"] == "PENDING", (
-            f"expected the freshly-rejected row's resolution_type to be 'PENDING' before any "
-            f"backfill, got {pending_reject['resolution_type']!r}"
-        )
-        assert pending_reject["resolved_by_run_id"] is None, (
-            f"expected the freshly-rejected row's resolved_by_run_id to be NULL before any "
-            f"backfill, got {pending_reject['resolved_by_run_id']!r}"
-        )
+    pending_reject = _fetch_pending_completeness_reject(
+        analytics_owner_connection,
+        run_id=original_run["run_id"],
+    )
+    assert pending_reject["resolution_type"] == "PENDING", (
+        f"expected the freshly-rejected row's resolution_type to be 'PENDING' before any "
+        f"backfill, got {pending_reject['resolution_type']!r}"
+    )
+    assert pending_reject["resolved_by_run_id"] is None, (
+        f"expected the freshly-rejected row's resolved_by_run_id to be NULL before any "
+        f"backfill, got {pending_reject['resolved_by_run_id']!r}"
+    )
 
-        dag_id, dag_run_id = _fetch_dagrun_identity(
-            analytics_owner_connection,
-            run_id=original_run["run_id"],
-        )
-        assert dag_id == _CUSTOMERS_DAG_ID, (
-            f"expected the original run to have been claimed under dag_id={_CUSTOMERS_DAG_ID!r}, "
-            f"got {dag_id!r}"
-        )
+    dag_id, dag_run_id = _fetch_dagrun_identity(
+        analytics_owner_connection,
+        run_id=original_run["run_id"],
+    )
+    assert dag_id == _CUSTOMERS_DAG_ID, (
+        f"expected the original run to have been claimed under dag_id={_CUSTOMERS_DAG_ID!r}, "
+        f"got {dag_id!r}"
+    )
 
-        with airflow_metadata_connection.cursor() as cur:
-            cur.execute(
-                "SELECT logical_date, clear_number FROM dag_run WHERE dag_id = %s AND run_id = %s",
-                (dag_id, dag_run_id),
-            )
-            dagrun_row = cur.fetchone()
-        assert dagrun_row is not None, (
-            f"no dag_run row found for dag_id={dag_id!r} run_id={dag_run_id!r} -- cannot "
-            f"determine the logical_date to target with a real backfill"
+    with airflow_metadata_connection.cursor() as cur:
+        cur.execute(
+            "SELECT logical_date, clear_number FROM dag_run WHERE dag_id = %s AND run_id = %s",
+            (dag_id, dag_run_id),
         )
-        logical_date, pre_backfill_clear_number = dagrun_row
-        assert logical_date is not None, (
-            f"dag_run for dag_id={dag_id!r} run_id={dag_run_id!r} has a NULL logical_date -- "
-            f"cannot target it with 'airflow backfill create --from-date/--to-date'"
-        )
+        dagrun_row = cur.fetchone()
+    assert dagrun_row is not None, (
+        f"no dag_run row found for dag_id={dag_id!r} run_id={dag_run_id!r} -- cannot "
+        f"determine the logical_date to target with a real backfill"
+    )
+    logical_date, pre_backfill_clear_number = dagrun_row
+    assert logical_date is not None, (
+        f"dag_run for dag_id={dag_id!r} run_id={dag_run_id!r} has a NULL logical_date -- "
+        f"cannot target it with 'airflow backfill create --from-date/--to-date'"
+    )
 
-        app.put_object(Bucket="raw", Key=corrected_key, Body=corrected_payload)
+    corrected_payload = _build_customers_csv(
+        analytics_connection,
+        base_customer_id=base_customer_id,
+        bad_row_name="Corrected Name",
+    )
+    app.put_object(Bucket="raw", Key=corrected_key, Body=corrected_payload)
 
-        _run_backfill_and_wait_for_reexecution(
-            kubectl,
-            airflow_metadata_connection,
-            dag_id=dag_id,
-            dag_run_id=dag_run_id,
-            logical_date=logical_date,
-            logical_date_iso=logical_date.isoformat(),
-            pre_backfill_clear_number=pre_backfill_clear_number,
-        )
+    _run_backfill_and_wait_for_reexecution(
+        kubectl,
+        airflow_metadata_connection,
+        dag_id=dag_id,
+        dag_run_id=dag_run_id,
+        logical_date=logical_date,
+        logical_date_iso=logical_date.isoformat(),
+        pre_backfill_clear_number=pre_backfill_clear_number,
+    )
 
-        corrected_file = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=corrected_uri,
-            timeout=_DISCOVERY_TIMEOUT_SECONDS,
-        )
-        assert corrected_file["duplicate_of_file_id"] is None, (
-            f"expected the corrected file {corrected_uri!r} to discover as a genuinely new "
-            f"file (duplicate_of_file_id=None), got duplicate_of_file_id="
-            f"{corrected_file['duplicate_of_file_id']!r} -- content_sha256-based dedup "
-            f"treated it as a repeat of an existing file"
-        )
+    corrected_file = poll_file_discovered(
+        analytics_connection,
+        dataset=_CUSTOMERS_DATASET,
+        object_uri=corrected_uri,
+        timeout=_DISCOVERY_TIMEOUT_SECONDS,
+    )
+    assert corrected_file["duplicate_of_file_id"] is None, (
+        f"expected the corrected file {corrected_uri!r} to discover as a genuinely new "
+        f"file (duplicate_of_file_id=None), got duplicate_of_file_id="
+        f"{corrected_file['duplicate_of_file_id']!r} -- content_sha256-based dedup "
+        f"treated it as a repeat of an existing file"
+    )
 
-        corrected_run = poll_run_for_file(
-            analytics_connection,
-            file_id=corrected_file["file_id"],
-            timeout=60,
-        )
-        corrected_outcome = poll_ingestion_run(
-            analytics_connection,
-            corrected_run["idempotency_key"],
-            timeout=_INGEST_TIMEOUT_SECONDS,
-        )
-        assert corrected_outcome["status"] == "SUCCEEDED", (
-            f"corrected-file backfill run finished {corrected_outcome['status']!r}, not SUCCEEDED"
-        )
+    corrected_run = poll_run_for_file(
+        analytics_connection,
+        file_id=corrected_file["file_id"],
+        timeout=60,
+    )
+    corrected_outcome = poll_ingestion_run(
+        analytics_connection,
+        corrected_run["idempotency_key"],
+        timeout=_INGEST_TIMEOUT_SECONDS,
+    )
+    assert corrected_outcome["status"] == "SUCCEEDED", (
+        f"corrected-file backfill run finished {corrected_outcome['status']!r}, not SUCCEEDED"
+    )
 
-        with analytics_owner_connection.cursor() as cur:
-            cur.execute(
-                "SELECT name FROM normalized.customers WHERE customer_id = %s",
-                (bad_customer_id,),
-            )
-            published_row = cur.fetchone()
-        assert published_row is not None, (
-            f"customer_id={bad_customer_id!r} (the corrected row) was never published to "
-            f"normalized.customers after the backfill run"
+    with analytics_owner_connection.cursor() as cur:
+        cur.execute(
+            "SELECT name FROM normalized.customers WHERE customer_id = %s",
+            (bad_customer_id,),
         )
-        assert published_row[0] == "Corrected Name", (
-            f"expected normalized.customers.name={'Corrected Name'!r} for customer_id="
-            f"{bad_customer_id!r}, got {published_row[0]!r}"
-        )
+        published_row = cur.fetchone()
+    assert published_row is not None, (
+        f"customer_id={bad_customer_id!r} (the corrected row) was never published to "
+        f"normalized.customers after the backfill run"
+    )
+    assert published_row[0] == "Corrected Name", (
+        f"expected normalized.customers.name={'Corrected Name'!r} for customer_id="
+        f"{bad_customer_id!r}, got {published_row[0]!r}"
+    )
 
-        _assert_row_resolved(
-            analytics_owner_connection,
-            rejected_record_id=pending_reject["rejected_record_id"],
-            expected_resolved_by_run_id=corrected_run["run_id"],
-        )
-    finally:
-        for key in (original_key, corrected_key):
-            with contextlib.suppress(Exception):
-                admin.delete_object(Bucket="raw", Key=key)
+    _assert_row_resolved(
+        analytics_owner_connection,
+        rejected_record_id=pending_reject["rejected_record_id"],
+        expected_resolved_by_run_id=corrected_run["run_id"],
+    )

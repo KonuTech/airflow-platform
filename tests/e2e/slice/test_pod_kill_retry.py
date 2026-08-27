@@ -1,4 +1,22 @@
-"""tests/e2e/slice/test_pod_kill_retry.py — D-09/D-10/D-11's permanent proof, and the U3 baseline.
+"""tests/e2e/slice/test_pod_kill_retry.py — D-09/D-10/D-11/D-18's proof, and the U3 baseline.
+
+Repointed from customers to ORDERS by debug/ci-pipeline-ingestion-timeout
+ROUND 16 (finding 19-A): every mechanism under proof here is
+dataset-agnostic -- the stage claim/lease/heartbeat machinery
+(`meta.ingestion_runs`), Airflow's own task retries relaunching a genuinely
+new pod, `meta.run_stages`' DBT_BUILD tracking, `meta.v_run_recovery`'s
+single-query recovery answer, and the exactly-once row-count guarantee under
+a real `kubectl delete pod`. What is NOT dataset-agnostic is the fixture's
+delivery shape: a lone large file honors orders' contract, while against
+customers' full-snapshot contract the same lone file is -- correctly -- a
+mass-delete breaker trip (ROUND 15's live-confirmed finding 19). Fixtures
+are generated in-test (`build_orders_csv_bytes`), each run in its own fresh,
+randomly-offset `order_id` window so repeat runs never contend for the same
+`normalized.orders` keys, and each references live-sampled real
+`normalized.customers` parents (orders' REFERENTIAL rule -- see
+`conftest.existing_customer_ids`). Raw uploads are deliberately NOT deleted
+afterwards: raw is append-only (section 63/ADR-0011) and rebuild-from-raw's
+premise requires published data's raw files to persist.
 
 Honest limit: `docs/spikes/U3-throughput-baseline.md`'s peak-RSS figure is a
 sampled MAXIMUM of `/sys/fs/cgroup/memory.current` polled every few seconds
@@ -11,19 +29,6 @@ genuine, live-verified environment facts, not assumptions; the sampled-max
 fallback is 04-08-PLAN.md's own explicitly anticipated alternative ("OR
 reads /sys/fs/cgroup/memory.peak ... taking the MAX observed value" --
 adapted here to `memory.current`, the file that actually exists).
-
-Both tests give the ~1,000,000-row fixture a FRESH, randomly-offset
-`customer_id` range on every invocation (`large_csv_with_offset_customer_ids`)
--- never the fixture's literal 1..1,000,000 range. This keeps repeat runs
-of this suite, runs of `test_smoke_and_idempotency.py`'s small-fixture test
-(customer_id 1..120), and 04-09-PLAN.md's own concurrent demo activity from
-ever contending for the same `normalized.customers` keys, which would
-otherwise make both this test's exact-row-count assertion and U3's
-`rows_loaded`-based throughput figure meaningless on any run after the
-first (`ON CONFLICT ... WHERE _record_hash IS DISTINCT ...` correctly
-suppresses a no-op republish of already-identical rows, so a reused
-customer_id range would make `rows_loaded` collapse to near-zero instead of
-reflecting genuine per-row publish throughput).
 """
 
 from __future__ import annotations
@@ -39,12 +44,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from tests.e2e.slice.conftest import (
-    LARGE_FIXTURE_ROWS,
     _poll_dbt_build_running_signal,
-    large_csv_with_offset_customer_ids,
+    build_orders_csv_bytes,
+    existing_customer_ids,
     poll_file_discovered,
     poll_ingestion_run,
     poll_run_for_file,
+    trigger_orders_dagrun,
 )
 
 if TYPE_CHECKING:
@@ -56,24 +62,41 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.cluster
 
-_CUSTOMERS_DATASET = "customers"
+_ORDERS_DATASET = "orders"
 
-# The KPO ingest pod's configured Kubernetes memory LIMIT
-# (airflow/dags/csv_ingest_customers.py's `_INGEST_RESOURCES`, read directly
-# from that file at the time this test was written -- verify there if this
-# ever looks stale) -- recorded in the U3 doc for context, not enforced by
-# this test itself.
+# ~1,000,000 rows -- the scale the kill-window and U3 throughput proofs are
+# load-bearing at: a smaller file's stage window can complete before the
+# kill lands, quietly turning a mid-load kill test into a no-op.
+_LARGE_ORDERS_ROWS = 1_000_000
+
+# The small-fixture row count the dbt-kill test uses (the kill target there
+# is the dbt_build pod, not the stage COPY -- a big file buys nothing).
+_SMALL_ORDERS_ROWS = 120
+
+# `order_id` window base range: same [2_000_000, 1_000_000_000) convention
+# as test_smoke_and_idempotency.py's own comment documents (disjoint from
+# test_referential_orphan.py's [1e9, 1.499e9) band).
+_ORDER_ID_LOW = 2_000_000
+_ORDER_ID_HIGH = 1_000_000_000
+
+# The KPO stage pod's configured Kubernetes memory LIMIT
+# (airflow/dags/_common/kpo.py's `stage_pod_resources()`, used by BOTH
+# ingestion DAGs' stage tasks -- read directly from that file at the time
+# this test was written; verify there if this ever looks stale) -- recorded
+# in the U3 doc for context, not enforced by this test itself.
 _INGEST_POD_MEMORY_LIMIT = "4Gi"
 
-# Airflow's own `retries=3` on the `ingest` task (csv_ingest_customers.py)
+# Airflow's own `retries=3` on the `stage` task (csv_ingest_orders.py)
 # means a genuinely NEW pod launches after a kill: Airflow must notice the
 # failed try and requeue (up to ~1 scheduler loop), a fresh pod must be
 # scheduled and its image pulled (~10-60s on this cluster's local registry),
 # and the retry re-stages the WHOLE file from scratch -- StagingLoader's own
-# `DROP TABLE IF EXISTS` first, never a resume -- meaning a 1,000,000-row
-# COPY effectively runs to completion an EXTRA time beyond the killed
-# attempt's partial, discarded work. 600s budgets generously for all of
-# that on a resource-constrained kind node.
+# `DROP TABLE IF EXISTS` first, never a resume (plus ROUND 15's
+# wait-and-reclaim: a SIGKILLed claim's lease must expire, ~5min, before the
+# retry can genuinely re-stage) -- meaning a 1,000,000-row COPY effectively
+# runs to completion an EXTRA time beyond the killed attempt's partial,
+# discarded work. 600s budgets generously for all of that on a
+# resource-constrained kind node.
 _RETRY_TIMEOUT_SECONDS = 600
 
 # Sampling interval for the U3 peak-memory poller -- frequent enough to
@@ -81,6 +104,17 @@ _RETRY_TIMEOUT_SECONDS = 600
 # (~1 `kubectl exec` per tick) not to itself perturb the pod's own resource
 # usage materially.
 _MEMORY_SAMPLE_INTERVAL_SECONDS = 3.0
+
+
+def _sampled_parent_ids(conn: psycopg.Connection[Any]) -> list[int]:
+    """Live-sample real parents for an orders fixture, with the shared failure message."""
+    parent_ids = existing_customer_ids(conn, count=100)
+    assert parent_ids, (
+        "normalized.customers is empty on this live cluster -- orders fixtures need real "
+        "parent customer_ids (the sweep corpus on CI, or any earlier customers ingest "
+        "locally, populates it)"
+    )
+    return parent_ids
 
 
 def _poll_mid_load_signal(
@@ -183,96 +217,96 @@ def test_pod_kill_mid_load_produces_no_duplicates(
     analytics_connection: psycopg.Connection[Any],
     analytics_owner_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
-    slice_fixtures_dir: Path,
 ) -> None:
     """D-09/D-10/D-11: a REAL `kubectl delete pod` mid-load leaves no duplicate or missing rows.
 
     The platform's single largest correctness risk (silent duplication
     after a genuine crash), proven against the real deployed pipeline: the
     killed pod's partial staging work is discarded (never resumed --
-    `StagingLoader`'s own `DROP TABLE IF EXISTS`-first retry semantics), a
-    fresh pod re-stages and re-publishes the whole file, and the final row
-    count for this run's own customer_id window matches the fixture's row
-    count EXACTLY -- migration 0006's `UNIQUE(customer_id)` constraint
-    already makes a literal SQL-level duplicate impossible, so the
-    meaningful assertion is that nothing is missing OR doubled.
+    `StagingLoader`'s own `DROP TABLE IF EXISTS`-first retry semantics, via
+    ROUND 15's wait-out-the-lease-then-reclaim path for the SIGKILL class),
+    a fresh pod re-stages and re-publishes the whole file, and the final row
+    count for this run's own order_id window matches the fixture's row
+    count EXACTLY -- migration 0016's `UNIQUE(order_id)` constraint already
+    makes a literal SQL-level duplicate impossible, so the meaningful
+    assertion is that nothing is missing OR doubled.
     """
     app = s3_client("app")
-    admin = s3_client("admin")
 
-    offset = random.SystemRandom().randint(2_000_000, 1_000_000_000)
-    payload = large_csv_with_offset_customer_ids(
-        (slice_fixtures_dir / "customers_large.csv").read_bytes(),
-        offset=offset,
+    parent_ids = _sampled_parent_ids(analytics_connection)
+    offset = random.SystemRandom().randint(_ORDER_ID_LOW, _ORDER_ID_HIGH)
+    payload = build_orders_csv_bytes(
+        order_id_start=offset,
+        row_count=_LARGE_ORDERS_ROWS,
+        customer_ids=parent_ids,
     )
     marker = uuid.uuid4().hex[:12]
-    key = f"customers/e2e-podkill-{marker}.csv"
+    key = f"orders/e2e-podkill-{marker}.csv"
     object_uri = f"s3://raw/{key}"
 
-    try:
-        app.put_object(Bucket="raw", Key=key, Body=payload)
+    app.put_object(Bucket="raw", Key=key, Body=payload)
+    trigger_orders_dagrun(kubectl, run_id=f"e2e-podkill-{marker}")
 
-        file_row = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=object_uri,
-            timeout=180,
+    file_row = poll_file_discovered(
+        analytics_connection,
+        dataset=_ORDERS_DATASET,
+        object_uri=object_uri,
+        timeout=180,
+    )
+    assert file_row["duplicate_of_file_id"] is None, (
+        f"the freshly-windowed large fixture was marked a duplicate of file_id="
+        f"{file_row['duplicate_of_file_id']!r} -- the order_id window did not make "
+        f"this content genuinely new"
+    )
+
+    run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
+    idempotency_key = run_row["idempotency_key"]
+
+    mid_load = _poll_mid_load_signal(analytics_connection, idempotency_key, timeout=300)
+    pod_name = mid_load["k8s_pod_name"]
+
+    delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")
+    assert delete.returncode == 0, (
+        f"kubectl delete pod {pod_name!r} -n etl failed (exit {delete.returncode}):\n"
+        f"{delete.stderr}"
+    )
+
+    outcome = poll_ingestion_run(
+        analytics_connection,
+        idempotency_key,
+        timeout=_RETRY_TIMEOUT_SECONDS,
+    )
+    assert outcome["status"] == "SUCCEEDED", (
+        f"after killing pod {pod_name!r} mid-load, the run finished "
+        f"{outcome['status']!r}, not SUCCEEDED -- check `kubectl logs` for the retry pod"
+    )
+
+    with analytics_owner_connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM normalized.orders WHERE order_id BETWEEN %s AND %s",
+            (offset, offset + _LARGE_ORDERS_ROWS - 1),
         )
-        assert file_row["duplicate_of_file_id"] is None, (
-            f"the freshly-offset large fixture was marked a duplicate of file_id="
-            f"{file_row['duplicate_of_file_id']!r} -- the customer_id offset did not make "
-            f"this content genuinely new"
-        )
-
-        run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
-        idempotency_key = run_row["idempotency_key"]
-
-        mid_load = _poll_mid_load_signal(analytics_connection, idempotency_key, timeout=300)
-        pod_name = mid_load["k8s_pod_name"]
-
-        delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")
-        assert delete.returncode == 0, (
-            f"kubectl delete pod {pod_name!r} -n etl failed (exit {delete.returncode}):\n"
-            f"{delete.stderr}"
-        )
-
-        outcome = poll_ingestion_run(
-            analytics_connection,
-            idempotency_key,
-            timeout=_RETRY_TIMEOUT_SECONDS,
-        )
-        assert outcome["status"] == "SUCCEEDED", (
-            f"after killing pod {pod_name!r} mid-load, the run finished "
-            f"{outcome['status']!r}, not SUCCEEDED -- check `kubectl logs` for the retry pod"
-        )
-
-        with analytics_owner_connection.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM normalized.customers WHERE customer_id BETWEEN %s AND %s",
-                (offset + 1, offset + LARGE_FIXTURE_ROWS),
-            )
-            row = cur.fetchone()
-            assert row is not None
-            total = row[0]
-        assert total == LARGE_FIXTURE_ROWS, (
-            f"expected exactly {LARGE_FIXTURE_ROWS} rows in this run's own customer_id "
-            f"window [{offset + 1}, {offset + LARGE_FIXTURE_ROWS}], found {total} -- "
-            f"a value below the fixture's row count means rows went missing after the kill; "
-            f"a value above is impossible under migration 0006's UNIQUE(customer_id) but "
-            f"would mean the constraint itself regressed"
-        )
-    finally:
-        with contextlib.suppress(Exception):
-            admin.delete_object(Bucket="raw", Key=key)
+        row = cur.fetchone()
+        assert row is not None
+        total = row[0]
+    assert total == _LARGE_ORDERS_ROWS, (
+        f"expected exactly {_LARGE_ORDERS_ROWS} rows in this run's own order_id "
+        f"window [{offset}, {offset + _LARGE_ORDERS_ROWS - 1}], found {total} -- "
+        f"a value below the fixture's row count means rows went missing after the kill; "
+        f"a value above is impossible under migration 0016's UNIQUE(order_id) but "
+        f"would mean the constraint itself regressed"
+    )
 
 
-_DBT_BUILD_LABEL_SELECTOR = "dag_id=csv_ingest_customers,task_id=dbt_build"
+_DBT_BUILD_LABEL_SELECTOR = "dag_id=csv_ingest_orders,task_id=dbt_build"
 
-# max_active_runs=1 (csv_ingest_customers.py) + max_active_tis_per_dag=1 (dbt_build itself)
+# max_active_runs=1 (csv_ingest_orders.py) + max_active_tis_per_dag=1 (dbt_build itself)
 # together guarantee at most one dbt_build pod for THIS dag_id is ever in flight at a time
 # (T-09-18's accepted mitigation for the label selector's own imprecision -- see 09-10-PLAN.md's
 # threat model) -- polling for the pod to APPEAR is still needed because mark_dbt_build_running
-# (meta.run_stages.status='RUNNING') lands before the KPO pod itself is scheduled.
+# (meta.run_stages.status='RUNNING') lands before the KPO pod itself is scheduled (and, since
+# ROUND 16's finding-23 fix, the eligibility list itself is computed AFTER this DagRun's own
+# stage completes, so the staging DagRun's own mark_running covers the freshly-staged run).
 _DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS = 120
 
 # Same generous ceiling as _RETRY_TIMEOUT_SECONDS -- a killed dbt_build pod's retry (Airflow's
@@ -370,7 +404,6 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
-    slice_fixtures_dir: Path,
 ) -> None:
     """D-18: a REAL `kubectl delete pod` mid-`dbt_build` recovers with no duplicate or missing rows.
 
@@ -378,92 +411,91 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     with no `rows_read`-style heartbeat of its own) -- this extends the SAME live-kill mechanism
     `test_pod_kill_mid_load_produces_no_duplicates` already proved for `stage`/`publish` to the
     third pipeline stage. The mid-flight signal is plan 09-04's own `mark_dbt_build_running`
-    write (`meta.run_stages.status='RUNNING'` for `stage_name='DBT_BUILD'`), and recovery is
-    confirmed via `meta.v_run_recovery` (plan 09-06) reporting `next_action='complete'` --
-    D-15's own single-query recovery answer, never a hand-rolled 3-way join in this test.
+    write (`meta.run_stages.status='RUNNING'` for `stage_name='DBT_BUILD'` -- written by the
+    staging DagRun itself since ROUND 16's finding-23 fix wired the eligibility query after
+    `stage`), and recovery is confirmed via `meta.v_run_recovery` (plan 09-06) reporting
+    `next_action='complete'` -- D-15's own single-query recovery answer, never a hand-rolled
+    3-way join in this test.
     """
     app = s3_client("app")
-    admin = s3_client("admin")
 
-    offset = random.SystemRandom().randint(2_000_000, 1_000_000_000)
-    base_bytes = (slice_fixtures_dir / "customers_small.csv").read_bytes()
-    payload = large_csv_with_offset_customer_ids(base_bytes, offset=offset)
+    parent_ids = _sampled_parent_ids(analytics_connection)
+    offset = random.SystemRandom().randint(_ORDER_ID_LOW, _ORDER_ID_HIGH)
+    payload = build_orders_csv_bytes(
+        order_id_start=offset,
+        row_count=_SMALL_ORDERS_ROWS,
+        customer_ids=parent_ids,
+    )
     marker = uuid.uuid4().hex[:12]
-    key = f"customers/e2e-dbtkill-{marker}.csv"
+    key = f"orders/e2e-dbtkill-{marker}.csv"
     object_uri = f"s3://raw/{key}"
 
-    try:
-        app.put_object(Bucket="raw", Key=key, Body=payload)
+    app.put_object(Bucket="raw", Key=key, Body=payload)
+    trigger_orders_dagrun(kubectl, run_id=f"e2e-dbtkill-{marker}")
 
-        file_row = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=object_uri,
-            timeout=180,
-        )
-        assert file_row["duplicate_of_file_id"] is None, (
-            f"the freshly-offset small fixture was marked a duplicate of file_id="
-            f"{file_row['duplicate_of_file_id']!r} -- the customer_id offset did not make "
-            f"this content genuinely new"
-        )
+    file_row = poll_file_discovered(
+        analytics_connection,
+        dataset=_ORDERS_DATASET,
+        object_uri=object_uri,
+        timeout=180,
+    )
+    assert file_row["duplicate_of_file_id"] is None, (
+        f"the freshly-windowed small fixture was marked a duplicate of file_id="
+        f"{file_row['duplicate_of_file_id']!r} -- the order_id window did not make "
+        f"this content genuinely new"
+    )
 
-        run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
-        run_id = run_row["run_id"]
+    run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
+    run_id = run_row["run_id"]
 
-        _poll_dbt_build_running_signal(analytics_connection, run_id, timeout=300)
-        pod_name = _poll_dbt_build_pod_name(
-            kubectl, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS
-        )
+    _poll_dbt_build_running_signal(analytics_connection, run_id, timeout=300)
+    pod_name = _poll_dbt_build_pod_name(kubectl, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS)
 
-        delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")
-        assert delete.returncode == 0, (
-            f"kubectl delete pod {pod_name!r} -n etl failed (exit {delete.returncode}):\n"
-            f"{delete.stderr}"
-        )
+    delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")
+    assert delete.returncode == 0, (
+        f"kubectl delete pod {pod_name!r} -n etl failed (exit {delete.returncode}):\n"
+        f"{delete.stderr}"
+    )
 
-        _poll_run_recovery_complete(
-            analytics_connection, run_id, timeout=_DBT_BUILD_RECOVERY_TIMEOUT_SECONDS
-        )
+    _poll_run_recovery_complete(
+        analytics_connection, run_id, timeout=_DBT_BUILD_RECOVERY_TIMEOUT_SECONDS
+    )
 
-        outcome = poll_ingestion_run(analytics_connection, run_row["idempotency_key"], timeout=60)
-        assert outcome["status"] == "SUCCEEDED", (
-            f"after killing dbt_build pod {pod_name!r}, run {run_id!r} finished "
-            f"{outcome['status']!r}, not SUCCEEDED"
-        )
+    outcome = poll_ingestion_run(analytics_connection, run_row["idempotency_key"], timeout=60)
+    assert outcome["status"] == "SUCCEEDED", (
+        f"after killing dbt_build pod {pod_name!r}, run {run_id!r} finished "
+        f"{outcome['status']!r}, not SUCCEEDED"
+    )
 
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM normalized.customers WHERE customer_id BETWEEN %s AND %s",
-                (offset + 1, offset + 120),
-            )
-            row = cur.fetchone()
-            assert row is not None
-            normalized_total = row[0]
-        assert normalized_total == 120, (
-            f"expected exactly 120 rows in normalized.customers for this run's own "
-            f"customer_id window [{offset + 1}, {offset + 120}], found {normalized_total} -- "
-            f"a value below means rows went missing after the dbt_build kill; a value above "
-            f"means duplication"
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM normalized.orders WHERE order_id BETWEEN %s AND %s",
+            (offset, offset + _SMALL_ORDERS_ROWS - 1),
         )
+        row = cur.fetchone()
+        assert row is not None
+        normalized_total = row[0]
+    assert normalized_total == _SMALL_ORDERS_ROWS, (
+        f"expected exactly {_SMALL_ORDERS_ROWS} rows in normalized.orders for this run's own "
+        f"order_id window [{offset}, {offset + _SMALL_ORDERS_ROWS - 1}], found "
+        f"{normalized_total} -- a value below means rows went missing after the dbt_build "
+        f"kill; a value above means duplication"
+    )
 
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM silver.customers "
-                "WHERE customer_id::int BETWEEN %s AND %s",
-                (offset + 1, offset + 120),
-            )
-            row = cur.fetchone()
-            assert row is not None
-            silver_total = row[0]
-        assert silver_total == 120, (
-            f"expected exactly 120 rows in silver.customers for this run's own customer_id "
-            f"window [{offset + 1}, {offset + 120}], found {silver_total} -- dbt's own "
-            f"idempotent re-run (plus Airflow's retries=2 on dbt_build) should have produced "
-            f"exactly one row per business key, not fewer or more"
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM silver.orders WHERE order_id::int BETWEEN %s AND %s",
+            (offset, offset + _SMALL_ORDERS_ROWS - 1),
         )
-    finally:
-        with contextlib.suppress(Exception):
-            admin.delete_object(Bucket="raw", Key=key)
+        row = cur.fetchone()
+        assert row is not None
+        silver_total = row[0]
+    assert silver_total == _SMALL_ORDERS_ROWS, (
+        f"expected exactly {_SMALL_ORDERS_ROWS} rows in silver.orders for this run's own "
+        f"order_id window [{offset}, {offset + _SMALL_ORDERS_ROWS - 1}], found "
+        f"{silver_total} -- dbt's own idempotent re-run (plus Airflow's retries=2 on "
+        f"dbt_build) should have produced exactly one row per business key, not fewer or more"
+    )
 
 
 def _read_run_metrics(conn: psycopg.Connection[Any], idempotency_key: str) -> tuple[int, int]:
@@ -495,13 +527,12 @@ def test_u3_throughput_and_peak_rss_baseline(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
-    slice_fixtures_dir: Path,
     repo_root: Path,
 ) -> None:
     """U3: a measured streaming-throughput and peak-RSS baseline, committed for future comparison.
 
     A SEPARATE, non-killed full run of the same ~1,000,000-row fixture
-    shape (its own fresh customer_id offset -- module docstring) -- killing
+    shape (its own fresh order_id window -- module docstring) -- killing
     mid-load is not the right run to measure steady-state throughput from.
     Peak memory is the running MAXIMUM of `/sys/fs/cgroup/memory.current`
     sampled every `_MEMORY_SAMPLE_INTERVAL_SECONDS` while the run is in
@@ -510,89 +541,87 @@ def test_u3_throughput_and_peak_rss_baseline(
     sampled approximation, not `memory.peak`, on this specific cluster.
     """
     app = s3_client("app")
-    admin = s3_client("admin")
 
-    offset = random.SystemRandom().randint(2_000_000, 1_000_000_000)
-    payload = large_csv_with_offset_customer_ids(
-        (slice_fixtures_dir / "customers_large.csv").read_bytes(),
-        offset=offset,
+    parent_ids = _sampled_parent_ids(analytics_connection)
+    offset = random.SystemRandom().randint(_ORDER_ID_LOW, _ORDER_ID_HIGH)
+    payload = build_orders_csv_bytes(
+        order_id_start=offset,
+        row_count=_LARGE_ORDERS_ROWS,
+        customer_ids=parent_ids,
     )
     marker = uuid.uuid4().hex[:12]
-    key = f"customers/e2e-u3-{marker}.csv"
+    key = f"orders/e2e-u3-{marker}.csv"
     object_uri = f"s3://raw/{key}"
 
-    try:
-        app.put_object(Bucket="raw", Key=key, Body=payload)
+    app.put_object(Bucket="raw", Key=key, Body=payload)
+    trigger_orders_dagrun(kubectl, run_id=f"e2e-u3-{marker}")
 
-        file_row = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=object_uri,
-            timeout=180,
-        )
-        assert file_row["duplicate_of_file_id"] is None
+    file_row = poll_file_discovered(
+        analytics_connection,
+        dataset=_ORDERS_DATASET,
+        object_uri=object_uri,
+        timeout=180,
+    )
+    assert file_row["duplicate_of_file_id"] is None
 
-        run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
-        idempotency_key = run_row["idempotency_key"]
+    run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
+    idempotency_key = run_row["idempotency_key"]
 
-        pod_name = _poll_pod_name(analytics_connection, idempotency_key, timeout=120)
+    pod_name = _poll_pod_name(analytics_connection, idempotency_key, timeout=120)
 
-        samples: list[int] = []
-        stop_sampling = threading.Event()
+    samples: list[int] = []
+    stop_sampling = threading.Event()
 
-        def _sample_loop() -> None:
-            while not stop_sampling.is_set():
-                proc = kubectl(
-                    "-n",
-                    "etl",
-                    "exec",
-                    pod_name,
-                    "--",
-                    "cat",
-                    "/sys/fs/cgroup/memory.current",
-                )
-                if proc.returncode == 0:
-                    with contextlib.suppress(ValueError):
-                        samples.append(int(proc.stdout.strip()))
-                stop_sampling.wait(_MEMORY_SAMPLE_INTERVAL_SECONDS)
-
-        sampler = threading.Thread(target=_sample_loop, name="u3-memory-sampler", daemon=True)
-        sampler.start()
-        try:
-            outcome = poll_ingestion_run(
-                analytics_connection,
-                idempotency_key,
-                timeout=_RETRY_TIMEOUT_SECONDS,
+    def _sample_loop() -> None:
+        while not stop_sampling.is_set():
+            proc = kubectl(
+                "-n",
+                "etl",
+                "exec",
+                pod_name,
+                "--",
+                "cat",
+                "/sys/fs/cgroup/memory.current",
             )
-        finally:
-            stop_sampling.set()
-            sampler.join(timeout=10)
+            if proc.returncode == 0:
+                with contextlib.suppress(ValueError):
+                    samples.append(int(proc.stdout.strip()))
+            stop_sampling.wait(_MEMORY_SAMPLE_INTERVAL_SECONDS)
 
-        assert outcome["status"] == "SUCCEEDED", (
-            f"U3 baseline run finished {outcome['status']!r}, not SUCCEEDED"
-        )
-
-        rows_loaded, duration_ms = _read_run_metrics(analytics_connection, idempotency_key)
-        throughput_rows_per_sec = rows_loaded / (duration_ms / 1000)
-        peak_bytes = max(samples) if samples else 0
-
-        assert throughput_rows_per_sec > 0
-        assert peak_bytes > 0, (
-            "no memory.current sample was ever captured -- the pod may have completed and "
-            "been deleted before the first sample landed (on_finish_action=delete_succeeded_pod)"
-        )
-
-        _write_u3_spike_doc(
-            repo_root,
-            rows_loaded=rows_loaded,
-            duration_ms=duration_ms,
-            throughput_rows_per_sec=throughput_rows_per_sec,
-            peak_bytes=peak_bytes,
-            sample_count=len(samples),
+    sampler = threading.Thread(target=_sample_loop, name="u3-memory-sampler", daemon=True)
+    sampler.start()
+    try:
+        outcome = poll_ingestion_run(
+            analytics_connection,
+            idempotency_key,
+            timeout=_RETRY_TIMEOUT_SECONDS,
         )
     finally:
-        with contextlib.suppress(Exception):
-            admin.delete_object(Bucket="raw", Key=key)
+        stop_sampling.set()
+        sampler.join(timeout=10)
+
+    assert outcome["status"] == "SUCCEEDED", (
+        f"U3 baseline run finished {outcome['status']!r}, not SUCCEEDED"
+    )
+
+    rows_loaded, duration_ms = _read_run_metrics(analytics_connection, idempotency_key)
+    throughput_rows_per_sec = rows_loaded / (duration_ms / 1000)
+    peak_bytes = max(samples) if samples else 0
+
+    assert throughput_rows_per_sec > 0
+    assert peak_bytes > 0, (
+        "no memory.current sample was ever captured -- the pod may have completed and "
+        "been deleted before the first sample landed (on_finish_action=delete_succeeded_pod)"
+    )
+
+    _write_u3_spike_doc(
+        repo_root,
+        rows_loaded=rows_loaded,
+        duration_ms=duration_ms,
+        throughput_rows_per_sec=throughput_rows_per_sec,
+        peak_bytes=peak_bytes,
+        sample_count=len(samples),
+    )
 
 
 def _write_u3_spike_doc(  # noqa: PLR0913 -- six independently-named metrics; a dataclass for one call site adds nothing
@@ -620,12 +649,14 @@ def _write_u3_spike_doc(  # noqa: PLR0913 -- six independently-named metrics; a 
 — do not hand-edit.**
 
 - Measured at: {measured_at}
-- Fixture: `tests/fixtures/slice-corpus.yaml`'s `customers_large.csv`
-  ({LARGE_FIXTURE_ROWS:,} rows, ~55 MB — see that manifest's own
-  `expect.approx_bytes`)
-- Ingest pod configured memory limit:
-  `{_INGEST_POD_MEMORY_LIMIT}` (`airflow/dags/csv_ingest_customers.py`'s
-  `_INGEST_RESOURCES`)
+- Fixture: a generated `orders` CSV ({_LARGE_ORDERS_ROWS:,} rows in a fresh
+  `order_id` window, parents live-sampled from `normalized.customers` --
+  `tests/e2e/slice/conftest.py::build_orders_csv_bytes`; repointed from the
+  customers manifest fixture by debug/ci-pipeline-ingestion-timeout ROUND 16,
+  finding 19-A, so the measured run includes orders' REFERENTIAL barrier)
+- Stage pod configured memory limit:
+  `{_INGEST_POD_MEMORY_LIMIT}` (`airflow/dags/_common/kpo.py`'s
+  `stage_pod_resources()`, shared by both ingestion DAGs)
 - `rows_loaded`: {rows_loaded:,}
 - `duration_ms`: {duration_ms:,}
 - **Throughput: {throughput_rows_per_sec:,.0f} rows/sec**
@@ -639,7 +670,7 @@ completed run's own `meta.ingestion_runs` row — the same wall-clock the
 pipeline itself reports, not a value derived independently in this test.
 
 Peak memory is the running MAXIMUM of `/sys/fs/cgroup/memory.current`,
-polled by `kubectl exec`-ing into the ingest pod on a fixed interval while
+polled by `kubectl exec`-ing into the stage pod on a fixed interval while
 the run is in flight. This cluster's containers were verified live to NOT
 expose the cgroup v2 `memory.peak` file (`cat
 /sys/fs/cgroup/memory.peak` → `No such file or directory`), and `kubectl

@@ -12,19 +12,21 @@ Shares `tests/e2e/slice/conftest.py`'s established fixtures/helpers (`slice_fixt
 rather than re-deriving them -- this suite is a SIBLING of `test_smoke_and_idempotency.py`
 and `test_backfill_reentry.py` in the same directory, not a re-implementation.
 
-`_unique_marked_csv_bytes`'s marker-in-name-field shape is copied (not imported) from
-`test_smoke_and_idempotency.py`'s own `_unique_small_csv_bytes`, matching that module's
-own documented convention (its docstring: "small helpers are copied per test tier, not
-shared through a library module") -- it additionally composes
-`conftest.py::large_csv_with_offset_customer_ids` (imported, not copied: it is already
-shared infrastructure `test_pod_kill_retry.py`/`test_concurrent_select.py` both import)
-to avoid a genuine, live-confirmed business-key collision (see `_OFFSET_LOW`/
-`_OFFSET_HIGH`'s own comment below).
+`_unique_marked_snapshot_csv_bytes`'s marker-in-name-field shape descends from
+`test_smoke_and_idempotency.py`'s historical `_unique_small_csv_bytes` convention -- it
+composes `conftest.py::large_csv_with_offset_customer_ids` (shared infrastructure) to
+avoid a genuine, live-confirmed business-key collision (see `_OFFSET_LOW`/
+`_OFFSET_HIGH`'s own comment below), and, since debug/ci-pipeline-ingestion-timeout
+ROUND 16 (finding 19-A), wraps the result in
+`conftest.snapshot_complete_customers_csv` so the delivery honors customers'
+FULL-SNAPSHOT contract (roster echo => vanished == 0; a lone 120-row file is,
+correctly, a mass-delete breaker trip). The raw upload is deliberately NOT deleted
+afterwards: raw is append-only (section 63/ADR-0011) and rebuild-from-raw's premise
+requires published data's raw files to persist.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import random
 import uuid
@@ -37,6 +39,7 @@ from tests.e2e.slice.conftest import (
     poll_file_discovered,
     poll_ingestion_run,
     poll_run_for_file,
+    snapshot_complete_customers_csv,
 )
 
 if TYPE_CHECKING:
@@ -88,16 +91,29 @@ _OFFSET_LOW = 2_000_000
 _OFFSET_HIGH = 1_000_000_000
 
 
-def _unique_marked_csv_bytes(base_bytes: bytes, *, offset: int) -> bytes:
-    """Return `base_bytes` with every `customer_id` shifted by `offset` and a fresh name marker.
+def _unique_marked_snapshot_csv_bytes(
+    conn: Any,
+    base_bytes: bytes,
+    *,
+    offset: int,
+) -> bytes:
+    """A SNAPSHOT-COMPLETE customers CSV: roster echo + the offset-marked 120 fixture rows.
 
     Combines `conftest.py::large_csv_with_offset_customer_ids` (business-key
     collision avoidance, this module's own docstring above) with
-    `test_smoke_and_idempotency.py::_unique_small_csv_bytes`'s own marker
-    convention (a human-readable breadcrumb in the first data row's `name`
-    field, visible in this test's own logged query output). The offset alone
-    already guarantees a fresh `content_sha256` (every row's leading field
-    changes), so the marker here is for log readability, not deduplication.
+    `test_smoke_and_idempotency.py`'s historical marker convention (a
+    human-readable breadcrumb in the first data row's `name` field, visible
+    in this test's own logged query output). The offset alone already
+    guarantees a fresh `content_sha256` (every row's leading field changes),
+    so the marker here is for log readability, not deduplication.
+
+    Wrapped in `conftest.snapshot_complete_customers_csv` by
+    debug/ci-pipeline-ingestion-timeout ROUND 16 (finding 19-A): customers'
+    contract is FULL-SNAPSHOT (`change_semantics: snapshot` + the
+    mass-delete breaker), so this delivery must echo the current gold
+    roster or the breaker -- correctly -- quarantines it as a mass delete.
+    See that helper's own docstring for the echo semantics (no new SCD
+    versions for echoed keys).
     """
     offset_bytes = large_csv_with_offset_customer_ids(base_bytes, offset=offset)
     marker = uuid.uuid4().hex[:12]
@@ -106,10 +122,16 @@ def _unique_marked_csv_bytes(base_bytes: bytes, *, offset: int) -> bytes:
     fields = first_data_row.split(",")
     fields[1] = f"E2E-DbtSilver-{marker}"
     new_first_row = ",".join(fields)
-    return "\n".join([header, new_first_row, *rest]).encode("utf-8")
+    extra_rows = [
+        tuple(line.split(","))
+        for line in [new_first_row, *rest]
+        if line
+    ]
+    assert header == "customer_id,name,country,birth_date,event_ts", header
+    return snapshot_complete_customers_csv(conn, extra_rows=extra_rows)
 
 
-def test_fresh_customers_file_flows_through_stage_dbt_build_publish(  # noqa: PLR0915
+def test_fresh_customers_file_flows_through_stage_dbt_build_publish(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     slice_fixtures_dir: Path,
@@ -128,176 +150,170 @@ def test_fresh_customers_file_flows_through_stage_dbt_build_publish(  # noqa: PL
     against the REAL live analytical PostgreSQL, actually lands rows. This test does.
     """
     app = s3_client("app")
-    admin = s3_client("admin")
 
     offset = random.SystemRandom().randint(_OFFSET_LOW, _OFFSET_HIGH)
     first_row_customer_id_int = offset + 1
     first_row_customer_id_text = f"{first_row_customer_id_int:06d}"
 
     base_bytes = (slice_fixtures_dir / "customers_small.csv").read_bytes()
-    payload = _unique_marked_csv_bytes(base_bytes, offset=offset)
+    payload = _unique_marked_snapshot_csv_bytes(
+        analytics_connection, base_bytes, offset=offset
+    )
 
     marker = uuid.uuid4().hex[:12]
     key = f"customers/e2e-dbt-silver-{marker}.csv"
     object_uri = f"s3://raw/{key}"
 
-    try:
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM normalized.customers WHERE customer_id = %s::int",
-                (first_row_customer_id_int,),
-            )
-            (pre_upload_count,) = cur.fetchone()
-        assert pre_upload_count == 0, (
-            f"normalized.customers already has a row for customer_id="
-            f"{first_row_customer_id_int!r} before upload -- the random offset "
-            f"collided with a prior run's data"
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM normalized.customers WHERE customer_id = %s::int",
+            (first_row_customer_id_int,),
         )
+        (pre_upload_count,) = cur.fetchone()
+    assert pre_upload_count == 0, (
+        f"normalized.customers already has a row for customer_id="
+        f"{first_row_customer_id_int!r} before upload -- the random offset "
+        f"collided with a prior run's data"
+    )
 
-        app.put_object(Bucket="raw", Key=key, Body=payload)
+    app.put_object(Bucket="raw", Key=key, Body=payload)
 
-        file_row = poll_file_discovered(
-            analytics_connection,
-            dataset=_CUSTOMERS_DATASET,
-            object_uri=object_uri,
-            timeout=_DAG_RUN_TIMEOUT_SECONDS,
-        )
-        assert file_row["duplicate_of_file_id"] is None, (
-            f"the freshly-marked upload was already marked a duplicate (of "
-            f"file_id={file_row['duplicate_of_file_id']!r}) -- the uniqueness marker "
-            f"did not make this content genuinely new"
-        )
+    file_row = poll_file_discovered(
+        analytics_connection,
+        dataset=_CUSTOMERS_DATASET,
+        object_uri=object_uri,
+        timeout=_DAG_RUN_TIMEOUT_SECONDS,
+    )
+    assert file_row["duplicate_of_file_id"] is None, (
+        f"the freshly-marked upload was already marked a duplicate (of "
+        f"file_id={file_row['duplicate_of_file_id']!r}) -- the uniqueness marker "
+        f"did not make this content genuinely new"
+    )
 
-        run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=30)
-        outcome = poll_ingestion_run(
-            analytics_connection,
-            run_row["idempotency_key"],
-            timeout=_INGEST_TIMEOUT_SECONDS,
-        )
-        assert outcome["status"] == "SUCCEEDED", (
-            f"ingestion run for {object_uri!r} finished {outcome['status']!r}, not "
-            f"SUCCEEDED -- the discover -> stage -> dbt_build -> publish chain did not "
-            f"complete cleanly (check the Airflow UI graph view / KPO pod logs for the "
-            f"run identified by idempotency_key={run_row['idempotency_key']!r})"
-        )
+    run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=30)
+    outcome = poll_ingestion_run(
+        analytics_connection,
+        run_row["idempotency_key"],
+        timeout=_INGEST_TIMEOUT_SECONDS,
+    )
+    assert outcome["status"] == "SUCCEEDED", (
+        f"ingestion run for {object_uri!r} finished {outcome['status']!r}, not "
+        f"SUCCEEDED -- the discover -> stage -> dbt_build -> publish chain did not "
+        f"complete cleanly (check the Airflow UI graph view / KPO pod logs for the "
+        f"run identified by idempotency_key={run_row['idempotency_key']!r})"
+    )
 
-        # Query 1: silver.customers -- dbt's own domain, one row, correctly typed.
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT customer_id, name, country, birth_date, event_ts "
-                "FROM silver.customers WHERE customer_id = %s",
-                (first_row_customer_id_text,),
-            )
-            silver_rows = cur.fetchall()
-        _logger.info(
-            "[Query 1] silver.customers WHERE customer_id = '%s': %r",
-            first_row_customer_id_text,
-            silver_rows,
+    # Query 1: silver.customers -- dbt's own domain, one row, correctly typed.
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, name, country, birth_date, event_ts "
+            "FROM silver.customers WHERE customer_id = %s",
+            (first_row_customer_id_text,),
         )
-        assert len(silver_rows) == 1, (
-            f"expected exactly ONE silver.customers row for customer_id="
-            f"{first_row_customer_id_text!r} (business-key deduplicated), found "
-            f"{len(silver_rows)}: {silver_rows!r}"
-        )
+        silver_rows = cur.fetchall()
+    _logger.info(
+        "[Query 1] silver.customers WHERE customer_id = '%s': %r",
+        first_row_customer_id_text,
+        silver_rows,
+    )
+    assert len(silver_rows) == 1, (
+        f"expected exactly ONE silver.customers row for customer_id="
+        f"{first_row_customer_id_text!r} (business-key deduplicated), found "
+        f"{len(silver_rows)}: {silver_rows!r}"
+    )
 
-        # Query 2: normalized.customers -- the pre-existing gold target, matching content.
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT customer_id, name, country, birth_date, event_ts "
-                "FROM normalized.customers WHERE customer_id = %s::int",
-                (first_row_customer_id_int,),
-            )
-            normalized_rows = cur.fetchall()
-        _logger.info(
-            "[Query 2] normalized.customers WHERE customer_id = %s::int: %r",
-            first_row_customer_id_int,
-            normalized_rows,
+    # Query 2: normalized.customers -- the pre-existing gold target, matching content.
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, name, country, birth_date, event_ts "
+            "FROM normalized.customers WHERE customer_id = %s::int",
+            (first_row_customer_id_int,),
         )
-        assert len(normalized_rows) == 1, (
-            f"expected exactly ONE normalized.customers row for customer_id="
-            f"{first_row_customer_id_int!r}, found {len(normalized_rows)}: "
-            f"{normalized_rows!r}"
-        )
+        normalized_rows = cur.fetchall()
+    _logger.info(
+        "[Query 2] normalized.customers WHERE customer_id = %s::int: %r",
+        first_row_customer_id_int,
+        normalized_rows,
+    )
+    assert len(normalized_rows) == 1, (
+        f"expected exactly ONE normalized.customers row for customer_id="
+        f"{first_row_customer_id_int!r}, found {len(normalized_rows)}: "
+        f"{normalized_rows!r}"
+    )
 
-        # Query 3: meta.dedup_audit -- a real row with plausible counts for this run's
-        # dbt invocation. `model_name` is the LITERAL `dataset_name` argument
-        # `dedup_audit_post_hook(...)` was called with in dbt/models/silver/
-        # silver_customers.sql (`dataset_name='customers'`) -- verified live against
-        # this cluster's own meta.dedup_audit rows, NOT 'silver_customers' (the value
-        # this plan's own checkpoint text assumed; corrected here as a Rule 1 fix,
-        # confirmed against dbt/macros/dedup_audit_post_hook.sql's own docstring:
-        # "also used as `meta.dedup_audit.model_name`").
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT dedup_audit_id, dbt_invocation_id, model_name, records_received, "
-                "records_accepted, records_rejected, records_deduplicated, run_at "
-                "FROM meta.dedup_audit WHERE model_name = 'customers' "
-                "ORDER BY dedup_audit_id DESC LIMIT 1",
-            )
-            dedup_audit_row = cur.fetchone()
-        _logger.info(
-            "[Query 3] meta.dedup_audit WHERE model_name = 'customers' "
-            "ORDER BY dedup_audit_id DESC LIMIT 1: %r",
-            dedup_audit_row,
+    # Query 3: meta.dedup_audit -- a real row with plausible counts for this run's
+    # dbt invocation. `model_name` is the LITERAL `dataset_name` argument
+    # `dedup_audit_post_hook(...)` was called with in dbt/models/silver/
+    # silver_customers.sql (`dataset_name='customers'`) -- verified live against
+    # this cluster's own meta.dedup_audit rows, NOT 'silver_customers' (the value
+    # this plan's own checkpoint text assumed; corrected here as a Rule 1 fix,
+    # confirmed against dbt/macros/dedup_audit_post_hook.sql's own docstring:
+    # "also used as `meta.dedup_audit.model_name`").
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT dedup_audit_id, dbt_invocation_id, model_name, records_received, "
+            "records_accepted, records_rejected, records_deduplicated, run_at "
+            "FROM meta.dedup_audit WHERE model_name = 'customers' "
+            "ORDER BY dedup_audit_id DESC LIMIT 1",
         )
-        assert dedup_audit_row is not None, (
-            "meta.dedup_audit has NO row for model_name='customers' -- dbt_build "
-            "never ran, or the dbt model never wrote its own audit row"
-        )
-        records_received = dedup_audit_row[3]
-        records_accepted = dedup_audit_row[4]
-        assert records_received >= 1, (
-            f"meta.dedup_audit's most recent model_name='customers' row has "
-            f"records_received={records_received!r}, expected >= 1"
-        )
-        assert records_accepted >= 1, (
-            f"meta.dedup_audit's most recent model_name='customers' row has "
-            f"records_accepted={records_accepted!r}, expected >= 1"
-        )
+        dedup_audit_row = cur.fetchone()
+    _logger.info(
+        "[Query 3] meta.dedup_audit WHERE model_name = 'customers' "
+        "ORDER BY dedup_audit_id DESC LIMIT 1: %r",
+        dedup_audit_row,
+    )
+    assert dedup_audit_row is not None, (
+        "meta.dedup_audit has NO row for model_name='customers' -- dbt_build "
+        "never ran, or the dbt model never wrote its own audit row"
+    )
+    records_received = dedup_audit_row[3]
+    records_accepted = dedup_audit_row[4]
+    assert records_received >= 1, (
+        f"meta.dedup_audit's most recent model_name='customers' row has "
+        f"records_received={records_received!r}, expected >= 1"
+    )
+    assert records_accepted >= 1, (
+        f"meta.dedup_audit's most recent model_name='customers' row has "
+        f"records_accepted={records_accepted!r}, expected >= 1"
+    )
 
-        # Query 4: meta.v_customers_lineage -- resolves the FULL chain, including the
-        # new dbt-hop columns (migration 0026), none NULL for this row.
-        with analytics_connection.cursor() as cur:
-            cur.execute(
-                "SELECT customer_id, file_id, batch_id, run_id, silver_loaded_at, "
-                "dbt_invocation_id, dbt_run_at, dbt_invocation_records_deduplicated "
-                "FROM meta.v_customers_lineage WHERE customer_id = %s::int",
-                (first_row_customer_id_int,),
-            )
-            lineage_rows = cur.fetchall()
-        _logger.info(
-            "[Query 4] meta.v_customers_lineage WHERE customer_id = %s::int: %r",
-            first_row_customer_id_int,
-            lineage_rows,
+    # Query 4: meta.v_customers_lineage -- resolves the FULL chain, including the
+    # new dbt-hop columns (migration 0026), none NULL for this row.
+    with analytics_connection.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, file_id, batch_id, run_id, silver_loaded_at, "
+            "dbt_invocation_id, dbt_run_at, dbt_invocation_records_deduplicated "
+            "FROM meta.v_customers_lineage WHERE customer_id = %s::int",
+            (first_row_customer_id_int,),
         )
-        assert len(lineage_rows) == 1, (
-            f"expected exactly ONE meta.v_customers_lineage row for customer_id="
-            f"{first_row_customer_id_int!r}, found {len(lineage_rows)}: {lineage_rows!r}"
+        lineage_rows = cur.fetchall()
+    _logger.info(
+        "[Query 4] meta.v_customers_lineage WHERE customer_id = %s::int: %r",
+        first_row_customer_id_int,
+        lineage_rows,
+    )
+    assert len(lineage_rows) == 1, (
+        f"expected exactly ONE meta.v_customers_lineage row for customer_id="
+        f"{first_row_customer_id_int!r}, found {len(lineage_rows)}: {lineage_rows!r}"
+    )
+    (
+        _customer_id,
+        _file_id,
+        _batch_id,
+        _run_id,
+        silver_loaded_at,
+        dbt_invocation_id,
+        dbt_run_at,
+        dbt_invocation_records_deduplicated,
+    ) = lineage_rows[0]
+    for column_name, value in (
+        ("silver_loaded_at", silver_loaded_at),
+        ("dbt_invocation_id", dbt_invocation_id),
+        ("dbt_run_at", dbt_run_at),
+        ("dbt_invocation_records_deduplicated", dbt_invocation_records_deduplicated),
+    ):
+        assert value is not None, (
+            f"meta.v_customers_lineage.{column_name} is NULL for customer_id="
+            f"{first_row_customer_id_int!r} -- the dbt hop never joined into this "
+            f"row's lineage"
         )
-        (
-            _customer_id,
-            _file_id,
-            _batch_id,
-            _run_id,
-            silver_loaded_at,
-            dbt_invocation_id,
-            dbt_run_at,
-            dbt_invocation_records_deduplicated,
-        ) = lineage_rows[0]
-        for column_name, value in (
-            ("silver_loaded_at", silver_loaded_at),
-            ("dbt_invocation_id", dbt_invocation_id),
-            ("dbt_run_at", dbt_run_at),
-            ("dbt_invocation_records_deduplicated", dbt_invocation_records_deduplicated),
-        ):
-            assert value is not None, (
-                f"meta.v_customers_lineage.{column_name} is NULL for customer_id="
-                f"{first_row_customer_id_int!r} -- the dbt hop never joined into this "
-                f"row's lineage"
-            )
-    finally:
-        # Best-effort cleanup: S3 DELETE is idempotent (a missing key is not an
-        # error) -- same discipline as test_smoke_and_idempotency.py's own finally
-        # block. Never masks a real assertion failure above with a cleanup exception.
-        with contextlib.suppress(Exception):
-            admin.delete_object(Bucket="raw", Key=key)

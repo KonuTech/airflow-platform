@@ -59,6 +59,9 @@ EXPECTED_TABLES = {
     ("meta", "reconciliation_results"),
     # Plan 09-10, migration 0034 (a whole-listing-empty backfill tick's gap record).
     ("meta", "processing_gaps"),
+    # debug/ci-pipeline-ingestion-timeout ROUND 16 finding 21, migration 0040
+    # (the silver models' exact-eligibility claim ledger).
+    ("meta", "dbt_processed_runs"),
     ("normalized", "customers"),
     ("normalized", "orders"),
 }
@@ -81,6 +84,9 @@ GRANTED_TABLES = sorted(
         ("meta", "watermark_history"),
         ("meta", "reconciliation_results"),
         ("meta", "processing_gaps"),
+        # Migration 0040: dbt_app SELECT/INSERT (its claim-ledger write path,
+        # 0024's dedup_audit grant shape); etl_app is SELECT-only here.
+        ("meta", "dbt_processed_runs"),
     },
 )
 
@@ -427,6 +433,9 @@ def test_grafana_reader_role_exists_and_is_select_only(migrated_dsn: str) -> Non
         ("meta", "v_run_recovery"),
         # Migration 0034 (plan 09-10): read access for the gap dashboard, never write.
         ("meta", "processing_gaps"),
+        # Migration 0041 (debug/ci-pipeline-ingestion-timeout ROUND 16, finding 20b):
+        # quarantined-artifact visibility for dashboards, never write.
+        ("meta", "v_quarantined_artifacts"),
     }
     assert set(granted.keys()) == expected_objects, (
         f"grafana_reader must hold grants on exactly {expected_objects}, got {set(granted.keys())}"
@@ -661,7 +670,10 @@ def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
         # meta except the narrow meta.dedup_audit/meta.dedup_decisions slice
         # migration 0024 (plan 08.1-05) carves out, plus
         # meta.reconciliation_results (migration 0032, plan 09-02) -- its own
-        # INSERT-only bronze_silver-hop post-hook write path.
+        # INSERT-only bronze_silver-hop post-hook write path -- plus
+        # meta.dbt_processed_runs (migration 0040, debug/ci-pipeline-
+        # ingestion-timeout ROUND 16 finding 21) -- the silver models' own
+        # SELECT+INSERT claim-ledger write path, same 0024 grant shape.
         forbidden_grants = conn.execute(
             """
             SELECT table_schema, table_name
@@ -671,14 +683,16 @@ def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
                    table_schema = 'normalized'
                    OR (table_schema = 'meta'
                        AND table_name NOT IN (
-                           'dedup_audit', 'dedup_decisions', 'reconciliation_results'
+                           'dedup_audit', 'dedup_decisions', 'reconciliation_results',
+                           'dbt_processed_runs'
                        ))
                )
             """,
         ).fetchall()
         assert forbidden_grants == [], (
             f"dbt_app must never be granted on normalized/meta "
-            f"(beyond dedup_audit/dedup_decisions/reconciliation_results), found: {forbidden_grants}"
+            f"(beyond dedup_audit/dedup_decisions/reconciliation_results/dbt_processed_runs), "
+            f"found: {forbidden_grants}"
         )
 
 

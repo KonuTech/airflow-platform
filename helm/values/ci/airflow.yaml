@@ -260,7 +260,20 @@ scheduler:
       memory: 512Mi
     limits:
       cpu: 1500m
-      memory: 2048Mi
+      memory: 2560Mi
+  # Debug session ci-pipeline-ingestion-timeout, ROUND 16 (2026-08-28): memory
+  # LIMIT raised 2048Mi->2560Mi (request untouched -- zero effect on the
+  # requests-only CI budget gate). Watch item 18b: the measured peak climbed
+  # every round as the suite got FURTHER (R12 1415MiB -> R13 1881 -> R15
+  # 1923MiB = 93.9% of 2048Mi, a new session high-water with ~125MiB left),
+  # and ROUND 16 makes the previously-fast-failing 1M-row e2e runs SUCCEED
+  # (more concurrent KPO churn, the orders DAG active throughout the singles
+  # phase, plus the rebuild capstone reprocessing the retained multi-million
+  # -row raw history) -- a proactive bump is cheap insurance against an OOM
+  # restart turning an otherwise-green run red. The dispatch-burst model
+  # below (ROUND 9) still governs the shape; this only restores its ~20%
+  # margin at the observed-peak level.
+  # ROUND 9 note kept below for the mechanism-history chain:
   # Debug session ci-pipeline-ingestion-timeout, ROUND 9 (2026-08-25): memory
   # LIMIT raised 1536Mi->2048Mi (request again untouched at 512Mi -- zero
   # effect on the requests-only CI budget gate; node memory requests sit at

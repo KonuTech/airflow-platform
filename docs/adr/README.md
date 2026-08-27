@@ -23,6 +23,7 @@ preview. If the decision has not been made yet, there is nothing to record.
 | [0009](0009-openbao-licence-escape-hatch.md) | Vault's BUSL-1.1 licence is accepted for this milestone; OpenBao is the named migration target | accepted | 2026-08-14 |
 | [0010](0010-dbt-silver-layer-boundary.md) | dbt owns bronze-to-silver transformation only — gold publish and SCD2 stay Python-owned | accepted | 2026-08-18 |
 | [0011](0011-raw-immutability-iam-not-worm.md) | Raw immutability is enforced via an IAM deny-delete policy, not object-lock/WORM | accepted | 2026-08-22 |
+| [0012](0012-quarantined-run-artifact-disposition.md) | Quarantined runs' bronze/silver artifacts are retained, excluded from gold, and identifiable — full silver disposition deferred | accepted | 2026-08-28 |
 
 Records 0002 through 0005 are the decisions Phase 1 actually takes. 0002 is the
 headline departure from README §68/§75; 0003 and 0004 are its physical
@@ -36,7 +37,9 @@ began. 0010 is Phase 08.1's reversal of the original blanket dbt exclusion,
 scoping dbt to bronze-to-silver transformation only. 0011 is Phase 11's
 resolution of Phase 2's own D-08 raw-immutability revisit point, confirming the
 IAM deny-delete policy already shipped in Phase 2 as the permanent mechanism,
-not object-lock/WORM.
+not object-lock/WORM. 0012 is the ci-pipeline-ingestion-timeout debug session's
+ROUND-16 disposition of quarantined runs' retained bronze/silver artifacts
+(gold exclusion now, silver disposition deferred with its design recorded).
 
 `0000-template.md` is the template. `0000` is its permanent number; it is never a
 record and never appears in the table above.

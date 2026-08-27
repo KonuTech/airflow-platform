@@ -36,10 +36,13 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import csv
+import io
 import shutil
 import socket
 import subprocess
 import time
+from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
@@ -228,6 +231,175 @@ def large_csv_with_offset_customer_ids(base_bytes: bytes, *, offset: int) -> byt
         new_id = int(line[:first_comma]) + offset
         out.append(f"{new_id:06d}{line[first_comma:]}")
     return "\n".join(out).encode("utf-8")
+
+
+def existing_customer_ids(conn: psycopg.Connection[Any], *, count: int) -> list[int]:
+    """Return up to `count` genuinely-present `normalized.customers.customer_id` values.
+
+    Shared by every ORDERS-repointed e2e test in this directory
+    (debug/ci-pipeline-ingestion-timeout ROUND 16, finding 19-A):
+    `orders.yaml`'s REFERENTIAL quality rule quarantines any orders row
+    whose `customer_id` has no `normalized.customers` parent, so orders
+    fixtures must reference real, live-queried parents -- the exact idiom
+    `test_referential_orphan.py`'s own `_existing_customer_ids` established
+    (plain `LIMIT`, never `ORDER BY random()` -- see that helper's comment).
+    An orders fixture may CYCLE a small parent pool across many rows (a
+    customer with many orders is the realistic shape), so callers assert
+    only `len(...) >= 1` with a message pointing at prior customers
+    ingestion (the sweep corpus on CI; any earlier ingest locally).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT customer_id FROM normalized.customers LIMIT %s", (count,))
+        rows = cur.fetchall()
+    return [int(row[0]) for row in rows]
+
+
+def build_orders_csv_bytes(
+    *,
+    order_id_start: int,
+    row_count: int,
+    customer_ids: list[int],
+) -> bytes:
+    """Build an `orders.yaml`-shaped CSV: `row_count` rows, sequential order_ids, cycled parents.
+
+    Column order (`order_id,customer_id,order_date,amount`) matches
+    `configs/datasets/orders.yaml`'s `columns:` block verbatim (positional
+    correspondence only -- `test_referential_orphan.py::_build_orders_csv`'s
+    own documented precedent). `order_id` runs `order_id_start ..
+    order_id_start + row_count - 1` so a caller's window assertions
+    (`BETWEEN order_id_start AND order_id_start + row_count - 1`) are exact;
+    `customer_id` cycles the live-sampled parent pool; `amount` varies per
+    row so two different windows never share full row content by accident.
+    """
+    assert customer_ids, "build_orders_csv_bytes needs at least one valid parent customer_id"
+    pool_size = len(customer_ids)
+    lines = ["order_id,customer_id,order_date,amount"]
+    lines.extend(
+        f"{order_id_start + i},{customer_ids[i % pool_size]},"
+        f"2026-01-15,{10 + (i % 90)}.{i % 100:02d}"
+        for i in range(row_count)
+    )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def trigger_orders_dagrun(
+    kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    run_id: str,
+) -> None:
+    """Manually trigger `csv_ingest_orders` -- the asset-scheduled DAG's test-side drive shape.
+
+    `csv_ingest_orders` is Asset-scheduled (`schedule=[customers_asset]`),
+    so an orders upload is only DISCOVERED when an orders DagRun actually
+    runs -- and during the singles phase nothing may be publishing customers
+    (asset events only fire on a real customers publish). A plain
+    `airflow dags trigger` is the established, live-proven idiom
+    (`test_referential_orphan.py`'s own docstring: Airflow accepts a manual
+    trigger for an asset-scheduled DAG exactly like any other DAG). The
+    unpause is belt-and-braces with `_unpause_slice_dags` (idempotent).
+    """
+    unpause = kubectl_fn(
+        "-n",
+        "airflow",
+        "exec",
+        "deploy/airflow-api-server",
+        "--",
+        "airflow",
+        "dags",
+        "unpause",
+        _ORDERS_DAG_ID,
+    )
+    assert unpause.returncode == 0, f"airflow dags unpause failed:\n{unpause.stderr}"
+    trigger = kubectl_fn(
+        "-n",
+        "airflow",
+        "exec",
+        "deploy/airflow-api-server",
+        "--",
+        "airflow",
+        "dags",
+        "trigger",
+        _ORDERS_DAG_ID,
+        "--run-id",
+        run_id,
+    )
+    assert trigger.returncode == 0, f"airflow dags trigger failed:\n{trigger.stderr}"
+
+
+# Mirrors `dataplat.load.publish.scd._CURRENT_COUNT_SQL`'s scoping exactly
+# (gold `is_current` rows whose key has EVER appeared in bronze) -- the
+# precise roster `MassDeleteCircuitBreaker`'s denominator counts, which is
+# exactly the set a snapshot-complete fixture must echo for vanished == 0.
+_SNAPSHOT_ROSTER_SQL = """
+SELECT customer_id, name, country, birth_date, event_ts
+  FROM normalized.customers
+ WHERE is_current
+   AND customer_id::text IN (SELECT DISTINCT customer_id FROM staging.customers)
+ ORDER BY customer_id
+"""
+
+
+def snapshot_complete_customers_csv(
+    conn: psycopg.Connection[Any],
+    *,
+    extra_rows: list[tuple[Any, ...]],
+) -> bytes:
+    """Build a customers CSV that honors the dataset's FULL-SNAPSHOT delivery contract.
+
+    debug/ci-pipeline-ingestion-timeout ROUND 16, finding (19)-A:
+    `customers.yaml` declares `change_semantics: snapshot` + an
+    `scd.mass_delete_threshold` breaker -- a "lone" customers file carrying
+    only a test's own handful of keys IS a mass-delete signal by that
+    contract's own definition (every roster key it omits reads as deleted),
+    and ROUND 15 proved the breaker fires on exactly that shape, correctly.
+    A delivery-shape-aware customers fixture therefore ECHOES the current
+    gold roster (queried live at build time, scoped exactly like the
+    breaker's own denominator -- `_SNAPSHOT_ROSTER_SQL`) and appends the
+    test's own new rows: vanished == 0 by construction, production breaker
+    semantics untouched.
+
+    Echoed rows re-deliver each key's CURRENT attribute values with its
+    CURRENT `event_ts`: byte-stable attributes at an already-seen business
+    timestamp fold into the existing version chain as duplicate
+    observations -- no new SCD versions, no gold changes for echoed keys.
+    Rendered via `csv.writer` (values are echoed from the live database, so
+    quoting must be handled properly, never by string concatenation). The
+    header is the 5-column pre-Phase-10 shape every existing slice fixture
+    uses -- `signup_country` is `required: false` (D-13) and ROUND 15's
+    schema-compat fix makes the 5-column prefix loadable by contract.
+
+    Args:
+        conn: An open analytics connection (any role with SELECT on
+            `normalized.customers` and `staging.customers` -- `etl_app`
+            has both).
+        extra_rows: The test's own `(customer_id, name, country,
+            birth_date, event_ts)` tuples, appended verbatim after the
+            roster echo.
+
+    Returns:
+        The CSV bytes (header + roster echo + extra rows, `\\n` line
+        terminator to match every other fixture in this suite).
+    """
+    with conn.cursor() as cur:
+        cur.execute(_SNAPSHOT_ROSTER_SQL)
+        roster = cur.fetchall()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["customer_id", "name", "country", "birth_date", "event_ts"])
+    for customer_id, name, country, birth_date, event_ts in roster:
+        writer.writerow(
+            [
+                customer_id,
+                name,
+                country,
+                "" if birth_date is None else birth_date.isoformat(),
+                event_ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ]
+        )
+    for row in extra_rows:
+        writer.writerow(list(row))
+    return buffer.getvalue().encode("utf-8")
 
 
 def _free_local_port() -> int:

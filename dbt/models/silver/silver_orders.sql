@@ -7,18 +7,20 @@
   _source_row_number DESC` precedent, mirrored here verbatim).
 
   See silver_customers.sql's own header comment for the full design
-  rationale (is_incremental()/_run_id watermark, D-06/D-07 layering,
+  rationale (is_incremental()/claimed-run eligibility, D-06/D-07 layering,
   late-arrival-vs-existing-silver ranking, _dbt_loaded_at) -- identical
-  here, dataset-substituted only.
+  here, dataset-substituted only. Eligibility is the meta.dbt_processed_runs
+  claim ledger (debug ci-pipeline-ingestion-timeout ROUND 16, finding 21),
+  never a max-`_run_id` watermark -- see claim_dbt_processed_runs.sql.
 #}
 
-{% set watermark_floor = 0 %}
-{% if is_incremental() %}
-  {% set watermark_floor_query %}
-    select coalesce(max(_run_id), 0) from {{ this }}
-  {% endset %}
-  {% set watermark_floor = run_query(watermark_floor_query).columns[0].values()[0] | int %}
-{% endif %}
+{% set pre_hook_sql %}
+{{ claim_dbt_processed_runs(
+    dataset_name='orders',
+    source_schema='staging',
+    source_identifier='orders'
+) }}
+{% endset %}
 
 {#-
   `post_hook_sql` is pre-rendered here, eagerly, in the model's own primary
@@ -54,6 +56,7 @@
     on_schema_change='append_new_columns',
     contract={'enforced': True},
     alias='orders',
+    pre_hook=pre_hook_sql,
     post_hook=post_hook_sql
 ) }}
 
@@ -64,7 +67,12 @@ with new_bronze as (
         _record_hash, _record_hash_version
     from {{ source('bronze', 'orders') }}
     {% if is_incremental() %}
-    where _run_id > {{ watermark_floor }}
+    where _run_id in (
+        select run_id
+        from meta.dbt_processed_runs
+        where dataset_name = 'orders'
+          and claimed_txid = txid_current()
+    )
     {% endif %}
 ),
 

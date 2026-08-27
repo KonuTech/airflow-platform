@@ -27,53 +27,37 @@
      value is built in an EARLIER pass than the model's own "real" compile
      pass).
 
-  3. Any prior-state value (here: the floor `_run_id` below which a file
-     has already been reconciled) is derived from an audit table's OWN
-     history (`coalesce(max(...), 0)`), never from a `run_query()` value
-     captured into a `post_hook` config string -- the same timing hazard
-     `dedup_audit_post_hook.sql`'s own `watermark_floor` argument was
-     removed to avoid. This macro reuses `meta.dedup_audit`'s EXISTING
-     per-model floor precedent (`max(max_run_id) where model_name = ...`)
-     rather than inventing a second, independent floor mechanism for this
-     hop.
+  3. Any batch-scoping value is derived from real, transaction-local
+     database state, never from a `run_query()` value or a
+     `{{ invocation_id }}` literal captured into a `post_hook` config
+     string. Two empirically-verified hazards forced this rule (both
+     reproduced live while developing this macro; kept documented here
+     because they now guard the whole hook-macro family): (a) a
+     `run_query()`-computed local captured into a hook string is frozen at
+     dbt's EARLIER config-build render pass, not the real compile pass --
+     the exact timing hazard `dedup_audit_post_hook.sql`'s own
+     `watermark_floor` argument was removed to avoid; (b) dbt's
+     partial-parsing cache (`target/partial_parse.msgpack`) can skip
+     re-rendering a model's `config()` block entirely across separate
+     `dbt build` invocations when it detects "nothing changed", silently
+     reusing a PREVIOUS invocation's rendered hook string -- including a
+     STALE, frozen `{{ invocation_id }}` literal baked in at the earlier
+     compile (reproduced live via two consecutive `dbt build` calls
+     against the SAME `target/` directory).
 
-     One refinement, found empirically while developing this macro against
-     a real, multi-statement `dbt build`: `dedup_audit_post_hook`'s own
-     INSERT runs FIRST in the same captured `post_hook_sql` string, in the
-     SAME transaction, and Postgres read-own-writes semantics mean this
-     macro's own `prior_watermark` query, run as a SEPARATE statement
-     afterwards, already sees that row -- unlike `dedup_audit_post_hook`'s
-     OWN `prior_watermark` CTE, which is part of the SAME single INSERT
-     statement as its own write and therefore reads a snapshot from BEFORE
-     it. Left unguarded, the floor this macro computes on a build's FIRST
-     ever invocation would equal that SAME build's own just-inserted
-     `max_run_id` -- excluding every row the build itself just processed,
-     writing zero reconciliation rows on every build, including the first.
-
-     The first fix attempted here was excluding the current row via
-     `dbt_invocation_id != '{{ invocation_id }}'` -- rejected after a
-     SECOND empirical finding: dbt's partial-parsing cache (`target/
-     partial_parse.msgpack`) can skip RE-RENDERING a model's `config()`
-     block entirely across separate `dbt build` invocations when it
-     detects "nothing changed" in the project's source files, silently
-     reusing a PREVIOUS invocation's already-rendered `post_hook_sql`
-     string -- including a STALE, frozen `{{ invocation_id }}` literal
-     baked in at the earlier compile. A `dbt_invocation_id !=` filter
-     keyed on that frozen literal then wrongly excludes the WRONG row
-     (or none at all, if the frozen id belongs to a build several runs
-     back), duplicating reconciliation rows on every "nothing changed"
-     rerun -- reproduced live via two consecutive `dbt build` calls
-     against the SAME `target/` directory. The actual fix instead excludes
-     the current build's own row by IDENTITY COLUMN, not by a
-     Jinja-rendered string: `dedup_audit_id < (select max(dedup_audit_id)
-     from meta.dedup_audit where model_name = ...)`. Since
-     `dedup_audit_post_hook`'s insert always runs strictly BEFORE this
-     macro's SELECT within the same transaction, the current build's own
-     row is always the highest `dedup_audit_id` for this `model_name` at
-     the moment this query runs -- true regardless of partial-parsing
-     caching, invocation-id staleness, or any other Jinja-rendering-order
-     hazard, since it depends only on real, transaction-local database
-     state.
+     This macro originally scoped its per-file set via `meta.dedup_audit`'s
+     self-derived `max(max_run_id)` floor (plus an identity-column dance to
+     exclude the current build's own just-written audit row). That floor
+     shared the calling model's own watermark bug (debug
+     ci-pipeline-ingestion-timeout ROUND 16, finding 21): a run staged
+     after a higher `_run_id` had already been built fell below the floor
+     forever and its files never got a bronze_silver reconciliation row.
+     Since finding 21 replaced the models' watermark with the
+     `meta.dbt_processed_runs` claim ledger (migration 0040), `bronze_files`
+     below scopes to exactly THIS transaction's claimed set (`claimed_txid
+     = txid_current()`) -- the same eligibility set the model's own SELECT
+     used, satisfying rule 3 by construction (transaction-local database
+     state, no Jinja-rendered value in any predicate).
 
   4. (This macro's own, additional constraint.) D-24 is LOCKED: grain is
      per file, per hop -- one row per `(file_id, hop)`. This macro must NOT
@@ -91,9 +75,9 @@
      the silver->gold hop's own documented "aggregate-attribution,
      per-pass not per-file" precedent for why the aggregate VALUES are
      shared while the per-file SPLIT is only in which rows get written). A
-     build that processes zero new rows (`bronze_files` empty) writes zero
-     reconciliation rows via this same cross join -- never a phantom row
-     with a NULL `file_id`.
+     build that processes zero new rows (`bronze_files` empty -- i.e. this
+     transaction claimed nothing) writes zero reconciliation rows via this
+     same cross join -- never a phantom row with a NULL `file_id`.
 
   D-22's exact accounting formula (migration 0032's own docstring, restated
   here verbatim since this macro is what computes it for this hop):
@@ -117,22 +101,15 @@
       this macro's self-derived floor scoped to the correct model.
 #}
 {% macro reconciliation_post_hook(dataset_name, source_schema, source_identifier, target_schema, target_identifier) %}
-with prior_watermark as (
-    select coalesce(max(max_run_id), 0) as floor
-    from meta.dedup_audit
-    where model_name = '{{ target_identifier }}'
-      and dedup_audit_id < (
-          select max(dedup_audit_id)
-          from meta.dedup_audit
-          where model_name = '{{ target_identifier }}'
-      )
-),
-
-bronze_files as (
+with bronze_files as (
     select distinct b._file_id as file_id
     from {{ source_schema }}.{{ source_identifier }} b
-    cross join prior_watermark
-    where b._run_id > prior_watermark.floor
+    where b._run_id in (
+        select run_id
+        from meta.dbt_processed_runs
+        where dataset_name = '{{ dataset_name }}'
+          and claimed_txid = txid_current()
+    )
 ),
 
 bronze_count as (

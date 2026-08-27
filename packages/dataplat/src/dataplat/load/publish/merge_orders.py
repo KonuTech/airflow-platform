@@ -62,6 +62,11 @@ if TYPE_CHECKING:
 # that legitimately fills in a real date. The `IS NULL OR` branch treats an
 # existing NULL as "always supersede-able", matching this platform's core
 # value that no data is ever silently dropped or left uncorrectable.
+#
+# QUARANTINE EXCLUSION (debug/ci-pipeline-ingestion-timeout ROUND 16,
+# finding 20b): see `merge.py`'s own identical predicate comment -- the
+# cumulative `silver.orders` source retains QUARANTINED runs' rows, which
+# must never reach gold via a later pass's whole-table upsert.
 _PUBLISH_SQL = """
 INSERT INTO normalized.orders (
     order_id, customer_id, order_date, amount,
@@ -73,6 +78,9 @@ SELECT DISTINCT ON (order_id)
        _run_id, _file_id, _batch_id, _source_row_number,
        _record_hash, _record_hash_version
 FROM   {staging_table}
+WHERE  _run_id NOT IN (
+           SELECT run_id FROM meta.ingestion_runs WHERE status = 'QUARANTINED'
+       )
 ORDER  BY order_id, order_date DESC, _source_row_number DESC
 ON CONFLICT (order_id) DO UPDATE
    SET customer_id = EXCLUDED.customer_id, order_date = EXCLUDED.order_date,

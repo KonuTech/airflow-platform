@@ -56,16 +56,23 @@
      config value depends on as part of a SEPARATE, EARLIER pass used to
      build the node's `model.config` (before the "real" compile pass that
      renders the model's SELECT body), and `run_query()` is not reliable in
-     that earlier pass. Rather than depend on that timing at all, this
-     macro derives its OWN watermark independently, from `meta.dedup_audit`'s
-     own history for this model: `coalesce(max(max_run_id), 0)` across every
-     PRIOR audit row for `model_name = target_identifier` (zero prior rows
-     -> floor 0, matching "process everything" on a model's first-ever
-     invocation). This is provably equivalent to the model's own
-     `max(_run_id) from <target>` floor under normal operation, since
-     `meta.dedup_audit` and the target table are always written together in
-     the SAME transaction -- and it needs no value handed across the
-     unreliable config-vs-compile pass boundary at all.
+     that earlier pass. The first replacement (a self-derived
+     `coalesce(max(max_run_id), 0)` floor over this model's own prior
+     `meta.dedup_audit` rows) shared the calling model's OWN watermark bug
+     (debug ci-pipeline-ingestion-timeout ROUND 16, finding 21): a run
+     whose bronze rows commit after a higher `_run_id` has already been
+     audited falls below the floor forever and its rows are never counted.
+     Since finding 21 replaced the models' watermark with the
+     `meta.dbt_processed_runs` claim ledger (migration 0040;
+     claim_dbt_processed_runs.sql pre-hook, SAME transaction), this macro
+     now scopes `new_bronze` to exactly THIS transaction's claimed set
+     (`claimed_txid = txid_current()`) -- byte-for-byte the same
+     eligibility set the calling model's own SELECT body used, evaluated in
+     the database at execution time, with still no value handed across the
+     unreliable config-vs-compile pass boundary (and no
+     `{{ invocation_id }}` predicate -- see the partial-parsing
+     stale-literal hazard reconciliation_post_hook.sql's own point 3
+     documents).
 
   4. Rather than re-deriving a SECOND, independent `row_number()` ranking
      over bronze alone (which cannot see rows the calling model's own
@@ -98,16 +105,14 @@
      dataset's ingestion registered it, so an unregistered dataset always
      has an empty `new_bronze` and the skipped row is a zero-information
      no-op (counts 0, NULL run-id range). Deliberately NOT a
-     skip-when-new_bronze-is-empty guard: `reconciliation_post_hook`'s
-     floor derivation excludes the current build's own audit row BY
-     IDENTITY (`dedup_audit_id < max(dedup_audit_id)` for this model) and
-     therefore RELIES on this macro writing a row on every invocation for
-     a registered dataset -- skipping registered-dataset no-op rows would
-     lower that floor on every idle build and duplicate reconciliation
-     rows. In the unregistered branch the sibling macro is provably
-     unaffected (`max(dedup_audit_id)` over zero rows -> NULL -> floor 0 ->
-     `bronze_files` empty -> zero rows written, its own documented
-     no-phantom-row cross-join). If the registration invariant were ever
+     skip-when-new_bronze-is-empty guard: idle registered-dataset builds
+     keep writing 0-count rows -- the audit trail records that a build ran
+     and found nothing, and downstream consumers (Grafana, sibling macro)
+     were built against that shape. (`reconciliation_post_hook` no longer
+     derives a floor from these rows at all -- both macros now scope to
+     the `meta.dbt_processed_runs` claimed set, docstring point 3 -- so
+     this is a stability choice, not a correctness dependency anymore.)
+     If the registration invariant were ever
      breached (bronze rows for an unregistered dataset), the
      `meta.dedup_decisions` INSERT below would fail loudly on its NOT NULL
      `dedup_audit_id` rather than silently dropping audit data.
@@ -129,17 +134,15 @@
       the correct model across invocations.
 #}
 {% macro dedup_audit_post_hook(dataset_name, business_key_column, source_schema, source_identifier, target_schema, target_identifier) %}
-with prior_watermark as (
-    select coalesce(max(max_run_id), 0) as floor
-    from meta.dedup_audit
-    where model_name = '{{ target_identifier }}'
-),
-
-new_bronze as (
+with new_bronze as (
     select b.*
     from {{ source_schema }}.{{ source_identifier }} b
-    cross join prior_watermark
-    where b._run_id > prior_watermark.floor
+    where b._run_id in (
+        select run_id
+        from meta.dbt_processed_runs
+        where dataset_name = '{{ dataset_name }}'
+          and claimed_txid = txid_current()
+    )
 ),
 
 current_winners as (

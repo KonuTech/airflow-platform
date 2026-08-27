@@ -194,4 +194,18 @@ def wire_dbt_build_tracking(
     mark_done = record_dbt_build_stage.override(
         task_id="mark_dbt_build_done", trigger_rule="all_done"
     )(run_ids=pending_run_ids, status=status)
+    # `stage >> pending_run_ids` (debug/ci-pipeline-ingestion-timeout ROUND 16,
+    # finding 23): without this edge the scheduler runs the eligibility query
+    # at DagRun START -- before this very DagRun's own `stage` task has
+    # committed its STAGE_LOAD='SUCCEEDED' rows -- so a run staged by its own
+    # DagRun was never in `pending_run_ids`, its DBT_BUILD row was silently
+    # deferred to the NEXT DagRun, and both `meta.v_run_recovery` and any
+    # observer polling `meta.run_stages[run_id,'DBT_BUILD']` (D-18's live
+    # dbt-kill proof) ran one DagRun behind reality even though the dbt build
+    # itself covered the run. Live-observed on CI as run 668's DBT_BUILD row
+    # never appearing inside the test's 300s poll window (run 33103279876).
+    # With the edge, eligibility is computed post-stage, so the staging
+    # DagRun itself writes RUNNING before its own dbt_build pod launches --
+    # exactly what this module's own docstring always claimed.
+    stage >> pending_run_ids
     stage >> mark_running >> dbt_build >> status >> mark_done >> publish
