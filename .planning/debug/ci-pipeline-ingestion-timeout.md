@@ -450,9 +450,46 @@ ROUND 15 (2026-08-27, opened on user decision Option B + both riders -- CURRENT 
       tests SUCCEEDING would mean union coverage; wedging RUNNING again would REFUTE
       the (20) fix. (19) stays the user's design decision -- this run supplies its
       definitive live evidence."
-  next_action: "Commit code + docs, push, record the authoritative e2e-full run ID
-      (+ companion publish.yml as item 0) in live_verification_state, return
-      CHECKPOINT (human-action) -- the session manager runs the single 60s watcher."
+  live_verification_state: "RECORDED 2026-08-27T18:25Z: fixes (20)+(20a) pushed as
+      commit 25b6eb0 (base 8c9dce1). AUTHORITATIVE ROUND 15 live-verification run:
+      e2e-full.yml run 33103279876 (headSha 25b6eb0, created 2026-08-27T18:24:11Z,
+      in_progress at recording; timeout-minutes now 190). Companions, same headSha:
+      publish.yml 33103279760 = criterion 0 (images MUST rebuild from 25b6eb0 --
+      csv-processor carries the schema fix + claim lifecycle IN-IMAGE; a stale image
+      silently reverts BOTH fixes; verify success BEFORE judging the e2e run); CI
+      33103279751 (expect the pre-existing Quality gate + Integration failure
+      pattern -- anything NEW at job level is a ROUND 15 regression signal);
+      e2e-chaos 33103279815 (observational; imports the slice conftest so the
+      QUARANTINED truth-up + traceback rider apply there too).
+      POST-RUN ANALYSIS STEPS (continuation agent, judged on the ROUND 15
+      pre_registered_criteria):
+      (1) CRITERION 0: publish.yml 33103279760 conclusion=success.
+      (2) FIX-IN-FORCE probes: any e2e single-file customers run must show stage
+      state=success try=1 (or a legible FAILED->re-stage via LEG 1/2) -- NEVER the
+      old signature: run wedged RUNNING with zero bronze rows + stage try=2
+      success-with-nothing-staged. Grep the TI dump + run->file dump for it.
+      (3) PREDICTION (19): expect the customers e2e runs terminal QUARANTINED with
+      their tests failing FAST on a legible not-SUCCEEDED assert carrying the
+      streamed traceback (ratio ~100% in the publish log). QUARANTINED = (19)
+      CONFIRMED LIVE -> return a design-decision item (delivery-shape contract vs
+      breaker scoping), NOT a (20) refutation. SUCCEEDED = union-covered, (19)
+      stays latent. RUNNING-wedge recurrence = (20) fix REFUTED -> back to
+      investigation.
+      (4) BUDGET (b): complete INSIDE 190min -- decomposition either way; the
+      73.5min (20) burn should be gone; (19) failures cost minutes each.
+      (5) GUARDS (c): Kyverno 0, restarts 0, scheduler peak vs 2048Mi (18b watch),
+      FailedScheduling burst class noted; fixes 16/17/18 hold.
+      (6) CENSUS (d): full -v diff vs the 17-test baseline + streamed tracebacks --
+      FIRST run where every failure carries its WHY; adjudicate the sweep failure
+      (14:48:31 in R14) from its now-visible traceback.
+      (7) SILENT-DROP GATE (e): zero SKIPPED_CONCURRENT-with-nothing-staged shapes;
+      crashed claims (if any) show FAILED + genuine re-stage; integrity_gate now
+      visible in the TI dump for the R14 flake class."
+  next_action: "Await the session manager's watcher on run 33103279876; then post-run
+      analysis per live_verification_state. Carried follow-ups: sidecar mirror,
+      stage-side RejectionRateCircuitBreaker classification, (19) adjudication (now
+      expected live), (20b) quarantine-silver leakage, 18b scheduler-headroom watch,
+      v_run_recovery wording."
 
 ROUND 14 OUTCOME (2026-08-27, post-run analysis of run 33080823061 -- SUPERSEDED BY ROUND 15 ABOVE):
   run: "e2e-full.yml 33080823061, headSha a247b67, conclusion CANCELLED at the NEW
