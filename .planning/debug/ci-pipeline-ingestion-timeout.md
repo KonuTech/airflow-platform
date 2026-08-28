@@ -51,7 +51,7 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 16 POST-RUN ANALYSIS COMPLETE -- see round16_status above)
+updated: 2026-08-28 (ROUND 17 OPENED on user decision (25) A+B + 22b/22c + 24-rider -- implementing; see Current Focus ROUND 17)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -292,7 +292,148 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 16 OUTCOME (2026-08-28, post-run analysis of run 33126343052 -- CURRENT STATE):
+ROUND 17 (2026-08-28, opened on user decision (25) A+B + confirmed 22b/22c/24-rider -- CURRENT STATE):
+  charter: "(1) (25)-A: delta-scope merge_orders' _PUBLISH_SQL -- merge only the
+      pass's own staged_run_ids' silver rows instead of the whole silver table
+      (production semantics done right; also closes the (20b) leak-vector-ii shape
+      at the same layer). Red/green required, determinism preserved, quarantine
+      exclusion kept. Survey other publishers, apply only where the argument holds.
+      (2) (25)-B: right-size retained chaos fixtures -- shrink where not genuinely
+      scale-bound, keep 1M only where it is; bound the rebuild re-queue mass and
+      verify the arithmetic. (3) (22b) migration 0042 SELECT grant on
+      meta.ingestion_runs for analytics_owner. (4) (22c) 'normalized' into the
+      topology test's ALLOWED_SCHEMAS. (5) (24) rider: sweep assert-4 failure
+      message streams the dbt_processed_runs ledger claims + late-file bronze
+      census + silver attribution so a next-run failure is adjudicable despite
+      rebuild destroying the DB state."
+  adjudications_from_source_reads:
+    - "(25)-A survey: THREE publishers. scd.py (customers) is ALREADY
+      staged_run_ids-scoped everywhere except the deliberately-unscoped bronze
+      history (its own F-1 design + 20b exclusion) -- no change. merge_orders.py
+      is the live O(accumulated-silver) offender (staged_run_ids accepted,
+      noqa'd unused) -- FIX HERE. merge.py (strategy 'merge') has the identical
+      whole-table shape BUT no live dataset uses it (customers=scd since Phase
+      10, orders=merge_orders; registry keeps 'merge' for future datasets) --
+      LEAVE UNCHANGED, recorded as a documented follow-up if a dataset ever
+      adopts 'merge'."
+    - "(25)-A safety argument (why delta-scope is exact, not approximate): the
+      whole-table read was compensation for INEXACT eligibility (pre-ledger,
+      dbt's watermark batching could consolidate runs invisibly -- run.py's own
+      docstring says 'reads silver.<dataset> unconditionally' for exactly this).
+      ROUND 16's fix (21) made eligibility EXACT: publish_ingest claims ALL
+      currently-STAGED runs; fix (23) orders stage>>dbt_build>>publish within a
+      DagRun; the claim ledger guarantees every staged run's bronze is folded
+      into silver before its own DagRun's publish; max_active_runs=1 serializes
+      DagRuns. Therefore every silver row whose winner _run_id is in
+      staged_run_ids is exactly 'this pass's delta', and every key whose winner
+      is an older run is already published by that run's own pass. Silver is one
+      row per business key (delete+insert, unique_key=order_id), so the delta
+      predicate `_run_id = ANY(staged_run_ids)` selects precisely the keys whose
+      state changed."
+    - "(25)-B verification per test's own assertions: podkill_mid_load KEEPS 1M
+      (kill-window genuinely scale-bound -- heartbeat-poll kill must land
+      mid-COPY with margin; local U3 rate 41,946 rows/s => 250k stages in ~6s,
+      too slim vs 0.5s poll + kubectl latency; 1M gives ~24s locally, minutes on
+      CI; plus (20a)'s restage-at-scale proof distinct_keys=1M). u3 SHRINKS
+      1M -> 250k (assertions are throughput>0 + peak>0 -- rate-based, NOT
+      scale-bound; steady-state dominated at 250k under CI contention; the doc
+      self-describes its fixture so the baseline stays honest). dbtkill: user
+      premise corrected -- it is ALREADY 120 rows (_SMALL_ORDERS_ROWS; the kill
+      target is the dbt_build pod, a big file buys nothing). concurrent_select
+      already 250k (R16). Rebuild re-queue arithmetic: retained orders corpus
+      before rebuild = 12 dated (~600) + concurrent 250k + podkill 1M + dbtkill
+      120 + u3 250k ~= 1.50M rows, down from R16's ~2.25M (-33%); with (25)-A
+      the rebuild-era publish work is sum-of-deltas (~1.5M total) instead of
+      N-passes x O(accumulated) -- the multiplier, not the mass, was R16's
+      dominant sink."
+    - "(22b): reentry's _fetch_dagrun_identity reads meta.ingestion_runs via
+      analytics_owner_connection (test line 707); 0040 already granted
+      analytics_owner SELECT on meta.dbt_processed_runs, 0038 on
+      meta.files/meta.datasets -- 0042 is the same one-liner for
+      meta.ingestion_runs. Red/green via has_table_privilege in
+      test_migrations.py (0638-precedent shape)."
+    - "(22c): ALLOWED_SCHEMAS (tests/e2e/cluster/test_postgres_topology.py:45)
+      lacks 'normalized' -- information_schema.schemata lists a schema only when
+      the connecting role holds a privilege on it, and 0039's USAGE grant made
+      normalized newly visible. One-line test-side fix."
+    - "(24) rider: sweep failure line 1289 (late_silver_row is None) becomes a
+      pytest.fail with a lazily-built forensics block: (a) meta.dbt_processed_runs
+      claims for dataset customers, (b) bronze (staging.customers) run census for
+      the late file's file_id + all meta.ingestion_runs rows for that file_id,
+      (c) silver.customers attribution for the late file's business keys. Built
+      ONLY at failure time; streams via the -v/traceback rider."
+  pre_registered_criteria:
+    - "(a) The 6 (25)-owned failures clear: podkill_mid_load, dbtkill
+      (podkill_mid_dbt), u3, rebuild, orphan, idempotent_reupload all PASS."
+    - "(b) sweep assert 4 passes OR fails WITH the adjudicable forensics block
+      streamed."
+    - "(c) (22b) reentry passes its _fetch_dagrun_identity read; (22c)
+      no_extra_schemas passes with 'normalized' allowed."
+    - "(d) Zero NEW failures vs the R16 census."
+    - "(e) Guards green: Kyverno 0, restarts 0, zero-failed-TIs class holds,
+      fixes 16-23 hold, scheduler under the 2560Mi limit."
+    - "(f) Duration decomposition shows meaningful shortening from O(delta)
+      publish (R16 suite 132.8min; expect the podkill-era and rebuild-era
+      publish/dbt sinks to shrink)."
+    - "(g) TARGET: first fully green census, or nameable-stragglers-only,
+      inside the 190-min ceiling."
+  reasoning_checkpoint:
+    hypothesis: "R16 finding (25)'s throughput collapse is dominated by the
+        O(accumulated-silver) whole-table merge in merge_orders' publish (every
+        pass rescans+row-locks ~all accumulated orders keys, so each retained 1M
+        fixture taxes every later publish) multiplied by the serialized
+        max_active_runs=1 pipe and the rebuild's full-corpus re-queue; making
+        publish O(delta) and right-sizing the retained mass clears the 6
+        (25)-owned failures without touching production breaker semantics."
+    confirming_evidence:
+      - "R16 live: podkill's 1M restage COMPLETED (run STAGED) but dbt+publish
+        did not finish in the residual 600s window; every subsequent orders test
+        starved behind it; rebuild 16/16 unsettled at 1800s with FailedScheduling
+        = 'Insufficient cpu' only -- zero logic wedges, zero failed TIs."
+      - "Source: merge_orders._PUBLISH_SQL reads {staging_table} (= silver.orders
+        since 08.1-10) with NO run scoping; staged_run_ids accepted and noqa'd
+        unused; scd.py by contrast is already scoped and customers cron passes
+        stayed fast all round."
+      - "R15 vs R16 differential: podkill PASSED in R15 on customers (scd,
+        run-scoped publish) and FAILED in R16 on orders (whole-table merge) at
+        the same 1M scale and same 600s budget."
+    falsification_test: "Live run: podkill/u3 still timing out with the delta
+        publish live and no upstream backlog refutes 'publish multiplier
+        dominates' (residual would be dbt-build or COPY cost); rebuild still
+        16/16-unsettled at 1800s with sum-of-deltas ~1.5M refutes the re-queue
+        mass model. Offline: the lock-based no-rescan test failing on the fixed
+        SQL means the delta predicate does not actually stop old-key access."
+    fix_rationale: "The fix is at the mechanism's own layer: publish cost should
+        scale with what the pass finalizes (its staged runs' delta), not with
+        platform lifetime -- the whole-table read existed to compensate for
+        pre-ledger inexact eligibility, and fix (21) removed that inexactness.
+        Determinism/auditability preserved: same DISTINCT ON + tie-break, same
+        ON CONFLICT guard, same quarantine NOT-IN exclusion, RETURNING unchanged.
+        Fixture right-sizing only shrinks where the tested property is
+        rate/mechanism-bound, never where scale is load-bearing."
+    blind_spots: "(1) The residual 1M cost inside podkill's 600s budget (lease
+        wait ~330s + restage + dbt + delta publish of 1M) is estimated, not
+        measured -- if it misses, it is a nameable straggler whose knob (budget,
+        option C) the user explicitly held back this round. (2) The equivalence
+        proof covers upsert semantics on one-row-per-key silver; a future
+        multi-row-per-key silver shape would need re-derivation. (3) (24)'s
+        mechanism stays UNRESOLVED by design this round -- the rider only makes
+        the next failure adjudicable. (4) The 2 offline policy failures are
+        pre-existing and out of scope."
+  offline_status: "COMPLETE 2026-08-28: all four charter items implemented;
+      red/green proven for (25)-A (LockNotAvailable red on stashed pre-fix
+      code, green with the delta scope) and (22b) (grant test red with 0042
+      parked); (25)-B per-assertion verification recorded (podkill keeps 1M,
+      u3 250k, dbtkill already 120, rebuild mass 2.25M -> ~1.50M); battery
+      green at bare-HEAD parity everywhere with 3 pre-existing
+      test_publish_orders TypeErrors additionally FIXED and zero new
+      failures. See the ROUND 17 offline Evidence entry."
+  next_action: "Commit code + docs, push, record the authoritative e2e-full
+      run ID (+ publish.yml companion as criterion 0) in
+      live_verification_state, return CHECKPOINT (human-action) for the
+      session manager's single 60s watcher."
+
+ROUND 16 OUTCOME (2026-08-28, post-run analysis of run 33126343052 -- SUPERSEDED BY ROUND 17 ABOVE):
   run: "e2e-full.yml 33126343052, headSha 0a69dec (tree identical to code commit
       55c8e41), conclusion FAILURE after 2h20m16s (23:27:32Z -> 01:47:45Z),
       self-terminated. Job 98705301890; suite step 132.8min of the 140.2min total;
@@ -7258,6 +7399,79 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     Decision checkpoint returned on the (25) knob (delta-scoped merge_orders
     publish vs fixture shrink vs budget raise vs scope cut) + the two one-liners
     + the (24) rider.
+
+- timestamp: 2026-08-28 (ROUND 17 offline implementation + red/green battery)
+  checked: >
+    merge_orders.py/_PUBLISH_SQL + publish(); merge.py + scd.py (publisher
+    survey); run.py publish_ingest + reconciliation comments; silver_orders.sql
+    (one-row-per-key confirmation); test_pod_kill_retry.py fixture sizes vs
+    each test's own assertions; test_rebuild_from_raw.py settle budget;
+    migrations 0038/0039/0040 precedent; test_postgres_topology.py
+    ALLOWED_SCHEMAS; test_backfill_2year_sweep.py assert-4 site; full offline
+    battery incl. bare-HEAD differentials for integration + ruff.
+  found: >
+    (25)-A IMPLEMENTED: `_run_id = ANY(%(staged_run_ids)s)` added to
+    merge_orders' _PUBLISH_SQL (quarantine NOT-IN kept; DISTINCT ON + tie-break
+    + ON CONFLICT guard + RETURNING unchanged => determinism/auditability
+    preserved). Publisher survey recorded: scd.py already run-scoped (no
+    change); merge.py has the identical O(accumulated) shape but ZERO live
+    datasets use strategy 'merge' -- left unchanged with a load-bearing
+    docstring warning to delta-scope before any dataset adopts it. RED/GREEN
+    PROVEN: new tests/integration/test_publish_orders_delta_scope.py -- (i)
+    equivalence: delta-scoped pass-by-pass gold byte-identical to a legacy
+    whole-table merge over the same final silver state (regression guard,
+    green both sides by design); (ii) no-rescan lock proof: with a concurrent
+    FOR UPDATE held on an already-published key and lock_timeout=2s, the
+    PRE-FIX publish failed `psycopg.errors.LockNotAvailable: canceling
+    statement due to lock timeout` (RED, observed on stashed pre-fix code)
+    and the delta-scoped publish completes green -- direct, deterministic
+    proof the accumulated keys are no longer read or row-locked.
+    test_publish_quarantine_exclusion.py's orders test updated to
+    publish_ingest's production shape (pass claims BOTH runs; exclusion still
+    run-scoped). test_publish_orders.py's 3 call sites now pass
+    staged_run_ids=[run_id] -- clearing the 3 PRE-EXISTING TypeError failures
+    R16 had declared out of scope (in scope now: the seam itself changed).
+    (25)-B IMPLEMENTED per-assertion verification: podkill KEEPS 1M (kill
+    window scale-bound: at U3's measured 41,946 rows/s a 250k stage is ~6s
+    local, too slim vs the 0.5s poll + kubectl latency; (20a) restage-at-scale
+    proof also 1M-bound); u3 SHRUNK 1M -> 250k (assertions are rate-based
+    throughput>0/peak>0, NOT scale-bound; doc self-describes its fixture);
+    dbtkill: user premise corrected -- ALREADY 120 rows since R16 (kill target
+    is the dbt pod). Rebuild re-queue arithmetic verified and recorded in the
+    test: 12 dated (~600) + 250k + 1M + 120 + 250k ~= 1.50M rows, down from
+    R16's ~2.25M (-33%); with (25)-A total rebuild-era publish work becomes
+    sum-of-deltas, killing the N-passes x O(accumulated) multiplier that was
+    R16's dominant sink. (22b) migration 0042 GRANT SELECT ON
+    meta.ingestion_runs TO analytics_owner (0038/0039/0040 family): red/green
+    via new has_table_privilege test (RED with 0042 parked, GREEN with it;
+    read-only boundary asserted). (22c) 'normalized' added to ALLOWED_SCHEMAS
+    with the visibility-mechanism comment. (24) RIDER: sweep assert-4 failure
+    now pytest.fail's with _late_file_lineage_forensics -- ledger claims
+    (dataset_name/run_id/claimed_txid/claimed_at), late-file bronze run census
+    + all ingestion_runs attempts (incl. replay_of_run_id), and silver
+    attribution for the late file's business keys -- built lazily at failure
+    time, streamed via the -v traceback rider, adjudicable despite rebuild's
+    later meta reset. BATTERY: unit+regression 560 passed; dagtest 14 passed;
+    policy 157 + the 2 known pre-existing failures; manifests+kubeconform
+    378/0/0; mypy strict 91 files clean; slice collects 17 / e2e collects 53.
+    Integration FULL-SUITE DIFFERENTIAL vs bare HEAD: HEAD = 17 failed / 186
+    passed; with ROUND 17 = 14 failed / 192 passed -- the 14 are the IDENTICAL
+    pre-existing node-IDs (config_registry x2, dbt_docker_image, lineage_view
+    x2, publish_ingest full-suite-order coupling, transaction_wiring x4,
+    referential_integrity, staging_normalization, watermarks x2; all fail on
+    bare HEAD in full-suite order, all pass in touched-suite runs), the 3
+    fixed are the test_publish_orders TypeErrors. Zero new failures. Ruff
+    lint/format restored to HEAD's exact pre-existing baseline (3 errors / 17
+    would-reformat, all pre-existing offline Quality-gate class). New
+    delta-scope tests drop their staging scratch tables + gold rows eagerly
+    (removes the role_table_grants ordering coupling they'd otherwise add).
+  implication: >
+    All four charter items are implemented with the pre-registered red/green
+    evidence. The live run adjudicates: (a) whether O(delta) publish + the
+    1.5M re-queue bound clears the 6 (25)-owned failures inside unchanged
+    budgets (the podkill 600s window -- lease ~330s + 1M restage + dbt +
+    delta publish -- is the pre-registered residual risk), and (b) finding
+    (24), which either passes or finally yields adjudicable forensics.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
