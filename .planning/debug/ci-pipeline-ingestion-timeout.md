@@ -840,8 +840,20 @@ investigation):
       `tests/integration` (testcontainers) not re-run (unaffected surface, and no reason to
       believe it would newly fail: only DAG-orchestration config and e2e-test-layer logic
       changed)."
-  live_verification_state: "PENDING -- see structured return for the authoritative run ID(s) and
-      pre-registered criteria; single 60s watcher only, per the charter's own cycle."
+  live_verification_state: "RECORDED 2026-08-28T19:50:41Z: ROUND 20 pushed as docs commit
+      7626781 ([skip ci], buried) + code commit 5f3aa61 (HEAD, clean message -- docs FIRST /
+      code LAST, single push, workflows trigger at 5f3aa61). AUTHORITATIVE ROUND 20
+      live-verification run: e2e-full.yml run 33205639775 (headSha 5f3aa61). Companion runs at
+      the SAME headSha (item 0 criterion: all images must push before cluster-up's pull window):
+      publish.yml run 33205639752; CI run 33205639753 (expected FAILURE per the same
+      pre-existing offline Quality-gate+policy pattern re-confirmed this round); e2e-chaos.yml
+      run 33205639829 (observational). Analysis criteria = this round's own pre_registered_
+      criteria above ((a) podkill within 900s via an ACTUAL retry -- check TI history for a
+      real execution_timeout-driven up_for_retry/failed transition, not an opportunistic
+      unrelated-DagRun reclaim; (b) sweep assertion (10) passes or is robustly scoped; (c)
+      OOMKilled publish pods don't recur, or recur but retry/handle cleanly; (d) zero new
+      failures; (e) guards green; (f) duration decomposition). TARGET: fully green census or
+      nameable-stragglers-only. Scratchpad convention: save the job log as round20-job.log."
   next_action: "Awaiting live CI verification of all three fixes plus the two regression tests'
       own real-cluster analogue (the actual podkill/sweep/u3 e2e tests)."
 
