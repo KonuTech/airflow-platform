@@ -428,10 +428,38 @@ ROUND 17 (2026-08-28, opened on user decision (25) A+B + confirmed 22b/22c/24-ri
       green at bare-HEAD parity everywhere with 3 pre-existing
       test_publish_orders TypeErrors additionally FIXED and zero new
       failures. See the ROUND 17 offline Evidence entry."
-  next_action: "Commit code + docs, push, record the authoritative e2e-full
-      run ID (+ publish.yml companion as criterion 0) in
-      live_verification_state, return CHECKPOINT (human-action) for the
-      session manager's single 60s watcher."
+  live_verification_state: "RECORDED 2026-08-28T06:2xZ: ROUND 17 pushed as
+      docs commit d2a733f ([skip ci], buried) + code commit 79dd299 (HEAD,
+      clean message -- the R16 skip-marker trap avoided by committing docs
+      FIRST and code LAST, single push, workflows trigger at 79dd299).
+      AUTHORITATIVE ROUND 17 live-verification run: e2e-full.yml run
+      33147620963 (headSha 79dd299, started 06:20:59Z). Companions same
+      headSha: publish.yml 33147621001,
+      SUCCESS 06:23:55Z (criterion 0: images at 79dd299 pushed ~3min after
+      trigger, before cluster-up's pull window -- migration 0042 rides the
+      migrate step, the delta-scoped merge_orders rides the csv-processor
+      image, test changes ride the checkout); CI 33147620927 FAILURE
+      (expected -- the pre-existing Quality-gate+Integration offline
+      pattern, exactly matching this round's bare-HEAD differentials: 14
+      pre-existing integration failures + 3 lint errors/17 reformat files,
+      all present on HEAD); e2e-chaos 33147621003 (observational).
+      Analysis criteria = pre_registered_criteria above ((a) the 6
+      (25)-owned failures clear; (b) sweep assert-4 passes OR fails with
+      the forensics block streamed; (c) reentry passes the
+      _fetch_dagrun_identity read + no_extra_schemas green; (d) zero new
+      failures; (e) guards green incl. scheduler < 2560Mi; (f) duration
+      decomposition shows the O(delta) shortening; (g) fully green census
+      or nameable stragglers, <= 190min). Pre-registered residual risk:
+      podkill's 600s window (lease ~330s + 1M restage + dbt + delta
+      publish). Scratchpad convention: save the job log as
+      round17-job.log."
+  next_action: "CHECKPOINT (human-action) returned: session manager runs the
+      single 60s-interval watcher on run 33147620963, then spawn post-run
+      analysis per live_verification_state. Carried follow-ups: sidecar
+      mirror, stage-side RejectionRateCircuitBreaker classification,
+      teardown-race flake class, v_run_recovery wording, ADR-0012's deferred
+      silver disposition, merge.py delta-scoping before any dataset adopts
+      strategy 'merge'."
 
 ROUND 16 OUTCOME (2026-08-28, post-run analysis of run 33126343052 -- SUPERSEDED BY ROUND 17 ABOVE):
   run: "e2e-full.yml 33126343052, headSha 0a69dec (tree identical to code commit
