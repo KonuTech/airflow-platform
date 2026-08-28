@@ -1061,6 +1061,110 @@ def _late_file_lineage_forensics(
     return "\n".join(lines)
 
 
+def _delete_detection_forensics(
+    conn: psycopg.Connection[Any],
+    *,
+    missing_customer_id: int,
+    last_day_run_id: int,
+) -> str:
+    """Assertion-10 forensics (debug/ci-pipeline-ingestion-timeout ROUND 19, closing the
+    sweep_assertion_10_delete_detection_finding gap named in ROUND 18's Current Focus).
+
+    ROUND 18's assertion-10 failure (the missing-customer member not correctly invalidated
+    on the final day's own pass) was a STRONG HYPOTHESIS, not forensically confirmed: fix
+    (21)'s ``publish_ingest`` claims EVERY currently-``STAGED`` run per pass
+    (``list_staged_run_ids`` -- see ``pipeline/run.py``), so if the FINAL day's publish pass
+    happened to batch an EARLIER day's still-``STAGED`` run_id (the one still carrying the
+    missing customer) together with the final day's own run_id, ``find_vanished_customer_ids``
+    would correctly (per the platform's real batch-scoped semantics) see that customer as
+    "staged this pass" and correctly NOT invalidate it -- the exact same test-layer
+    granularity mismatch (24) turned out to be, not a genuine DELETE-detection bug.
+
+    ``meta.ingestion_runs`` carries no persistent staged_run_ids/pass-id column, so pass
+    membership must be reconstructed after the fact: ``publish_ingest``'s own finalize loop
+    (``pipeline/run.py``) computes ``finished_at`` exactly ONCE per invocation, outside the
+    per-run loop, and stamps the IDENTICAL value onto every run_id `finalize_publication`
+    touches that pass -- making ``finished_at`` equality the durable, direct way to recover
+    which run_ids shared the final day's own publish pass. This is the SAME evidence
+    standard (24)'s rider was held to: direct DB state, not inference. Built LAZILY -- only
+    on the failing path.
+    """
+    lines = [
+        (
+            f"FORENSICS for assertion (10) DELETE-detection failure (missing_customer_id="
+            f"{missing_customer_id}, final day's own run_id={last_day_run_id}) -- captured at "
+            f"failure time (ROUND 19: closing the evidence gap ROUND 18 named in "
+            f"sweep_assertion_10_delete_detection_finding, same evidence standard as finding "
+            f"(24)):"
+        ),
+    ]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT finished_at FROM meta.ingestion_runs WHERE run_id = %s",
+            (last_day_run_id,),
+        )
+        finished_at_row = cur.fetchone()
+    final_pass_finished_at = finished_at_row[0] if finished_at_row is not None else None
+    lines.append(
+        f"[a0] final day's own run_id={last_day_run_id}'s finished_at (publish_ingest stamps "
+        f"the SAME finished_at onto every run_id one pass finalizes -- this is the after-the-"
+        f"fact pass-membership key): {final_pass_finished_at!r} (None means this run_id was "
+        f"never finalized by any publish pass at all -- a DIFFERENT, more serious failure mode)"
+    )
+    batch: list[tuple[int, str]] = []
+    if final_pass_finished_at is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT r.run_id, f.object_uri FROM meta.ingestion_runs r "
+                "JOIN meta.files f USING (file_id) "
+                "JOIN meta.datasets d ON d.dataset_id = f.dataset_id "
+                "WHERE d.dataset_name = 'customers' AND r.finished_at = %s "
+                "ORDER BY r.run_id",
+                (final_pass_finished_at,),
+            )
+            batch = cur.fetchall()
+    lines.append(
+        f"[a] final day's own publish pass's FULL staged_run_ids batch (every customers "
+        f"run_id sharing the SAME finished_at), (run_id, object_uri) x{len(batch)}: "
+        f"{batch!r} -- if this batch spans MORE than just the final day's own run_id "
+        f"({last_day_run_id}), fix (21)'s 'claims ALL currently-STAGED runs' batching "
+        f"semantics is the confirmed mechanism (test-layer granularity mismatch, same class "
+        f"as (24)), not a DELETE-detection bug; if it is EXACTLY [{last_day_run_id}] alone, "
+        f"the batching hypothesis is REFUTED and this is a genuine DELETE-detection defect"
+    )
+    batch_run_ids = [row[0] for row in batch]
+    bronze_presence: list[tuple[int, int]] = []
+    if batch_run_ids:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT _run_id, count(*) FROM staging.customers "
+                "WHERE customer_id = %s AND _run_id = ANY(%s) "
+                "GROUP BY _run_id ORDER BY _run_id",
+                (str(missing_customer_id), batch_run_ids),
+            )
+            bronze_presence = cur.fetchall()
+    lines.append(
+        f"[b] staging.customers (bronze) presence for customer_id={missing_customer_id} "
+        f"across the batch's own staged_run_ids, (_run_id, rows) x{len(bronze_presence)}: "
+        f"{bronze_presence!r} -- ANY row here means find_vanished_customer_ids correctly (per "
+        f"the platform's real batch-scoped semantics) saw this customer as 'staged this pass' "
+        f"and correctly did NOT invalidate it; zero rows here refutes the batching hypothesis "
+        f"and points at a genuine DELETE-detection bug"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_current, valid_to, event_ts FROM normalized.customers "
+            "WHERE customer_id = %s ORDER BY event_ts DESC LIMIT 1",
+            (missing_customer_id,),
+        )
+        last_seen_row = cur.fetchone()
+    lines.append(
+        f"[c] missing customer's own actual last-seen normalized.customers row "
+        f"(is_current, valid_to, event_ts): {last_seen_row!r}"
+    )
+    return "\n".join(lines)
+
+
 def _failed_scheduling_event_snapshot(
     kubectl_json_fn: Callable[..., Any],
 ) -> dict[str, int]:
@@ -1632,6 +1736,12 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
     #     path), proving D-05's `invalidate` default fired correctly on a
     #     real cluster. ---
     missing_customer_id = _CUSTOMER_ID_BASE + _MISSING_CUSTOMER_MEMBER_INDEX
+    # ROUND 19 rider setup: the final day's own run_id, needed to reconstruct (after the
+    # fact, via `finished_at` equality -- see `_delete_detection_forensics`'s own docstring)
+    # which run_ids shared the final day's own publish pass. `last_day` is the SAME variable
+    # assertion (5)'s watermark check above already computed.
+    last_day_filename = f"customers_{last_day.strftime('%Y%m%d')}.csv"
+    last_day_run_id = customers_results[last_day_filename]["run_id"]
     with analytics_connection.cursor() as cur:
         cur.execute(
             "SELECT is_current, valid_to FROM normalized.customers WHERE customer_id = %s "
@@ -1644,19 +1754,35 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
         f"(customer_id={missing_customer_id!r}) -- it was present every day except the last"
     )
     missing_is_current, missing_valid_to = missing_customer_row
-    assert missing_is_current is False, (
-        f"expected the missing-customer member's (customer_id={missing_customer_id!r}) latest "
-        f"version to be closed (is_current=false) after D-05's `invalidate` semantics fired on "
-        f"the final day's own pass -- proving the SCD Publisher's DELETE-detection (Step A) "
-        f"correctly closed a customer absent from the corpus' own LAST snapshot, got "
-        f"is_current={missing_is_current!r}"
-    )
-    assert missing_valid_to == expected_customers_watermark, (
-        f"expected the missing-customer member's closed valid_to to equal the corpus' own "
-        f"last-observed max event_ts {expected_customers_watermark!r} (SCD-06's effective-dating "
-        f"requirement applied to the DELETE path -- an event-time-derived value, NEVER "
-        f"wall-clock 'now'), got {missing_valid_to!r}"
-    )
+    if missing_is_current is not False:
+        # ROUND 19 rider (debug/ci-pipeline-ingestion-timeout, closing the evidence gap
+        # ROUND 18 named in sweep_assertion_10_delete_detection_finding): stream the
+        # DELETE-detection lineage forensics into the failure message at failure time (see
+        # `_delete_detection_forensics`'s own docstring), same pattern as (24)'s rider above.
+        pytest.fail(
+            f"expected the missing-customer member's (customer_id={missing_customer_id!r}) "
+            f"latest version to be closed (is_current=false) after D-05's `invalidate` "
+            f"semantics fired on the final day's own pass -- proving the SCD Publisher's "
+            f"DELETE-detection (Step A) correctly closed a customer absent from the corpus' "
+            f"own LAST snapshot, got is_current={missing_is_current!r}\n"
+            + _delete_detection_forensics(
+                analytics_connection,
+                missing_customer_id=missing_customer_id,
+                last_day_run_id=last_day_run_id,
+            )
+        )
+    if missing_valid_to != expected_customers_watermark:
+        pytest.fail(
+            f"expected the missing-customer member's closed valid_to to equal the corpus' "
+            f"own last-observed max event_ts {expected_customers_watermark!r} (SCD-06's "
+            f"effective-dating requirement applied to the DELETE path -- an event-time-"
+            f"derived value, NEVER wall-clock 'now'), got {missing_valid_to!r}\n"
+            + _delete_detection_forensics(
+                analytics_connection,
+                missing_customer_id=missing_customer_id,
+                last_day_run_id=last_day_run_id,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

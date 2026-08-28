@@ -170,6 +170,58 @@ jobs:
           disown || true
           echo "Started control-plane monitor, PID $!"
 
+          # ROUND 19 (debug/ci-pipeline-ingestion-timeout): terminated-container reason
+          # capture for stage/dbt_build/publish pods. `airflow/dags/_common/kpo.py`'s own
+          # `on_finish_action: "delete_pod"` deletes each KPO pod almost immediately after it
+          # reaches a terminal phase -- ROUND 18's post-run diagnostics named this exact gap:
+          # "no pod-level crash reason for publish-n1l2gcsv was captured before K8s garbage-
+          # collected it", leaving the podkill wedge's reconstruction ("publish pod crashed,
+          # retries never got a second shot") unconfirmed. A SEPARATE, fast (2s) poll loop --
+          # narrowly scoped to only stage/dbt_build/publish pod names, not the whole etl
+          # namespace like the 15s cp-monitor loop above -- maximizes the odds of observing
+          # `status.containerStatuses[].state.terminated` / `.lastState.terminated`
+          # (reason/exitCode/message) BEFORE KPO's delete call lands. Deliberately does NOT
+          # dedupe in-loop (a still-existing terminated pod may log a few times across
+          # consecutive 2s polls before deletion) -- the dump step below dedupes with
+          # `sort -u`, keeping this script itself trivial and hard to get wrong.
+          cat > /tmp/pod-term-watch.sh <<'TERMWATCH_EOF'
+          #!/usr/bin/env bash
+          set -u
+          LOG=/tmp/etl-pod-terminations.log
+          : > "$LOG"
+          i=0
+          # 5700 * 2s = 11400s = 190min, matching this job's own timeout-minutes ceiling.
+          while [ "$i" -lt 5700 ]; do
+            kubectl -n etl get pods -o json 2>/dev/null | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          for pod in data.get('items', []):
+              name = pod['metadata']['name']
+              if not any(k in name for k in ('stage', 'dbt-build', 'publish')):
+                  continue
+              phase = pod.get('status', {}).get('phase', 'NA')
+              for cs in pod.get('status', {}).get('containerStatuses', []) or []:
+                  cid = cs.get('containerID', 'NA')
+                  for key in ('state', 'lastState'):
+                      term = (cs.get(key) or {}).get('terminated')
+                      if term:
+                          print('|'.join(str(x) for x in [
+                              name, phase, key, cid, term.get('reason'), term.get('exitCode'),
+                              term.get('message'), term.get('startedAt'), term.get('finishedAt'),
+                          ]))
+          " >> "$LOG" 2>/dev/null
+            i=$((i+1))
+            sleep 2
+          done
+          TERMWATCH_EOF
+          chmod +x /tmp/pod-term-watch.sh
+          nohup /tmp/pod-term-watch.sh > /tmp/pod-term-watch-stdout.log 2>&1 < /dev/null &
+          disown || true
+          echo "Started pod-termination watcher, PID $!"
+
       - name: Point csv_processor_image/dbt_image at this commit's own GHCR images
         run: scripts/ci-set-workload-images.sh ${{ github.sha }}
 
@@ -220,6 +272,7 @@ jobs:
         if: always()
         run: |
           pkill -f cp-monitor.sh || true
+          pkill -f pod-term-watch.sh || true
           echo "===== cp-monitor.csv (full time series, ts_utc,role,pod,phase,restarts,mem_current_bytes,pids_current) ====="
           cat /tmp/cp-monitor.csv || echo "no monitor log found"
           echo "===== per-role peak memory / peak pids across the whole run ====="
@@ -297,8 +350,78 @@ jobs:
                   print(ti.run_id, "| task=", ti.task_id, "| map_index=", ti.map_index, "| state=", ti.state, "| try=", ti.try_number, "| start=", ti.start_date, "| end=", ti.end_date)
           PYEOF
 
+          # ROUND 19 (debug/ci-pipeline-ingestion-timeout): the orders-side equivalent of the
+          # ROUND 5 customers DagRun/TaskInstance dump above -- a named HONEST GAP in ROUND
+          # 18's podkill_root_cause_investigation ("no orders-DagRun/TaskInstance dump
+          # equivalent to the customers one already in the end-of-job dump"). Every downstream
+          # cascade this session has attributed to podkill's own DagRun (dbtkill, u3, orphan,
+          # idempotent_reupload) is itself measured through orders/customers DagRun state, so
+          # this closes the SAME gap on the other dataset, not a new one. Same task list as
+          # ROUND 5's customers dump -- csv_ingest_orders.py declares the identical
+          # wait_for_files/discover/stage/integrity_gate/dbt_build/publish task_ids.
+          echo "===== ROUND 19: csv_ingest_orders DagRun history (this whole session, dag_id-scoped) ====="
+          kubectl -n airflow exec -i airflow-scheduler-0 -c scheduler -- python - <<'PYEOF' 2>&1 | grep -v "DeprecatedImportWarning\|py.warnings" || echo "orders DagRun history query failed"
+          from airflow.utils.session import create_session
+          from airflow.models import DagRun
+          with create_session() as session:
+              rows = session.query(DagRun).filter(DagRun.dag_id == "csv_ingest_orders").order_by(DagRun.id).all()
+              print("TOTAL DagRuns:", len(rows))
+              for dr in rows:
+                  print(dr.run_id, "| type=", dr.run_type, "| state=", dr.state, "| backfill_id=", dr.backfill_id, "| start=", dr.start_date, "| end=", dr.end_date, "| logical_date=", dr.logical_date)
+          PYEOF
+
+          echo "===== ROUND 19: csv_ingest_orders key TaskInstance history (wait_for_files/discover/stage/integrity_gate/dbt_build/publish) ====="
+          kubectl -n airflow exec -i airflow-scheduler-0 -c scheduler -- python - <<'PYEOF' 2>&1 | grep -v "DeprecatedImportWarning\|py.warnings" || echo "orders TaskInstance history query failed"
+          from airflow.utils.session import create_session
+          from airflow.models import TaskInstance
+          with create_session() as session:
+              tasks = ["wait_for_files", "discover", "stage", "integrity_gate", "dbt_build", "publish"]
+              rows = (
+                  session.query(TaskInstance)
+                  .filter(TaskInstance.dag_id == "csv_ingest_orders", TaskInstance.task_id.in_(tasks))
+                  .order_by(TaskInstance.run_id, TaskInstance.task_id, TaskInstance.map_index)
+                  .all()
+              )
+              print("TOTAL TaskInstances (6 key tasks):", len(rows))
+              for ti in rows:
+                  print(ti.run_id, "| task=", ti.task_id, "| map_index=", ti.map_index, "| state=", ti.state, "| try=", ti.try_number, "| start=", ti.start_date, "| end=", ti.end_date)
+          PYEOF
+
           echo "===== ROUND 5: scheduler log (current+previous container), csv_ingest_customers lines mentioning contention/pause/backfill/concurrency ====="
           { kubectl -n airflow logs airflow-scheduler-0 -c scheduler --since=100m 2>/dev/null; kubectl -n airflow logs airflow-scheduler-0 -c scheduler -p --since=100m 2>/dev/null; } | grep -i "csv_ingest_customers" | grep -iE "constraint|concurrency|max_active|AlreadyRunning|is_paused|starv|Backfill|wait_for_files|deferred|exceeds_max" | tail -500 || echo "no matching scheduler log lines"
+
+          # ROUND 19: raw scheduler stdout/stderr, UNFILTERED by dag_id -- ROUND 18's
+          # podkill_root_cause_investigation reconstructed (but did not directly observe) a
+          # dagrun_timeout firing on podkill's own DagRun. Direct source read of the INSTALLED
+          # apache-airflow==3.3.0 (this same local persistent cluster, `scheduler_job_runner.
+          # py`) confirms the EXACT log text emitted when this fires: `self.log.info("Run %s
+          # of %s has timed-out", dag_run.run_id, dag_run.dag_id)` (line ~2833), plus its own
+          # exception-path sibling `self.log.exception("Error scheduling DAG run %s of %s", ...)`
+          # (line ~2785) for a genuine scheduling-loop error, and `"Exception when executing
+          # SchedulerJob._run_scheduler_loop"` for a scheduler-loop-fatal crash. All three carry
+          # the dag_run_id/dag_id INSIDE the message text itself, so no dag_id pre-filter is
+          # needed (unlike the ROUND 5 grep above) -- this only widens coverage. `--since=200m`
+          # (vs ROUND 5's 100m) because this diagnostics step runs after `cluster-slice-verify`
+          # completes, which can itself run well past 100 minutes (the sweep test alone budgets
+          # up to 5400s/90min); 200m stays safely under this job's 190-minute ceiling while
+          # covering effectively the whole job for any event that fired during cluster-slice-
+          # verify.
+          echo "===== ROUND 19: scheduler log (current+previous container, UNFILTERED by dag_id), dagrun_timeout / scheduling-error signatures ====="
+          { kubectl -n airflow logs airflow-scheduler-0 -c scheduler --since=200m 2>/dev/null; kubectl -n airflow logs airflow-scheduler-0 -c scheduler -p --since=200m 2>/dev/null; } > /tmp/round19-raw-scheduler.log || true
+          echo "total captured raw scheduler log lines (both containers, --since=200m): $(wc -l < /tmp/round19-raw-scheduler.log 2>/dev/null || echo 0)"
+          echo "-- 'has timed-out' matches (dagrun_timeout actually firing) --"
+          grep -n "has timed-out" /tmp/round19-raw-scheduler.log || echo "ZERO 'has timed-out' lines captured"
+          echo "-- 'Error scheduling DAG run' matches, with 15-line trailing context (the exception traceback) --"
+          grep -n -A 15 "Error scheduling DAG run" /tmp/round19-raw-scheduler.log || echo "ZERO 'Error scheduling DAG run' lines captured"
+          echo "-- 'Exception when executing SchedulerJob' matches, with 25-line trailing context --"
+          grep -n -A 25 "Exception when executing SchedulerJob" /tmp/round19-raw-scheduler.log || echo "ZERO scheduler-loop-fatal exception lines captured"
+          echo "-- exceeds_max_active_runs matches (the sibling branch _schedule_dag_run takes right after logging 'has timed-out') --"
+          grep -n -i "exceeds_max_active_runs\|exceeds max active" /tmp/round19-raw-scheduler.log || echo "ZERO exceeds_max_active_runs lines captured"
+
+          echo "===== ROUND 19: etl-pod-terminations.log (stage/dbt_build/publish container termination reasons, deduped) ====="
+          sort -u /tmp/etl-pod-terminations.log 2>/dev/null || echo "no pod-termination log found"
+          echo "===== ROUND 19: pod-term-watch.sh's own stdout/stderr (script-level failures, if any) ====="
+          tail -50 /tmp/pod-term-watch-stdout.log 2>/dev/null || echo "no pod-term-watch stdout log found"
 
           echo "===== ROUND 5: triggerer pod status (never monitored by any prior round's diagnostics) ====="
           kubectl -n airflow get pod -l component=triggerer -o wide || true
@@ -336,16 +459,35 @@ jobs:
           # mechanism unadjudicable. Dump every error-bearing / non-success terminal row
           # WITH its error columns (small result set by construction, no tail-truncation
           # risk like the full mapping above).
-          echo "===== ROUND 18: error-bearing ingestion runs (FAILED/QUARANTINED + any error_message, ALL datasets) ====="
+          #
+          # ROUND 19 WIDENING: ROUND 18's OWN adjudication of this exact query
+          # (criteria_adjudication (e)) found the podkill wedge produces a run that is
+          # STRUCTURALLY INVISIBLE to this query -- `status='STAGED'`, `error_type`/
+          # `error_message` both permanently NULL, because a dagrun_timeout-driven
+          # Airflow-level SKIP never touches meta.ingestion_runs at all. Added a second
+          # disjunct: any run in a NON-TERMINAL status (`PENDING`, `RUNNING`, `STAGED` --
+          # the full non-terminal status vocabulary this codebase uses, confirmed by
+          # grepping every `status = '...'` literal in `pipeline/run.py`/`metadata/*.py`)
+          # whose `started_at` is more than 20 minutes old. 20 minutes is deliberately far
+          # below `dagrun_timeout=45min` (a run wedged this long is unambiguously stale
+          # well before dagrun_timeout would even fire) and far above this suite's own
+          # observed single-file processing pace (~1-2 min/file per the sweep test's own
+          # sizing comments) -- a normal in-flight run near the end of this ~190min job
+          # will not false-positive here. `now() - r.started_at` surfaces the exact age so
+          # a genuinely-borderline row is still adjudicable from the dump text alone.
+          echo "===== ROUND 19: error-bearing OR stale-non-terminal ingestion runs (widens ROUND 18 finding 26 -- FAILED/QUARANTINED/error_message, OR PENDING/RUNNING/STAGED older than 20min, ALL datasets) ====="
           kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
             SELECT r.run_id, d.dataset_name, r.status, r.schema_version_id, f.object_uri,
                    r.error_type, left(r.error_message, 500) AS error_message_500,
-                   r.error_detail
+                   r.error_detail, r.started_at, r.lease_expires_at,
+                   now() - r.started_at AS age_since_started
               FROM meta.ingestion_runs r
               LEFT JOIN meta.files f USING (file_id)
               LEFT JOIN meta.datasets d ON d.dataset_id = f.dataset_id
-             WHERE r.status IN ('FAILED', 'QUARANTINED') OR r.error_message IS NOT NULL
-             ORDER BY r.run_id;" 2>&1 | tail -200 || echo "error-bearing runs query failed"
+             WHERE r.status IN ('FAILED', 'QUARANTINED')
+                OR r.error_message IS NOT NULL
+                OR (r.status IN ('PENDING', 'RUNNING', 'STAGED') AND r.started_at < now() - interval '20 minutes')
+             ORDER BY r.run_id;" 2>&1 | tail -200 || echo "error-bearing/stale-non-terminal runs query failed"
           echo "===== ROUND 12: meta.schema_versions history (the discovery idempotency-key term) ====="
           kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
             SELECT schema_version_id, dataset_id, version, left(schema_hash, 12) AS hash_prefix,
