@@ -982,6 +982,85 @@ def _reconciliation_rows(
     ]
 
 
+def _late_file_lineage_forensics(
+    conn: psycopg.Connection[Any],
+    *,
+    late_filename: str,
+    late_file_id: int,
+    late_run_id: int,
+) -> str:
+    """Assertion-4 forensics (debug/ci-pipeline-ingestion-timeout ROUND 17, finding 24 rider).
+
+    ROUND 16's sweep assert-4 failure (`silver.customers has no rows for
+    _run_id=31`) was UNADJUDICABLE after the fact: the rebuild test later
+    DROPS/RESETS `meta.ingestion_runs` and the idempotent-rerun test
+    overwrites the sweep-era TI history, so the end-of-job diagnostics dump
+    post-rebuild state. This helper captures the three evidence sets that
+    adjudicate the mechanism INTO the streamed failure message AT FAILURE
+    TIME, before any later test destroys them: (a) the dbt claim ledger's
+    rows for customers (did dbt ever claim the late run?), (b) the late
+    file's bronze run census + every ingestion_runs attempt for that file
+    (did the late run's bronze rows land, and which run_id actually carried
+    them?), (c) silver attribution for the late file's business keys (who
+    won the ranking instead?). Built LAZILY -- only on the failing path.
+    """
+    lines = [
+        (
+            f"FORENSICS for late file {late_filename!r} (file_id={late_file_id}, "
+            f"newest run_id={late_run_id}) -- captured at failure time because later "
+            f"tests (rebuild's meta reset, idempotent rerun) destroy this state "
+            f"before the end-of-job diagnostics run:"
+        ),
+    ]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT run_id, claimed_txid, claimed_at FROM meta.dbt_processed_runs "
+            "WHERE dataset_name = 'customers' ORDER BY run_id",
+        )
+        claims = cur.fetchall()
+    lines.append(
+        "[a] meta.dbt_processed_runs claims (dataset=customers), (run_id, claimed_txid, "
+        f"claimed_at) x{len(claims)}: {claims!r}"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT _run_id, count(*) FROM staging.customers "
+            "WHERE _file_id = %s GROUP BY _run_id ORDER BY _run_id",
+            (late_file_id,),
+        )
+        bronze_census = cur.fetchall()
+    lines.append(
+        f"[b1] bronze (staging.customers) run census for _file_id={late_file_id}, "
+        f"(_run_id, rows): {bronze_census!r}"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT run_id, status, replay_of_run_id, started_at, finished_at "
+            "FROM meta.ingestion_runs WHERE file_id = %s ORDER BY run_id",
+            (late_file_id,),
+        )
+        attempts = cur.fetchall()
+    lines.append(
+        f"[b2] meta.ingestion_runs attempts for file_id={late_file_id}, "
+        f"(run_id, status, replay_of_run_id, started_at, finished_at): {attempts!r}"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.customer_id, s._run_id, s._file_id, s.event_ts "
+            "FROM silver.customers s WHERE s.customer_id IN ("
+            "    SELECT DISTINCT b.customer_id FROM staging.customers b"
+            "     WHERE b._file_id = %s"
+            ") ORDER BY s.customer_id",
+            (late_file_id,),
+        )
+        silver_attribution = cur.fetchall()
+    lines.append(
+        "[c] silver.customers attribution for the late file's business keys, "
+        f"(customer_id, _run_id, _file_id, event_ts): {silver_attribution!r}"
+    )
+    return "\n".join(lines)
+
+
 def _failed_scheduling_event_snapshot(
     kubectl_json_fn: Callable[..., Any],
 ) -> dict[str, int]:
@@ -1286,7 +1365,20 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
             (late_run_id,),
         )
         late_silver_row = cur.fetchone()
-    assert late_silver_row is not None, f"silver.customers has no rows for _run_id={late_run_id!r}"
+    if late_silver_row is None:
+        # Finding (24) rider (ROUND 17): this exact failure fired in ROUNDS
+        # 14/15/16 and was unadjudicable post-hoc -- stream the full lineage
+        # forensics INTO the failure message at failure time (see
+        # `_late_file_lineage_forensics`'s own docstring).
+        pytest.fail(
+            f"silver.customers has no rows for _run_id={late_run_id!r}\n"
+            + _late_file_lineage_forensics(
+                analytics_connection,
+                late_filename=late_filename,
+                late_file_id=customers_results[late_filename]["file_id"],
+                late_run_id=late_run_id,
+            )
+        )
     late_customer_id = int(late_silver_row[0])
     expected_late_event_ts = datetime(
         late_day.year, late_day.month, late_day.day, 8, 15, 0, tzinfo=UTC

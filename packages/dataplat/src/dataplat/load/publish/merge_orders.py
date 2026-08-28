@@ -66,7 +66,30 @@ if TYPE_CHECKING:
 # QUARANTINE EXCLUSION (debug/ci-pipeline-ingestion-timeout ROUND 16,
 # finding 20b): see `merge.py`'s own identical predicate comment -- the
 # cumulative `silver.orders` source retains QUARANTINED runs' rows, which
-# must never reach gold via a later pass's whole-table upsert.
+# must never reach gold via a later pass's upsert.
+#
+# DELTA SCOPING (debug/ci-pipeline-ingestion-timeout ROUND 17, finding 25):
+# `_run_id = ANY(%(staged_run_ids)s)` makes this publish O(this pass's
+# delta) instead of O(accumulated silver). The original whole-table read
+# was compensation for INEXACT dbt eligibility (pre-ledger, dbt's
+# watermark batching could fold runs into silver invisibly, so the only
+# safe publish was "re-upsert everything"). ROUND 16's claim ledger
+# (`meta.dbt_processed_runs`, finding 21) plus the stage >> dbt_build >>
+# publish DagRun ordering (finding 23) made eligibility EXACT: every run
+# in `staged_run_ids` has its bronze folded into silver before its own
+# DagRun's publish, `publish_ingest` claims ALL currently-STAGED runs per
+# pass, and silver holds ONE row per business key (delete+insert,
+# unique_key=order_id) -- so the winner rows whose `_run_id` is in
+# `staged_run_ids` are precisely the keys whose published state can have
+# changed this pass. Keys whose silver winner is an OLDER run were already
+# published by that run's own pass and are deliberately never rescanned or
+# re-row-locked here (the R16 live finding: whole-table re-upserts made
+# every publish scale with platform lifetime, collapsing the serialized
+# orders pipe under retained large fixtures). This also closes finding
+# (20b)'s leak vector ii structurally: a quarantined run's silver rows can
+# no longer ride into gold on a LATER pass's whole-table rescan -- they are
+# out of every later pass's delta by construction, and the NOT-IN predicate
+# below still excludes them from their own pass.
 _PUBLISH_SQL = """
 INSERT INTO normalized.orders (
     order_id, customer_id, order_date, amount,
@@ -78,7 +101,8 @@ SELECT DISTINCT ON (order_id)
        _run_id, _file_id, _batch_id, _source_row_number,
        _record_hash, _record_hash_version
 FROM   {staging_table}
-WHERE  _run_id NOT IN (
+WHERE  _run_id = ANY(%(staged_run_ids)s)
+  AND  _run_id NOT IN (
            SELECT run_id FROM meta.ingestion_runs WHERE status = 'QUARANTINED'
        )
 ORDER  BY order_id, order_date DESC, _source_row_number DESC
@@ -121,7 +145,7 @@ class OrdersMergePublisher(Publisher):
         source_table: str,
         conn: Connection[Any],
         *,
-        staged_run_ids: Sequence[int],  # noqa: ARG002 -- unused; see Args below
+        staged_run_ids: Sequence[int],
     ) -> PublishResult:
         """Publish ``source_table``'s rows into ``normalized.orders``.
 
@@ -135,10 +159,14 @@ class OrdersMergePublisher(Publisher):
                 identifier only -- see the module docstring.
             conn: An open connection, inside an open transaction the caller
                 owns. Never committed or rolled back here.
-            staged_run_ids: Unused by this ``Publisher`` -- its whole-table
-                ``ON CONFLICT`` publish statement needs no run-scoping
-                (Phase 10, 10-01-PLAN.md Task 3). Accepted only to satisfy
-                the ``Publisher`` protocol's shared signature.
+            staged_run_ids: The exact list of ``run_id``s this publish pass
+                is finalizing, computed by the caller (``publish_ingest``)
+                BEFORE this call and never re-derived here (the
+                ``Publisher`` protocol's own contract). Load-bearing since
+                debug/ci-pipeline-ingestion-timeout ROUND 17 (finding 25):
+                the publish statement is scoped to exactly these runs'
+                silver rows -- see ``_PUBLISH_SQL``'s DELTA SCOPING comment
+                for why this is exact, not approximate.
 
         Returns:
             A ``PublishResult`` whose ``rows_affected`` is
@@ -154,6 +182,7 @@ class OrdersMergePublisher(Publisher):
         """
         cursor = conn.execute(
             _PUBLISH_SQL.format(staging_table=source_table),
+            {"staged_run_ids": list(staged_run_ids)},
         )
         published_business_keys = tuple(str(row[0]) for row in cursor.fetchall())
         return PublishResult(

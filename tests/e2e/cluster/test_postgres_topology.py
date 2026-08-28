@@ -42,7 +42,21 @@ NAMESPACE = "data"
 # carry no `analytics_owner` USAGE grant and stay invisible here -- if one
 # ever appears, this test should flag it for a fresh decision, so they are
 # deliberately NOT allowlisted.
-ALLOWED_SCHEMAS = {"pg_catalog", "information_schema", "public", "pg_toast", "meta"}
+# `normalized` (debug/ci-pipeline-ingestion-timeout ROUND 17, finding 22c):
+# `information_schema.schemata` lists a schema only when the CONNECTING ROLE
+# holds a privilege on it -- migration 0039's `GRANT USAGE ON SCHEMA
+# normalized TO analytics_owner` made `normalized` newly visible to this
+# test's connection, tripping the then-stale allowlist in ROUND 16 (the
+# failure was itself the live proof that 0039 landed). `normalized` is an
+# Alembic-owned schema (migration 0005), so it belongs here.
+ALLOWED_SCHEMAS = {
+    "pg_catalog",
+    "information_schema",
+    "public",
+    "pg_toast",
+    "meta",
+    "normalized",
+}
 
 
 def _free_local_port() -> int:

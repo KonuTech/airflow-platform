@@ -94,6 +94,15 @@ _POLL_INTERVAL_SECONDS = 1.0
 # ~2-minute-window backfill taking 5-10+ minutes end to end under this host's documented CPU
 # contention (STATE.md's own recurring "node CPU budget" notes). 30 minutes gives real headroom
 # without masking a genuine hang.
+#
+# Re-queue mass bound (debug/ci-pipeline-ingestion-timeout ROUND 17, finding
+# 25-B arithmetic): the orders side of the cascade re-ingests the retained
+# raw corpus = 12 dated corpus files (~600 rows) + concurrent_select 250k +
+# podkill 1M + dbtkill 120 + u3 250k (right-sized from 1M this round)
+# ~= 1.50M rows, down from ROUND 16's ~2.25M -- and with merge_orders'
+# publish now O(delta) (finding 25-A) the total rebuild-era publish work is
+# the SUM of those deltas, not N-passes x O(accumulated-silver), which was
+# R16's dominant sink (16/16 unsettled at 1800s, node CPU-saturated).
 _BACKFILL_SETTLE_TIMEOUT_SECONDS = 1800.0
 _REBUILD_SUBPROCESS_TIMEOUT_SECONDS = 1800.0
 

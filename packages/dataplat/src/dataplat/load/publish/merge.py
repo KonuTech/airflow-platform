@@ -128,7 +128,16 @@ class MergePublisher(Publisher):
             staged_run_ids: Unused by this ``Publisher`` -- its whole-table
                 ``ON CONFLICT`` publish statement needs no run-scoping
                 (Phase 10, 10-01-PLAN.md Task 3). Accepted only to satisfy
-                the ``Publisher`` protocol's shared signature.
+                the ``Publisher`` protocol's shared signature. NOTE
+                (debug/ci-pipeline-ingestion-timeout ROUND 17, finding 25):
+                ``merge_orders.py`` delta-scopes its publish to
+                ``staged_run_ids`` because its whole-table read made
+                publish cost scale with accumulated silver mass on the
+                live ``orders`` pipeline. The same O(accumulated) shape
+                exists here, but NO live dataset uses strategy ``"merge"``
+                (customers moved to ``"scd"`` in Phase 10) -- apply
+                ``merge_orders.py``'s delta-scoping pattern here BEFORE
+                pointing any real dataset at this strategy.
 
         Returns:
             A ``PublishResult`` whose ``rows_affected`` is

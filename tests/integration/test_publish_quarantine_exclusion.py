@@ -323,10 +323,16 @@ def test_scd_recompute_never_folds_a_quarantined_runs_bronze_rows_into_gold(
 def test_orders_merge_never_publishes_a_quarantined_runs_silver_rows(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
-    """The merge-side leak: a whole-silver upsert must skip QUARANTINED runs' rows.
+    """The merge-side leak: an orders publish pass must skip QUARANTINED runs' rows.
 
-    A clean sibling run's row in the same silver table must still publish
-    (the exclusion is run-scoped, never table-scoped). The NOT-IN
+    A clean sibling run's row in the same silver table and the SAME publish
+    pass must still publish (the exclusion is run-scoped, never
+    table/pass-scoped). Both runs ride in ``staged_run_ids`` -- exactly
+    ``publish_ingest``'s production shape, which claims ALL currently-STAGED
+    runs per pass (and, since ROUND 17's delta scoping, the publish
+    statement reads ONLY those runs' silver rows, so a quarantined run's
+    rows are additionally out of every LATER pass's delta by construction --
+    the NOT-IN predicate proven here covers its own pass). The NOT-IN
     default-include shape (a ``_run_id`` with no ``meta.ingestion_runs`` row
     at all publishes normally) is proven by ``test_publish_orders.py``'s
     pre-existing scratch-table tests, which carry exactly such run_ids --
@@ -365,7 +371,7 @@ def test_orders_merge_never_publishes_a_quarantined_runs_silver_rows(
                 _make_orders_context(),
                 "silver.orders",
                 conn,
-                staged_run_ids=[quarantined_run],
+                staged_run_ids=[quarantined_run, clean_run],
             )
             conn.commit()
 

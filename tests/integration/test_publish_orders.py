@@ -231,7 +231,9 @@ def test_publish_dedups_same_order_id_keeping_the_later_order_date(
         # Must not raise "ON CONFLICT DO UPDATE command cannot affect row a
         # second time" -- the DISTINCT ON in OrdersMergePublisher's own SQL
         # is what prevents that.
-        result = OrdersMergePublisher().publish(_make_context(), staging_table, conn)
+        result = OrdersMergePublisher().publish(
+            _make_context(), staging_table, conn, staged_run_ids=[run_id]
+        )
         conn.commit()
 
     assert result.outcome == "PUBLISHED"
@@ -282,7 +284,9 @@ def test_republishing_the_identical_staged_row_is_a_no_op(
             source_row_number=1,
             record_hash=record_hash,
         )
-        first_result = OrdersMergePublisher().publish(_make_context(), first_table, conn)
+        first_result = OrdersMergePublisher().publish(
+            _make_context(), first_table, conn, staged_run_ids=[run_id]
+        )
         conn.commit()
     assert first_result.rows_affected == 1
 
@@ -302,7 +306,9 @@ def test_republishing_the_identical_staged_row_is_a_no_op(
             source_row_number=1,
             record_hash=record_hash,  # identical hash -- the WHERE guard must suppress this write
         )
-        second_result = OrdersMergePublisher().publish(_make_context(), second_table, conn)
+        second_result = OrdersMergePublisher().publish(
+            _make_context(), second_table, conn, staged_run_ids=[run_id]
+        )
         conn.commit()
 
     assert second_result.rows_affected == 0
@@ -352,7 +358,9 @@ def test_a_null_order_date_can_still_be_corrected_by_a_later_publish(
             source_row_number=1,
             record_hash=hashlib.sha256(b"null-order-date-v1").digest(),
         )
-        first_result = OrdersMergePublisher().publish(_make_context(), first_table, conn)
+        first_result = OrdersMergePublisher().publish(
+            _make_context(), first_table, conn, staged_run_ids=[run_id]
+        )
         conn.commit()
     assert first_result.rows_affected == 1
 
@@ -384,7 +392,9 @@ def test_a_null_order_date_can_still_be_corrected_by_a_later_publish(
             source_row_number=1,
             record_hash=hashlib.sha256(b"null-order-date-v2").digest(),
         )
-        second_result = OrdersMergePublisher().publish(_make_context(), second_table, conn)
+        second_result = OrdersMergePublisher().publish(
+            _make_context(), second_table, conn, staged_run_ids=[run_id]
+        )
         conn.commit()
 
     assert second_result.rows_affected == 1

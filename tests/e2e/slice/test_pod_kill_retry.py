@@ -64,10 +64,28 @@ pytestmark = pytest.mark.cluster
 
 _ORDERS_DATASET = "orders"
 
-# ~1,000,000 rows -- the scale the kill-window and U3 throughput proofs are
+# ~1,000,000 rows -- the scale the mid-load KILL-WINDOW proof is
 # load-bearing at: a smaller file's stage window can complete before the
-# kill lands, quietly turning a mid-load kill test into a no-op.
+# kill lands, quietly turning a mid-load kill test into a no-op. Kept at 1M
+# deliberately (debug/ci-pipeline-ingestion-timeout ROUND 17, finding 25-B
+# right-sizing survey): at the U3-measured local rate (~42k rows/s) a 250k
+# file stages in ~6s -- too slim against the 0.5s DB-poll + kubectl-delete
+# latency -- and ROUND 15's (20a) leg-2 proof (a genuine 1M-row re-stage
+# after lease expiry, distinct_keys=1M, zero duplicates) is only meaningful
+# at real scale.
 _LARGE_ORDERS_ROWS = 1_000_000
+
+# The U3 throughput/peak-RSS baseline's own fixture size (ROUND 17, finding
+# 25-B): shrunk from 1M -- U3's assertions are RATE-based (throughput > 0,
+# peak > 0, and the committed doc's 5x-regression policy compares rows/sec,
+# which is scale-independent once steady-state dominates; at CI-contended
+# rates a 250k COPY runs for minutes, far past warmup). Unlike the
+# kill-window above, nothing in U3 needs the file to outlast an external
+# event, so 250k buys a ~750k-row cut in the retained raw corpus that the
+# rebuild-from-raw capstone must re-queue (raw is append-only, section 63 --
+# fixtures are never deleted, so every retained row is paid for again by
+# every later rebuild).
+_U3_FIXTURE_ROWS = 250_000
 
 # The small-fixture row count the dbt-kill test uses (the kill target there
 # is the dbt_build pod, not the stage COPY -- a big file buys nothing).
@@ -531,9 +549,11 @@ def test_u3_throughput_and_peak_rss_baseline(
 ) -> None:
     """U3: a measured streaming-throughput and peak-RSS baseline, committed for future comparison.
 
-    A SEPARATE, non-killed full run of the same ~1,000,000-row fixture
-    shape (its own fresh order_id window -- module docstring) -- killing
-    mid-load is not the right run to measure steady-state throughput from.
+    A SEPARATE, non-killed full run of a `_U3_FIXTURE_ROWS`-sized fixture
+    (its own fresh order_id window -- module docstring; right-sized from 1M
+    to 250k by ROUND 17 finding 25-B, see `_U3_FIXTURE_ROWS`'s own comment)
+    -- killing mid-load is not the right run to measure steady-state
+    throughput from.
     Peak memory is the running MAXIMUM of `/sys/fs/cgroup/memory.current`
     sampled every `_MEMORY_SAMPLE_INTERVAL_SECONDS` while the run is in
     flight, from a background thread stopped (and joined) before this
@@ -546,7 +566,7 @@ def test_u3_throughput_and_peak_rss_baseline(
     offset = random.SystemRandom().randint(_ORDER_ID_LOW, _ORDER_ID_HIGH)
     payload = build_orders_csv_bytes(
         order_id_start=offset,
-        row_count=_LARGE_ORDERS_ROWS,
+        row_count=_U3_FIXTURE_ROWS,
         customer_ids=parent_ids,
     )
     marker = uuid.uuid4().hex[:12]
@@ -649,7 +669,7 @@ def _write_u3_spike_doc(  # noqa: PLR0913 -- six independently-named metrics; a 
 — do not hand-edit.**
 
 - Measured at: {measured_at}
-- Fixture: a generated `orders` CSV ({_LARGE_ORDERS_ROWS:,} rows in a fresh
+- Fixture: a generated `orders` CSV ({_U3_FIXTURE_ROWS:,} rows in a fresh
   `order_id` window, parents live-sampled from `normalized.customers` --
   `tests/e2e/slice/conftest.py::build_orders_csv_bytes`; repointed from the
   customers manifest fixture by debug/ci-pipeline-ingestion-timeout ROUND 16,

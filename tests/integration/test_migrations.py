@@ -696,6 +696,37 @@ def test_dbt_app_role_is_scoped_correctly(migrated_dsn: str) -> None:
         )
 
 
+def test_analytics_owner_can_select_meta_ingestion_runs(migrated_dsn: str) -> None:
+    """Migration 0042 (debug/ci-pipeline-ingestion-timeout ROUND 17, finding 22b).
+
+    `analytics_owner` reads `meta.ingestion_runs.dag_id`/`dag_run_id` live
+    (`tests/e2e/slice/test_backfill_reentry.py::_fetch_dagrun_identity`) and
+    held schema `meta` USAGE since 0038 but never a table SELECT here --
+    the ROUND 16 live run died on exactly this `InsufficientPrivilege`.
+    Same `has_table_privilege` proof shape as this module's other grant
+    tests; read-only remains the boundary (no INSERT/UPDATE/DELETE).
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        can_select = conn.execute(
+            "SELECT has_table_privilege('analytics_owner', 'meta.ingestion_runs', 'SELECT')",
+        ).fetchone()
+        assert can_select is not None
+        assert can_select[0] is True, (
+            "analytics_owner lacks SELECT on meta.ingestion_runs -- migration 0042's grant "
+            "is missing (the reentry e2e test's _fetch_dagrun_identity read fails live "
+            "without it)"
+        )
+        for privilege in ("INSERT", "UPDATE", "DELETE"):
+            row = conn.execute(
+                "SELECT has_table_privilege('analytics_owner', 'meta.ingestion_runs', %s)",
+                (privilege,),
+            ).fetchone()
+            assert row is not None
+            assert row[0] is False, (
+                f"analytics_owner must stay read-only on meta.ingestion_runs, but holds {privilege}"
+            )
+
+
 def test_dbt_app_can_insert_dedup_audit_but_not_update_or_delete(migrated_dsn: str) -> None:
     """T-08.1-10: `dbt_app` gets INSERT on dedup_audit/dedup_decisions, never UPDATE/DELETE.
 

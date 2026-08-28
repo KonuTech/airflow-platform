@@ -260,10 +260,14 @@ class _ReconciliationAggregates:
     """This pass's silver->gold reconciliation figures (D-20/D-21/D-22).
 
     Computed ONCE, against the WHOLE cumulative ``source_table`` (silver)
-    and ``ctx.config.load.target`` (gold) tables -- never a per-run slice,
-    the same Pitfall-2 whole-table-read constraint ``publisher.publish()``
-    is already subject to (RESEARCH.md) -- then attributed identically to
-    every file finalized this pass, mirroring ``rows_loaded``'s own
+    and ``ctx.config.load.target`` (gold) tables -- never a per-run slice:
+    reconciliation's question is "do silver and gold agree IN TOTAL", which
+    stays a whole-table comparison even though ``publisher.publish()``
+    itself is delta-scoped since debug/ci-pipeline-ingestion-timeout ROUND
+    17 (finding 25) -- a read-only ``count(*)``/``count(DISTINCT ...)``
+    pass takes no row locks and does not carry the O(accumulated) upsert
+    cost the publish statement used to. Attributed identically to every
+    file finalized this pass, mirroring ``rows_loaded``'s own
     aggregate-attribution precedent (see ``publish_ingest``'s own
     ``finalize_publication`` call site).
 
@@ -1283,13 +1287,18 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
 
     A single, unmapped invocation per dataset -- never per-run (RESEARCH.md
     Open Question 1, resolved by plan 08.1-07's ``meta.run_stages``/
-    ``list_staged_run_ids`` machinery): dbt's own watermark-driven batching
-    (D-05) may consolidate several ``stage_ingest`` runs' bronze
-    contributions into one deduplicated silver pass, so this function reads
-    ``silver.<dataset>`` unconditionally -- the SAME idempotent ``INSERT ...
-    ON CONFLICT`` upsert ``merge.py`` already proves safe to re-run -- and
-    finalizes every currently-``STAGED`` run in one atomic transaction
-    (META-03, unchanged from ``run_ingest``'s own guarantee).
+    ``list_staged_run_ids`` machinery): dbt's own batching (D-05) may
+    consolidate several ``stage_ingest`` runs' bronze contributions into
+    one deduplicated silver pass, so this function claims and finalizes
+    every currently-``STAGED`` run in one atomic transaction (META-03,
+    unchanged from ``run_ingest``'s own guarantee). The ``Publisher`` is
+    handed this pass's exact ``staged_run_ids`` and scopes its read of
+    ``silver.<dataset>`` to them (debug/ci-pipeline-ingestion-timeout
+    ROUND 17, finding 25 -- exact since ROUND 16's ``meta.
+    dbt_processed_runs`` claim ledger made dbt eligibility precise; the
+    pre-ledger design read silver unconditionally as compensation for
+    inexact eligibility). The upsert stays the SAME idempotent ``INSERT
+    ... ON CONFLICT`` shape ``merge.py`` already proves safe to re-run.
 
     Args:
         ctx: The current pipeline context. ``ctx.run`` is never read (this
@@ -1402,11 +1411,13 @@ def publish_ingest(ctx: PipelineContext) -> dict[str, object]:
 
             # D-20/D-21/D-22: this pass's silver->gold reconciliation
             # figures, computed ONCE against the whole cumulative
-            # silver/gold tables (never a per-run slice -- the same
-            # Pitfall-2 whole-table-read constraint `publisher.publish()`
-            # above is already subject to) and attributed identically to
-            # every file finalized this pass below, mirroring
-            # `rows_loaded`'s own aggregate-attribution precedent.
+            # silver/gold tables (never a per-run slice -- "do silver and
+            # gold agree in total" is inherently a whole-table question,
+            # and this read-only count pass stays cheap even now that
+            # `publisher.publish()` above is delta-scoped per ROUND 17
+            # finding 25) and attributed identically to every file
+            # finalized this pass below, mirroring `rows_loaded`'s own
+            # aggregate-attribution precedent.
             reconciliation = _compute_silver_gold_reconciliation(
                 ctx,
                 conn,
