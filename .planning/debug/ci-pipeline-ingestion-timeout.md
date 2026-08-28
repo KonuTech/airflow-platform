@@ -465,6 +465,20 @@ ROUND 20 can fix from confirmed root cause instead of reconstruction):
       collected, confirms the new helper/pytest.fail rewiring is syntactically and structurally
       sound); bash -n + python ast.parse on the extracted heredoc scripts (cp-monitor.sh's new
       pod-term-watch.sh block, including its embedded python3 -c snippet) all pass."
+  push_ordering_correction: "The code commit (dfdacd5) and the docs commit (9ccaf2d, '[skip
+      ci]') were pushed together in ONE `git push`. GitHub evaluates skip-ci against the
+      PUSH's head commit only, not per-commit -- since 9ccaf2d (carrying '[skip ci]') was HEAD
+      at push time, the ENTIRE push's workflow triggering was suppressed, including
+      e2e-full.yml/publish.yml against the code commit this round actually needs live-
+      verified (confirmed: zero new check-runs/workflow-runs for either SHA, `gh api .../
+      dfdacd5/check-runs` returned `total_count: 0`). Corrected by pushing ONE additional
+      trivial commit WITHOUT '[skip ci]' to retrigger against the current tree (which already
+      contains both prior commits' changes) -- see live_verification_state below for the
+      retrigger commit SHA and the resulting authoritative run IDs. Convention going forward:
+      when a round's code+docs commits are pushed in the SAME `git push` invocation, put
+      '[skip ci]' on NEITHER -- it only affects a push whose OWN head commit carries it, so a
+      docs-only commit safely gets the marker ONLY when it is pushed strictly on its own, in a
+      SEPARATE `git push` from any code commit that still needs to trigger CI."
   next_action: "CHECKPOINT REACHED (human-action) with the authoritative e2e-full.yml run ID
       (+ companion publish.yml run ID as item 0) recorded in live_verification_state below --
       session manager runs the single 60s watcher. Do NOT self-watch."
