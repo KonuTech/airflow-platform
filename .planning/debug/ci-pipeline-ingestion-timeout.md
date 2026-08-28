@@ -487,9 +487,24 @@ ROUND 20 can fix from confirmed root cause instead of reconstruction):
       spell out the literal marker text inside a commit message that is not itself intended to
       be skipped, even in an explanatory/quoting context -- GitHub's detector does not
       distinguish a live directive from a description of one."
-  next_action: "CHECKPOINT REACHED (human-action) with the authoritative e2e-full.yml run ID
-      (+ companion publish.yml run ID as item 0) recorded in live_verification_state below --
-      session manager runs the single 60s watcher. Do NOT self-watch."
+  live_verification_state: "RECORDED 2026-08-28T14:43:52Z: ROUND 19 pushed as code commit
+      dfdacd5 (diagnostics only, no production code), docs commits 9ccaf2d/68bc3e4/3db1fde
+      (charter + the two retrigger-incident corrections above). The push-ordering trap cost
+      two retrigger attempts (see push_ordering_correction) -- the AUTHORITATIVE run is the
+      one actually triggered against headSha 3db1fde (the third push attempt, first one whose
+      head commit carried no skip-ci marker anywhere in its message). (0) companion publish.yml
+      run: 33181630967. AUTHORITATIVE e2e-full.yml run: 33181630984, both status=in_progress as
+      of this recording. Also triggered (same push, not this round's concern): CI run
+      33181630930, E2E chaos run 33181630925. Success criteria per the pre_registered_success_
+      criterion above: this round succeeds if EITHER (a) podkill/assertion-10 pass outright, or
+      (b) they fail again but the NEW diagnostics produce direct, forensically-closed evidence
+      (exact 'has timed-out' log line + orders DagRun/TI state for podkill; exact staged_run_ids
+      batch + bronze presence/absence for assertion 10) rather than requiring further
+      inference. Session manager runs the single 60s watcher against run 33181630984 (and
+      33181630967 for completeness) -- do NOT self-watch further this turn."
+  next_action: "CHECKPOINT REACHED (human-action) -- run IDs recorded above. Awaiting the
+      live-verification watcher; a fresh continuation agent performs ROUND 19's post-run
+      analysis once it completes."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
