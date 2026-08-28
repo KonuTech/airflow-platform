@@ -1,11 +1,31 @@
 ---
 status: fixing
-round16_status: "ROUND 16 OFFLINE COMPLETE + PUSHED (2026-08-28): full-scope charter
-  (19)-A + 21 + 22 + 23 + 20b all implemented, red/green proven for 21/23/20b, full
-  battery green. Code commit 55c8e41, live headSha 0a69dec. AWAITING LIVE
-  VERIFICATION: e2e-full.yml run 33126343052 (companions: publish 33126343060,
-  CI 33126343071, chaos 33126343043). See Current Focus ROUND 16 block +
-  live_verification_state + the ROUND 16 offline Evidence entry."
+round16_status: "ROUND 16 POST-RUN ANALYSIS COMPLETE on run 33126343052 (headSha 0a69dec,
+  conclusion FAILURE at 2h20m16s, self-terminated, 74% of the 190-min ceiling): census
+  9 failed / 29 passed / 6 skipped in 2:12:50 -- BEST census of the session (R15: 10/28/6),
+  and the QUARANTINED-not-SUCCEEDED signature is GONE (zero QUARANTINED failures anywhere).
+  Fix-in-force proofs: all 3 images at 0a69dec (publish pushed 23:28-23:29, BEFORE
+  cluster-up pulled 23:31); migrations 0039/0040/0041 all applied at cluster-up; fix (23)'s
+  stage>>pending edge proven live in TI history (every DagRun: all stages -> dbt_build ->
+  publish, strictly ordered); (19)-A proven live (concurrent_select orders 250k PASSED
+  end-to-end, dbt_silver snapshot-complete PASSED, reentry's original run SUCCEEDED
+  un-quarantined); (22)'s 0039 proven live BY failure #1 (normalized now visible in
+  analytics_owner's information_schema, tripping the stale test allowlist); (20b) proven
+  by mass_delete PASSED with exclusion predicates in force. Failure taxonomy: 2 one-line
+  stragglers ((22b) analytics_owner lacks SELECT on meta.ingestion_runs -- reentry died
+  at a line R15 never reached; (22c) test_no_extra_schemas allowlist missing 'normalized');
+  NEW FINDING (25) owns 6 failures: orders serialized-pipeline throughput collapse under
+  retained 1M-row fixtures (podkill 600s terminal timeout with run STAGED post-restage,
+  then dbtkill/u3/orphan/idempotent 180s discovery starvation behind the backlog, then
+  rebuild 16/16 orders files unsettled in 1800s with the node CPU-saturated -- the
+  pre-registered (g) risk fired, wider than predicted); NEW FINDING (24): sweep assert 4
+  STILL red (silver has no rows for _run_id=31) with the claim ledger provably live --
+  per the pre-registered falsification this refutes the watermark as the SOLE mechanism;
+  forensics destroyed by rebuild's meta reset (diagnostics gap: end-of-job dumps are
+  post-rebuild). Guards: Kyverno 0, restarts 0, ZERO failed TIs (best ever), scheduler
+  peak 1786MiB = 69.8% of the new 2560Mi (18b vindicated: = 91.5% of the old limit),
+  SKIPPED_CONCURRENT 0, fixes 16/17/18/20/20a all hold. DECISION CHECKPOINT returned.
+  See Current Focus ROUND 16 OUTCOME + Evidence."
 round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha 25b6eb0,
   conclusion FAILURE at 1h44m12s -- FIRST run of the whole session to finish under its
   own steam, 45% of the 190-min ceiling, 86min headroom): fixes (20)+(20a)
@@ -31,7 +51,7 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-27 (ROUND 15 POST-RUN ANALYSIS COMPLETE -- see round15_status above)
+updated: 2026-08-28 (ROUND 16 POST-RUN ANALYSIS COMPLETE -- see round16_status above)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -272,7 +292,119 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 16 (2026-08-28, opened on user decision (19)-A + FULL scope 19+21+22+23+20b -- CURRENT STATE):
+ROUND 16 OUTCOME (2026-08-28, post-run analysis of run 33126343052 -- CURRENT STATE):
+  run: "e2e-full.yml 33126343052, headSha 0a69dec (tree identical to code commit
+      55c8e41), conclusion FAILURE after 2h20m16s (23:27:32Z -> 01:47:45Z),
+      self-terminated. Job 98705301890; suite step 132.8min of the 140.2min total;
+      observability + rebuild-from-raw capstone steps SKIPPED (gated on suite green).
+      Log: scratchpad round16-job.log (12,700 lines). Companion publish 33126343060
+      SUCCESS (all 3 images pushed 23:28:19-23:29:34, before cluster-up pulled at
+      23:31:15 -- criterion 0 met, no stale-image race)."
+  census: "9 failed / 29 passed / 6 skipped in 7970.98s (2:12:50) -- best census of
+      the session (R15: 10/28/6). Newly GREEN vs R15: concurrent_select (orders 250k
+      repoint, full discover->stage->dbt->publish->atomicity proof), dbt_silver
+      (snapshot-complete customers fixture, zero quarantine), and the R15
+      QUARANTINED-not-SUCCEEDED signature is EXTINCT: zero QUARANTINED terminals in
+      the entire run (the only breaker trip is mass_delete's designed one, which
+      PASSED with the (20b) exclusion predicates in force). Newly RED vs R15:
+      test_no_extra_schemas_exist (see 22c below -- mechanical consequence of 0039
+      being live). Failed node-IDs: no_extra_schemas, sweep(assert 4), reentry,
+      podkill_mid_load, podkill_mid_dbt(dbtkill), u3, rebuild, orphan,
+      idempotent_reupload."
+  fixes_in_force_proofs:
+    - "(19)-A LIVE + its mechanism CLEARED: concurrent_select PASSED (orders 250k,
+      SUCCEEDED, atomic publish observed); dbt_silver PASSED (snapshot-complete
+      echo, no vanished trip); reentry's original bad-row run reached SUCCEEDED
+      un-quarantined (its R15 death) and the test progressed to a line R15 never
+      reached. 6 of the 8 (19)-owned tests are still red but ALL with DIFFERENT
+      mechanisms (grant gap x1, throughput collapse x5) -- the QUARANTINED
+      signature itself is gone 8/8."
+    - "(22) 0039 LIVE, proven by its own side effect: test_no_extra_schemas_exist
+      now FAILS with 'unexpected schema(s): [normalized]' on the analytics_owner
+      connection -- information_schema.schemata lists a schema only when the role
+      holds a privilege on it, so this failure IS the observation that USAGE landed."
+    - "(23) LIVE: TI history shows every customers DagRun (cron + backfill) running
+      ALL stage maps -> dbt_build -> publish strictly ordered (e.g. backfill 15:15:
+      stages 23:36:29-23:40:35, dbt_build 23:40:41, publish 23:41:13). Criterion (d)
+      itself unadjudicated (dbtkill never reached its poll -- starved upstream)."
+    - "(21) ledger LIVE (model in-image, 0040 applied, builds succeeded) but
+      criterion (b) NOT met -- see finding 24."
+    - "(20b) LIVE: 0041 applied; mass_delete PASSED (breaker trips, gold unmutated)
+      with the exclusion predicates in the publish path; zero quarantine-lineage
+      assertions failed anywhere (criterion (e) met on available evidence)."
+    - "Migrations 0038->0039->0040->0041 all applied at cluster-up (streamed alembic
+      log 23:34:14)."
+  new_findings:
+    - "(24) SWEEP ASSERT 4 STILL RED POST-LEDGER (silver.customers has no rows for
+      _run_id=31, test line 1289, 23:58:24 -- run 31 = the late file
+      customers_20240108's newest replay run per the drain's max-run_id query;
+      asserts 1-3 all PASSED, orders counts exact at 600). The pre-registered
+      falsification ('sweep assert 4 still failing refutes the (21) mechanism')
+      FIRED: the global-max watermark was real but was NOT the sole mechanism
+      behind this assert. Model logic re-verified by source read: claim ledger
+      (txid-scoped) + existing_silver_contenders + _run_id desc tie-break SHOULD
+      attribute the newest replay copy; every stage was followed by a same-DagRun
+      dbt_build (fix 23). MECHANISM UNRESOLVED -- and unresolvable from this run's
+      artifacts: the rebuild test DROPS/RESETS meta.ingestion_runs (run numbering
+      restarts at 1 in the end-of-job dumps) and the idempotent_rerun test re-runs
+      the same backfill window (try=2 overwrites sweep-era TI timings), so ALL
+      sweep-era forensic state (ledger claims, bronze census, silver attribution)
+      is destroyed before the always()-diagnostics run. NAMED DIAGNOSTICS GAP +
+      rider: the sweep test must dump meta.dbt_processed_runs rows, the late
+      file's bronze run census, and silver attribution for the late keys INTO the
+      streamed assertion message at failure time."
+    - "(25) ORDERS SERIALIZED-PIPELINE THROUGHPUT COLLAPSE UNDER RETAINED 1M-ROW
+      FIXTURES -- owns 6 failures. Chain: podkill (00:27 SIGKILL) -> (20a) lease
+      wait + full 1M re-stage COMPLETED (run observed STAGED, the R15 wedge is
+      NOT back) but dbt_build+publish on 1M rows did not finish inside the
+      remaining 600s poll -> test failed while the DagRun kept running -> every
+      subsequent orders test's manual trigger queued behind it (dbtkill/u3
+      discovery timeouts at 00:40/00:44, 180s budgets) -> rebuild (00:44-01:40)
+      reset ALL runs to PENDING and re-triggered re-ingestion of the ENTIRE
+      retained raw corpus (16 orders files incl. 3x1M + 250k + 12 dated =
+      ~3.25M+ rows, versus the charter's ~2.35M estimate) through the same
+      serialized pipe -> 16/16 unsettled at 1800s, node CPU-saturated
+      (FailedScheduling census: stage/discover/publish/dbt-build pods all
+      'Insufficient cpu', one stage pod 38min old at job end) -> orphan +
+      idempotent_reupload starved (01:43/01:47). The pre-registered (g) risk
+      fired, WIDER than predicted: not just the rebuild settle windows but the
+      pre-rebuild per-test budgets. Contributing structural cost: merge_orders
+      _PUBLISH_SQL publishes the WHOLE silver table each pass (already flagged
+      as (20b) leak vector ii), so orders publish cost scales with ACCUMULATED
+      silver mass, not the run's delta -- each retained 1M fixture makes every
+      later publish slower. Zero evidence of any logic wedge: zero failed TIs,
+      zero SKIPPED_CONCURRENT, files eventually progressed (dbtkill's file
+      reached STAGED by rebuild-era)."
+    - "(22b) analytics_owner lacks SELECT on meta.ingestion_runs: reentry died at
+      _fetch_dagrun_identity (test line 707/603) with InsufficientPrivilege --
+      first time any test reached this read as analytics_owner (R15 died earlier
+      at the quarantine). Same grant-history family as 0038/0039; fix is a
+      one-line migration 0042 (analytics_owner already holds meta.files/
+      meta.datasets/meta.rejected_records SELECTs by precedent)."
+    - "(22c) tests/e2e/cluster/test_postgres_topology.py ALLOWED_SCHEMAS is stale:
+      'normalized' must be added now that analytics_owner holds USAGE (0039). One
+      line, test-side."
+  guards: "Kyverno denials 0 (only the deliberate unsigned-image test, PASSED);
+      restarts 0 all roles (timeline empty); ZERO failed TIs (best ever; R15 had
+      the teardown-race one); scheduler peak 1,873,281,024B = 1786MiB = 69.8% of
+      the new 2560Mi limit (18b vindicated -- same absolute mass would have been
+      91.5% of the old 2048Mi; R15 peaked 1923MiB/93.9%); dag-processor peak
+      784MiB, triggerer 401MiB; SKIPPED_CONCURRENT 0 (docstring mentions only);
+      FailedScheduling class = 'Insufficient cpu' ONLY, but no longer transient --
+      it is finding 25's mechanism during the rebuild era; publish idem-rerun
+      try=2s are the designed D-18 replay shape; suite 140.2min < 190 ceiling
+      (obs + capstone still unexercised, skipped on suite failure)."
+  next_action: "DECISION CHECKPOINT returned to user: choose the ROUND 17 shape
+      for finding (25) -- (A) delta-scope merge_orders' publish (fix the O(total)
+      whole-silver merge, the platform-correct move), (B) shrink retained orders
+      chaos fixtures (1M -> 250k where the property is not scale-bound), (C)
+      raise the per-test budgets, (D) CI-profile scope reduction -- plus the two
+      one-line stragglers (22b migration 0042, 22c allowlist) and the (24)
+      forensics rider on the sweep test. Carried follow-ups: sidecar mirror,
+      stage-side RejectionRateCircuitBreaker classification, teardown-race flake
+      class, v_run_recovery wording, ADR-0012 silver disposition."
+
+ROUND 16 (2026-08-28, opened on user decision (19)-A + FULL scope 19+21+22+23+20b -- SUPERSEDED BY OUTCOME ABOVE):
   charter: "(1) (19)-A delivery-shape-aware fixtures: repoint the lone-file e2e tests at
       a delivery shape their dataset's contract tolerates. Production breaker semantics
       untouched; sweep module keeps full-snapshot customers coverage. (2) (21) adjudicate
@@ -7032,6 +7164,100 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     its own staging DagRun; (e) no gold row can carry QUARANTINED lineage. Known
     pre-registered risk: the rebuild test now reprocesses the retained ~2.35M-row
     orders raw history through the asset cascade inside its 1800s settle windows.
+
+- timestamp: 2026-08-28 (ROUND 16 post-run -- run 33126343052 analysis, best census of the session)
+  checked: "Full job log of e2e-full.yml run 33126343052 (headSha 0a69dec, conclusion
+    FAILURE, 23:27:32Z -> 01:47:45Z = 2h20m16s self-terminated, job 98705301890,
+    12,700 lines saved to scratchpad round16-job.log; companion publish 33126343060
+    SUCCESS with all 3 images pushed 23:28:19-23:29:34 BEFORE cluster-up pulled at
+    23:31:15 -- criterion 0 met, stale-image hypothesis for the sweep failure
+    eliminated by timestamps). Analyzed: streamed tracebacks for all 9 failures,
+    the -v census, alembic migration log, TI/DagRun history dumps, FailedScheduling
+    census, etl-monitor, final etl-namespace pods, cp-monitor peaks, ROUND 12 DB
+    dumps (found post-rebuild, see finding 24), plus source reads of
+    silver_customers.sql and _wait_for_dataset_files_terminal for the sweep
+    adjudication."
+  found: >
+    (A) CENSUS: 9 failed / 29 passed / 6 skipped in 7970.98s (2:12:50). Best of the
+    session (R15: 10/28/6). Newly green: concurrent_select (orders 250k repoint,
+    SUCCEEDED end-to-end -- (19)-A's core mechanic proven live), dbt_silver
+    (snapshot-complete customers, zero quarantine). Newly red: no_extra_schemas
+    (allowlist vs 0039, see D). The R15 QUARANTINED-not-SUCCEEDED signature is
+    EXTINCT: zero QUARANTINED terminals in the whole run; the only breaker trip is
+    mass_delete's designed one (test PASSED with the (20b) exclusion predicates
+    live).
+    (B) FIXES IN FORCE: migrations 0039/0040/0041 applied at cluster-up (alembic
+    log 23:34:14); csv_processor/dbt/airflow images all at 0a69dec; fix (23)'s
+    edge proven live in TI history (backfill 15:15: stages 23:36:29-23:40:35 ->
+    dbt_build 23:40:41-23:41:08 -> publish 23:41:13-23:41:44; same shape on every
+    DagRun); reentry's original bad-row run reached SUCCEEDED un-quarantined
+    (snapshot-complete fixture worked; R15's death point cleared).
+    (C) FINDING (25) -- orders serialized-pipeline throughput collapse owns 6
+    failures: podkill mid_load killed its stage pod ~00:27:25; the (20a) lease
+    reclaim + full 1M re-stage COMPLETED inside the poll (last observed status
+    STAGED -- the R15 stage-wedge is NOT back) but dbt_build+publish on 1M rows
+    did not finish in the remaining 600s. The still-running DagRun then starved
+    every later orders test: dbtkill 00:40:43 + u3 00:44:01 (discovery never
+    registered within 180s), rebuild 00:44->01:40 reset all runs to PENDING and
+    re-triggered the ENTIRE retained raw corpus (16 orders files: podkill/dbtkill/
+    u3 1M each + concurrent 250k + 12 dated = ~3.25M+ rows vs the charter's ~2.35M
+    estimate) through the same serialized pipe -> 16/16 unsettled at 1800s
+    ({concurrent:STAGED, dbtkill:STAGED, podkill:RUNNING, u3+12 dated:PENDING}),
+    orphan 01:43:21 + idempotent_reupload 01:47:10 starved. End-state: etl
+    namespace CPU-saturated -- FailedScheduling census all 'Insufficient cpu'
+    (stage/discover/publish/dbt-build pods), one stage pod (stage-jxsiz8ms, 2/2)
+    38min old and still Running at job end. Structural cost multiplier:
+    merge_orders' _PUBLISH_SQL publishes the WHOLE silver table each pass ((20b)
+    leak vector ii), so orders publish scales with accumulated silver mass --
+    every retained 1M fixture makes all later publishes slower. Zero failed TIs,
+    zero SKIPPED_CONCURRENT, files eventually progressed (dbtkill's file reached
+    STAGED by rebuild-era) => contention, not a logic wedge. The pre-registered
+    (g) risk fired WIDER than predicted (per-test budgets, not just the rebuild
+    settle).
+    (D) FINDING (22b)+(22c) -- grant-family stragglers: reentry failed at
+    _fetch_dagrun_identity (line 707/603) with InsufficientPrivilege on
+    meta.ingestion_runs as analytics_owner -- a read no test had reached before
+    (R15 died earlier); precedent-consistent fix = migration 0042 GRANT SELECT.
+    test_no_extra_schemas_exist failed with 'unexpected schema(s): [normalized]'
+    on the analytics_owner connection -- information_schema.schemata only lists
+    schemas the role holds a privilege on, so this failure is itself the live
+    PROOF that 0039's USAGE landed; fix = add 'normalized' to ALLOWED_SCHEMAS.
+    (E) FINDING (24) -- sweep assert 4 STILL red post-ledger: 'silver.customers
+    has no rows for _run_id=31' at 23:58:24 (run 31 = late file
+    customers_20240108's newest replay per the drain's max-run_id DISTINCT ON;
+    asserts 1-3 PASSED, orders counts exact at 600). Pre-registered falsification
+    fired: the global-max watermark was NOT the sole mechanism. Source re-read
+    confirms the live model SHOULD attribute correctly (txid-scoped claim ledger,
+    existing_silver_contenders, _run_id desc tie-break) and every stage had a
+    same-DagRun follow-up build. Forensics unrecoverable from this run: the
+    rebuild test drops/resets meta.ingestion_runs (end-of-job ROUND 12 dumps show
+    run numbering restarted at 1, sweep-era rows gone) and idempotent_rerun
+    re-executes the same backfill window (try=2 overwrites sweep-era TI timings).
+    NAMED DIAGNOSTICS GAP: end-of-job DB dumps are post-rebuild; the sweep test
+    needs a failure-time dump rider (ledger claims + late-file bronze census +
+    silver attribution for the late keys, streamed in the assertion message).
+    (F) GUARDS: Kyverno 0 (only the deliberate unsigned-image denial, PASSED);
+    restarts 0 all roles; ZERO failed TIs (session first); scheduler peak
+    1,873,281,024B = 1786MiB = 69.8% of the new 2560Mi (18b vindicated: same mass
+    = 91.5% of the old 2048Mi; R15 peak 1923MiB was 93.9%); dag-processor 784MiB;
+    triggerer 401MiB; SKIPPED_CONCURRENT 0; publish try=2s = designed D-18 replay
+    (idempotent_rerun test re-creates the same backfill window, PASSED); suite
+    140.2min < 190; observability + rebuild capstone steps SKIPPED (suite-green
+    gated), still never exercised live.
+  implication: >
+    ROUND 16's five-mechanism hypothesis is 4/5 confirmed-or-cleared: (19)-A's
+    quarantine mechanism is extinct, (22) landed (spawning two one-line
+    grant-family stragglers), (23) is live, (20b) is live. The residual failure
+    mass has COLLAPSED from five mechanisms to two: finding (25), a capacity/
+    design problem (serialized orders pipeline whose publish cost scales with
+    accumulated silver mass, colliding with retained 1M fixtures and per-test
+    budgets on ~3 CPU -- the session's original trigger shape, now with the
+    root causes stripped away), and finding (24), the one genuinely unexplained
+    correctness question left (sweep late-row attribution), which needs a
+    failure-time forensics rider because the rebuild test destroys the evidence.
+    Decision checkpoint returned on the (25) knob (delta-scoped merge_orders
+    publish vs fixture shrink vs budget raise vs scope cut) + the two one-liners
+    + the (24) rider.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
