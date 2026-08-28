@@ -448,11 +448,34 @@ dispositions; ceiling stays 190 -- CURRENT STATE):
       kubeconform valid; mypy clean; slice collection clean; workflow YAML
       valid). No production-code changes this round -- test + workflow layer
       only. See the ROUND 18 offline Evidence entry."
-  live_verification_state: "NOT YET RECORDED -- filled after commit+push."
-  next_action: "Commit docs [skip ci] FIRST and code LAST (R16 skip-marker
-      trap avoidance), single push, record the authoritative e2e-full.yml
-      run ID (+ companion publish.yml as item 0), return CHECKPOINT
-      (human-action) for the session manager's single 60s watcher."
+  live_verification_state: "RECORDED 2026-08-28T10:5xZ: ROUND 18 pushed as
+      docs commit ce3b3a6 ([skip ci], buried) + code commit 4818867 (HEAD,
+      clean message -- docs FIRST / code LAST, single push, workflows
+      trigger at 4818867). AUTHORITATIVE ROUND 18 live-verification run:
+      e2e-full.yml run 33164806655 (headSha 4818867, created 10:49:21Z).
+      Companions same headSha: publish.yml 33164806681 (criterion 0: all 3
+      images must push before cluster-up's pull window -- NOTE this round's
+      changes ride the CHECKOUT only [tests + workflow], no image-borne
+      change, so a publish/pull race cannot mask any ROUND 18 fix);
+      CI 33164806656 (expected FAILURE -- the pre-existing offline
+      Quality-gate+Integration pattern, bare-HEAD differentials confirmed
+      again this round: 2 policy failures + 2 sweep lint errors + 2 format-
+      drift files, all present on stashed HEAD); e2e-chaos 33164806660
+      (observational). Analysis criteria = pre_registered_criteria above
+      ((a) sweep assert-4 passes; (b) dbtkill/u3/orphan/idempotent clear
+      via the drain helper; (c) podkill inside 900s; (d) rebuild's
+      monotonic-progress assertion holds; (e) (26) passes or fails WITH
+      streamed error_type/error_message; (f) zero new failures vs R17;
+      (g) guards green). TARGET: fully green census, or green-except-(26)-
+      with-adjudicable-evidence, inside the 190-min ceiling. Scratchpad
+      convention: save the job log as round18-job.log."
+  next_action: "CHECKPOINT (human-action) returned: session manager runs the
+      single 60s-interval watcher on run 33164806655, then spawn post-run
+      analysis per live_verification_state. Carried follow-ups unchanged:
+      sidecar mirror, stage-side RejectionRateCircuitBreaker classification,
+      teardown-race flake class, v_run_recovery wording, ADR-0012's deferred
+      silver disposition, merge.py delta-scoping before any dataset adopts
+      strategy 'merge', scd_concurrent duration-variance watch."
 
 ROUND 17 OUTCOME (2026-08-28, post-run analysis of run 33147620963 -- SUPERSEDED BY ROUND 18 ABOVE):
   run: "e2e-full.yml 33147620963, headSha 79dd299, conclusion FAILURE, job
