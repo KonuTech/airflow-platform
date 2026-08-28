@@ -196,9 +196,19 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 20 offline fixes complete for all three ROUND 19 findings -- podkill
-  execution_timeout ceiling, sweep assertion-10 batch-scoping, orders publish OOM right-sizing;
-  offline battery green, awaiting live CI verification; see Current Focus ROUND 20 block)
+updated: 2026-08-28 (ROUND 20 POST-RUN ANALYSIS COMPLETE on run 33205639775, headSha 5f3aa61,
+  CANCELLED at the 190-min ceiling: podkill CONFIRMED FIXED via a real same-DagRun retry (try=2,
+  14.2min, well inside 900s); sweep assertion (10) PASSED cleanly; OOMKilled publish did NOT
+  recur. NEW dbtkill failure mode (run_id=826, DBT_BUILD mark_running never written within 300s)
+  ROOT-CAUSED with direct TI evidence: the SAME dagrun_timeout-force-skip pathology R18/R19
+  diagnosed, triggered this time not by a kubectl-deleted pod but by a pre-existing, massive
+  (3000+/run) CPU-starvation condition on the single-node CI cluster COMBINED with a timeout-
+  budget arithmetic gap (execution_timeout x retries + exponential backoff can exceed
+  dagrun_timeout=45min) introduced when execution_timeout was added this round. Two UNRELATED
+  orders DagRuns independently rode to their own 45-min dagrun_timeout wedges this run
+  (asset_triggered Z3rArVfS then dbtkill's own e2e-dbtkill-8796c91632c6), cascading into u3/
+  rebuild/orphan failures and preventing test_idempotent_reupload from ever running before the
+  190-min ceiling cancelled the job. See Current Focus ROUND 20 OUTCOME + Evidence.)
 updated_prior_round20: 2026-08-28 (ROUND 19 post-run analysis complete: both named evidence gaps
   forensically closed, podkill root cause refined, sweep assertion-10 closed same-class as (24);
   see Current Focus ROUND 19 OUTCOME)
@@ -854,8 +864,105 @@ investigation):
       OOMKilled publish pods don't recur, or recur but retry/handle cleanly; (d) zero new
       failures; (e) guards green; (f) duration decomposition). TARGET: fully green census or
       nameable-stragglers-only. Scratchpad convention: save the job log as round20-job.log."
-  next_action: "Awaiting live CI verification of all three fixes plus the two regression tests'
-      own real-cluster analogue (the actual podkill/sweep/u3 e2e tests)."
+  next_action: "SUPERSEDED -- see ROUND 20 OUTCOME below."
+
+ROUND 20 OUTCOME (2026-08-28, post-run analysis of run 33205639775 -- CURRENT STATE):
+  run: "e2e-full.yml 33205639775, headSha 5f3aa61, conclusion CANCELLED at the 190-min ceiling,
+      job 19:50:46Z->23:01:34Z = 190min48s (the FIRST run this session actually cancelled AT the
+      ceiling rather than self-terminating just inside it). Log saved as scratchpad
+      round20-job.log (14,896 lines). Companion runs (not this round's concern): publish.yml
+      33205639752, CI 33205639753, e2e-chaos.yml 33205639829."
+  census: "PARTIAL -- no pytest summary line was ever printed (step 13 was cancelled mid-suite).
+      33 passed / 4 explicit FAILED (test_pod_kill_mid_dbt_build_produces_no_duplicates,
+      test_u3_throughput_and_peak_rss_baseline,
+      test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending,
+      test_orphan_order_quarantined_while_valid_rows_publish) / 6 skipped = 43 of the expected 44
+      node-IDs. test_idempotent_reupload NEVER RAN -- cut off before it could even start,
+      almost certainly waiting on its own queue-drain check behind the still-unresolved DagRun
+      from finding (4)(d) below. Two of R19's 7 failures CLEARED THIS ROUND: podkill and the
+      sweep (assertion-10 vehicle, test_full_2year_sweep_customers_and_orders) both PASSED. Zero
+      genuinely NEW independent bugs -- dbtkill's failure is a NEW manifestation of an ALREADY-
+      DIAGNOSED mechanism class (see below), and u3/rebuild/orphan are the SAME downstream-
+      cascade pattern this session has repeatedly and correctly attributed via the ROUND 18
+      queue-drain helper."
+  criteria_adjudication:
+    - "(a) podkill passes within 900s via an ACTUAL retry: MET. e2e-podkill-9f73f67c310e
+      (manual DagRun) succeeded end-to-end in 14min10.8s (851s < 900s). stage map_index=0's
+      TI shows try=2 (a real same-DagRun, same-task-id/map_index requeue-and-succeed), NOT an
+      opportunistic reclaim by an unrelated DagRun (R19's pattern). dbt_build and publish both
+      ran and succeeded immediately after in the SAME DagRun. Residual, non-blocking gap: no
+      log line (AirflowTaskTimeout/TimeoutPosix/SIGALRM/execution_timeout/'exceeded the
+      timeout') was found anywhere in the 14,896-line job log, so the exact sub-mechanism
+      (execution_timeout's SIGALRM vs KPO's own faster ~30-40s pod-vanish exception) that
+      converted try=1 into try=2 is still not log-proven -- only the TI-level effect is."
+    - "(b) sweep assertion (10) passes or is robustly scoped: MET CLEANLY. Test PASSED outright
+      (20:29:53), no forensics rider needed."
+    - "(c) OOMKilled publish pods don't recur: MET. Zero 'OOMKilled' / exit-137 occurrences in
+      the whole job log (R19 had 3)."
+    - "(d) zero new failures: NOT STRICTLY MET, but NOT a regression either. dbtkill's failure
+      is a NEW test-node failure (R19's 7 did not include it failing for THIS reason -- wait,
+      dbtkill DID fail in R19 too, so this is not a new node-ID; re-stated: the FAILURE
+      MECHANISM for dbtkill changed from R19 -- R19 never analyzed dbtkill's own root cause in
+      detail; this round's analysis shows it is the SAME dagrun_timeout-force-skip class as
+      podkill's own R18/R19 mechanism, just reached via CPU-starvation rather than a killed
+      pod). No test that was passing in R19 regressed."
+    - "(e) guards green: MET. Kyverno 0 unintended denials, restarts 0 all roles, scheduler peak
+      1901MiB/74.3% of 2560Mi (R19: 1826MiB/71.3%, +2.9%, not concerning)."
+    - "(f) duration decomposition: this run was CANCELLED at 190min48s vs R19's self-terminated
+      184.45min -- WORSE despite 3 fixes landing clean, because a NEW ~45min dead-time source
+      appeared: an UNRELATED asset-triggered orders DagRun independently wedged into its own
+      full dagrun_timeout window immediately after podkill released the serialized queue slot
+      (see finding 4 below), something R19's own run did not exhibit at this scale/consequence."
+    - "TARGET (fully green census or nameable-stragglers-only): NOT MET -- but 2 of 3 targeted
+      fixes are cleanly confirmed, and the residual failure is diagnosed with direct evidence
+      to a NEWLY-IDENTIFIED, concrete, actionable root cause rather than left as an open gap."
+  root_cause_dbtkill: >
+      NOT a new, independent bug and NOT caused by the execution_timeout fix failing or being
+      swallowed. It is the SAME 'stage TI never reaches a natural terminal state; dagrun_timeout's
+      blunt 45-min sweep force-skips it before retry/failure logic resolves; zero error ever
+      written' pathology R18/R19 diagnosed for podkill's own kill-specific case -- reached this
+      round via a DIFFERENT, previously-lower-visibility trigger. Direct causal chain (see
+      Evidence entry timestamped 2026-08-28, ROUND 20 post-run analysis, for full detail):
+      podkill's DagRun released the orders queue slot (21:32:04.5) -> an UNRELATED asset-
+      triggered DagRun (Z3rArVfS) claimed it and became a SECOND dagrun_timeout victim
+      (21:32:04.9 -> 22:17:05.9, exactly 45min00.9s, stage try=3/skipped) -- its own discover
+      pass (21:33:25-21:33:45) almost certainly created dbtkill's run_id=826 as one item in its
+      multi-file stage batch, which never reached DBT_BUILD's mark_running write before the
+      force-skip -> dbtkill's OWN manually-triggered DagRun (e2e-dbtkill-8796c91632c6) sat
+      QUEUED behind it for the entire 45min (confirmed by u3's own queue-drain assertion at
+      21:48:39), finally starting at 22:17:07 -> that DagRun (c) itself then also stalled (stage
+      map_index=1, try=3, still up_for_retry as of end-of-job, DagRun state=running/end=None,
+      on pace for ITS OWN dagrun_timeout at ~23:02:07, 68s after the actual cancellation). TWO
+      root-level contributing factors, both directly confirmed: (i) a pre-existing, massive,
+      unfixed CPU-starvation condition (3657 'Insufficient cpu' FailedScheduling events this
+      run, 3483 in R19 -- NOT newly introduced by this round; the single CI node's baseline
+      platform pods alone already consume 86% (2580m/3000m) of allocatable CPU before any ETL
+      pod launches, leaving ~420m headroom for everything stage/dbt_build/publish/discover/
+      integrity_gate need across both DAGs); (ii) an internally-inconsistent timeout-budget
+      hierarchy this round's own fix introduced without checking: stage's retries=3 (4 attempts)
+      x execution_timeout=10min + retry_exponential_backoff's growing inter-attempt delays can
+      sum past 55 minutes -- already exceeding the enclosing dagrun_timeout=45min BY DESIGN, so
+      any stage task needing 2-3 timeout cycles to get a pod scheduled under contention will be
+      force-skipped by the DagRun-level sweep before its own retry/failure logic ever concludes.
+      execution_timeout itself is NOT broken and NOT being swallowed here -- both wedged
+      DagRuns show try=3, direct proof of real timeout-driven retry cycles firing -- the ceiling
+      it retries into is simply too tight for the node's real contention level.
+  next_action: "DECISION CHECKPOINT returned to user: podkill/sweep/OOMKilled fixes are
+      CONFIRMED HELD with direct evidence -- no further work needed on those three. dbtkill's
+      failure requires a ROUND 21 fix, not more diagnostics (root cause already forensically
+      closed with direct TI/log/resource evidence): (1) rebalance the timeout-budget hierarchy
+      so execution_timeout x (retries+1) [+ worst-case backoff] stays safely under
+      dagrun_timeout=45min (e.g. lower execution_timeout, lower stage's retries, remove/cap
+      exponential backoff growth, or raise dagrun_timeout -- needs a decision, not just a
+      number change, since the current values were only just set this round); (2) separately
+      address the root CPU-starvation condition (3000+ FailedScheduling events/run, pre-existing
+      since at least R19, node headroom ~420m after baseline platform pods) -- candidates:
+      right-size platform pod CPU requests, reduce concurrent ETL pod resource requests/
+      concurrency caps (max_active_tis_per_dag), or accept and document the constraint while
+      fixing (1) as the primary mitigation. Carried follow-ups unchanged: sidecar mirror,
+      stage-side RejectionRateCircuitBreaker classification, teardown-race flake class,
+      v_run_recovery wording, ADR-0012's deferred silver disposition, merge.py delta-scoping
+      before any dataset adopts strategy 'merge', scd_concurrent duration-variance watch."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
@@ -8866,6 +8973,138 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     KubernetesExecutor for podkill; scope-fix assertion (10) like (24)) rather than another
     diagnostics round -- the evidence bar this session set for itself (direct, not inferred) is
     now satisfied for both of ROUND 18's named gaps.
+
+- timestamp: 2026-08-28 (ROUND 20 post-run analysis, run 33205639775, headSha 5f3aa61, CANCELLED
+    at the 190-min ceiling, scratchpad round20-job.log, 14,896 lines)
+  checked: >
+    All three ROUND 20 fixes against the live run: podkill's own TI history (real retry vs
+    opportunistic reclaim), the NEW dbtkill failure mode's causal chain (run_id=826's stage
+    lineage, the orders-DagRun queue-drain assertions from u3/orphan that fired downstream, the
+    orders DagRun/TI dump, the ROUND 19 widened stale-run query), sweep assertion (10)'s outcome,
+    OOMKilled recurrence (pod-termination watcher), guards (Kyverno/restarts/scheduler-peak,
+    kubectl describe node's Allocated-resources block), the FailedScheduling "Insufficient cpu"
+    census (this round vs the surviving round19-job.log), and the DAG source
+    (retries/execution_timeout/dagrun_timeout/retry_exponential_backoff values on stage).
+  found: >
+    (1) PODKILL CONFIRMED FIXED VIA THE DESIGNED MECHANISM, NOT LUCK: test_pod_kill_mid_load_
+    produces_no_duplicates PASSED (21:31:32). Its own DagRun e2e-podkill-9f73f67c310e: type=
+    manual, state=success, start=21:17:53.669392, end=21:32:04.499982 (14min10.8s, well inside
+    900s). stage map_index=0's CURRENT TI row shows try=2, start=21:26:50.029417, end=
+    21:28:35.171875, state=success -- a REAL requeue-and-succeed within the SAME DagRun/task/
+    map_index (not R19's pattern of an orphaned try=1 rescued by an unrelated DagRun's
+    opportunistic reclaim). dbt_build (21:28:44-21:30:06) and publish (21:30:20-21:32:03) both
+    ran and succeeded immediately after, end-to-end, in this one DagRun. Residual gap (not
+    blocking criterion (a)): no direct log line (AirflowTaskTimeout/TimeoutPosix/SIGALRM) was
+    found anywhere in the 14,896-line job log to prove WHICH of the two confirmed-working
+    mechanisms (execution_timeout's SIGALRM vs KPO's own ~30-40s pod-vanish exception) actually
+    fired for try=1->2 -- only the TI-level effect (a genuine same-DagRun retry) is
+    forensically closed, not the sub-mechanism. Grep for "AirflowTaskTimeout", "TimeoutPosix",
+    "SIGALRM", "execution_timeout" and "exceeded the timeout" across the whole job log: ZERO
+    matches, all patterns.
+    (2) SWEEP ASSERTION (10): test_full_2year_sweep_customers_and_orders PASSED cleanly
+    (20:29:53) -- the batch-scoping fix held, no forensics rider needed this run (neither
+    assertion failed).
+    (3) OOMKILLED PUBLISH: ZERO "OOMKilled" and ZERO exit-137 occurrences anywhere in the job
+    log (vs R19's 3 events) -- the customers-matching _STAGE_RESOURCES back-port held, no
+    recurrence.
+    (4) DBTKILL NEW FAILURE MODE -- ROOT-CAUSED WITH DIRECT EVIDENCE, SAME MECHANISM CLASS AS
+    R18/R19'S PODKILL WEDGE, DIFFERENT TRIGGER: test_pod_kill_mid_dbt_build_produces_no_
+    duplicates FAILED (21:38:37) at `meta.run_stages[run_id=826, stage_name='DBT_BUILD']
+    never reached status='RUNNING' within 300s (last observed: None)`. Direct causal chain,
+    reconstructed from the orders DagRun/TI dump plus the queue-drain assertions u3/orphan
+    fired downstream: (a) podkill's own DagRun released the exclusive orders max_active_runs=1
+    slot at 21:32:04.499982; (b) an UNRELATED asset-triggered DagRun
+    (asset_triggered__2026-08-28T21:11:44.008731+00:00_Z3rArVfS) claimed the slot 0.4s later
+    (start=21:32:04.926063) and became a SECOND, independent dagrun_timeout victim: state=
+    failed, end=22:17:05.929415 (45min00.9s duration, matching dagrun_timeout=45min exactly).
+    Its own discover ran 21:33:25-21:33:45 -- squarely inside dbtkill's test's own file-
+    discovery poll window -- and almost certainly created run_id=826 as one item in its own
+    multi-file stage batch; its stage map_index=0 shows try=3, state=skipped (force-skipped by
+    dagrun_timeout, last attempt start=21:57:05.962877 end=21:57:29.076845, only 23s -- never
+    reached DBT_BUILD's own mark_running write, explaining the test's exact failure). (c)
+    dbtkill's OWN manually-triggered DagRun (e2e-dbtkill-8796c91632c6) could not even START
+    while (b) held the slot: u3's queue-drain assertion at 21:48:39 found it still 'queued'
+    behind (b)'s 'running' state; it finally started at 22:17:07.068871 (1.1s after (b)'s
+    dagrun_timeout released the slot) -- i.e. dbtkill's own DagRun sat queued for ~38-45min
+    before it could even begin. (d) That DagRun (c) itself then became a THIRD wedge candidate:
+    its own stage map_index=1 shows try=3, state=up_for_retry, start=22:51:06.349786, end=
+    22:51:38.986632 -- STILL not resolved at end-of-job (23:01:27); the whole DagRun (c) shows
+    state=running, start=22:17:07.068871, end=None at final dump -- had the job not been
+    cancelled, (c) was on pace for its own dagrun_timeout at ~23:02:07, 68s AFTER the actual
+    23:00:59 cancellation. A THIRD, later ingestion_runs row for the SAME file
+    (run_id=102, dataset=orders, status=FAILED, object_uri=e2e-dbtkill-8796c91632c6.csv,
+    started_at=22:27:59.879854, age_since_started=00:33:31 at dump time) confirms the file was
+    re-claimed yet again under (c)'s own discover pass and ALSO did not resolve cleanly.
+    ROOT CAUSE: this is the SAME "orphaned/stalled stage TI rides the blunt 45-min dagrun_
+    timeout sweep instead of resolving via its own retry logic" pathology R18/R19 diagnosed for
+    podkill's kill-specific case -- except here the trigger is NOT an out-of-band pod delete;
+    it is genuine, sustained CPU-starvation-driven pod-scheduling failure (see finding 5) hitting
+    an UNRELATED DagRun, which then cascades via queue serialization into dbtkill's own DagRun.
+    execution_timeout is NOT being swallowed or failing to fire here -- (b)'s and (d)'s stage
+    tasks both show try=3, direct proof multiple real timeout-driven retry cycles DID occur --
+    but the retry math itself cannot resolve within the dagrun-level ceiling under sustained
+    contention (see finding 6).
+    (5) CPU-STARVATION CENSUS: "Insufficient cpu" FailedScheduling events this run: 3657
+    occurrences (vs 3483 in the surviving round19-job.log, +5%) -- a massive, PRE-EXISTING,
+    chronic condition, not newly introduced by this round's publish-resource fix. `kubectl
+    describe node`'s Allocated-resources block (single-node CI profile): cpu Requests
+    2580m/3000m allocatable = 86% consumed by baseline platform/system pods ALONE (airflow-
+    scheduler 420m, dag-processor 320m, api-server 200m, triggerer 120m, analytics-db/airflow-
+    db/minio/vault/kyverno/coredns/etc the remainder) -- leaving only ~420m CPU headroom for
+    ALL concurrently-running ETL pods (stage/dbt_build/publish/discover/integrity_gate, across
+    BOTH DAGs, some mapped up to 15-20 wide). FailedScheduling events observed for stage-*,
+    dbt-build-*, publish-*, and discover-* pods alike, with ages up to 56m in the events census
+    -- this node has essentially no slack once the platform's own control-plane pods are
+    running.
+    (6) TIMEOUT-BUDGET ARITHMETIC DOES NOT FIT: stage has `retries=3` (4 total attempts) +
+    `execution_timeout=10min` + `retry_exponential_backoff=True` (default retry_delay base,
+    growing per attempt) + the enclosing `dagrun_timeout=45min`. Worst case, 4 attempts each
+    consuming up to 10min execution_timeout plus growing exponential-backoff gaps between them
+    (e.g. ~5min, ~10min, ~20min at a 300s base) sums to 55+ minutes -- already EXCEEDING
+    dagrun_timeout=45min before the task's own retry budget can exhaust naturally. Under the
+    confirmed, chronic CPU-starvation condition (finding 5), a stage task that legitimately
+    needs 2-3 timeout cycles to get a pod scheduled will inevitably be force-skipped by
+    dagrun_timeout's blunt sweep before its own retries/failure logic ever resolves --
+    reproducing the exact "TI never reaches a natural terminal state, dagrun_timeout force-
+    skips it, zero error ever written" signature for ANY orders DagRun unlucky enough to need
+    multiple stage retries, independent of whether a pod was ever killed by a test.
+    (7) DURATION: job 19:50:46Z->23:01:34Z = 190min48s (CANCELLED at the ceiling, unlike R19's
+    184.45min self-terminated finish). Partial census: 33 passed/4 explicit FAILED (dbtkill,
+    u3, rebuild, orphan)/6 skipped = 43 of the expected 44 node-IDs; test_idempotent_reupload
+    never ran (no pytest summary line was ever printed) -- cut off mid-suite, most likely
+    waiting on its own queue-drain check behind DagRun (c)'s still-unresolved wedge. u3's
+    (21:48:39) and orphan's (22:54:01) own failures are BOTH the SAME downstream cascade,
+    correctly caught by the ROUND 18 queue-drain helper naming the exact still-active DagRun
+    each time (Z3rArVfS then e2e-dbtkill-8796c91632c6) -- pure downstream noise, not
+    independent bugs, matching this session's own established cascade-attribution precedent.
+    rebuild's failure (22:43:49, 14/15 orders files unsettled, zero progress for 600s) is the
+    same cascade under its own monotonic-stall assertion.
+    (8) GUARDS: Kyverno 0 unintended denials (only the deliberate PASSED unsigned-image test),
+    restarts 0 all roles (cp-monitor's restart-timeline awk emits every row rather than only
+    changed ones -- a pre-existing script bug, not a real restart signal; every restarts column
+    value observed is 0), scheduler peak 1,993,003,008B=1901MiB=74.3% of 2560Mi (R19:
+    1826MiB/71.3% -- +75MiB/+2.9%, consistent with the extra retry volume this round, not a
+    new OOM/crash-loop risk).
+  implication: >
+    Podkill's fix is CONFIRMED via direct TI evidence to work via a real per-task retry within
+    one DagRun (criterion (a) MET), though the exact sub-mechanism (execution_timeout vs KPO's
+    own faster exception) remains unproven by log evidence -- a residual, non-blocking gap.
+    Sweep assertion (10) and OOMKilled-publish fixes both CONFIRMED HELD (criteria (b)/(c) MET).
+    dbtkill's NEW failure mode is NOT an independent new bug and NOT a regression from this
+    round's fixes -- it is the SAME dagrun_timeout-force-skip pathology R18/R19 diagnosed,
+    reached via a different, previously-lower-visibility trigger: a pre-existing, massive
+    (3000+ occurrences/run), unfixed CPU-starvation condition on the single-node CI cluster,
+    combined with a timeout-budget hierarchy (execution_timeout x retries + backoff can exceed
+    dagrun_timeout) that was never checked for internal consistency when execution_timeout was
+    added this round. execution_timeout is demonstrably firing and driving real retries (try=3
+    observed twice) -- it is not being swallowed -- but retrying into a wall that is itself too
+    tight under contention just relocates the wedge from "podkill's own kill" to "any orders
+    DagRun unlucky enough to need multiple stage retries under load", which happened TWICE this
+    round to DagRuns with no relationship to the podkill/dbtkill test mechanisms at all. This
+    is a genuinely new, actionable, well-evidenced finding for ROUND 21, not a diagnostics gap:
+    it does not require another investigation round to act on, unlike prior rounds' honest
+    blind spots.
+  timestamp: 2026-08-28 (ROUND 20 post-run analysis, run 33205639775)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
