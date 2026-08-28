@@ -124,23 +124,53 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   teardown ran); scheduler peak 1923MiB = 93.9% of 2048Mi NEW HIGH-WATER (18b).
   DECISION CHECKPOINT returned: (19) is now a live design decision. See Current
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
-round19_status: "ROUND 19 IN PROGRESS (diagnostics-only, no production fix): five
-  instrumentation items implemented per user-confirmed charter -- orders DagRun/TI dump
-  (mirrors ROUND 5 customers dump), raw unfiltered scheduler-log signature capture (exact
-  'has timed-out'/'Error scheduling DAG run'/'Exception when executing SchedulerJob' text
-  confirmed via direct source read of the installed apache-airflow==3.3.0 on the LOCAL
-  persistent cluster), a new fast (2s) pod-termination watcher for stage/dbt_build/publish
-  pods (closes the KPO on_finish_action=delete_pod race ROUND 18 named), (26)'s query widened
-  to catch stale non-terminal (PENDING/RUNNING/STAGED, >20min old) rows, and (24)'s forensics-
-  rider pattern extended to sweep assertion (10) via a new _delete_detection_forensics()
-  helper (finished_at-equality pass-membership reconstruction, bronze presence check, last-
-  seen normalized.customers row). Offline battery clean (manifests/kubeconform, 564 unit,
-  14 dagtest, policy 157 passed + 2 pre-existing failures unrelated to this round, collection
-  + bash/python syntax checks all pass). Pushed; live-verification run ID pending -- see
-  Current Focus ROUND 19 + live_verification_state."
+round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha 3db1fde,
+  conclusion FAILURE, job 14:43:55->17:48:22 = 184.45min, self-terminated, 5.55min inside the
+  190-min ceiling -- healthier margin than R18's 0.7min): census 7 failed / 31 passed / 6
+  skipped in 10629.44s (2:57:09) -- IDENTICAL 7 test node-IDs to R18 (zero new, zero cleared,
+  expected for a diagnostics-only round). ROUND 19 SUCCEEDS ON ITS OWN PRE-REGISTERED
+  CRITERION: both named evidence gaps are now FORENSICALLY CLOSED with direct evidence, not
+  reconstruction. (A) Sweep assertion (10) DELETE-detection: the new forensics rider's direct
+  output CLOSES this per the pre-registered discriminator -- final day's own run_id=36 has a
+  non-None finished_at; its publish pass's staged_run_ids batch = [(35, .../customers_20240112.
+  csv), (36, .../customers_20240113.csv)]; the missing customer (2100100032) IS present in
+  staging.customers for run_id=35. CONFIRMS fix (21)'s claim-ALL-currently-STAGED-runs batching
+  as the mechanism -- same class as (24), a test-layer batching-scope mismatch, NOT a platform
+  DELETE-detection defect. (B) Podkill stall: FORENSICALLY CLOSED, and the mechanism is MORE
+  PRECISE than R18's reconstruction (which is now REFUTED for this run's failure shape). Direct
+  evidence: scheduler log line '2026-08-28T17:45:29.589732Z ... Run e2e-podkill-a49fbd2dd226 of
+  csv_ingest_orders has timed-out ... scheduler_job_runner.py:2833' (the exact 'has timed-out'
+  signature); the DagRun's own start/end (17:00:29.184901 -> 17:45:29.575582 = 45min00.4s,
+  matching the log timestamp within 14ms); and the orders TI dump showing stage map_index=0
+  try=1 started 17:01:47.345760 and NEVER reached a terminal state (end=None) before being
+  force-SKIPPED by dagrun_timeout, while dbt_build/publish never even started (try=0, start=
+  None). REFINED ROOT CAUSE: this is NOT 'publish crashed, retries exhausted' (R18's guess) --
+  it is that Airflow's KubernetesExecutor/scheduler NEVER detects the test's own `kubectl
+  delete pod --wait=false` deletion of the stage pod; the killed TaskInstance is orphaned at
+  try=1/running indefinitely (43+ min, zero requeue, zero error) until dagrun_timeout's blunt
+  45-min DagRun-level hammer force-SKIPs it; recovery then happens NOT via Airflow's own task
+  retry but via an entirely SEPARATE mechanism -- the next asset-triggered DagRun (started
+  17:45:30.016539, 1s after) re-discovers the still-PENDING ingestion_run row (run_id=42) and
+  reclaims it under a fresh run_id=337, RUNNING as of end-of-job. BONUS finding from the new
+  pod-termination watcher (unplanned, real, high-value): 3 distinct publish-pod OOMKilled
+  events (exit 137) at 16:26:35-16:27:18/16:35:04-16:35:50/16:51:56-16:52:37, all inside the
+  PRECEDING orders DagRun (asset_triggered__...16:09:45, start 16:15:27 -> end 17:00:28 =
+  ALSO exactly ~45min, ALSO a dagrun_timeout victim) -- a second, independent, previously-
+  unknown real production bug (publish genuinely exceeding its memory limit 3x in a row,
+  matching retries=3) that immediately preceded and fed into podkill's own wedge. Guards green:
+  Kyverno 0, restarts 0, scheduler peak 1826MiB = 71.3% of 2560Mi (R18: 1804MiB/70.5% --
+  stable, no OOM/crash-loop of Airflow's own control-plane). Diagnostics-only confirmed: git
+  diff dfdacd5 touches ONLY .github/workflows/e2e-full.yml + tests/e2e/slice/
+  test_backfill_2year_sweep.py, zero dags//packages/dataplat drift. DECISION CHECKPOINT
+  returned: ROUND 20 should be a TARGETED FIX round (zombie/orphan-pod detection for the
+  podkill mechanism, scope-fix for sweep assertion-10, and a NEW follow-up ticket for the
+  publish-OOMKill finding) rather than another diagnostics round -- the evidence bar this
+  session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 19 diagnostics-only round implemented and pushed; see Current Focus ROUND 19)
+updated: 2026-08-28 (ROUND 19 post-run analysis complete: both named evidence gaps forensically
+  closed, podkill root cause refined, sweep assertion-10 closed same-class as (24); see Current
+  Focus ROUND 19 OUTCOME)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -502,9 +532,131 @@ ROUND 20 can fix from confirmed root cause instead of reconstruction):
       batch + bronze presence/absence for assertion 10) rather than requiring further
       inference. Session manager runs the single 60s watcher against run 33181630984 (and
       33181630967 for completeness) -- do NOT self-watch further this turn."
-  next_action: "CHECKPOINT REACHED (human-action) -- run IDs recorded above. Awaiting the
-      live-verification watcher; a fresh continuation agent performs ROUND 19's post-run
-      analysis once it completes."
+  next_action: "SUPERSEDED -- see ROUND 19 OUTCOME below."
+
+ROUND 19 OUTCOME (2026-08-28, post-run analysis of run 33181630984 -- CURRENT STATE):
+  run: "e2e-full.yml 33181630984, headSha 3db1fde, conclusion FAILURE, job
+      14:43:55Z->17:48:22Z = 184.45min (self-terminated, NOT cancelled -- 5.55min inside the
+      190-min ceiling, a healthier margin than R18's 0.7min). Suite 10629.44s (2:57:09). Log
+      saved as scratchpad round19-job.log (17,300 lines). Companion publish.yml run
+      33181630967 (not this round's concern)."
+  census: "7 failed / 31 passed / 6 skipped -- IDENTICAL 7 test node-IDs to R18 byte-for-byte
+      (test_full_2year_sweep_customers_and_orders, test_pod_kill_mid_load_produces_no_
+      duplicates, test_pod_kill_mid_dbt_build_produces_no_duplicates,
+      test_u3_throughput_and_peak_rss_baseline,
+      test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending,
+      test_orphan_order_quarantined_while_valid_rows_publish, test_idempotent_reupload) --
+      zero new failures, zero cleared. Expected and correct for a diagnostics-only round: the
+      instrumentation changed NOTHING about pass/fail outcomes, only what evidence survives a
+      failure. This composition stability is itself a control check that the new instrumentation
+      did not perturb the pipeline's behavior."
+  criteria_adjudication:
+    - "PRE-REGISTERED SUCCESS CRITERION MET for BOTH named gaps. Per ROUND 19's own charter:
+      success means forensically-closed DIRECT evidence, independent of whether the underlying
+      bugs reproduce (they both did). Neither required 'confirmed via inference' this round."
+    - "sweep assertion (10) DELETE-detection: CLOSED, same disposition class as (24). The
+      forensics rider's live output: [a0] run_id=36 finished_at = 2026-08-28 15:10:11.176196
+      (non-None, genuinely finalized); [a] the SAME finished_at's full staged_run_ids batch =
+      [(35, s3://raw/customers/customers_20240112.csv), (36, s3://raw/customers/
+      customers_20240113.csv)] -- TWO run_ids, not one; [b] staging.customers (bronze) for
+      customer_id=2100100032 across that batch = [(35, 1)] -- present. Per the test's own
+      pre-registered discriminator (documented in the ROUND 19 charter itself): a batch of >1
+      run_id containing the customer anywhere CONFIRMS fix (21)'s claim-ALL-currently-STAGED-
+      runs batching semantics as the mechanism. find_vanished_customer_ids correctly operates
+      at PASS scope (per the currently-correct, ROUND-12-fixed platform code), not per-file
+      scope, and correctly did NOT invalidate a customer staged anywhere in that pass. VERDICT:
+      test-layer batching-scope mismatch, NOT a platform DELETE-detection defect -- identical
+      disposition class to (24)."
+    - "podkill stall: FORENSICALLY CLOSED, mechanism REFINED beyond R18's reconstruction (R18's
+      'publish pod crashed, retries never got a second shot' story is REFUTED for this run's
+      failure shape by direct TI evidence -- publish never even started here, try=0/start=None).
+      Direct, first-hand evidence (not inference): (1) raw scheduler log, grepped UNFILTERED
+      across the whole job: '21013:2026-08-28T17:45:29.589732Z [info] Run e2e-podkill-
+      a49fbd2dd226 of csv_ingest_orders has timed-out [airflow.jobs.scheduler_job_runner.
+      SchedulerJobRunner] loc=scheduler_job_runner.py:2833' -- the EXACT dagrun_timeout-firing
+      signature the charter pre-specified from direct source read. ZERO 'Error scheduling DAG
+      run' / 'Exception when executing SchedulerJob' / exceeds_max_active_runs lines -- ruling
+      OUT a scheduler-loop crash or a max-active-runs collision as alternate explanations. (2)
+      orders DagRun history: e2e-podkill-a49fbd2dd226, type=manual, state=failed, start=
+      2026-08-28 17:00:29.184901+00:00, end=2026-08-28 17:45:29.575582+00:00 -- duration
+      45min00.4s, matching the 45min dagrun_timeout config AND the scheduler log timestamp to
+      within 14 milliseconds. (3) orders key-TI dump for this DagRun: stage map_index=0, try=1,
+      start=2026-08-28 17:01:47.345760+00:00, end=None, final state=skipped (force-skipped by
+      dagrun_timeout's unconditional sweep, NEVER itself transitioned to failed/up_for_retry on
+      its own); stage map_index 1-9, try=1, start=None (never even scheduled -- the serialized
+      pipe never got past index 0); dbt_build, try=0, start=None, state=skipped; publish, try=0,
+      start=None, state=skipped (neither downstream task ever ran at all in this DagRun)."
+  refined_root_cause: "The killed stage TaskInstance (map_index=0) is orphaned the instant the
+      test's `kubectl delete pod ... --wait=false` removes its pod: Airflow's KubernetesExecutor
+      /scheduler never observes the deletion and never transitions that TaskInstance out of
+      try=1/running -- no requeue, no zombie-detection failure, no error, for the full 43min43s
+      between the kill (~17:01:47 pod-claim time) and dagrun_timeout's force-SKIP at 17:45:29.
+      This is NOT the designed fix-20a 'wait out the ~5.5min lease then genuinely re-stage
+      WITHIN the same DagRun' path (that path requires Airflow to notice the failure and issue
+      try=2, which never happens here) -- it is a distinct, deeper gap: whatever mechanism is
+      supposed to detect a pod that disappears without ever reporting a terminal phase (the
+      scheduler's zombie-task heartbeat-timeout detection, `scheduler_zombie_task_threshold`,
+      is the leading candidate; its interaction with KubernetesExecutor-managed pods is NOT yet
+      directly verified this round) either is not firing, is misconfigured, or does not apply
+      to this executor/pod-lifecycle combination. Recovery in this run happened ONLY because an
+      UNRELATED asset-triggered DagRun started 1 second after dagrun_timeout released the
+      global orders slot (17:45:30.016539) and its own discovery pass opportunistically
+      reclaimed the still-PENDING ingestion_run row (run_id=42 -> fresh claim run_id=337,
+      RUNNING as of end-of-job) -- a lucky, incidental recovery path, not a designed one; had no
+      further orders DagRun been queued behind podkill's, the file would have stayed PENDING
+      indefinitely with no automatic re-trigger."
+  bonus_finding_publish_oomkill: "UNPLANNED but real and high-value: the new pod-termination
+      watcher (item 3 of the charter) did NOT catch the podkill target pod (expected --
+      `kubectl delete pod` removes the pod object entirely, so there is no lingering
+      containerStatuses.terminated to poll; a structural, not a timing, gap for THIS kill
+      mechanism -- informative on its own: any future diagnostic aimed at THIS specific kill
+      path must key off TaskInstance/DagRun state, not pod-container state, exactly as this
+      round's items 1-2 did). It DID catch something else: 3 distinct publish-pod OOMKilled
+      events (reason=OOMKilled, exitCode=137) -- publish-8936eenv (2026-08-28T16:51:56Z ->
+      16:52:37Z), publish-cm617fe9 (16:26:35Z -> 16:27:18Z), publish-y1mtyjg5 (16:35:04Z ->
+      16:35:50Z) -- all three inside the PRECEDING orders DagRun
+      (asset_triggered__2026-08-28T16:09:45.116153+00:00_pnaP7IGo, start=2026-08-28
+      16:15:27.833104+00:00, end=2026-08-28 17:00:28.084541+00:00, state=failed -- duration
+      44min59.1s, ALSO a dagrun_timeout victim by the same signature class). This is a SECOND,
+      independent, previously-unknown real production bug: publish is genuinely exceeding its
+      container memory limit on 3 consecutive attempts (matching KPO's retries=3), never
+      succeeding, until that DagRun's own dagrun_timeout fires -- and podkill's own DagRun was
+      queued directly behind it, meaning THIS round's two failure sequences chained
+      back-to-back (~90min of combined dagrun_timeout wedge time) rather than being independent
+      events. NOT adjudicated further this round (out of this round's charter) -- flagged as a
+      genuine NEW follow-up requiring its own investigation (candidate causes: growing retained-
+      fixture corpus across rounds inflating publish's per-invocation memory footprint per
+      README's raw-immutability/append-only design; or a real memory leak/unbounded buffering in
+      publish's own SCD merge path)."
+  duration_and_ceiling_risk: "184.45min self-terminated, 5.55min inside the 190-min ceiling --
+      healthier margin than R18's 0.7min (suite itself ran ~4min faster: 10629.44s vs R18's
+      10866.63s, within normal CI-contention noise, not attributable to this round's
+      diagnostics-only changes). The new instrumentation (2s pod-term-watch background poll,
+      widened SQL query, extra end-of-job dump sections) added negligible overhead. Guards
+      green: Kyverno 0 denials (only the deliberate PASSED unsigned-image test), restarts 0 all
+      roles (empty restart-change timeline), scheduler peak 1,915,170,816B = 1826MiB = 71.3% of
+      2560Mi (R18: 1804MiB/70.5% -- stable, marginal growth within noise, no OOM/crash-loop of
+      Airflow's own control-plane pods)."
+  scope_confirmation: "Diagnostics-only confirmed via `git show --stat dfdacd5`: exactly 2
+      files touched (.github/workflows/e2e-full.yml, tests/e2e/slice/
+      test_backfill_2year_sweep.py), zero dags//packages/dataplat/src changes -- matches the
+      charter's own scope_guardrails exactly, no drift."
+  next_action: "DECISION CHECKPOINT returned to user: BOTH of ROUND 18's named evidence gaps
+      are now forensically closed with direct evidence, meeting this round's own pre-registered
+      bar. Session should move to a TARGETED FIX round (ROUND 20), not another diagnostics
+      round: (1) podkill -- investigate why zombie/orphan-pod detection does not reclaim a
+      TaskInstance whose pod was deleted out-of-band within a bounded window (candidate:
+      `scheduler_zombie_task_threshold` config/behavior under KubernetesExecutor), so a killed
+      stage task retries within its OWN DagRun instead of relying on dagrun_timeout's 45-min
+      hammer plus an incidental downstream DagRun's opportunistic pickup; (2) sweep assertion
+      (10) -- apply the SAME disposition already used for (24): scope the test's own assertion
+      to the actual publish pass's batch (or make it robust to legitimate multi-day batching)
+      rather than assuming one-file-per-pass; (3) NEW follow-up ticket (not this session's
+      charter, needs its own investigation): publish-pod OOMKilled recurrence, independent of
+      the podkill test. Carried follow-ups unchanged: sidecar mirror, stage-side
+      RejectionRateCircuitBreaker classification, teardown-race flake class, v_run_recovery
+      wording, ADR-0012's deferred silver disposition, merge.py delta-scoping before any dataset
+      adopts strategy 'merge', scd_concurrent duration-variance watch."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
@@ -8440,8 +8592,108 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     wedge duration is now also a ceiling-margin risk (0.7min slack this
     round) independent of whether it is ever fixed to complete faster.
 
+- timestamp: 2026-08-28 (ROUND 19 post-run analysis, run 33181630984, headSha 3db1fde)
+  checked: >
+    ROUND 19's five diagnostics-only instrumentation items against the LIVE run's job log
+    (17,300 lines, scratchpad round19-job.log): the new orders-side DagRun/TaskInstance dump,
+    the raw unfiltered scheduler-log signature grep, the fast (2s) pod-termination watcher, the
+    widened finding-(26) stale-row query, and (24)'s forensics-rider pattern extended to
+    assertion (10). Also verified: census diff vs R18 (identical 7 node-IDs), guard metrics
+    (Kyverno/restarts/scheduler-peak), and `git show --stat dfdacd5` for production-code drift.
+  found: >
+    (1) Scheduler log, grepped RAW and UNFILTERED across the whole job (`--since=200m`):
+    exactly one 'has timed-out' match -- '21013:2026-08-28T17:45:29.589732Z [info] Run
+    e2e-podkill-a49fbd2dd226 of csv_ingest_orders has timed-out [airflow.jobs.
+    scheduler_job_runner.SchedulerJobRunner] loc=scheduler_job_runner.py:2833'. ZERO 'Error
+    scheduling DAG run', ZERO 'Exception when executing SchedulerJob', ZERO
+    exceeds_max_active_runs matches -- rules out a scheduler-loop crash or a max-active-runs
+    collision as alternate explanations for this run's wedge. (2) orders DagRun history (33
+    total DagRuns dumped): e2e-podkill-a49fbd2dd226, type=manual, state=failed, start=
+    2026-08-28 17:00:29.184901+00:00, end=2026-08-28 17:45:29.575582+00:00 (45min00.4s,
+    matching the scheduler log timestamp to within 14ms and the dagrun_timeout=45min config
+    exactly). (3) orders key-TI dump (595 TI rows across 6 key tasks): for this DagRun, stage
+    map_index=0 try=1 start=2026-08-28 17:01:47.345760+00:00 end=None state=skipped (force-
+    skipped by dagrun_timeout, never itself transitioned to failed/up_for_retry); stage
+    map_index 1-9 never started (start=None); dbt_build and publish both try=0/start=None/
+    state=skipped (neither downstream task was ever scheduled in this DagRun) -- DIRECTLY
+    REFUTES R18's 'publish pod crashed ~11min post-kill, retries exhausted' reconstruction for
+    this run's failure shape (publish never ran at all here). (4) meta.ingestion_runs mapping
+    dump: file_id=62 (the podkill fixture) has TWO ingestion_runs rows -- run_id=42 (status
+    PENDING, the original claim, orphaned) and run_id=337 (status RUNNING, a FRESH claim). The
+    orders DagRun history shows the DagRun that produced run_id=337's claim
+    (asset_triggered__2026-08-28T16:16:51.263538+00:00_TqLEQ2hB, state=running) started at
+    2026-08-28 17:45:30.016539+00:00 -- exactly 1 second after podkill's own DagRun ended via
+    dagrun_timeout, confirming recovery happened via an UNRELATED asset-triggered DagRun's
+    opportunistic rediscovery of the still-PENDING row, not via Airflow's own stage-task retry
+    (which never fired -- try stayed at 1 for the whole 45min). (5) pod-termination watcher
+    (/tmp/etl-pod-terminations.log): captured ZERO entries for any stage pod matching the
+    podkill kill window (~17:01:47) -- expected and informative, not a miss: `kubectl delete
+    pod --wait=false` removes the pod object entirely, leaving no lingering
+    containerStatuses.terminated for a poll-based watcher to catch; this kill mechanism is
+    structurally invisible to container-state polling and must be diagnosed via TaskInstance/
+    DagRun state instead (exactly what items 1-2 did). The SAME watcher DID catch 3 distinct
+    publish-pod OOMKilled events (exitCode=137): publish-cm617fe9 (2026-08-28T16:26:35Z ->
+    16:27:18Z), publish-y1mtyjg5 (16:35:04Z -> 16:35:50Z), publish-8936eenv (16:51:56Z ->
+    16:52:37Z) -- all three inside the DIRECTLY PRECEDING orders DagRun
+    (asset_triggered__2026-08-28T16:09:45.116153+00:00_pnaP7IGo, start=16:15:27.833104+00:00,
+    end=17:00:28.084541+00:00, state=failed, duration 44min59.1s -- ALSO a dagrun_timeout
+    victim by the same log-signature class, immediately adjacent to podkill's own). (6) widened
+    finding-(26) query (FAILED/QUARANTINED/error_message OR stale PENDING/RUNNING/STAGED
+    >20min): returned exactly 2 rows at end-of-job -- run_id=41 (orders, RUNNING,
+    age=00:46:24, the concurrent_select fixture, still legitimately in flight behind the
+    backlog) and run_id=336 (orders, FAILED, age=00:00:29, the idempotent_reupload test's own
+    fresh first-upload failure) -- run_id=337 (podkill's fresh reclaim) was correctly excluded
+    (age <20min at dump time, consistent with the query's own threshold design, not a miss).
+    (7) census: 7 failed/31 passed/6 skipped, IDENTICAL test node-IDs to R18 (zero new, zero
+    cleared). (8) guards: Kyverno 0 denials, restarts 0 all roles, scheduler peak
+    1,915,170,816B=1826MiB=71.3% of 2560Mi (R18: 1804MiB/70.5%, stable). (9) `git show --stat
+    dfdacd5`: exactly 2 files touched (.github/workflows/e2e-full.yml, tests/e2e/slice/
+    test_backfill_2year_sweep.py) -- zero production-code drift, matching the round's own
+    scope_guardrails.
+  implication: >
+    ROUND 19's own pre-registered success criterion is MET for both named gaps: the mechanism
+    is now forensically closed with direct evidence for both podkill and sweep assertion (10),
+    not reconstruction. Assertion (10) is CLOSED (same disposition class as (24), test-layer
+    fix, no platform bug). Podkill's mechanism is CLOSED and materially REFINED: the actual
+    defect is that Airflow never detects the test's out-of-band `kubectl delete pod` removal of
+    the stage pod -- the TaskInstance is orphaned at try=1/running with zero requeue for the
+    full window, and only dagrun_timeout's blunt 45-min DagRun-level hammer ever terminates it;
+    R18's 'publish crashed, retries exhausted' story does not hold for this run's own evidence
+    and should be retired in favor of this TI-level orphaning mechanism. A genuinely NEW,
+    independent finding (publish-pod OOMKilled x3, unrelated to the podkill test) surfaced as a
+    byproduct of the pod-termination watcher and needs its own follow-up ticket, separate from
+    this session's podkill/assertion-10 charter. Recommendation: ROUND 20 should be a targeted
+    FIX round (investigate `scheduler_zombie_task_threshold`/orphan-pod detection under
+    KubernetesExecutor for podkill; scope-fix assertion (10) like (24)) rather than another
+    diagnostics round -- the evidence bar this session set for itself (direct, not inferred) is
+    now satisfied for both of ROUND 18's named gaps.
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
+
+- hypothesis: "Sweep assertion (10) (test_full_2year_sweep_customers_and_orders' DELETE-
+    detection check) is a genuine platform DELETE-detection defect: find_vanished_customer_ids
+    fails to invalidate a customer (2100100032) that is genuinely absent from the final day's
+    own snapshot, leaving it incorrectly is_current=true."
+  evidence: "ROUND 19's _delete_detection_forensics() rider (extending (24)'s exact pattern)
+    fired on this exact failure and produced the pre-registered discriminating evidence: the
+    final day's own run_id=36 has a non-None finished_at (genuinely finalized by a publish
+    pass); that SAME finished_at's full staged_run_ids batch spans TWO run_ids -- [(35,
+    s3://raw/customers/customers_20240112.csv), (36, s3://raw/customers/customers_20240113.
+    csv)] -- not just [36] alone; and staging.customers (bronze) shows customer_id=2100100032
+    genuinely present for run_id=35, one of the batch's members. Per the test's own pre-
+    registered discriminator (documented in the ROUND 19 charter): a multi-run_id batch
+    containing the customer anywhere REFUTES the 'genuine DELETE-detection bug' hypothesis and
+    CONFIRMS the alternate ('test assumes one-file-per-publish-pass; the platform actually
+    operates at whatever-is-STAGED-when-publish-runs granularity' -- fix (21)'s own documented
+    batching semantics). find_vanished_customer_ids' bronze snapshot correctly (per the
+    platform's real, currently-correct batch-scoped semantics) saw this customer as 'staged
+    this pass' and correctly did NOT invalidate it. direct source read of
+    packages/dataplat/src/dataplat/scd/delete_detection.py (ROUND 18) already confirmed
+    find_vanished_customer_ids is correctly scoped to staged_run_ids; this round's forensics
+    closes the remaining question of WHY the final day's own pass could legitimately span
+    multiple days' run_ids under CI's confirmed CPU-contention/queue-drain conditions."
+  timestamp: 2026-08-28 (ROUND 19 post-run analysis, run 33181630984)
 
 - hypothesis: "ROUND 12 alternates for (16)'s 54%: (i) the mass-delete test fixture's own
     15/50 snapshot leaked into the sweep corpus; (ii) per-window roster churn in seed v5
@@ -9018,6 +9270,26 @@ root_cause: >
   fixed ~158-188min -- 150 does not hold even green (raise to ~180-190 or trim the
   sweep module's 47min scd+pilot throughput cost). Sweep failure at 14:48:31 (exact
   assert unknown, no traceback) needs ROUND 15 adjudication.
+  ROUND 19 ADDENDUM (2026-08-28, run 33181630984, supersedes ROUND 18's podkill
+  reconstruction below): the podkill DagRun wedge is now FORENSICALLY CLOSED with direct
+  evidence (exact 'has timed-out' scheduler log line + exact orders DagRun/TI state -- see
+  Current Focus ROUND 19 OUTCOME + Evidence). REFINED mechanism, replacing R18's 'publish
+  crashed, retries exhausted' guess: the test's own `kubectl delete pod --wait=false` removes
+  the stage pod out-of-band; Airflow's KubernetesExecutor/scheduler never observes this
+  deletion and never transitions the stage TaskInstance out of try=1/running -- no requeue, no
+  error, for the full 43+ minutes until dagrun_timeout's blunt 45-min DagRun-level sweep force-
+  SKIPs it (downstream dbt_build/publish never even start, try=0). Recovery in the observed run
+  happened only incidentally, via a wholly separate asset-triggered DagRun opportunistically
+  reclaiming the still-PENDING ingestion_run row 1 second after dagrun_timeout released the
+  slot -- not via any designed Airflow-level or dataplat-level retry path. Leading candidate
+  fix direction for ROUND 20: investigate whether/why the scheduler's zombie-task heartbeat-
+  timeout detection (`scheduler_zombie_task_threshold`) does not reclaim a KubernetesExecutor-
+  managed TaskInstance whose pod disappears without ever reporting a terminal phase. Sweep
+  assertion (10)'s DELETE-detection finding is CLOSED as a test-layer batching-scope artifact,
+  same disposition class as (24) -- see Eliminated. A SECOND, independent, previously-unknown
+  finding surfaced as a byproduct (publish-pod OOMKilled x3, exit 137, in the DagRun
+  immediately preceding podkill's own) is flagged as a new follow-up requiring its own
+  investigation, out of this session's original podkill/assertion-10 charter.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
