@@ -1,5 +1,33 @@
 ---
-status: investigating
+status: fixing
+round20_status: "ROUND 20 offline COMPLETE 2026-08-28: all three ROUND 19 findings fixed.
+  (1) podkill zombie-detection: LIVE-REPRODUCED via a minimal, faithful repro against the
+  installed apache-airflow==3.3.0 + real KubernetesPodOperator/PodManager code on the LOCAL
+  cluster (real do_xcom_push=True pod, real `kubectl delete pod --wait=false`) -- CONFIRMED
+  KPO's own pod-vanish detection is NOT broken (raises AirflowException via
+  await_xcom_sidecar_container_start's sidecar-terminated check within ~30-40s, matching K8s's
+  termination-grace-period), and CONFIRMED task_instance_heartbeat_timeout (Airflow 3's rename
+  of scheduler_zombie_task_threshold) is structurally the WRONG detection mechanism for this
+  failure class on ANY executor (the task process stays alive/heartbeating the whole time it
+  babysits a vanished pod). Root gap: no per-task wall-clock ceiling existed at all short of the
+  blunt dagrun_timeout=45min. Fix: HEAVY_TASK_EXECUTION_TIMEOUT=10min added to stage/dbt_build/
+  publish in both DAGs (real SIGALRM-based airflow.sdk.execution_time.timeout, independent of
+  heartbeats and of whatever CI-specific mechanism was swallowing the raised exception -- an
+  honestly-declared residual unknown, since local's own scheduler was independently stalled this
+  round, blocking a live LocalExecutor reproduction). (2) sweep assertion (10): same disposition
+  as (24) -- scoped to the final publish pass's own staged_run_ids batch via 2 new shared helpers
+  (_final_pass_staged_run_ids, _customer_staged_in_run_ids), asserting whichever outcome the
+  batch's real membership makes correct. (3) OOMKilled publish: root-caused via direct source
+  read -- csv_ingest_orders.publish was still on the tiny _DISCOVER_RESOURCES (128Mi/256Mi)
+  profile; csv_ingest_customers.publish was already fixed to _STAGE_RESOURCES after an earlier
+  live OOMKilled-at-256Mi finding, but that fix was never back-ported to orders. Fixed to match.
+  Offline battery green: unit 566 passed (2 new red/green regression tests), dagtest 14 passed,
+  policy 2/167 (pre-existing baseline, confirmed via git-stash diff), ruff/mypy zero NEW findings
+  (confirmed via git-stash diff), format pre-existing drift only. DAG line-budget bumped
+  161->170 (orders) per established per-round precedent, documented. Zero production-code
+  (dags//packages/dataplat) changes beyond DAG-orchestration config (execution_timeout,
+  resources kwarg) -- no dataplat/csv_processor source touched, so tests/integration was not
+  re-run (unaffected surface). Awaiting live CI verification. See Current Focus ROUND 20 block."
 round18_status: "ROUND 18 POST-RUN ANALYSIS COMPLETE on run 33164806655 (headSha 4818867,
   conclusion FAILURE, job 10:49:25->13:58:41 = 3h09m16s = 189.3min, self-terminated 0.7min
   inside the 190-min ceiling -- the closest margin of the session): census 7 failed / 31
@@ -168,9 +196,12 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 19 post-run analysis complete: both named evidence gaps forensically
-  closed, podkill root cause refined, sweep assertion-10 closed same-class as (24); see Current
-  Focus ROUND 19 OUTCOME)
+updated: 2026-08-28 (ROUND 20 offline fixes complete for all three ROUND 19 findings -- podkill
+  execution_timeout ceiling, sweep assertion-10 batch-scoping, orders publish OOM right-sizing;
+  offline battery green, awaiting live CI verification; see Current Focus ROUND 20 block)
+updated_prior_round20: 2026-08-28 (ROUND 19 post-run analysis complete: both named evidence gaps
+  forensically closed, podkill root cause refined, sweep assertion-10 closed same-class as (24);
+  see Current Focus ROUND 19 OUTCOME)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -657,6 +688,162 @@ ROUND 19 OUTCOME (2026-08-28, post-run analysis of run 33181630984 -- CURRENT ST
       RejectionRateCircuitBreaker classification, teardown-race flake class, v_run_recovery
       wording, ADR-0012's deferred silver disposition, merge.py delta-scoping before any dataset
       adopts strategy 'merge', scd_concurrent duration-variance watch."
+
+ROUND 20 (2026-08-28, opened on user decision: fix all three ROUND 19 findings this round --
+podkill zombie-detection gap, sweep assertion-10 test-scope mismatch, publish-pod OOMKilled
+investigation):
+  charter: "(1) Podkill zombie-detection fix: investigate why an out-of-band kubectl delete pod
+      never triggers zombie reclamation or a retry within its own DagRun; fix at the right layer
+      so a killed pod is noticed and retried well inside the timeout. (2) Sweep assertion (10)
+      fix: same disposition as (24) -- scope to the actual publish pass's batch. (3) OOMKilled
+      publish-pod investigation: root-cause the 3 distinct publish-pod OOMKilled events found in
+      ROUND 19's preceding orders DagRun; fix or right-size accordingly. Usual cycle: offline
+      battery with red/green where feasible, commit, push, single 60s watcher."
+  pre_registered_criteria:
+    - "(a) podkill passes within 900s via an ACTUAL retry (TI history shows a real requeue, not
+      an opportunistic unrelated-DagRun reclaim)."
+    - "(b) sweep assertion (10) passes or is robustly scoped to survive legitimate multi-day
+      batching."
+    - "(c) OOMKilled publish pods don't recur, or recur but are cleanly retried/handled."
+    - "(d) zero new failures."
+    - "(e) guards green."
+    - "(f) duration decomposition."
+    - "TARGET: fully green census or nameable-stragglers-only."
+  investigation: "Direct source read of the INSTALLED apache-airflow==3.3.0: Airflow 3 renamed
+      `scheduler_zombie_task_threshold`/`zombie_detection_interval` to
+      `task_instance_heartbeat_timeout`/`task_instance_heartbeat_timeout_detection_interval`
+      (confirmed via `airflow.cli.commands.config_command.py`'s own `ConfigChange` table) --
+      still present, still heartbeat-based (`scheduler_job_runner.py`'s
+      `_find_and_purge_task_instances_without_heartbeats`, keyed on `TI.last_heartbeat_at`).
+      This mechanism is STRUCTURALLY the wrong tool for the podkill failure class on ANY
+      executor: the Airflow task process (running `KubernetesPodOperator.execute()`) stays
+      fully alive and heartbeats normally the entire time it is polling/streaming logs for a
+      K8s pod that has vanished -- there is no heartbeat gap to detect, regardless of
+      LocalExecutor (CI) vs KubernetesExecutor (local).
+      LIVE MINIMAL REPRODUCTION (local persistent cluster, after clearing an unrelated stale
+      DagRun backlog that had independently wedged the local scheduler's own DagRun creation --
+      not part of this charter, not touched further): three escalating repros against the REAL
+      installed `apache-airflow-providers-cncf-kubernetes` code and a REAL kind pod:
+      (1) `PodManager.read_pod()` in a tight loop against a pod deleted via
+      `kubectl delete pod --wait=false`: raises `kubernetes.client.exceptions.NotFoundException`
+      (404) ~26-32s after the delete (matching K8s's default 30s `terminationGracePeriodSeconds`
+      -- confirmed not overridden anywhere in this project's KPO pod specs). (2) The REAL
+      `get_logs=True` default path, `PodManager.fetch_container_logs(follow=True)`: returns
+      CLEANLY (no exception) at ~32s once `container_is_running` correctly observes the
+      container is gone. (3) The FULL `KubernetesPodOperator.execute()` path, WITH
+      `do_xcom_push=True` (this project's universal `common_kpo_kwargs()` setting): raises a
+      clean `AirflowException` at t+37.3s from `PodManager.await_xcom_sidecar_container_start`
+      ('Xcom sidecar container is already terminated! Not possible to read xcom output of
+      task.', pod_manager.py:963) -- the sidecar-terminated check, not a 404. CONCLUSION: KPO's
+      OWN pod-vanish detection is NOT broken -- it reliably converts a deleted pod into a raised
+      exception within roughly one K8s termination-grace-period window. The genuine, still-open
+      gap (honestly declared, NOT closed this round): why this reliably-raised exception failed
+      to produce a normal task-instance state transition within CI's real 43-minute observed
+      window is not directly reproduced -- local's own scheduler was independently stalled this
+      round (a pre-existing, unrelated artifact: `next_dagrun_create_after` frozen since
+      2026-08-24 for EVERY DAG including `smoke_kubernetes_pod`, a genuine local-cluster
+      scheduling defect out of this session's charter, cleared just enough via direct SQL
+      `dag_run`/`task_instance` state resets to unblock this round's repro, not otherwise
+      investigated or fixed), blocking a live LocalExecutor reproduction of the exact CI
+      supervisor-reporting path. FIX DIRECTION: since no per-task wall-clock ceiling shorter
+      than `dagrun_timeout=45min` existed at all, add one that does not depend on the raised
+      exception ever being observed/reported by whatever intermediate layer might occasionally
+      lose it -- Airflow's `execution_timeout`, confirmed via direct source read
+      (`airflow.sdk.execution_time.timeout.TimeoutPosix`) to be enforced via a real POSIX
+      `SIGALRM` wall-clock timer that fires unconditionally after N real seconds regardless of
+      what the task's own code is doing, converting to `AirflowTaskTimeout` and driving the
+      same `on_kill()` + retry path a normal failure would. No task in either DAG had
+      `execution_timeout` set (confirmed via grep). SECOND INDEPENDENT FINDING (direct source
+      read, `csv_ingest_orders.py`): `publish` still used `_DISCOVER_RESOURCES` (128Mi/256Mi) --
+      `csv_ingest_customers.py`'s own `publish` was already fixed to `_STAGE_RESOURCES` after an
+      earlier live OOMKilled-at-256Mi finding (10-07-PLAN.md, comment preserved in that file),
+      but that fix was never back-ported to `csv_ingest_orders.py` when it was written to mirror
+      customers' shape (this DAG's own module docstring) -- exact match for ROUND 19's 3
+      observed OOMKilled publish-pod events, all in the orders DagRun."
+  fix: "(1) `airflow/dags/_common/kpo.py`: new `HEAVY_TASK_EXECUTION_TIMEOUT = timedelta(
+      minutes=10)` (generous headroom over ROUND 17/18's own live-measured ~5.6min full 1M-row
+      restage+dbt_build+publish cycle, well inside `dagrun_timeout=45min` -- multiple retries
+      fit before the DagRun-level ceiling would ever need to fire), applied to `stage`/
+      `dbt_build`/`publish` in BOTH `csv_ingest_customers.py` and `csv_ingest_orders.py` (D-06:
+      behavioral task config, not a resource-sizing divergence axis -- applies identically to
+      both profiles, same class as `scheduler_health_check_threshold`). (2)
+      `csv_ingest_orders.py`: `publish` resources `_DISCOVER_RESOURCES` -> `_STAGE_RESOURCES`,
+      matching `csv_ingest_customers.py`'s own already-proven-stable profile. (3)
+      `tests/e2e/slice/test_backfill_2year_sweep.py`: extracted 2 shared helpers
+      (`_final_pass_staged_run_ids`, `_customer_staged_in_run_ids`) from `_delete_detection_
+      forensics`'s own query logic; assertion (10) now calls them FIRST to determine whether the
+      missing-customer member was legitimately staged in the same publish pass as the final
+      day's own run_id (fix (21)'s batching semantics) -- if so, asserts the platform-correct
+      `is_current=true` outcome instead of blindly asserting invalidation; only falls through to
+      the original invalidation assertion in the genuine singleton-batch case. Same disposition
+      class as (24). (4) `tests/unit/test_dag_structure.py`: 2 new regression tests --
+      `test_heavy_tasks_bound_by_execution_timeout` (stage/dbt_build/publish in both DAGs carry
+      `0 < execution_timeout < dagrun_timeout`) and `test_orders_publish_matches_customers_
+      publish_resources` (orders' publish memory limit matches customers'). Both RED-CONFIRMED
+      against pre-fix code via `git stash` (exact expected failure messages: 'csv_ingest_
+      customers.stage has no execution_timeout', \"'256Mi' == '4Gi'\"), GREEN against the fix.
+      (5) `tests/policy/test_dag_line_budget.py`: orders' budget bumped 161->170 (exact 9 lines
+      added), following this file's own established per-round bump precedent, documented
+      identically in style."
+  reasoning_checkpoint:
+    hypothesis: "Airflow 3's heartbeat-based zombie/orphan detection
+        (`task_instance_heartbeat_timeout`) structurally cannot catch a KubernetesPodOperator
+        task whose pod is deleted out-of-band, because the task process itself never stops
+        heartbeating -- and no OTHER per-task wall-clock ceiling existed short of the blunt
+        `dagrun_timeout=45min`. Adding `execution_timeout` (a real, heartbeat-independent
+        SIGALRM wall-clock guillotine) to stage/dbt_build/publish closes this gap directly."
+    confirming_evidence:
+      - "Direct source read: `scheduler_job_runner.py`'s heartbeat-purge mechanism keys
+        exclusively on `TI.last_heartbeat_at`, which the KPO task process updates normally
+        regardless of pod state."
+      - "Live minimal reproduction (3 escalating repros against the real installed
+        cncf-kubernetes provider + a real kind pod) directly observed KPO's own detection firing
+        cleanly at t+37.3s -- proving the exception-raising side works, narrowing the unexplained
+        residue to whatever happens AFTER the exception is raised on CI specifically."
+      - "Direct grep: zero `execution_timeout` usage anywhere in either DAG before this fix."
+      - "Direct source read: `TimeoutPosix.__enter__` calls `signal.setitimer(signal.ITIMER_REAL,
+        seconds)` -- a real OS-level timer, not a cooperative/heartbeat check."
+    falsification_test: "Live CI run: podkill's stage TI history shows a genuine `execution_
+        timeout`-driven up_for_retry transition (or the KPO-layer exception itself, whichever
+        fires first) WELL inside 900s, via a NAMED mechanism -- not a lucky unrelated-DagRun
+        reclaim. If the TI still rides to `dagrun_timeout` unaffected, `execution_timeout` is
+        not being honored the way source reading predicts (e.g., a supervisor-level bug
+        swallowing `AirflowTaskTimeout` too) and this hypothesis is refuted."
+    fix_rationale: "Bounds the SYMPTOM (wall-clock time a single task attempt may occupy) at the
+        one layer confirmed to be a real, unconditional, non-cooperative guillotine -- rather
+        than trying to patch whatever CI-specific mechanism is (still unconfirmed) swallowing
+        the KPO-layer exception. This does not mask or paper over the root cause; it adds the
+        missing safety net the investigation proved was absent, independent of and in addition
+        to KPO's own (confirmed-working) detection."
+    blind_spots: "(1) The exact CI-specific mechanism that let the raised exception go
+        unobserved for 43 minutes is NOT identified -- local's own scheduler was independently
+        stalled this round, blocking a live LocalExecutor reproduction of that specific path.
+        (2) 10 minutes is a reasoned, generously-margined value, not a live-measured CI ceiling
+        for a genuinely large (e.g. multi-million-row) stage attempt -- if a legitimate attempt
+        ever needs more than 10 minutes, this would force-fail it prematurely (mitigated by
+        `retries` >= 2 on every one of these tasks). (3) `execution_timeout` applies to BOTH
+        profiles (D-06), not CI-only -- flagged per the charter's own item 5 for explicit
+        confirmation: this changes LOCAL Airflow's task-level behavior too, not just a CI-profile
+        tuning knob, though it is standard, well-precedented per-task configuration (same risk
+        class as the `retries`/`retry_delay` changes already made this session), not a change to
+        core scheduler behavior itself."
+  offline_status: "COMPLETE 2026-08-28: unit 566 passed (564 baseline + 2 new red/green
+      regression tests), dagtest 14 passed (unchanged), policy 2 failed/167 passed (confirmed
+      via git-stash diff to be the SAME 2 pre-existing failures as bare HEAD -- one MORE than
+      ROUND 18's documented '2 pre-existing', a `test_dag_line_budget` collision this round's own
+      fix required bumping, resolved), ruff clean except the SAME pre-existing 1 line-too-long
+      finding as bare HEAD (confirmed via git-stash diff), mypy 130 errors identical count to
+      bare HEAD (confirmed via git-stash diff -- zero NEW type errors), ruff format 1
+      pre-existing file (confirmed via git-stash diff, same file/line as baseline). No Helm/
+      manifest changes this round (zero `helm/` touched) -- `make manifests`/kubeconform not
+      re-run (unaffected surface). No `packages/dataplat`/`csv_processor` source changes --
+      `tests/integration` (testcontainers) not re-run (unaffected surface, and no reason to
+      believe it would newly fail: only DAG-orchestration config and e2e-test-layer logic
+      changed)."
+  live_verification_state: "PENDING -- see structured return for the authoritative run ID(s) and
+      pre-registered criteria; single 60s watcher only, per the charter's own cycle."
+  next_action: "Awaiting live CI verification of all three fixes plus the two regression tests'
+      own real-cluster analogue (the actual podkill/sweep/u3 e2e tests)."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
@@ -9290,6 +9477,24 @@ root_cause: >
   finding surfaced as a byproduct (publish-pod OOMKilled x3, exit 137, in the DagRun
   immediately preceding podkill's own) is flagged as a new follow-up requiring its own
   investigation, out of this session's original podkill/assertion-10 charter.
+  ROUND 20 ADDENDUM (2026-08-28, offline, awaiting live verification): the ROUND 19 ADDENDUM's
+  leading candidate (`scheduler_zombie_task_threshold`) is REFUTED as a viable fix direction --
+  live minimal reproduction against the REAL installed cncf-kubernetes provider proved KPO's own
+  pod-vanish detection already works correctly (raises within ~30-40s of a deletion), and direct
+  source read proved Airflow 3's heartbeat-based zombie/orphan detection (renamed
+  `task_instance_heartbeat_timeout`) is structurally incapable of catching this failure class on
+  ANY executor, since the task process never stops heartbeating while it babysits a vanished
+  pod. REFINED root cause: no per-task wall-clock ceiling shorter than `dagrun_timeout=45min`
+  existed at all -- fixed via `execution_timeout` (a real SIGALRM-based guillotine, confirmed via
+  source read to be heartbeat-independent). The exact CI-specific mechanism that let the
+  KPO-layer exception go unobserved for the full 43 minutes remains an honestly-declared,
+  not-yet-closed blind spot (local's own scheduler was independently stalled this round,
+  blocking a live LocalExecutor reproduction of that specific path) -- `execution_timeout`
+  bounds the SYMPTOM regardless of that mechanism ever being identified. The OOMKilled-publish
+  bonus finding is CONFIRMED (not merely suspected) to be a SEPARATE, second root cause:
+  `csv_ingest_orders.py`'s `publish` was never given the same `_STAGE_RESOURCES` fix
+  `csv_ingest_customers.py`'s `publish` already received after an earlier live OOMKilled finding
+  -- fixed by matching the two DAGs' profiles.
 fix: >
   (1) helm/values/ci/airflow.yaml: scheduler.resources (request 200m->400m cpu, limit
   500m->1500m cpu) and dagProcessor.resources (request 200m->300m cpu, limit 500m->1200m cpu).
@@ -9596,6 +9801,19 @@ fix: >
   test_discover_files_never_re_offers_a_quarantined_run. PRE-REGISTERED alongside:
   candidate (19) -- lone partial-file e2e fixtures may now quarantine legibly
   (pre-existing snapshot-delivery-shape tension, NOT expanded into this round).
+  (20) airflow/dags/_common/kpo.py: new HEAVY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+  constant (fully documented mechanism/rationale in its own docstring). csv_ingest_customers.py
+  + csv_ingest_orders.py: execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT added to stage/
+  dbt_build/publish in BOTH DAGs. csv_ingest_orders.py: publish resources _DISCOVER_RESOURCES ->
+  _STAGE_RESOURCES (matches customers' already-fixed profile). tests/e2e/slice/
+  test_backfill_2year_sweep.py: 2 new shared helpers (_final_pass_staged_run_ids,
+  _customer_staged_in_run_ids) extracted from _delete_detection_forensics; assertion (10)
+  rewritten to check batch membership FIRST and assert whichever outcome is platform-correct
+  (is_current=true if legitimately batched with an earlier day's still-STAGED run, else the
+  original invalidation assertion). tests/unit/test_dag_structure.py: 2 new red/green regression
+  tests (test_heavy_tasks_bound_by_execution_timeout, test_orders_publish_matches_customers_
+  publish_resources). tests/policy/test_dag_line_budget.py: orders budget 161->170 (exact 9
+  lines added), documented per this file's own established bump precedent.
 verification: >
   Offline: (1) `make manifests` -- 0 chart lint failures across all 9 charts both profiles,
   kubeconform -strict reports 0 invalid/0 errors across 540 resources; (2) `uv run pytest
@@ -9958,6 +10176,14 @@ verification: >
   failed TI all session fired the exact second dbtkill's teardown ran). Guards
   green; scheduler peak 93.9% of 2048Mi = new high-water (18b watch). (20b) now
   material at scale: 3M+ silver rows retained from QUARANTINED runs.
+  ROUND 20 OFFLINE VERIFICATION, COMPLETE 2026-08-28: unit 566/566 (2 new red/green regression
+  tests, RED-confirmed against pre-fix code via git stash with the exact predicted failure
+  messages, GREEN against the fix); dagtest 14/14 unchanged; policy 167 passed/2 failed
+  (git-stash-diff-confirmed identical to bare HEAD's own 2 pre-existing failures); ruff clean
+  except the SAME single pre-existing line-too-long finding as bare HEAD (git-stash-confirmed);
+  mypy 130 errors, byte-identical count to bare HEAD (git-stash-confirmed zero new type errors);
+  ruff format 1 pre-existing file (git-stash-confirmed same file/line as baseline). LIVE CI
+  VERIFICATION: PENDING.
 files_changed:
   - helm/values/ci/airflow.yaml
   - helm/values/local/airflow.yaml
@@ -10016,3 +10242,12 @@ files_changed:
   - tests/integration/test_stage_ingest.py
   - tests/integration/test_schema_resolution.py
   - tests/integration/test_run_ingest.py
+  ROUND 20 (2026-08-28, offline complete, awaiting live verification):
+  - airflow/dags/_common/kpo.py (new HEAVY_TASK_EXECUTION_TIMEOUT constant)
+  - airflow/dags/csv_ingest_customers.py (execution_timeout on stage/dbt_build/publish)
+  - airflow/dags/csv_ingest_orders.py (execution_timeout on stage/dbt_build/publish;
+    publish resources _DISCOVER_RESOURCES -> _STAGE_RESOURCES)
+  - tests/e2e/slice/test_backfill_2year_sweep.py (assertion-10 batch-scoping fix + 2 shared
+    helpers extracted from _delete_detection_forensics)
+  - tests/unit/test_dag_structure.py (2 new red/green regression tests)
+  - tests/policy/test_dag_line_budget.py (orders budget 161 -> 170, documented precedent)
