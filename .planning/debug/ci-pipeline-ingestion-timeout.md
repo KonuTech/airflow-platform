@@ -1,5 +1,39 @@
 ---
 status: fixing
+round17_status: "ROUND 17 POST-RUN ANALYSIS COMPLETE on run 33147620963 (headSha 79dd299,
+  conclusion FAILURE, job 06:21:03->09:06:11 = 2h45m08s, finished under its own steam,
+  well inside the 190-min ceiling): census 7 failed / 31 passed / 6 skipped in 9454.05s
+  (2:37:34) -- BEST census of the session (R16: 9/29/6). Newly green: reentry (0042 grant
+  live-proven by the previously-fatal read now passing) + no_extra_schemas (allowlist) --
+  criterion (c) MET. Zero new failures (7 subset of R16's 9) -- (d) MET. Guards all green
+  ((e) MET): Kyverno 0, restarts 0, ZERO failed TIs (1492 customers TIs), 66/66 customers
+  DagRuns success, scheduler peak 1776MiB = 69.4% of 2560Mi. Criterion (b) MET AND
+  ADJUDICATED: sweep assert-4 fired WITH the forensics rider streamed -- finding (24) is a
+  TEST-LAYER ARTIFACT, platform CORRECT (bronze has run 39's 50 rows, run SUCCEEDED,
+  ledger claimed it; every late-file key sits in silver with the business-ts winner from
+  the day-12/13 snapshots -- the corpus reuses the SAME 50 customer_ids daily, so the
+  backdated day-8 rows deterministically lose every one-row-per-key silver slot; the
+  test's own comment says the proof belongs in normalized.customers but the code queries
+  silver.customers = wrong table; secondary: waits drained on pilot-era terminal state,
+  backfill-3's own runs started 11s AFTER the failure). Criterion (a) NOT met but
+  materially advanced: podkill's 1M DagRun now COMPLETES end-to-end in ~11.1min -- its
+  publish finished ~07:52:40, just ~66s past the 600s deadline (R16: never completed,
+  starved everything for 70+min) = the pre-registered residual risk fired by a whisker;
+  dbtkill/u3 discovery starvation = knock-on (podkill's DagRun held the slot ~50s of
+  dbtkill's window, then the ~5-run asset-event queue backlog from its 10.5-min occupancy
+  drained serially -- zero FailedScheduling in that window, queue latency not CPU);
+  rebuild improved 16/16 -> 15/16 unsettled with 9/16 STAGED (vs R16's 2) at -33% requeue
+  mass -- the staged tail's serialized dbt/publish still exceeds 1800s; orphan = same
+  starvation class post-rebuild. NEW FINDING (26): idempotent_reupload's failure MORPHED
+  -- its first upload's run 439 went terminally FAILED (not starvation), same signature
+  as dbtkill's-file runs 62+438 (all three FAILED pre-schema, schema_version_id NULL,
+  zero failed TIs / pod warnings; both distinct FAILED files are exactly the 120-row
+  fixtures while 50-row/250k/1M files staged clean) -- UNADJUDICABLE: the ingestion_runs
+  dump omits the error column (named diagnostics gap). Criterion (f) MET at mechanism
+  level (O(delta) publish live-measured: post-restage dbt+publish of 1M in <=2min), NOT
+  at suite level (+24.7min total, explained: scd_concurrent +11.4 variance, reentry +5.1
+  now running to full green, rebuild +3.9). DECISION CHECKPOINT returned. See Current
+  Focus ROUND 17 OUTCOME + Evidence."
 round16_status: "ROUND 16 POST-RUN ANALYSIS COMPLETE on run 33126343052 (headSha 0a69dec,
   conclusion FAILURE at 2h20m16s, self-terminated, 74% of the 190-min ceiling): census
   9 failed / 29 passed / 6 skipped in 2:12:50 -- BEST census of the session (R15: 10/28/6),
@@ -51,7 +85,7 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 17 OPENED on user decision (25) A+B + 22b/22c + 24-rider -- implementing; see Current Focus ROUND 17)
+updated: 2026-08-28 (ROUND 17 POST-RUN ANALYSIS COMPLETE on run 33147620963 -- decision checkpoint returned; see Current Focus ROUND 17 OUTCOME)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -292,7 +326,140 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 17 (2026-08-28, opened on user decision (25) A+B + confirmed 22b/22c/24-rider -- CURRENT STATE):
+ROUND 17 OUTCOME (2026-08-28, post-run analysis of run 33147620963 -- CURRENT STATE):
+  run: "e2e-full.yml 33147620963, headSha 79dd299, conclusion FAILURE, job
+      06:21:03Z->09:06:11Z = 2h45m08s (finished under its own steam; suite
+      9454.05s = 2:37:34), well inside the 190-min job ceiling. Log saved as
+      scratchpad round17-job.log (13,941 lines, forensics + all always()-
+      diagnostics recovered)."
+  census: "7 failed / 31 passed / 6 skipped -- BEST of the session (R16: 9/29/6,
+      R15: 10/28/6). Newly green: test_backfill_reentry (0042's grant live: the
+      previously-fatal _fetch_dagrun_identity read now passes and the test runs
+      7.4min to full green) + test_no_extra_schemas_exist ('normalized'
+      allowlisted). The 7 failures are an exact subset of R16's 9 -- ZERO new
+      failing node-IDs. Failed: full_2year_sweep (assert-4, (24) -- now
+      ADJUDICATED), podkill_mid_load (600s terminal wait, last STAGED),
+      dbtkill + u3 + orphan (180s discovery starvation), rebuild (15/16
+      unsettled at 1800s, 9 STAGED + 6 PENDING, dbtkill's file settled FAILED),
+      idempotent_reupload (NEW SHAPE: first upload's run FAILED -- finding 26)."
+  criteria_adjudication:
+    - "(a) NOT MET -- all 6 (25)-owned failures persist, BUT the mechanism
+      moved decisively: podkill's 1M DagRun now COMPLETES end-to-end in
+      ~11.1min (kill ~07:41:35 -> publish done ~07:52:40) including the
+      designed ~5.5min (20a) lease wait; it missed its 600s terminal deadline
+      (07:51:34) by only ~66s. In R16 the same DagRun NEVER completed and
+      starved the pipeline 70+ minutes until rebuild. The pre-registered
+      podkill residual risk fired -- by a whisker."
+    - "(b) MET AND ADJUDICATED: assert-4 fired ('silver.customers has no rows
+      for _run_id=39') WITH the full forensics block streamed. VERDICT:
+      finding (24) is a TEST-LAYER ARTIFACT; the platform is CORRECT. Proof
+      from the forensics: [b1] bronze holds run 39's 50 rows; [b2] run 39
+      SUCCEEDED (replay_of=7); [a] ledger claimed run 39 (txid 1291 @
+      06:41:48); [c] every one of the late file's 50 business keys IS in
+      silver, attributed to runs 47/48 (files 11/12 = day-12/13 snapshots,
+      event_ts 2024-01-12/13) -- the corpus reuses the SAME 50 customer_ids
+      every day, so the day-8 late file's backdated rows deterministically
+      LOSE every one-row-per-key silver slot to newer business timestamps.
+      That is exactly D-05's required semantics (business-ts ordering wins).
+      Test defect 1: the docstring/comment states the proof belongs in
+      normalized.customers (verbatim backdated event_ts retention) but the
+      code queries silver.customers -- wrong table. Test defect 2
+      (sequencing): the corpus files were already terminal from the pilot
+      era, so both dataset waits drained instantly and assert-4 ran against
+      pilot-era attempt history -- the sweep's own backfill-3 DagRuns started
+      06:54:04, ELEVEN SECONDS AFTER the test failed at 06:53:53."
+    - "(c) MET: reentry green (0042 applied at cluster-up 06:27:49, alembic
+      line '0041 -> 0042'), no_extra_schemas green."
+    - "(d) MET: zero new failures vs R16."
+    - "(e) MET: Kyverno 0 denials (only the deliberate unsigned-image test,
+      PASSED); restarts 0 all roles (restart-change timeline empty); ZERO
+      failed TIs (1492 customers TIs dumped, 0 failed); 66/66 customers
+      DagRuns success; scheduler peak 1,862,717,440B = 1776MiB = 69.4% of
+      2560Mi (R16 1786MiB -- stable); stage_cpu_request 200m in force; all
+      images at 79dd299 (publish pods pulled csv-processor:79dd299...);
+      fixes 16-23 hold (stage>>dbt_build>>publish ordering visible in TI
+      history, mass_delete PASSED with exclusions, zero QUARANTINED-not-
+      SUCCEEDED, zero SKIPPED_CONCURRENT)."
+    - "(f) MET AT MECHANISM LEVEL, NOT SUITE LEVEL: direct O(delta) live
+      measurement -- podkill's post-restage dbt_build+publish on 1M rows took
+      <=2min (publish pod publish-s4hc01fs running <=07:51:33 -> gone by
+      07:52:46) vs R16 where the same segment did not finish in the residual
+      600s and the DagRun ran 56+min more without completing. Rebuild-era
+      stage throughput: 9/16 files STAGED inside the 1800s settle vs R16's 2
+      STAGED at -33% re-queue mass. Suite TOTAL went UP 24.7min (2:37:34 vs
+      2:12:50), fully decomposed per-test: scd_concurrent +11.4min (5.1 ->
+      16.5, PASSED both rounds -- contention variance, watch item), reentry
+      +5.1min (R16 died at 2.3min on the grant error; R17 runs the whole test
+      to green = new coverage, not regression), rebuild +3.9min, live_run
+      +2.0min, podkill itself -1.5min, everything else within +-1min."
+    - "(g) NOT MET (not green) but: first complete census with every failure
+      NAMEABLE, 2:37:34 << ceiling, failure mass 9 -> 7."
+  dbtkill_slot_holder_adjudication: "User's live observation CONFIRMED in
+      substance, with one refinement. During dbtkill's 180s discovery window
+      (~07:51:50 -> 07:55:00) the orders max_active_runs=1 slot was held first
+      by PODKILL'S OWN 1M DagRun -- direct evidence: podkill's run key
+      64184a77... observed STAGED at 07:51:34 while publish pod
+      publish-s4hc01fs ran (07:51:33 -> gone by 07:52:46), i.e. the DagRun
+      released the slot ~07:52:40, ~50s into dbtkill's window. The REMAINDER
+      of dbtkill's window and all of u3's (07:55 -> 07:58:21) were consumed by
+      the serial drain of orders DagRuns QUEUED during podkill's 10.5-min
+      occupancy: customers cron completed ~5 publishes 07:43:31-07:52:57, each
+      firing an asset event -> ~5 queued orders DagRuns ahead of dbtkill's
+      manual trigger (created ~07:51:50, FIFO behind them). No orders discover
+      pod executed before 07:58:21; the etl namespace was pod-sparse/idle
+      07:53-07:56 with ZERO FailedScheduling events in that window -- the gap
+      is DagRun-queue drain latency, not CPU saturation. So yes: this is the
+      flagged podkill residual-risk zone (600s window), and the entire
+      dbtkill/u3 failure family is knock-on from podkill finishing ~66s late.
+      orphan (08:58 -> 09:01:35) is the same starvation class in the
+      post-rebuild backlog era (15 re-queued files churning; orphan's own
+      cleanup then deleted its object at line 279)."
+  new_finding_26: "Three orders ingestion runs terminally FAILED at the
+      pre-schema phase (schema_version_id NULL): runs 62 AND 438 = dbtkill's
+      120-row file (two different eras: rebuild re-drive wave + post-rebuild
+      wave 437-453), run 439 = idempotent_reupload's fresh 120-row fixture
+      (the test's new failure shape: poll returned terminal FAILED within
+      ~3min of upload). Zero failed TIs, zero pod-level warnings (no OOM /
+      eviction / BackOff / admission denial in the final-events window) =>
+      the failure is APPLICATION-LEVEL, recorded only in
+      meta.ingestion_runs.error -- which NO diagnostic dump captures. Pattern:
+      both distinct FAILED files are exactly the 120-row fixtures
+      (_SMALL_ORDERS_ROWS=120, _IDEMPOTENT_FIXTURE_ROWS=120) while 50-row
+      dated, 250k and 1M files staged clean in the same eras; fixture
+      builders were NOT touched by 79dd299 (conftest unchanged) and dbtkill's
+      same file reached STAGED in R16. Mechanism UNADJUDICABLE this round.
+      NAMED DIAGNOSTICS GAP: end-of-job ingestion_runs dump omits the error
+      column; poll_ingestion_run's assertion prints only the status."
+  recommendation_for_user_decision: "ROUND 18 as a FINAL targeted round,
+      splitting one real fix, one diagnostics rider, and three explicit
+      test-budget dispositions: (1) FIX (24) at the test layer -- repoint
+      sweep assert-4 to normalized.customers (verbatim backdated event_ts,
+      exactly what its own comment specifies), keep the forensics rider;
+      optionally gate the waits on the sweep's OWN backfill runs.
+      (2) DIAGNOSTICS RIDER for (26) -- stream meta.ingestion_runs.error in
+      poll_ingestion_run's failure message + add the error column (FAILED
+      rows) to the end-of-job dump; (26) is the ONLY genuinely unexplained
+      residue and cannot be fixed blind. (3) DISPOSITION podkill as
+      test-budget: raise the terminal wait 600 -> 900s (the designed 5.5-min
+      lease wait leaves ~4.5min for a 1M restage+dbt+publish on ~3 CPU; it
+      missed by 66s -- the mechanism is proven sound). (4) DISPOSITION
+      dbtkill/u3/orphan discovery waits: preferred = a bounded
+      orders-queue-idle drain helper before upload (keeps per-test budgets
+      honest); alternative = raise 180 -> ~480s. (5) DISPOSITION rebuild: on
+      the CI profile either raise settle 1800 -> 2700s OR convert to a
+      monotonic-progress assertion (recommended: progress assertion --
+      ceiling arithmetic is tight: green-path projection with raised budgets
+      ~= 157min + up to ~30min of newly-waited completions ~= 185-190min vs
+      the 190-min ceiling). Watch item, no action: scd_concurrent 5.1 ->
+      16.5min variance."
+  next_action: "DECISION CHECKPOINT returned to user: confirm the ROUND 18
+      shape (fix (24) + (26) rider + dispositions 3/4/5) or redirect. Carried
+      follow-ups unchanged: sidecar mirror, stage-side
+      RejectionRateCircuitBreaker classification, teardown-race flake class,
+      v_run_recovery wording, ADR-0012's deferred silver disposition,
+      merge.py delta-scoping before any dataset adopts strategy 'merge'."
+
+ROUND 17 (2026-08-28, opened on user decision (25) A+B + confirmed 22b/22c/24-rider -- SUPERSEDED BY ROUND 17 OUTCOME ABOVE):
   charter: "(1) (25)-A: delta-scope merge_orders' _PUBLISH_SQL -- merge only the
       pass's own staged_run_ids' silver rows instead of the whole silver table
       (production semantics done right; also closes the (20b) leak-vector-ii shape
@@ -7500,6 +7667,83 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     budgets (the podkill 600s window -- lease ~330s + 1M restage + dbt +
     delta publish -- is the pre-registered residual risk), and (b) finding
     (24), which either passes or finally yields adjudicable forensics.
+
+- timestamp: 2026-08-28 (ROUND 17 post-run analysis of run 33147620963)
+  checked: >
+    Full job log (13,941 lines, scratchpad round17-job.log): per-test result
+    lines + short summary; sweep assert-4 traceback WITH the streamed
+    _late_file_lineage_forensics block; podkill/dbtkill/u3/rebuild/orphan/
+    idempotent tracebacks; end-of-job always()-diagnostics (cp-monitor peaks,
+    restart timeline, FailedScheduling census, etl-monitor rolling pod
+    timeline 07:40-08:05 + final events, customers DagRun history 66 rows,
+    customers TI history 1492 rows, meta.ingestion_runs->files mapping 93
+    rows, schema_versions, silver _run_id census); alembic migration log at
+    cluster-up; R16 log per-test timestamps for the duration diff; test
+    sources (test_pod_kill_retry.py trigger paths, test_smoke_and_idempotency
+    fixture size, test_referential_orphan cleanup delete) and the 79dd299
+    commit stat (conftest fixture builders untouched).
+  found: >
+    (A) CENSUS: 7 failed / 31 passed / 6 skipped in 9454.05s (2:37:34); job
+    2h45m08s, self-completed. Best census of the session; the 7 failures are
+    an exact subset of R16's 9 (newly green: reentry, no_extra_schemas).
+    (B) FIXES IN FORCE: migration 0042 applied at cluster-up (06:27:49
+    '0041 -> 0042'); all images at 79dd299; publish_retries=3 CI profile
+    registered; fix (23) ordering visible throughout TI history.
+    (C) (24) ADJUDICATED VIA THE RIDER -- TEST ARTIFACT, PLATFORM CORRECT:
+    forensics show bronze holds run 39's 50 rows, run 39 SUCCEEDED
+    (replay_of=7), ledger claimed it (txid 1291 @ 06:41:48), and all 50 late-
+    file business keys ARE in silver attributed to runs 47/48 (day-12/13
+    snapshot files, event_ts 2024-01-13/12, one key to run 47). The corpus
+    reuses the same 50 customer_ids daily; backdated day-8 rows must lose
+    every silver slot under business-ts-wins semantics. The assertion queries
+    silver.customers although its own comment specifies normalized.customers.
+    Sequencing defect: waits drained on pilot-era terminal state; backfill-3
+    DagRuns (00:03/00:04/00:05) executed 06:54:04-07:01:25 -- AFTER the
+    test's 06:53:53 failure.
+    (D) PODKILL: kill ~07:41:35; (20a) lease wait + full 1M restage + dbt +
+    DELTA publish completed ~07:52:40 (publish-s4hc01fs running <=07:51:33 ->
+    gone by 07:52:46) = ~66s past the 600s deadline (last observed STAGED).
+    The O(delta) publish is live-proven: post-restage dbt+publish <=2min on
+    1M rows (R16: same segment >600s residual and the DagRun never finished).
+    (E) DBTKILL/U3 STARVATION MECHANISM (user observation confirmed +
+    refined): podkill's DagRun held the max_active_runs=1 slot through the
+    first ~50s of dbtkill's window, then ~5 asset-triggered orders DagRuns
+    queued during its 10.5-min occupancy (customers publishes 07:43:31-
+    07:52:57) drained serially ahead of dbtkill's/u3's manual triggers; no
+    orders discover pod before 07:58:21; etl namespace pod-sparse 07:53-07:56
+    with ZERO FailedScheduling in that window -- queue latency, not CPU.
+    (F) REBUILD: 15/16 unsettled at 1800s but 9/16 STAGED + 6 PENDING (R16:
+    2 STAGED/1 RUNNING/13 PENDING at ~2.25M mass; R17 mass ~1.50M) --
+    stage-side throughput through the requeue vastly improved; the staged
+    tail's serialized dbt/publish still exceeds the settle budget. dbtkill's
+    file 'settled' by going FAILED (run 62). CPU-saturation FailedScheduling
+    census is rebuild-era only.
+    (G) NEW FINDING (26): runs 62 + 438 (dbtkill's 120-row file, two eras)
+    and run 439 (idempotent's fresh 120-row fixture) reached terminal FAILED
+    at pre-schema phase (schema_version_id NULL) with zero failed TIs and
+    zero pod-level warnings -- application-level failure whose error text no
+    dump captures (ingestion_runs dump lacks the error column;
+    poll_ingestion_run prints only status). idempotent_reupload's failure
+    thereby MORPHED from R16 starvation to run-FAILED. Both FAILED files are
+    exactly the two 120-row fixtures; 50-row/250k/1M files staged clean in
+    the same eras; conftest fixture builders untouched by 79dd299; dbtkill's
+    same file reached STAGED in R16. UNADJUDICABLE this round.
+    (H) GUARDS: Kyverno 0; restarts 0; ZERO failed TIs; 66/66 customers
+    DagRuns success; scheduler peak 1776MiB = 69.4% of 2560Mi; suite duration
+    diff vs R16 fully decomposed (scd_concurrent +11.4min variance-watch,
+    reentry +5.1min now-full-coverage, rebuild +3.9min, live_run +2.0min,
+    podkill -1.5min).
+  implication: >
+    The (25) multiplier is dead: orders publish is O(delta) live, podkill's
+    DagRun completes, and the remaining 6 non-sweep failures reduce to (i)
+    ONE 66s budget miss (podkill 600s) with (ii) queue-drain discovery
+    starvation and (iii) the rebuild settle budget as its knock-ons, plus
+    (iv) finding (26), the only unexplained residue, blocked solely on a
+    missing error-column dump. Finding (24) is closed as a test-layer
+    artifact with the platform proven correct by its own forensics. Decision
+    checkpoint returned recommending a final ROUND 18: fix (24)'s wrong-table
+    assert, add the (26) error-forensics rider, and disposition
+    podkill/discovery/rebuild budgets explicitly.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
