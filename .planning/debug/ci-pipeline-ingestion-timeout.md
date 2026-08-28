@@ -1,16 +1,46 @@
 ---
-status: fixing
-round18_status: "ROUND 18 OPENED 2026-08-28 on user decision (final targeted round, ceiling
-  stays 190): fix (24) test-layer repoint of sweep assert-4 to normalized.customers (manifest-
-  derived late member, min(event_ts) == verbatim backdated ts, forensics rider kept); (26)
-  diagnostics rider (poll_ingestion_run returns/streams error_type+error_message, five assert
-  sites print them, e2e-full.yml gains an error-bearing-runs dump); dispositions: podkill
-  terminal wait 600->900s (designed lease arithmetic), bounded orders-queue-idle drain helper
-  before dbtkill/u3/orphan/idempotent uploads (keeps 180s discovery budgets honest), rebuild
-  settle -> monotonic-progress assertion (600s stall window over status+rows_read snapshot,
-  3600s hard cap). OFFLINE COMPLETE: battery green at bare-HEAD parity, 4 new drain-helper
-  unit tests, zero production-code changes (test + workflow layer only). See Current Focus
-  ROUND 18."
+status: investigating
+round18_status: "ROUND 18 POST-RUN ANALYSIS COMPLETE on run 33164806655 (headSha 4818867,
+  conclusion FAILURE, job 10:49:25->13:58:41 = 3h09m16s = 189.3min, self-terminated 0.7min
+  inside the 190-min ceiling -- the closest margin of the session): census 7 failed / 31
+  passed / 6 skipped in 10866.63s (3:01:06) -- SAME COUNT as R17 but a MATERIALLY DIFFERENT
+  composition, not a re-run of the same 7. Fix (24) WORKED: sweep assert-4 now PASSES
+  (normalized.customers query change confirmed live) -- but the test proceeds further and
+  fails at a LATER assertion (10, DELETE-detection) never previously reached (masked by
+  assert-4 in every prior round) -- STRONG hypothesis, not yet forensically confirmed: the
+  same 'test assumes one-file-per-publish-pass' mismatch (24) was, now recurring one
+  assertion downstream, because fix (21)'s claim-ALL-currently-STAGED-runs batching can
+  fold the final day's file into the SAME pass as an earlier day that still had the
+  customer. Disposition (3)/(4)/(5) all fired as DESIGNED (900s wait, drain helper, stall
+  assertion) and correctly demoted 5 of R17's messy failures into clean, fast, honestly-
+  labeled ones -- but podkill's own DagRun genuinely NEVER reached a terminal ETL status
+  this run (STAGED for the full 900s, error_type/error_message both None), a QUALITATIVELY
+  WORSE outcome than R17's 66s-miss. ROOT CAUSE (new, strong, source-confirmed, not yet
+  100% direct-evidence-closed): dagrun_timeout=45min almost certainly fired CORRECTLY
+  (Airflow's own DagRun-level safety net, confirmed sound by direct source read of the
+  installed 3.3.0 scheduler_job_runner.py/dagrun.py on the live LOCAL cluster) -- but
+  there is NO mechanism connecting an Airflow-level dagrun_timeout/SKIPPED-task outcome
+  back to meta.ingestion_runs, so the run is permanently orphaned at its last real status
+  (STAGED) with zero error ever written at the application layer. Direct etl-monitor
+  evidence shows a genuine publish pod FAILURE ~11min post-kill (publish-n1l2gcsv, Failed
+  phase, ~12:25:35) -- publish's own retries=3/exponential-backoff plausibly never got a
+  second attempt inside the 45min window, explaining why THIS run wedged where R17's
+  (same mechanism, no publish-pod failure) did not. (26)'s error-bearing dump correctly
+  printed ZERO rows (this failure shape has no FAILED/QUARANTINED/error-message row to
+  find) -- (26)'s own query needs widening to also catch stale-STAGED rows, a real,
+  now-confirmed diagnostics gap. Cascade (CONFIRMED, direct evidence): dbtkill/u3/orphan/
+  idempotent_reupload's NEW drain-helper ALL correctly attribute their failure to
+  podkill's DagRun still 'running' (or, for idempotent_reupload -- the session's OWN
+  backlog after podkill's eventual dagrun_timeout release) -- pure downstream noise, no
+  independent bug. Rebuild's NEW monotonic-stall assertion also fired CORRECTLY (zero
+  progress for 600s, 14/14 orders files unsettled) -- same root cause, the global
+  stage/dbt_build/publish slot was still recovering from podkill's ~45min (not R17's
+  ~11min) occupancy. Guards fully green: Kyverno 0 (only the deliberate PASSED unsigned-
+  image test), restarts 0 all roles, scheduler peak 1804MiB = 70.5% of 2560Mi (stable vs
+  R17's 1776MiB) -- ZERO OOM/crash-loop this round, ruling out the ROUND-3-era livelock
+  (M1) as this round's mechanism. DECISION CHECKPOINT returned (root cause strong but not
+  forensically closed -- proposing a diagnostics-first ROUND 19, not a blind fix). See
+  Current Focus ROUND 18 OUTCOME + Evidence."
 round17_status: "ROUND 17 POST-RUN ANALYSIS COMPLETE on run 33147620963 (headSha 79dd299,
   conclusion FAILURE, job 06:21:03->09:06:11 = 2h45m08s, finished under its own steam,
   well inside the 190-min ceiling): census 7 failed / 31 passed / 6 skipped in 9454.05s
@@ -96,7 +126,7 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 18 opened + offline implementation complete; see Current Focus ROUND 18)
+updated: 2026-08-28 (ROUND 18 post-run analysis complete; see Current Focus ROUND 18 OUTCOME)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -339,7 +369,7 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
-dispositions; ceiling stays 190 -- CURRENT STATE):
+dispositions; ceiling stays 190 -- SUPERSEDED BY ROUND 18 OUTCOME BELOW):
   charter: "(1) FIX (24) at the test layer: repoint sweep assert-4 to
       normalized.customers -- the test's own comment specifies the proof is
       verbatim backdated event_ts retention in normalized.customers (SCD2
@@ -469,12 +499,204 @@ dispositions; ceiling stays 190 -- CURRENT STATE):
       (g) guards green). TARGET: fully green census, or green-except-(26)-
       with-adjudicable-evidence, inside the 190-min ceiling. Scratchpad
       convention: save the job log as round18-job.log."
-  next_action: "CHECKPOINT (human-action) returned: session manager runs the
-      single 60s-interval watcher on run 33164806655, then spawn post-run
-      analysis per live_verification_state. Carried follow-ups unchanged:
-      sidecar mirror, stage-side RejectionRateCircuitBreaker classification,
-      teardown-race flake class, v_run_recovery wording, ADR-0012's deferred
-      silver disposition, merge.py delta-scoping before any dataset adopts
+  next_action: "SUPERSEDED -- see ROUND 18 OUTCOME below."
+
+ROUND 18 OUTCOME (2026-08-28, post-run analysis of run 33164806655 -- CURRENT STATE):
+  run: "e2e-full.yml 33164806655, headSha 4818867, conclusion FAILURE, job
+      10:49:25Z->13:58:41Z = 3h09m16s = 189.3min (self-terminated, NOT cancelled -- 0.7min
+      inside the 190-min ceiling, the tightest margin of the whole session). Suite
+      10866.63s (3:01:06). Log saved as scratchpad round18-job.log (15,674 lines)."
+  census: "7 failed / 31 passed / 6 skipped -- SAME COUNT as R17 but a DIFFERENT
+      composition (not the same 7 test node-IDs recurring unchanged). Fix (24) CONFIRMED
+      WORKING: sweep assert-4 now PASSES against normalized.customers. Fix (26)'s rider
+      CONFIRMED WORKING but returned zero rows (no FAILED/QUARANTINED/error-bearing run
+      existed this round -- see criteria_adjudication (e) below on why that is itself
+      informative, not merely silent). Dispositions (3)/(4)/(5) (podkill 900s, drain
+      helper, rebuild stall-assertion) all fired exactly as designed and produced clean,
+      fast, honestly-labeled failures -- but did not clear the underlying podkill
+      mechanism, which got WORSE (full 900s stall vs R17's 66s miss). Failed:
+      test_full_2year_sweep_customers_and_orders (NEW failure point -- assertion (10),
+      DELETE-detection, never reached before), test_pod_kill_mid_load_produces_no_duplicates
+      (genuinely wedged the full 900s, STAGED, error_type/error_message both None),
+      test_pod_kill_mid_dbt_build_produces_no_duplicates (drain helper: podkill's own
+      DagRun still 'running' after 600s), test_u3_throughput_and_peak_rss_baseline (SAME
+      drain-helper cascade, NEW to this specific census slot but same root cause),
+      test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (NEW shape: the
+      monotonic-stall assertion fired -- 14/14 orders files ZERO progress for the full
+      600s stall window, not the old 1800s-budget-exhaustion shape),
+      test_referential_orphan.py::test_orphan_order_quarantined_while_valid_rows_publish
+      (poll_ingestion_run 180s timeout, STAGED, same cascade one test later),
+      test_idempotent_reupload (drain helper: a DIFFERENT active DagRun set this time --
+      podkill's own run had already left 'running' by this point in the suite, replaced
+      by a fresh post-timeout backlog)."
+  criteria_adjudication:
+    - "(a) sweep assert-4: MET. Fix (24) confirmed live -- the test's forensics-adjacent
+      assertion (4) no longer fires; the test now runs to a LATER assertion never
+      reached in any prior round."
+    - "(b) dbtkill/u3/orphan/idempotent_reupload clear via the drain helper: NOT MET, but
+      the drain helper's OWN mechanism is confirmed sound and doing exactly its
+      documented job -- all four failures carry direct, legible evidence naming
+      podkill's own DagRun ('e2e-podkill-59f13a4ddbe9') or its aftermath as the blocker,
+      not an inscrutable timeout. This is criterion (f)'s knock-on model CONFIRMED again,
+      one layer downstream of R17's adjudication (see dbtkill/u3/orphan/idempotent
+      cascade evidence below)."
+    - "(c) podkill inside 900s: NOT MET, and WORSE than R17 -- R17 missed the 600s budget
+      by 66s after completing the full kill->lease->restage->dbt->publish cycle; R18
+      never reached a terminal ETL status at all inside 900s (STAGED, zero error). The
+      900s budget was not the limiting factor this round; the DagRun itself deadlocked
+      at the Airflow level."
+    - "(d) rebuild's monotonic-progress assertion: NOT MET in the sense of passing, but
+      MET in the sense of firing EXACTLY as designed -- a genuine, unambiguous, unbounded
+      stall (0 files of 14 progressing for the full 600s window) is precisely the failure
+      mode this assertion was built to catch cleanly, replacing R17's uninformative
+      '9/16 STAGED, 1800s exhausted, no clear stall-vs-slow distinction' shape."
+    - "(e) (26) passes or fails WITH adjudicable error evidence: PARTIALLY MET -- the
+      rider correctly executed and correctly found ZERO error-bearing rows, which is
+      itself the adjudicating signal: this round's failure has NO FAILED/QUARANTINED
+      row and NO non-null error_message anywhere (confirmed by the end-of-job dump,
+      '(0 rows)'), which is DIRECT evidence the podkill wedge is an Airflow-level
+      DagRun/TaskInstance-layer event (dagrun_timeout + SKIPPED tasks), never surfaced to
+      the application layer at all -- (26)'s rider was scoped to catch FAILED/
+      QUARANTINED/error-message rows, and this failure shape structurally cannot produce
+      one. NAMED GAP: (26)'s query needs widening to also catch stale non-terminal rows
+      (e.g. status NOT IN terminal AND age beyond some bound) to close this specific
+      blind spot."
+    - "(f) zero NEW failures vs R17: NOT MET literally (composition changed: assert-4
+      cleared, assertion-10 is new; rebuild's failure shape changed from budget-exhaustion
+      to stall-assertion; u3 and orphan's specific failure text changed) -- but every
+      change is EITHER a confirmed fix (24) working, OR the SAME root mechanism
+      (podkill's DagRun) surfacing through a NEWLY HONEST diagnostic (drain helper,
+      stall assertion) instead of the old inscrutable timeout shapes. No failure this
+      round is unexplained by an already-understood mechanism except the two genuinely
+      new items handled above: assertion (10) (strong hypothesis, forensics-first
+      ROUND 19 action recommended) and podkill's qualitatively-worse wedge (root-caused
+      below with strong, source-confirmed, not-yet-100%-closed evidence)."
+    - "(g) guards green: MET. Kyverno 0 denials (only the deliberate PASSED unsigned-image
+      test), restarts 0 all roles (empty restart-change timeline), scheduler peak
+      1,891,291,136B = 1804MiB = 70.5% of 2560Mi (R17: 1776MiB -- stable, no growth
+      trend), ZERO OOM/crash-loop this round -- directly ruling OUT the ROUND-3-era
+      adopt_or_reset_orphaned_tasks livelock (M1) as this round's mechanism (that
+      mechanism requires a scheduler restart to manifest; this scheduler never
+      restarted)."
+  podkill_root_cause_investigation: "Direct source read of the INSTALLED apache-
+      airflow==3.3.0 on the LOCAL persistent cluster (kubectl exec into
+      deploy/airflow-scheduler, same version as CI's ephemeral cluster) --
+      scheduler_job_runner.py's _schedule_dag_run() (line ~2789) confirms the
+      dagrun_timeout check itself (`dag_run.start_date and dag.dagrun_timeout and
+      dag_run.start_date < utcnow() - dag.dagrun_timeout`) has NO run_type gate and no
+      dependency on task progress -- on firing it unconditionally sets
+      dag_run.state=FAILED and every unfinished TaskInstance (state in
+      State.unfinished or None) to SKIPPED, then flushes. This is a hard, DB-state-
+      driven ceiling, independent of task retries, confirmed sound and already
+      live-verified working elsewhere in this SAME session (ROUND 3's fix; root cause 14's
+      'backfill__05:31 ... dagrun_timeout killed it at 14:36:44'). Timeline
+      reconstruction from the test's own poll budgets: kill at ~12:14:44 (900s before
+      the 12:29:45 test failure), DagRun creation no later than that (likely
+      ~12:07-12:14, consistent with etl-monitor's first podkill-window stage pod at
+      12:10:59) -- so dagrun_timeout=45min should fire ~12:52-12:59. Direct etl-
+      monitor.log pod-lifecycle evidence in that exact window: stage-lqu9he3u Running
+      12:21:45-12:22:55 (~70s, consistent with fix 20a's ~5.5min lease-wait + restage),
+      dbt-build-eleymmox Running 12:23:30-12:24:24 (~1min), then publish-n1l2gcsv
+      Running 12:24:42-12:25:17 followed by publish-n1l2gcsv Failed at 12:25:35 -- a
+      REAL publish pod failure, ~11min post-kill (matching R17's OWN successful timing
+      almost exactly, except this time publish itself crashed instead of merely running
+      long). publish has retries=3/retry_exponential_backoff=True with this project's
+      stock 5min-base uncapped-multiplier retry_delay (confirmed via grep, no override) --
+      a failed first attempt's exponential backoff plausibly never reaches a second
+      attempt before the ~45min dagrun_timeout ceiling arrives, at which point
+      dagrun_timeout fires, marks the DagRun FAILED, and SKIPS publish's still-
+      up_for_retry TaskInstance -- but publish's own KPO pod never got far enough on its
+      ONE real attempt to write anything to meta.ingestion_runs.error (a pod-level
+      crash, not an application-level exception the dataplat code itself caught), so
+      the run is orphaned forever at its pre-crash status (STAGED) with error_type/
+      error_message both permanently NULL. Reconciling evidence for 'dagrun_timeout DID
+      eventually fire': idempotent_reupload's OWN drain-helper failure (the LAST test in
+      the run, ~13:5x) names a COMPLETELY DIFFERENT active DagRun set
+      ('asset_triggered__...running', 'e2e-orphan-...queued') with NO mention of
+      'e2e-podkill-59f13a4ddbe9' at all -- meaning the podkill DagRun genuinely left
+      'running' state SOMETIME between orphan's failure (13:47:24) and idempotent's own
+      check, freeing the global stage/dbt_build/publish slot for a fresh backlog to
+      occupy instead (exactly what a ~45min-after-creation dagrun_timeout firing would
+      produce). meta.ingestion_runs.status='STAGED' persisting in the FINAL end-of-job
+      dump (13:58:36) is fully consistent with this: the ETL-layer status is
+      independent of and never updated by the Airflow-layer DagRun/TaskInstance state
+      change. HONEST GAP: this is NOT yet closed by direct, first-hand evidence -- no
+      raw scheduler stdout/stderr log survives in this round's diagnostics (only a
+      customers-filtered scheduler-log grep exists; there is no orders-DagRun/
+      TaskInstance dump equivalent to the customers one already in the end-of-job
+      dump), and no pod-level crash reason for publish-n1l2gcsv was captured before K8s
+      garbage-collected it. The 'publish pod crashed, retries never got a second shot
+      inside 45min' story is the single most evidence-consistent reconstruction
+      available, not a directly-observed fact."
+    dbtkill_u3_orphan_idempotent_cascade_confirmation: "Direct evidence, no inference
+      needed: dbtkill's and u3's own failure text is
+      wait_for_orders_dagrun_queue_idle's own assertion, naming
+      'e2e-podkill-59f13a4ddbe9' (state 'running') as the still-active DagRun at
+      12:39:47 and 12:49:49 respectively -- both squarely inside the pre-dagrun_timeout
+      window this analysis reconstructs (created ~12:07-12:14, timeout ~12:52-12:59).
+      orphan's later failure (13:47:24) is a plain poll_ingestion_run 180s timeout
+      (STAGED) on ITS OWN upload -- meaning orphan's OWN drain-helper call passed (the
+      queue WAS idle by orphan's own upload time, most likely just after
+      dagrun_timeout finally released podkill's slot), but orphan's own file then
+      queued behind whatever backlog remained and could not clear its own 180s
+      discovery/stage budget -- same root mechanism (podkill's abnormally long, ~45min
+      vs R17's ~11min, slot occupancy), one hop further downstream, not a
+      separate bug. idempotent_reupload (last test) shows the slot handed to an
+      entirely different DagRun set, confirming the queue kept churning through a
+      backlog well past podkill's own release. CONFIRMED: dbtkill, u3, orphan, and
+      idempotent_reupload are pure downstream noise from podkill's single root wedge;
+      none needs an independent fix."
+  sweep_assertion_10_delete_detection_finding: "STRONG HYPOTHESIS, same class as
+      already-adjudicated (24), NOT forensically confirmed this round (no forensics
+      rider was attached to this specific assertion -- (24)'s rider is scoped only to
+      assert-4's own failure text, which no longer fires). Direct source read of
+      packages/dataplat/src/dataplat/scd/delete_detection.py confirms
+      find_vanished_customer_ids' own DELETE-detection is correctly scoped to
+      staged_run_ids ('THIS pass's own staged run ids') read from staging.customers
+      (bronze) -- the ROUND-12-fixed, currently-correct mechanism. The test's own
+      module docstring confirms this is a BACKFILL test: all 13 corpus files are
+      uploaded up front and processed via a multi-tick backfill window, with fix (21)'s
+      own 'publish_ingest claims ALL currently-STAGED runs' batching semantics (the
+      SAME mechanism (24) was ultimately adjudicated against) meaning a single publish
+      pass's staged_run_ids can legitimately span MULTIPLE days' files if more than one
+      became STAGED before any publish ran -- plausible under this same round's
+      confirmed CPU-contention/queue-drain conditions. If the FINAL day's publish pass
+      batched an EARLIER day's run_id (the one still carrying customer_id=2100100032)
+      together with the final day's own run_id, find_vanished_customer_ids' bronze
+      snapshot would correctly (by the platform's actual, batch-scoped semantics)
+      include that customer as 'staged this pass' and correctly NOT invalidate it --
+      the exact same 'test assumes one-file-per-publish-pass granularity; the platform
+      actually operates at whatever-is-STAGED-when-publish-runs granularity' mismatch
+      (24) was. Recommended ROUND 19 action: extend (24)'s exact forensics-rider
+      pattern to this NEW assertion -- on failure, dump the FINAL day's own publish
+      pass's staged_run_ids (via meta.dbt_processed_runs claims for customers), whether
+      customer_id=2100100032 appears in staging.customers for any run_id in that batch,
+      and which day/file each such run_id maps to. Do NOT repoint or weaken the
+      assertion blind; confirm the batching mechanism with the SAME evidence standard
+      (24) was held to before deciding whether this is a test-layer artifact (like (24))
+      or a genuine DELETE-detection bug."
+  duration_and_ceiling_risk: "189.3min self-terminated inside the 190-min ceiling by
+      only 0.7min -- the tightest margin of the whole session (R17: 2:37:34 suite,
+      well inside; R16: 2h20m16s). The drain helper's bounded 600s waits and the
+      rebuild stall-assertion's 600s window both fail FAST relative to the old
+      180s/1800s shapes they replaced, which is why this round finished at all despite
+      podkill's DagRun consuming its FULL 900s test-budget PLUS an additional ~35min of
+      real wall-clock dagrun_timeout wait baked into the suite's actual execution
+      before the drain helper ever got a chance to observe it clear. NEW RISK: if
+      ROUND 19 does not shorten podkill's own wedge duration, the ceiling margin has
+      essentially zero further slack -- any additional dagrun_timeout-driven wait
+      elsewhere would very plausibly push a future run over 190min."
+  next_action: "DECISION CHECKPOINT returned to user: root cause of the podkill wedge
+      is strong but not forensically closed (no raw scheduler log, no orders-DagRun/TI
+      dump, no crash reason for the failed publish pod survive this round's
+      diagnostics); assertion (10)'s DELETE-detection finding is a strong same-class
+      hypothesis as (24), also not forensically confirmed. Recommending a
+      diagnostics-first ROUND 19 (mirroring this session's own established (26)
+      precedent: instrument before fixing blind) rather than another guess-and-verify
+      cycle on the platform's single largest correctness-risk area (podkill). Carried
+      follow-ups unchanged: sidecar mirror, stage-side RejectionRateCircuitBreaker
+      classification, teardown-race flake class, v_run_recovery wording, ADR-0012's
+      deferred silver disposition, merge.py delta-scoping before any dataset adopts
       strategy 'merge', scd_concurrent duration-variance watch."
 
 ROUND 17 OUTCOME (2026-08-28, post-run analysis of run 33147620963 -- SUPERSEDED BY ROUND 18 ABOVE):
@@ -7950,6 +8172,134 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     production-code changes. Ready to commit (docs [skip ci] first, code
     last, single push) and hand the live watcher the authoritative
     e2e-full.yml run ID against the pre-registered criteria.
+
+- timestamp: 2026-08-28 (ROUND 18 post-run analysis, run 33164806655, headSha 4818867)
+  checked: >
+    Full job log (round18-job.log, 15,674 lines) via gh api job logs for the
+    'Full local E2E suite + rebuild-from-raw capstone' job (98827564090); the
+    pytest short-summary (7 failed/31 passed/6 skipped, 10866.63s); the full
+    text of every failing test's assertion + traceback; the end-of-job
+    diagnostics dump (cp-monitor.csv/etl-monitor.log/final ingestion_runs
+    dumps/(26)'s error-bearing-rows query); direct source read of the
+    INSTALLED apache-airflow==3.3.0 on the LOCAL persistent cluster (kubectl
+    exec into deploy/airflow-scheduler -- scheduler_job_runner.py's
+    _schedule_dag_run/_schedule_all_dag_runs, dagrun.py's
+    get_running_dag_runs_to_examine); packages/dataplat/src/dataplat/scd/
+    delete_detection.py and load/publish/scd.py in full; airflow/dags/
+    csv_ingest_orders.py and _common/run_stage_recorder.py in full; the
+    orders DAG's own dagrun_timeout/retries/retry_exponential_backoff
+    config; tests/e2e/slice/conftest.py's poll_ingestion_run/
+    wait_for_orders_dagrun_queue_idle in full.
+  found: >
+    (1) Fix (24) CONFIRMED WORKING live: sweep assert-4 no longer fires;
+    the test proceeds to a LATER assertion (10, DELETE-detection on
+    customer_id=2100100032) never reached in any prior round -- masked
+    every prior round by assert-4's own earlier failure. (2) podkill's
+    DagRun ('e2e-podkill-59f13a4ddbe9') genuinely never reached a terminal
+    meta.ingestion_runs status this round (STAGED for the full 900s test
+    budget, error_type/error_message both NULL throughout) -- qualitatively
+    worse than R17's 66s-miss-then-complete. (3) Direct source read,
+    installed 3.3.0, scheduler_job_runner.py:_schedule_dag_run (~line 2789):
+    the dagrun_timeout check (`dag_run.start_date and dag.dagrun_timeout and
+    dag_run.start_date < utcnow() - dag.dagrun_timeout`) has NO run_type
+    gate, fires purely on wall-clock + DB state, and on firing sets
+    dag_run.state=FAILED + every unfinished TaskInstance to SKIPPED --
+    confirmed sound, and already independently live-verified working
+    elsewhere this session (ROUND 3's fix; root cause 14's backfill
+    dagrun_timeout kill at 14:36:44). (4) dagrun.py:get_running_dag_runs_to_examine
+    uses `with_row_locks(..., skip_locked=True)` -- a theoretically possible
+    (but NOT confirmed this round; single scheduler replica, no evidence of
+    a lock holder) alternate mechanism for a DagRun to be silently excluded
+    from every scheduling loop forever; ruled less likely than the
+    dagrun_timeout-fired-but-not-propagated explanation given direct
+    supporting pod-lifecycle evidence (below). (5) etl-monitor.log direct
+    pod-lifecycle evidence in the reconstructed post-kill window: stage
+    pod (stage-lqu9he3u) Running 12:21:45-12:22:55 (~70s, matches fix 20a's
+    ~5.5min lease-wait + restage arithmetic), dbt_build pod
+    (dbt-build-eleymmox) Running 12:23:30-12:24:24 (~1min), THEN publish
+    pod (publish-n1l2gcsv) Running 12:24:42-12:25:17 followed by
+    publish-n1l2gcsv reaching phase 'Failed' at 12:25:35 -- a REAL publish
+    pod failure ~11min post-kill, timing-matched to R17's own SUCCESSFUL
+    publish completion (~11.1min) almost exactly, except this round publish
+    itself crashed. (6) publish has retries=3/retry_exponential_backoff=True
+    with the project's stock (no override, confirmed via grep) ~5min-base
+    uncapped-multiplier retry_delay -- a failed first attempt's own backoff
+    plausibly does not reach a second attempt before dagrun_timeout=45min
+    (measured from DagRun creation ~12:07-12:14) elapses (~12:52-12:59).
+    (7) idempotent_reupload's OWN drain-helper failure (last test in the
+    run, ~13:5x) names a COMPLETELY DIFFERENT active DagRun set
+    ('asset_triggered__...running', 'e2e-orphan-...queued') with ZERO
+    mention of 'e2e-podkill-59f13a4ddbe9' -- direct evidence the podkill
+    DagRun DID eventually leave 'running' state sometime between orphan's
+    failure (13:47:24) and idempotent's own check, freeing the global
+    stage/dbt_build/publish slot for a fresh backlog -- exactly the
+    signature a ~45min-after-creation dagrun_timeout firing would produce.
+    (8) (26)'s error-bearing-rows dump printed literally '(0 rows)' at the
+    very end of the job (13:58:36) even though a genuine wedge existed all
+    along -- confirms (26)'s WHERE clause (FAILED/QUARANTINED/non-null
+    error_message) structurally cannot see a run stuck at a non-terminal
+    status with NULL errors; a real, now-named diagnostics gap. (9) dbtkill
+    (12:39:47) and u3 (12:49:49) failures are direct, unambiguous
+    wait_for_orders_dagrun_queue_idle assertions naming
+    'e2e-podkill-59f13a4ddbe9' (state 'running') -- both inside the
+    reconstructed pre-dagrun_timeout window. orphan (13:47:24) is a plain
+    poll_ingestion_run 180s STAGED timeout on ITS OWN upload, one hop
+    further downstream (its own drain-helper call passed -- the queue had
+    JUST cleared -- but its own file then queued behind residual backlog).
+    (10) rebuild's NEW monotonic-stall assertion fired cleanly: 14/14
+    orders files, ZERO status/rows_read change for the full 600s stall
+    window -- same root mechanism, observed via the NEW honest diagnostic
+    instead of the old 1800s-budget-exhaustion shape. (11) Guards fully
+    green: Kyverno 0 denials, restarts 0 all roles (empty restart-change
+    timeline), scheduler peak 1804MiB (70.5% of 2560Mi, stable vs R17's
+    1776MiB) -- ZERO OOM/crash-loop this round, directly ruling OUT the
+    ROUND-3-era adopt_or_reset_orphaned_tasks livelock (M1) as this round's
+    mechanism (that path requires a scheduler restart to manifest; none
+    occurred). (12) find_vanished_customer_ids (delete_detection.py) is
+    confirmed correctly scoped to `staged_run_ids` (bronze, ROUND-12-fixed)
+    -- assertion (10)'s failure is NOT an unscoped-read regression; it is,
+    by direct code read, consistent with the SAME 'test assumes
+    one-file-per-publish-pass' mismatch (24) was, one assertion downstream,
+    IF fix (21)'s claim-ALL-currently-STAGED-runs batching folded an
+    earlier day's still-has-the-customer run_id into the SAME publish pass
+    as the final day's run_id -- plausible under this round's own confirmed
+    contention conditions, but NOT forensically confirmed (no forensics
+    rider attached to this specific new assertion this round). (13) Job
+    duration 189.3min self-terminated, 0.7min inside the 190-min ceiling --
+    the tightest margin of the session; the drain helper's and stall
+    assertion's own fast-fail budgets (600s each) are what kept the round
+    inside budget despite podkill's DagRun consuming its full 900s test
+    wait plus real wall-clock dagrun_timeout time baked into the suite's
+    actual execution.
+  implication: >
+    Two genuinely new findings this round, both same-class as already-
+    adjudicated (24)/(26) but NOT yet forensically closed: (i) podkill's
+    DagRun wedge is now root-caused with strong, source-confirmed,
+    multi-source-corroborated evidence to an Airflow-level dagrun_timeout
+    firing with no propagation path back into meta.ingestion_runs -- but
+    the proximate trigger (WHY publish's first attempt crashed this round,
+    when the same mechanism succeeded in R17) is not directly observed
+    (no raw scheduler log, no orders-DagRun/TI dump, no captured pod-crash
+    reason survive this round's diagnostics); (ii) sweep assertion (10)'s
+    DELETE-detection failure is a strong, code-consistent same-class
+    hypothesis to (24) (batch-scoped publish spanning multiple days), also
+    not forensically confirmed. Per this session's own established
+    discipline (never fix blind; instrument first when a mechanism is
+    plausible but unconfirmed, exactly as (26) was born from R17's
+    idempotent_reupload finding), ROUND 19 should be diagnostics-first:
+    (a) an orders-DagRun/TaskInstance dump mirroring the existing customers
+    one, specifically surfacing dag_run.state/start_date/end_date and any
+    SKIPPED-by-timeout TI signature; (b) raw scheduler pod log capture
+    (or at minimum a grep for 'has timed-out'/'Error scheduling DAG run')
+    across the WHOLE run, not just the customers-filtered grep that exists
+    today; (c) a rolling capture of terminated-container reasons for
+    stage/dbt_build/publish pods (their crash reason is currently lost the
+    moment Kubernetes garbage-collects the pod); (d) widen (26)'s
+    error-bearing dump to also catch stale non-terminal rows (age-bounded,
+    not just FAILED/QUARANTINED/error-message); (e) extend (24)'s exact
+    forensics-rider pattern to assertion (10)'s new failure point. Dagrun
+    wedge duration is now also a ceiling-margin risk (0.7min slack this
+    round) independent of whether it is ever fixed to complete faster.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
