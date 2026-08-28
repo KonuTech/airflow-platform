@@ -32,6 +32,7 @@ from tests.e2e.slice.conftest import (
     poll_ingestion_run,
     poll_run_for_file,
     trigger_orders_dagrun,
+    wait_for_orders_dagrun_queue_idle,
 )
 
 if TYPE_CHECKING:
@@ -263,6 +264,7 @@ def test_idempotent_reupload(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     analytics_owner_connection: psycopg.Connection[Any],
+    airflow_metadata_connection: psycopg.Connection[Any],
     kubectl: Callable[..., Any],
 ) -> None:
     """D-07/LOAD-03/QUAL-09: re-uploading identical content under a new key adds zero rows.
@@ -310,6 +312,13 @@ def test_idempotent_reupload(
     object_uri_1 = f"s3://raw/{key_1}"
     object_uri_2 = f"s3://raw/{key_2}"
 
+    # ROUND 18 (debug/ci-pipeline-ingestion-timeout, finding 25/R17
+    # adjudication): start each upload's 180s discovery budget honestly --
+    # this test's R16 failure was queue-drain latency behind the serialized
+    # max_active_runs=1 backlog (R17's own new FAILED shape is finding 26,
+    # tracked separately and now adjudicable via the poll's error columns).
+    wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
+
     app.put_object(Bucket="raw", Key=key_1, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=f"e2e-idempotent-{marker}-1")
 
@@ -332,10 +341,17 @@ def test_idempotent_reupload(
         timeout=_INGEST_TIMEOUT_SECONDS,
     )
     assert outcome_1["status"] == "SUCCEEDED", (
-        f"first upload's ingestion run finished {outcome_1['status']!r}, not SUCCEEDED"
+        f"first upload's ingestion run finished {outcome_1['status']!r}, not SUCCEEDED "
+        f"(error_type={outcome_1['error_type']!r}, "
+        f"error_message={outcome_1['error_message']!r})"
     )
 
     row_count_before = _orders_row_count(analytics_connection)
+
+    # Same honest-start-line reasoning as above, for the SECOND upload's own
+    # discovery budget (the first upload's just-finished DagRun plus any cron
+    # asset-event arrivals can still be draining).
+    wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
     app.put_object(Bucket="raw", Key=key_2, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=f"e2e-idempotent-{marker}-2")

@@ -51,6 +51,7 @@ from tests.e2e.slice.conftest import (
     poll_ingestion_run,
     poll_run_for_file,
     trigger_orders_dagrun,
+    wait_for_orders_dagrun_queue_idle,
 )
 
 if TYPE_CHECKING:
@@ -113,9 +114,16 @@ _INGEST_POD_MEMORY_LIMIT = "4Gi"
 # wait-and-reclaim: a SIGKILLed claim's lease must expire, ~5min, before the
 # retry can genuinely re-stage) -- meaning a 1,000,000-row COPY effectively
 # runs to completion an EXTRA time beyond the killed attempt's partial,
-# discarded work. 600s budgets generously for all of that on a
-# resource-constrained kind node.
-_RETRY_TIMEOUT_SECONDS = 600
+# discarded work.
+#
+# 900s, raised from 600 by debug/ci-pipeline-ingestion-timeout ROUND 18 on
+# ROUND 17's live measurement: the full kill -> lease-expiry wait (~5.5min,
+# DESIGNED behavior, fix 20a) -> 1M restage -> dbt_build+publish (<=2min
+# with ROUND 17's O(delta) publish) cycle completed end-to-end in ~11.1min
+# on CI -- missing the old 600s deadline by ~66s with the mechanism proven
+# sound. 900s budgets the designed arithmetic (330s lease + ~340s measured
+# restage/dbt/publish) with honest headroom instead of a whisker.
+_RETRY_TIMEOUT_SECONDS = 900
 
 # Sampling interval for the U3 peak-memory poller -- frequent enough to
 # catch a multi-second-to-multi-minute run's actual peak, cheap enough
@@ -296,7 +304,8 @@ def test_pod_kill_mid_load_produces_no_duplicates(
     )
     assert outcome["status"] == "SUCCEEDED", (
         f"after killing pod {pod_name!r} mid-load, the run finished "
-        f"{outcome['status']!r}, not SUCCEEDED -- check `kubectl logs` for the retry pod"
+        f"{outcome['status']!r}, not SUCCEEDED (error_type={outcome['error_type']!r}, "
+        f"error_message={outcome['error_message']!r}) -- check `kubectl logs` for the retry pod"
     )
 
     with analytics_owner_connection.cursor() as cur:
@@ -421,6 +430,7 @@ def _poll_run_recovery_complete(
 def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
+    airflow_metadata_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     """D-18: a REAL `kubectl delete pod` mid-`dbt_build` recovers with no duplicate or missing rows.
@@ -447,6 +457,11 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     marker = uuid.uuid4().hex[:12]
     key = f"orders/e2e-dbtkill-{marker}.csv"
     object_uri = f"s3://raw/{key}"
+
+    # ROUND 18 (finding 25/R17 adjudication): start the 180s discovery budget
+    # honestly -- this test's R16/R17 failures were pure queue-drain latency
+    # behind the podkill test's own 10.5-min max_active_runs=1 occupancy.
+    wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
     app.put_object(Bucket="raw", Key=key, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=f"e2e-dbtkill-{marker}")
@@ -482,7 +497,8 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     outcome = poll_ingestion_run(analytics_connection, run_row["idempotency_key"], timeout=60)
     assert outcome["status"] == "SUCCEEDED", (
         f"after killing dbt_build pod {pod_name!r}, run {run_id!r} finished "
-        f"{outcome['status']!r}, not SUCCEEDED"
+        f"{outcome['status']!r}, not SUCCEEDED (error_type={outcome['error_type']!r}, "
+        f"error_message={outcome['error_message']!r})"
     )
 
     with analytics_connection.cursor() as cur:
@@ -544,6 +560,7 @@ def _read_run_metrics(conn: psycopg.Connection[Any], idempotency_key: str) -> tu
 def test_u3_throughput_and_peak_rss_baseline(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
+    airflow_metadata_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
     repo_root: Path,
 ) -> None:
@@ -572,6 +589,12 @@ def test_u3_throughput_and_peak_rss_baseline(
     marker = uuid.uuid4().hex[:12]
     key = f"orders/e2e-u3-{marker}.csv"
     object_uri = f"s3://raw/{key}"
+
+    # ROUND 18 (finding 25/R17 adjudication): start the 180s discovery budget
+    # honestly -- same queue-drain knock-on class as the dbtkill test above,
+    # and a clean-queue start also keeps this baseline's own steady-state
+    # throughput measurement uncontaminated by a draining backlog.
+    wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
     app.put_object(Bucket="raw", Key=key, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=f"e2e-u3-{marker}")
@@ -621,7 +644,8 @@ def test_u3_throughput_and_peak_rss_baseline(
         sampler.join(timeout=10)
 
     assert outcome["status"] == "SUCCEEDED", (
-        f"U3 baseline run finished {outcome['status']!r}, not SUCCEEDED"
+        f"U3 baseline run finished {outcome['status']!r}, not SUCCEEDED "
+        f"(error_type={outcome['error_type']!r}, error_message={outcome['error_message']!r})"
     )
 
     rows_loaded, duration_ms = _read_run_metrics(analytics_connection, idempotency_key)

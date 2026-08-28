@@ -38,7 +38,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from tests.e2e.slice.conftest import poll_file_discovered, poll_ingestion_run, poll_run_for_file
+from tests.e2e.slice.conftest import (
+    poll_file_discovered,
+    poll_ingestion_run,
+    poll_run_for_file,
+    wait_for_orders_dagrun_queue_idle,
+)
 
 if TYPE_CHECKING:
     import subprocess
@@ -135,6 +140,7 @@ def test_orphan_order_quarantined_while_valid_rows_publish(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
     analytics_owner_connection: psycopg.Connection[Any],
+    airflow_metadata_connection: psycopg.Connection[Any],
     kubectl: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
     """VALID-07/D-16, live: one real orphan row quarantines, the rest genuinely publish.
@@ -189,6 +195,15 @@ def test_orphan_order_quarantined_while_valid_rows_publish(
         )
         assert unpause.returncode == 0, f"airflow dags unpause failed:\n{unpause.stderr}"
 
+        # ROUND 18 (debug/ci-pipeline-ingestion-timeout, finding 25/R17
+        # adjudication): start the 180s discovery budget honestly -- this
+        # test's R16/R17 failures were queue-drain latency behind earlier
+        # tests' serialized max_active_runs=1 backlog (post-rebuild era in
+        # R17), not a discovery defect. Sited AFTER the unpause: a paused
+        # DAG's queued DagRuns never drain, so the reverse order could only
+        # burn the drain budget waiting on a queue that cannot move.
+        wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
+
         app.put_object(Bucket="raw", Key=key, Body=payload)
 
         run_id_marker = f"e2e-orphan-{marker}"
@@ -226,7 +241,9 @@ def test_orphan_order_quarantined_while_valid_rows_publish(
             timeout=_INGEST_TIMEOUT_SECONDS,
         )
         assert outcome["status"] == "SUCCEEDED", (
-            f"orphan-order run finished {outcome['status']!r}, not SUCCEEDED -- D-16 says a "
+            f"orphan-order run finished {outcome['status']!r}, not SUCCEEDED "
+            f"(error_type={outcome['error_type']!r}, "
+            f"error_message={outcome['error_message']!r}) -- D-16 says a "
             f"row-level REFERENTIAL_ORPHAN quarantine must never fail the whole run; check "
             f"`kubectl logs` for the ingest pod"
         )

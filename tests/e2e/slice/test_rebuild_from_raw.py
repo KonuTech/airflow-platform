@@ -106,6 +106,17 @@ _POLL_INTERVAL_SECONDS = 1.0
 _BACKFILL_SETTLE_TIMEOUT_SECONDS = 1800.0
 _REBUILD_SUBPROCESS_TIMEOUT_SECONDS = 1800.0
 
+# ROUND 18 (debug/ci-pipeline-ingestion-timeout): the raw-files settle wait
+# is a MONOTONIC-PROGRESS assertion on the CI profile, not a fixed budget --
+# see `_wait_for_all_raw_files_settled`'s own docstring. The stall window
+# comfortably exceeds R17's longest observed legitimately-quiet gap (~5min
+# of DagRun-queue drain with zero pod activity, 07:53-07:58) while staying
+# far below the old fixed 1800s; the hard cap bounds a slow-but-moving
+# pathology inside the job's own 190-min ceiling arithmetic (R17 green-path
+# projection ~157min + up to ~30min of newly-waited completions).
+_SETTLE_STALL_TIMEOUT_SECONDS = 600.0
+_SETTLE_HARD_TIMEOUT_SECONDS = 3600.0
+
 # customer_id is `sa.Integer()` (migration 0005, signed 4-byte -- max 2_147_483_647). Disjoint
 # from every other live-cluster customer_id range this suite's other files already use:
 # test_pod_kill_retry.py/test_concurrent_select.py [2_000_000, 1_000_000_000),
@@ -298,13 +309,14 @@ def _wait_for_new_backfill_completed(
     raise AssertionError(msg)
 
 
-def _wait_for_all_raw_files_settled(
+def _wait_for_all_raw_files_settled(  # noqa: PLR0913 -- one keyword per settle-wait control knob (ROUND 18's stall/hard pair replaced the single fixed timeout)
     conn: psycopg.Connection[Any],
     s3_app: Any,
     *,
     dataset: str,
     prefix: str,
-    timeout: float,
+    stall_timeout: float,
+    hard_timeout: float,
 ) -> None:
     """Poll until EVERY raw `.csv` object under `prefix` is discovered AND terminal in meta.
 
@@ -324,6 +336,19 @@ def _wait_for_all_raw_files_settled(
     (DISTINCT ON + `run_id DESC` -- the newest attempt is the one that
     matters), extended with the duplicate carve-out because this wait runs
     against the WHOLE bucket prefix, not a manifest of known-unique files.
+
+    MONOTONIC-PROGRESS assertion, not a fixed budget (debug/ci-pipeline-
+    ingestion-timeout ROUND 18, on ROUND 17's adjudication): the CI
+    profile's serialized max_active_runs=1 re-drive of the whole retained
+    corpus makes total settle time proportional to accumulated fixture
+    mass, and R17 showed CONTINUOUS forward progress right through the old
+    fixed 1800s deadline (9/16 STAGED, up from R16's 2/16, at -33% requeue
+    mass) -- the budget, not the mechanism, was the failure. So: fail on a
+    genuine STALL (the observed per-file `(status, rows_read)` snapshot
+    unchanged for `stall_timeout` -- `rows_read` is the stage heartbeat, so
+    a long single-file COPY still counts as progress), and keep
+    `hard_timeout` as an absolute cap so a slow-but-moving pathology still
+    fails legibly instead of eating the whole job ceiling.
     """
     paginator = s3_app.get_paginator("list_objects_v2")
     filenames = [
@@ -339,14 +364,17 @@ def _wait_for_all_raw_files_settled(
         # files guarantee the customers call is never empty.
         return
 
-    deadline = time.monotonic() + timeout
+    started_at = time.monotonic()
+    hard_deadline = started_at + hard_timeout
+    stall_deadline = started_at + stall_timeout
+    last_snapshot: dict[str, tuple[Any, ...]] | None = None
     pending: dict[str, str | None] = {}
-    while time.monotonic() < deadline:
+    while time.monotonic() < hard_deadline:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT DISTINCT ON (f.filename)
-                       f.filename, f.duplicate_of_file_id, ir.status
+                       f.filename, f.duplicate_of_file_id, ir.status, ir.rows_read
                   FROM meta.files f
                   JOIN meta.datasets d ON d.dataset_id = f.dataset_id
                   LEFT JOIN meta.ingestion_runs ir ON ir.file_id = f.file_id
@@ -358,7 +386,9 @@ def _wait_for_all_raw_files_settled(
             rows = cur.fetchall()
         settled: set[str] = set()
         pending = {}
-        for filename, duplicate_of_file_id, status in rows:
+        snapshot: dict[str, tuple[Any, ...]] = {}
+        for filename, duplicate_of_file_id, status, rows_read in rows:
+            snapshot[filename] = (duplicate_of_file_id, status, rows_read)
             if duplicate_of_file_id is not None or status in _SETTLE_TERMINAL_RUN_STATUSES:
                 settled.add(filename)
             else:
@@ -368,10 +398,26 @@ def _wait_for_all_raw_files_settled(
             return
         for name in missing:
             pending[name] = "<undiscovered>"
+        if snapshot != last_snapshot:
+            # Genuine forward movement (a new discovery, a status
+            # transition, or a stage-heartbeat rows_read tick) -- reset the
+            # stall clock.
+            last_snapshot = snapshot
+            stall_deadline = time.monotonic() + stall_timeout
+        elif time.monotonic() >= stall_deadline:
+            msg = (
+                f"dataset={dataset!r}: rebuild settle STALLED -- {len(pending)} of "
+                f"{len(filenames)} raw files unsettled with ZERO observed progress (no "
+                f"discovery, no status transition, no rows_read heartbeat tick) for "
+                f"{stall_timeout}s ({time.monotonic() - started_at:.0f}s total elapsed). "
+                f"Still pending: {dict(sorted(pending.items()))}"
+            )
+            raise AssertionError(msg)
         time.sleep(_POLL_INTERVAL_SECONDS)
     msg = (
         f"dataset={dataset!r}: {len(pending)} of {len(filenames)} raw files never settled "
-        f"within {timeout}s after the rebuild backfill completed -- still pending: "
+        f"within the {hard_timeout}s HARD cap after the rebuild backfill completed (progress "
+        f"never stalled {stall_timeout}s -- slow-but-moving, not wedged) -- still pending: "
         f"{dict(sorted(pending.items()))}"
     )
     raise AssertionError(msg)
@@ -549,14 +595,16 @@ def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa:
         app,
         dataset=_CUSTOMERS_DATASET,
         prefix="customers/",
-        timeout=_BACKFILL_SETTLE_TIMEOUT_SECONDS,
+        stall_timeout=_SETTLE_STALL_TIMEOUT_SECONDS,
+        hard_timeout=_SETTLE_HARD_TIMEOUT_SECONDS,
     )
     _wait_for_all_raw_files_settled(
         analytics_connection,
         app,
         dataset="orders",
         prefix="orders/",
-        timeout=_BACKFILL_SETTLE_TIMEOUT_SECONDS,
+        stall_timeout=_SETTLE_STALL_TIMEOUT_SECONDS,
+        hard_timeout=_SETTLE_HARD_TIMEOUT_SECONDS,
     )
 
     # --- Step 4: post-rebuild snapshots + explicit, individually-named comparisons --------

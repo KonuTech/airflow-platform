@@ -782,7 +782,9 @@ def airflow_metadata_connection(
 ) -> Iterator[psycopg.Connection[Any]]:
     """A live connection to the Airflow metadata cluster (`airflow-db`), owner-equivalent.
 
-    Only `test_smoke_and_idempotency.py`'s U1 test uses this — reading
+    Used by `test_smoke_and_idempotency.py`'s U1 test, the sweep module's
+    backfill helpers, and (since debug/ci-pipeline-ingestion-timeout ROUND
+    18) every caller of `wait_for_orders_dagrun_queue_idle` — reading
     `dag_run`/`xcom` directly is the most direct, version-stable way to
     observe a triggered DAG run's outcome and its task's XCom payload
     without depending on the Airflow REST API's auth configuration (this
@@ -831,33 +833,116 @@ def poll_ingestion_run(
         timeout: Maximum seconds to wait. Defaults to 120.
 
     Returns:
-        `{"status": ..., "rows_loaded": ..., "lease_expires_at": ...}` once
-        `status` is one of `_TERMINAL_RUN_STATUSES` (`SUCCEEDED`/`FAILED`/
-        `SKIPPED_DUPLICATE`/`SKIPPED_CONCURRENT`/`QUARANTINED`).
+        `{"status": ..., "rows_loaded": ..., "lease_expires_at": ...,
+        "error_type": ..., "error_message": ...}` once `status` is one of
+        `_TERMINAL_RUN_STATUSES` (`SUCCEEDED`/`FAILED`/`SKIPPED_DUPLICATE`/
+        `SKIPPED_CONCURRENT`/`QUARANTINED`). The two error columns (added by
+        debug/ci-pipeline-ingestion-timeout ROUND 18, finding 26's named
+        diagnostics gap: three runs went terminally FAILED pre-schema in
+        ROUND 17 with the failure recorded ONLY in these columns, which no
+        assert message or end-of-job dump ever surfaced) are `None` on the
+        happy path -- callers asserting `status == "SUCCEEDED"` should
+        include them in their failure message so a terminal FAILED is
+        adjudicable from the test output alone.
 
     Raises:
         AssertionError: `timeout` elapses first — names the timeout and the
             last-observed status (or "no row yet" if the run was never even
-            created).
+            created), plus the last-observed error columns if any.
     """
     deadline = time.monotonic() + timeout
     last_status: str | None = None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
     while time.monotonic() < deadline:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT status, rows_loaded, lease_expires_at "
+                "SELECT status, rows_loaded, lease_expires_at, error_type, error_message "
                 "FROM meta.ingestion_runs WHERE idempotency_key = %s",
                 (idempotency_key,),
             )
             row = cur.fetchone()
         if row is not None:
             last_status = row[0]
+            last_error_type = row[3]
+            last_error_message = row[4]
             if last_status in _TERMINAL_RUN_STATUSES:
-                return {"status": row[0], "rows_loaded": row[1], "lease_expires_at": row[2]}
+                return {
+                    "status": row[0],
+                    "rows_loaded": row[1],
+                    "lease_expires_at": row[2],
+                    "error_type": row[3],
+                    "error_message": row[4],
+                }
         time.sleep(_POLL_INTERVAL_SECONDS)
     msg = (
         f"meta.ingestion_runs[idempotency_key={idempotency_key!r}] did not reach a terminal "
-        f"status within {timeout}s (last observed status: {last_status!r})"
+        f"status within {timeout}s (last observed status: {last_status!r}, error_type: "
+        f"{last_error_type!r}, error_message: {last_error_message!r})"
+    )
+    raise AssertionError(msg)
+
+
+def wait_for_orders_dagrun_queue_idle(
+    airflow_conn: psycopg.Connection[Any],
+    *,
+    dag_id: str = "csv_ingest_orders",
+    timeout: float = 600,
+) -> None:
+    """Bounded wait until `dag_id` has ZERO queued/running DagRuns — an honest test start line.
+
+    Added by debug/ci-pipeline-ingestion-timeout ROUND 18 (finding 25/R17's
+    dbtkill/u3/orphan adjudication): `csv_ingest_orders` runs with
+    `max_active_runs=1`, and every customers publish fires an asset event
+    that queues another orders DagRun — so a test that uploads its fixture
+    while a backlog of queued DagRuns is still draining serially starts its
+    fixed 180s discovery budget already in debt (ROUND 17 measured the
+    starved windows at zero `FailedScheduling` events: pure DagRun-queue
+    drain latency, not CPU). Calling this BEFORE the upload keeps each
+    test's own discovery budget honest instead of inflating it to cover
+    another test's backlog.
+
+    Deliberately a bounded wait with a legible failure, not an unbounded
+    drain: a queue that never idles within `timeout` is itself a finding
+    (a wedged or perpetually-backlogged pipeline) and must fail here, named,
+    rather than surface later as an inscrutable discovery timeout.
+
+    Residual race, accepted: a DagRun created AFTER this returns (a cron
+    asset event landing between the check and the caller's upload) can still
+    briefly hold the slot — bounded to one cron tick's worth, the same class
+    ROUND 17 measured at ~50s, well inside a 180s discovery budget.
+
+    Args:
+        airflow_conn: An open connection to the AIRFLOW metadata database
+            (the `airflow_metadata_connection` fixture — `dag_run` lives
+            there, not in the analytical cluster).
+        dag_id: The DAG whose DagRun queue must be idle.
+        timeout: Maximum seconds to wait. Defaults to 600 (R17's worst
+            observed drain, podkill's ~5-run backlog, cleared in ~6min).
+
+    Raises:
+        AssertionError: `timeout` elapses with DagRuns still queued/running —
+            names each still-active `run_id` and its state.
+    """
+    deadline = time.monotonic() + timeout
+    active: list[tuple[str, str]] = []
+    while time.monotonic() < deadline:
+        with airflow_conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_id, state FROM dag_run "
+                "WHERE dag_id = %s AND state IN ('queued', 'running') "
+                "ORDER BY run_id",
+                (dag_id,),
+            )
+            active = [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+        if not active:
+            return
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    msg = (
+        f"dag_id={dag_id!r} still has {len(active)} queued/running DagRun(s) after {timeout}s "
+        f"waiting for the queue to go idle -- the serialized max_active_runs=1 pipe never "
+        f"drained, so this test's own discovery budget cannot start honestly. Still active: "
+        f"{active!r}"
     )
     raise AssertionError(msg)
 

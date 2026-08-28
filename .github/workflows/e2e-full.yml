@@ -329,6 +329,23 @@ jobs:
                    left(r.idempotency_key, 20) AS idem_prefix, r.schema_version_id
               FROM meta.ingestion_runs r JOIN meta.files f USING (file_id)
               ORDER BY r.run_id;" 2>&1 | tail -120 || echo "run->file mapping query failed"
+
+          # ROUND 18 (debug/ci-pipeline-ingestion-timeout): finding (26)'s named
+          # diagnostics gap -- ROUND 17 had three terminally-FAILED runs whose failure
+          # was recorded ONLY in the error columns, which no dump captured, leaving the
+          # mechanism unadjudicable. Dump every error-bearing / non-success terminal row
+          # WITH its error columns (small result set by construction, no tail-truncation
+          # risk like the full mapping above).
+          echo "===== ROUND 18: error-bearing ingestion runs (FAILED/QUARANTINED + any error_message, ALL datasets) ====="
+          kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
+            SELECT r.run_id, d.dataset_name, r.status, r.schema_version_id, f.object_uri,
+                   r.error_type, left(r.error_message, 500) AS error_message_500,
+                   r.error_detail
+              FROM meta.ingestion_runs r
+              LEFT JOIN meta.files f USING (file_id)
+              LEFT JOIN meta.datasets d ON d.dataset_id = f.dataset_id
+             WHERE r.status IN ('FAILED', 'QUARANTINED') OR r.error_message IS NOT NULL
+             ORDER BY r.run_id;" 2>&1 | tail -200 || echo "error-bearing runs query failed"
           echo "===== ROUND 12: meta.schema_versions history (the discovery idempotency-key term) ====="
           kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "
             SELECT schema_version_id, dataset_id, version, left(schema_hash, 12) AS hash_prefix,

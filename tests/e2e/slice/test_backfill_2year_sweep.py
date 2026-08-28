@@ -1351,27 +1351,48 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
     )
 
     # --- (4) the late/out-of-order record lands correctly ordered by BUSINESS timestamp, not
-    #     arrival order (D-05); every row's business key is globally unique in this corpus (no
-    #     dedup collision is even possible), so the proof is that the late row's OWN event_ts in
-    #     normalized.customers matches its BACKDATED value verbatim -- never silently corrected
-    #     forward to its file's nominal day. ---
+    #     arrival order (D-05). Repointed to normalized.customers by debug/ci-pipeline-
+    #     ingestion-timeout ROUND 18 (finding 24, adjudicated live in ROUND 17): this corpus
+    #     reuses the SAME 50-member roster's customer_ids every day, so the backdated late
+    #     row deterministically LOSES its one-row-per-key silver.customers slot to any newer
+    #     business timestamp for the same key -- that is exactly D-05's required semantics
+    #     (business-ts ordering wins), which made the old `silver.customers WHERE _run_id`
+    #     lookup assert a row the platform is REQUIRED not to keep. The durable proof (this
+    #     comment's original intent) lives in normalized.customers: SCD2 retains every
+    #     version boundary, so the late member's EARLIEST version boundary must equal the
+    #     backdated event_ts VERBATIM -- never silently corrected forward to its file's
+    #     nominal day. The late member's identity comes from the corpus' own manifest
+    #     (`late_event_row_index`, the roster-order row index == member index), not from a
+    #     silver read -- also making this assertion era-insensitive (ROUND 17's secondary
+    #     sequencing defect: the old lookup could run against pilot-era attempt history). ---
     late_day = _START_DATE + timedelta(days=_LATE_EVENT_DAY_INDEX)
     late_filename = f"customers_{late_day.strftime('%Y%m%d')}.csv"
     late_run_id = customers_results[late_filename]["run_id"]
+    late_customer_id = _CUSTOMER_ID_BASE + customers_manifest.late_event_row_index
+    expected_late_event_ts = datetime(
+        late_day.year, late_day.month, late_day.day, 8, 15, 0, tzinfo=UTC
+    ) - timedelta(days=_LATE_EVENT_OFFSET_DAYS)
     with analytics_connection.cursor() as cur:
         cur.execute(
-            "SELECT customer_id FROM silver.customers WHERE _run_id = %s "
-            "ORDER BY event_ts ASC LIMIT 1",
-            (late_run_id,),
+            "SELECT min(event_ts) FROM normalized.customers WHERE customer_id = %s",
+            (late_customer_id,),
         )
-        late_silver_row = cur.fetchone()
-    if late_silver_row is None:
-        # Finding (24) rider (ROUND 17): this exact failure fired in ROUNDS
+        min_row = cur.fetchone()
+    earliest_version_ts = min_row[0] if min_row is not None else None
+    if earliest_version_ts != expected_late_event_ts:
+        # Finding (24) rider (ROUND 17, kept in place per the ROUND 18
+        # decision): the silver-era shape of this failure fired in ROUNDS
         # 14/15/16 and was unadjudicable post-hoc -- stream the full lineage
         # forensics INTO the failure message at failure time (see
         # `_late_file_lineage_forensics`'s own docstring).
         pytest.fail(
-            f"silver.customers has no rows for _run_id={late_run_id!r}\n"
+            f"normalized.customers' earliest SCD2 version boundary for the late member "
+            f"(customer_id={late_customer_id!r}, manifest late_event_row_index="
+            f"{customers_manifest.late_event_row_index!r}) is {earliest_version_ts!r}, "
+            f"expected the VERBATIM backdated event_ts {expected_late_event_ts!r} "
+            f"(late file {late_filename!r}'s nominal day {late_day!r} minus "
+            f"{_LATE_EVENT_OFFSET_DAYS} days -- D-05: business-ts ordering, never silently "
+            f"corrected forward; None means the member never published at all)\n"
             + _late_file_lineage_forensics(
                 analytics_connection,
                 late_filename=late_filename,
@@ -1379,22 +1400,6 @@ def test_full_2year_sweep_customers_and_orders(  # noqa: PLR0915 -- 7 independen
                 late_run_id=late_run_id,
             )
         )
-    late_customer_id = int(late_silver_row[0])
-    expected_late_event_ts = datetime(
-        late_day.year, late_day.month, late_day.day, 8, 15, 0, tzinfo=UTC
-    ) - timedelta(days=_LATE_EVENT_OFFSET_DAYS)
-    with analytics_connection.cursor() as cur:
-        cur.execute(
-            "SELECT event_ts FROM normalized.customers WHERE customer_id = %s",
-            (late_customer_id,),
-        )
-        late_gold_row = cur.fetchone()
-    assert late_gold_row is not None, f"late customer_id={late_customer_id!r} never published"
-    assert late_gold_row[0] == expected_late_event_ts, (
-        f"expected the late row's (customer_id={late_customer_id!r}) own event_ts to be its "
-        f"backdated value {expected_late_event_ts!r} (never silently corrected to the file's "
-        f"nominal day {late_day!r}), got {late_gold_row[0]!r}"
-    )
 
     # --- (5) meta.watermarks.cursor_value equals the TRUE max event_ts/order_date across the
     #     whole corpus -- never the late event's earlier value, never simply "today" (INCR-01/
