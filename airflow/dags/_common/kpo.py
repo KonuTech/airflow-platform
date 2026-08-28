@@ -16,6 +16,8 @@ contains no business logic, not that the scan overlooked it.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from airflow.sdk import Variable
 from kubernetes.client import models as k8s
 
@@ -73,6 +75,43 @@ _DEFAULT_STAGE_CPU_REQUEST = "500m"
 # so the CI value is sized against the measured transient burst window
 # (~5min self-healed, ROUND 13), not against breaker-trip burn.
 _DEFAULT_PUBLISH_RETRIES = "6"
+
+# debug/ci-pipeline-ingestion-timeout ROUND 20 (finding: podkill zombie-detection gap):
+# `stage`/`dbt_build`/`publish` had NO per-task wall-clock ceiling of their own -- the only
+# ceiling in force was the whole DagRun's blunt `dagrun_timeout=45min`. Live-reproduced this
+# round (direct source read of the INSTALLED apache-airflow==3.3.0, cross-checked against a
+# real `kubectl delete pod --wait=false` against the REAL KubernetesPodOperator/PodManager code
+# on the local cluster): Airflow's own zombie/orphan-task detection
+# (`[scheduler] task_instance_heartbeat_timeout`, the Airflow-3 rename of the Airflow-2
+# `scheduler_zombie_task_threshold` -- see `airflow.cli.commands.config_command.py`'s own
+# `ConfigChange` table) is heartbeat-based: it fires only when the TASK PROCESS ITSELF stops
+# heartbeating to the metadata DB. A KubernetesPodOperator task whose pod is deleted out-of-band
+# does NOT stop heartbeating -- the task process stays fully alive, polling/streaming logs for a
+# pod that no longer exists -- so this detection class can structurally never catch this failure
+# mode, on ANY executor. Separately, direct live reproduction proved `KubernetesPodOperator`'s
+# OWN pod-vanish detection is NOT broken: with `do_xcom_push=True` (this project's universal
+# setting, see `common_kpo_kwargs` below), `PodManager.await_xcom_sidecar_container_start`
+# reliably raises `AirflowException` ("Xcom sidecar container is already terminated!") within
+# roughly one Kubernetes termination-grace-period window (~30-40s) of the delete -- the
+# exception fires quickly and correctly at the KPO layer. What was missing is a task-level
+# wall-clock guillotine INDEPENDENT of that exception ever being observed/reported by whatever
+# CI-specific supervisor path might occasionally lose it under contention (an honestly-declared
+# residual unknown -- this session's live LocalExecutor reproduction was blocked by an unrelated,
+# pre-existing local-cluster scheduling stall): Airflow's `execution_timeout` is enforced via a
+# real POSIX `SIGALRM` wall-clock timer (`airflow.sdk.execution_time.timeout.TimeoutPosix`,
+# confirmed via direct source read) that fires unconditionally after N real seconds regardless of
+# what the task's own code is doing, converts to `AirflowTaskTimeout`, and drives the SAME
+# `on_kill()` + retry path a normal task failure would. 10 minutes is sized with generous
+# headroom over every legitimate single-attempt duration measured this session (ROUND 17/18's
+# live-measured ~5.6min for a full 1M-row restage + dbt_build + publish cycle COMBINED) while
+# staying well inside `dagrun_timeout=45min`, so a killed pod is force-failed and retried
+# (`stage`/`dbt_build`/`publish` all carry `retries` >= 2) WITHIN the DagRun, multiple times over,
+# before the DagRun-level ceiling would ever need to fire. Applied identically in both profiles
+# (D-06: behavioral task configuration, not a resource-sizing divergence axis) and to BOTH DAGs'
+# `stage`/`dbt_build`/`publish` tasks -- the same three tasks ROUND 19 named for the podkill gap
+# and the OOMKilled-publish bonus finding, both of which share this exact missing-ceiling
+# mechanism.
+HEAVY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
 
 
 def publish_retries() -> int:

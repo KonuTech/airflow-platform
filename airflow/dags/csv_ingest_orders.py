@@ -28,7 +28,7 @@ from kubernetes.client import models as k8s
 
 from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
-from _common.kpo import common_kpo_kwargs, stage_pod_resources
+from _common.kpo import HEAVY_TASK_EXECUTION_TIMEOUT, common_kpo_kwargs, stage_pod_resources
 from _common.run_stage_recorder import wire_dbt_build_tracking
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
@@ -130,6 +130,8 @@ def csv_ingest_orders() -> None:
         retries=3,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=1,
+        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
     # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
@@ -138,6 +140,8 @@ def csv_ingest_orders() -> None:
         retries=2,
         retry_exponential_backoff=True,
         max_active_tis_per_dag=1,
+        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(
             resources=_DISCOVER_RESOURCES,
             service_account_name="dbt",
@@ -146,13 +150,18 @@ def csv_ingest_orders() -> None:
             include_dataplat_credentials=False,
         ),
     )
+    # ROUND 20 (debug/ci-pipeline-ingestion-timeout, OOMKilled-publish finding): _STAGE_RESOURCES,
+    # not _DISCOVER_RESOURCES -- publish runs the same in-memory SCD merge customers.py's publish
+    # already needed _STAGE_RESOURCES for; this DAG never got that back-port, live-observed
+    # OOMKilled x3.
     publish = KubernetesPodOperator(
         task_id="publish",
         cmds=["dataplat"],
         arguments=["publish", "--dataset", "orders"],
         retries=3,
         retry_exponential_backoff=True,
-        **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
+        execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
+        **common_kpo_kwargs(resources=_STAGE_RESOURCES),
     )
     wire_dbt_build_tracking("orders", stage, dbt_build, publish)  # LOAD-06 (D-14/D-17/D-19)
     aggregate_receipts(stage.output)

@@ -27,7 +27,12 @@ from kubernetes.client import models as k8s
 
 from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
-from _common.kpo import common_kpo_kwargs, publish_retries, stage_pod_resources
+from _common.kpo import (
+    HEAVY_TASK_EXECUTION_TIMEOUT,
+    common_kpo_kwargs,
+    publish_retries,
+    stage_pod_resources,
+)
 from _common.run_stage_recorder import wire_dbt_build_tracking
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
@@ -156,6 +161,8 @@ def csv_ingest_customers() -> None:
         retry_exponential_backoff=True,
         retry_delay=_KYVERNO_RETRY_DELAY,
         max_active_tis_per_dag=1,
+        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
     # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
@@ -170,6 +177,8 @@ def csv_ingest_customers() -> None:
         retry_exponential_backoff=True,
         retry_delay=_KYVERNO_RETRY_DELAY,
         max_active_tis_per_dag=1,
+        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(
             resources=_DISCOVER_RESOURCES,
             service_account_name="dbt",
@@ -189,6 +198,8 @@ def csv_ingest_customers() -> None:
         retries=publish_retries(),
         retry_exponential_backoff=True,
         retry_delay=_KYVERNO_RETRY_DELAY,
+        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         outlets=[customers_asset],
         # 10-07-PLAN.md (Rule 1 fix, live-cluster finding): was
         # _DISCOVER_RESOURCES (128Mi/256Mi) -- sized for discover's

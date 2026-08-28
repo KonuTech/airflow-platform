@@ -9,6 +9,7 @@ loading mechanism, do not invent a second one").
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
@@ -35,6 +36,7 @@ def _kpo_attrs(task: object) -> dict[str, object] | None:
             "service_account_name": task.service_account_name,
             "container_resources": task.container_resources,
             "retries": task.retries,
+            "execution_timeout": task.execution_timeout,
         }
     return None
 
@@ -78,6 +80,58 @@ def test_kpo_resources(dagbag: DagBag) -> None:
             assert resources.limits, f"{task.task_id}'s container_resources has no limits"
             checked += 1
     assert checked >= 3, "expected discover, ingest and the smoke pod to all be checked"
+
+
+_HEAVY_TASK_IDS = {"stage", "dbt_build", "publish"}
+
+
+def test_heavy_tasks_bound_by_execution_timeout(dagbag: DagBag) -> None:
+    """debug/ci-pipeline-ingestion-timeout ROUND 20: `stage`/`dbt_build`/`publish` in BOTH DAGs
+    carry a real `execution_timeout` strictly shorter than `dagrun_timeout` -- the live-confirmed
+    fix for the podkill zombie-detection gap (a killed pod's task must be force-failed and
+    retried WITHIN its own DagRun, never solely by the blunt DagRun-level ceiling). See
+    `_common/kpo.py`'s own `HEAVY_TASK_EXECUTION_TIMEOUT` docstring for the full mechanism.
+    """
+    checked = 0
+    for dag_id in ("csv_ingest_customers", "csv_ingest_orders"):
+        dag = dagbag.dags[dag_id]
+        dagrun_timeout = dag.dagrun_timeout
+        assert dagrun_timeout is not None, f"{dag_id} has no dagrun_timeout at all"
+        for task_id in _HEAVY_TASK_IDS:
+            task = dag.task_dict[task_id]
+            attrs = _kpo_attrs(task)
+            assert attrs is not None, f"{dag_id}.{task_id} is not a KPO-shaped task"
+            timeout = attrs.get("execution_timeout")
+            assert timeout is not None, f"{dag_id}.{task_id} has no execution_timeout"
+            assert isinstance(timeout, timedelta)
+            assert timedelta(0) < timeout < dagrun_timeout, (
+                f"{dag_id}.{task_id}'s execution_timeout={timeout!r} must be strictly between "
+                f"zero and dagrun_timeout={dagrun_timeout!r}"
+            )
+            checked += 1
+    assert checked == 6, "expected stage/dbt_build/publish checked in both DAGs"
+
+
+def test_orders_publish_matches_customers_publish_resources(dagbag: DagBag) -> None:
+    """debug/ci-pipeline-ingestion-timeout ROUND 20: `csv_ingest_orders`'s `publish` must use the
+    SAME (heavier) resource profile `csv_ingest_customers`'s `publish` already uses.
+
+    Regression guard for the live-confirmed OOMKilled-publish finding: orders' `publish` was
+    left on the tiny `_DISCOVER_RESOURCES` profile (128Mi/256Mi) despite running the identical
+    in-memory SCD merge customers' `publish` already needed a heavier profile for -- 3 distinct
+    publish-pod OOMKilled (exit 137) events were live-observed in this exact DAG (ROUND 19).
+    """
+    customers_publish = _kpo_attrs(dagbag.dags["csv_ingest_customers"].task_dict["publish"])
+    orders_publish = _kpo_attrs(dagbag.dags["csv_ingest_orders"].task_dict["publish"])
+    assert customers_publish is not None
+    assert orders_publish is not None
+    customers_memory = customers_publish["container_resources"].limits["memory"]
+    orders_memory = orders_publish["container_resources"].limits["memory"]
+    assert orders_memory == customers_memory, (
+        f"csv_ingest_orders.publish's memory limit ({orders_memory!r}) does not match "
+        f"csv_ingest_customers.publish's ({customers_memory!r}) -- orders' publish runs the "
+        f"same in-memory SCD merge and needs the same headroom"
+    )
 
 
 def test_uses_s3_key_sensor(dagbag: DagBag) -> None:
