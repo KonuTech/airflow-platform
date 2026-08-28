@@ -118,7 +118,9 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+2 pending — `/gsd:capture --list` to review:
+- Fix e2e-chaos.yml (QUAL-15 chaos suite) failing on every push (2026-08-28)
+- Draft ADR: dbt silver layer boundary
 
 ### Blockers/Concerns
 
@@ -163,7 +165,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-24T05:20:12.992Z
-Stopped at: context exhaustion at 75% (2026-08-24)
+Last session: 2026-08-25
+Stopped at: Session resumed from HANDOFF.json; user chose round-7 strategic direction for cluster-slice-verify: REDUCE CONCURRENT LOAD (throttle sweep_corpus 19-file parallel ingestion, cap active DagRuns). Loosened timeouts / job-splitting reserved for round 8 (locally); moving off GH-hosted runners is the final fallback. Proceeding to /gsd:debug continue ci-pipeline-ingestion-timeout.
 Resume file: None
-None
