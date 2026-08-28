@@ -1,5 +1,16 @@
 ---
 status: fixing
+round18_status: "ROUND 18 OPENED 2026-08-28 on user decision (final targeted round, ceiling
+  stays 190): fix (24) test-layer repoint of sweep assert-4 to normalized.customers (manifest-
+  derived late member, min(event_ts) == verbatim backdated ts, forensics rider kept); (26)
+  diagnostics rider (poll_ingestion_run returns/streams error_type+error_message, five assert
+  sites print them, e2e-full.yml gains an error-bearing-runs dump); dispositions: podkill
+  terminal wait 600->900s (designed lease arithmetic), bounded orders-queue-idle drain helper
+  before dbtkill/u3/orphan/idempotent uploads (keeps 180s discovery budgets honest), rebuild
+  settle -> monotonic-progress assertion (600s stall window over status+rows_read snapshot,
+  3600s hard cap). OFFLINE COMPLETE: battery green at bare-HEAD parity, 4 new drain-helper
+  unit tests, zero production-code changes (test + workflow layer only). See Current Focus
+  ROUND 18."
 round17_status: "ROUND 17 POST-RUN ANALYSIS COMPLETE on run 33147620963 (headSha 79dd299,
   conclusion FAILURE, job 06:21:03->09:06:11 = 2h45m08s, finished under its own steam,
   well inside the 190-min ceiling): census 7 failed / 31 passed / 6 skipped in 9454.05s
@@ -85,7 +96,7 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 17 POST-RUN ANALYSIS COMPLETE on run 33147620963 -- decision checkpoint returned; see Current Focus ROUND 17 OUTCOME)
+updated: 2026-08-28 (ROUND 18 opened + offline implementation complete; see Current Focus ROUND 18)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -326,7 +337,124 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-ROUND 17 OUTCOME (2026-08-28, post-run analysis of run 33147620963 -- CURRENT STATE):
+ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
+recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
+dispositions; ceiling stays 190 -- CURRENT STATE):
+  charter: "(1) FIX (24) at the test layer: repoint sweep assert-4 to
+      normalized.customers -- the test's own comment specifies the proof is
+      verbatim backdated event_ts retention in normalized.customers (SCD2
+      retains every version boundary; the corpus reuses the SAME 50
+      customer_ids daily so the one-row-per-key silver slot deterministically
+      goes to the newest business-ts -- R17-adjudicated platform-correct
+      behavior). Keep the forensics rider attached to the new failure path.
+      (2) DIAGNOSTICS RIDER (26): poll_ingestion_run selects + returns
+      error_type/error_message (and streams them in its timeout failure
+      message); the four slice-suite SUCCEEDED asserts that consumed R17's
+      FAILED shapes (idempotent_reupload, podkill, dbtkill, u3, orphan)
+      include the error fields in their assert messages; e2e-full.yml's
+      end-of-job dump gains an error-bearing-rows query (FAILED/QUARANTINED +
+      any error_message-bearing rows, with error_type + left(error_message,
+      500)). (26) is the only genuinely unexplained residue -- this makes the
+      two 120-row fixture failures adjudicable next run.
+      (3) DISPOSITION podkill: _RETRY_TIMEOUT_SECONDS 600 -> 900 with the
+      R17-measured arithmetic recorded in the comment (designed ~5.5min (20a)
+      lease wait + measured ~5.6min restage+dbt+publish of 1M = ~11.1min
+      total observed; it missed 600s by ~66s; 900 budgets the designed
+      mechanism honestly).
+      (4) DISPOSITION dbtkill/u3/orphan/idempotent_reupload discovery waits:
+      bounded orders-DagRun-queue-idle drain helper
+      (wait_for_orders_dagrun_queue_idle, slice conftest, <=600s, clear
+      failure message naming the still-active DagRuns) called BEFORE each
+      test's upload -- keeps the 180s discovery budgets honest instead of
+      inflating them (R17 proof: the whole family's failures were queue-drain
+      latency behind podkill's 10.5-min slot occupancy, zero FailedScheduling
+      in the starved windows).
+      (5) DISPOSITION rebuild: _wait_for_all_raw_files_settled converted from
+      a fixed 1800s deadline to a monotonic-progress assertion -- fail only
+      if the observed (filename -> status/rows_read) snapshot shows ZERO
+      change across a 600s stall window; keep a 3600s hard cap so a genuine
+      wedge still fails legibly (R17: 9/16 STAGED at 1800s with real forward
+      progress throughout -- the budget, not the mechanism, was the failure)."
+  pre_registered_criteria:
+    - "(a) sweep assert-4 PASSES (normalized.customers holds the verbatim
+      backdated event_ts as the late member's earliest version boundary)."
+    - "(b) dbtkill/u3/orphan/idempotent_reupload clear via the drain helper
+      (discovery inside 180s once the queue is idle at upload time)."
+    - "(c) podkill passes within the 900s terminal wait."
+    - "(d) rebuild's monotonic-progress assertion holds (settles with
+      progress never stalling 600s, inside the 3600s hard cap)."
+    - "(e) (26) either passes or fails WITH the streamed
+      error_type/error_message making it adjudicable."
+    - "(f) Zero NEW failures vs the R17 census."
+    - "(g) Guards green: Kyverno 0, restarts 0, zero-failed-TIs class holds,
+      fixes 16-23 + (25)-A/B hold, scheduler under 2560Mi."
+    - "TARGET: fully green census, or green-except-(26)-with-adjudicable-
+      evidence, inside the 190-min ceiling."
+  reasoning_checkpoint:
+    hypothesis: "R17's 7 residual failures decompose into (i) one
+        adjudicated test-layer artifact ((24): assert-4 queries silver for
+        rows that D-05 semantics correctly place in normalized), (ii) five
+        test-budget shortfalls of a proven-sound mechanism (podkill missed
+        600s by 66s with the full kill->lease->restage->dbt->publish cycle
+        live-measured at ~11.1min; the dbtkill/u3/orphan family is pure
+        queue-drain knock-on; rebuild showed continuous forward progress at
+        1800s), and (iii) one genuinely unexplained application-level
+        failure ((26): 120-row fixtures FAILED pre-schema with the error
+        recorded only in the never-dumped meta.ingestion_runs error columns)
+        -- so repointing (24), rebudgeting (ii) honestly, and instrumenting
+        (iii) yields a fully green census or an adjudicable (26)."
+    confirming_evidence:
+      - "R17 forensics block (streamed live): bronze holds run 39's 50 rows,
+        run SUCCEEDED, ledger claimed it, every late-file key in silver
+        attributed to runs 47/48 (day-12/13 snapshots) -- assert-4's silver
+        query is provably the wrong table per the test's own comment."
+      - "R17 timing: podkill publish done ~07:52:40 vs deadline 07:51:34
+        (66s over); zero FailedScheduling during the dbtkill/u3 starved
+        windows; rebuild 9/16 STAGED at -33% requeue mass (R16: 2/16)."
+      - "R17 (26): runs 62/438/439 all FAILED pre-schema (schema_version_id
+        NULL), zero failed TIs, zero pod warnings => application-level error
+        recorded only in meta.ingestion_runs error columns, which no
+        diagnostic captures."
+    falsification_test: "Live run: sweep assert-4 failing against
+        normalized.customers refutes the (24) adjudication (would mean the
+        backdated version boundary is genuinely absent -- a real platform
+        bug); podkill missing 900s refutes 'mechanism sound, budget short';
+        the dbtkill family still starving WITH the queue drained at upload
+        refutes the knock-on model; rebuild stalling 600s with zero snapshot
+        change refutes 'progress was continuous'; (26) recurring with an
+        empty error_message refutes 'the error is recorded at application
+        level'."
+    fix_rationale: "(24) moves the assertion to the layer its own comment
+        specifies -- no platform change. (3)/(4)/(5) encode ACCEPTED designed
+        behavior into test budgets (lease wait is design, queue serialization
+        is design, rebuild progress is design) instead of masking or
+        inflating blindly -- the drain helper keeps budgets honest rather
+        than raising them. (26)'s rider is instrumentation-only: no behavior
+        change, purely making the next failure adjudicable."
+    blind_spots: "(1) (26)'s mechanism stays unexplained by design this
+        round -- the rider only makes it adjudicable. (2) The 600s stall
+        window for rebuild tolerates the observed ~5min quiet gaps but a
+        legitimate >10min quiet gap (e.g. an extreme queue-drain pause)
+        would fail the stall assertion -- the hard cap and stall message
+        make that legible if it fires. (3) The drain helper waits on
+        queued/running DagRuns only -- a DagRun created AFTER the drain
+        returns (cron asset event racing the upload) can still occupy the
+        slot; bounded residual risk, same class R17 measured at ~50s.
+        (4) scd_concurrent's 5.1->16.5min variance stays a watch item."
+  offline_status: "COMPLETE 2026-08-28: all five charter items implemented;
+      battery green at bare-HEAD parity (ruff/format: only pre-existing HEAD
+      drift; unit+regression 564 passed incl. 4 NEW drain-helper unit tests;
+      policy 2 pre-existing failures only; dagtest 14 passed; manifests +
+      kubeconform valid; mypy clean; slice collection clean; workflow YAML
+      valid). No production-code changes this round -- test + workflow layer
+      only. See the ROUND 18 offline Evidence entry."
+  live_verification_state: "NOT YET RECORDED -- filled after commit+push."
+  next_action: "Commit docs [skip ci] FIRST and code LAST (R16 skip-marker
+      trap avoidance), single push, record the authoritative e2e-full.yml
+      run ID (+ companion publish.yml as item 0), return CHECKPOINT
+      (human-action) for the session manager's single 60s watcher."
+
+ROUND 17 OUTCOME (2026-08-28, post-run analysis of run 33147620963 -- SUPERSEDED BY ROUND 18 ABOVE):
   run: "e2e-full.yml 33147620963, headSha 79dd299, conclusion FAILURE, job
       06:21:03Z->09:06:11Z = 2h45m08s (finished under its own steam; suite
       9454.05s = 2:37:34), well inside the 190-min job ceiling. Log saved as
@@ -7744,6 +7872,61 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     checkpoint returned recommending a final ROUND 18: fix (24)'s wrong-table
     assert, add the (26) error-forensics rider, and disposition
     podkill/discovery/rebuild budgets explicitly.
+
+- timestamp: 2026-08-28 (ROUND 18 offline implementation + battery)
+  checked: >
+    tests/e2e/slice/test_backfill_2year_sweep.py (assert-4 + manifest
+    late_event_row_index provenance), tools/corpus/dated_series.py
+    (_render_customer_day_lines: late row = member rows_per_day//2 == 25,
+    attributes IDENTICAL to baseline, event_ts backdated 90 days -- so the
+    member's SCD2 chain collapses to versions whose EARLIEST boundary is the
+    backdated ts, disjoint from every other anomaly member 30/31/32/33-47),
+    migrations/versions/0004_meta_ingestion_runs.py (error columns are
+    error_type/error_message/error_detail; rows_read exists for the
+    heartbeat), tests/e2e/slice/conftest.py, test_pod_kill_retry.py,
+    test_referential_orphan.py, test_smoke_and_idempotency.py,
+    test_rebuild_from_raw.py, .github/workflows/e2e-full.yml.
+  found: >
+    All five ROUND 18 charter items implemented: (1) sweep assert-4
+    repointed to normalized.customers -- late member identified from the
+    corpus' OWN manifest (late_event_row_index -> _CUSTOMER_ID_BASE + 25,
+    same idiom as the module's other anomaly asserts), assertion is
+    min(event_ts) == the verbatim backdated ts (also era-insensitive,
+    closing R17's secondary sequencing defect), forensics rider kept on the
+    failure path. (2) poll_ingestion_run now selects/returns
+    error_type/error_message, streams them in its timeout message; the five
+    SUCCEEDED asserts that consumed R17's failures (podkill, dbtkill, u3,
+    orphan, idempotent_reupload) print them; e2e-full.yml's always()-dump
+    gained a dedicated error-bearing-runs query (FAILED/QUARANTINED or
+    error_message NOT NULL, all datasets, error_detail included, own tail
+    budget -- no truncation risk). (3) _RETRY_TIMEOUT_SECONDS 600 -> 900
+    with the R17 arithmetic recorded (330s designed lease + ~340s measured
+    restage/dbt/publish = ~11.1min observed cycle). (4) NEW
+    wait_for_orders_dagrun_queue_idle helper (slice conftest, <=600s bound,
+    fails naming still-active run_ids) called before dbtkill/u3/orphan and
+    BOTH idempotent_reupload uploads (orphan's call sited AFTER its unpause
+    -- a paused DAG's queue cannot drain). (5) rebuild settle converted to
+    monotonic-progress: stall window 600s over the per-file
+    (duplicate,status,rows_read) snapshot (rows_read = stage heartbeat, so a
+    long single-file COPY counts as progress), hard cap 3600s, both failure
+    messages distinct and legible. OFFLINE BATTERY at bare-HEAD parity:
+    ruff check on all touched files -> only the 2 pre-existing sweep
+    W505/E501 (verified identical on stashed HEAD); ruff format -> only the
+    2 pre-existing drift files with hunks in UNTOUCHED regions (411/516/536);
+    unit+regression 564 passed (incl. 4 NEW drain-helper unit tests: idle
+    fast-path, poll-until-drain, legible never-drains failure naming
+    dag_id/run_ids/states, dag_id parameterization); policy 2 pre-existing
+    failures only (dag_line_budget + gates_actually_fail, HEAD lint-driven);
+    dagtest 14 passed; make manifests + kubeconform 378 valid / 0 invalid;
+    mypy strict clean (91 files); e2e slice collection clean (17 tests);
+    e2e-full.yml parses as YAML. No integration surface touched (no
+    packages/ change at all this round -- test + workflow layer only).
+  implication: >
+    ROUND 18 is implementation-complete offline: one test-layer fix, one
+    instrumentation rider, three explicit budget/behavior dispositions, zero
+    production-code changes. Ready to commit (docs [skip ci] first, code
+    last, single push) and hand the live watcher the authoritative
+    e2e-full.yml run ID against the pre-registered criteria.
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
