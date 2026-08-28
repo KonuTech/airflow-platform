@@ -124,9 +124,23 @@ round15_status: "ROUND 15 POST-RUN ANALYSIS COMPLETE on run 33103279876 (headSha
   teardown ran); scheduler peak 1923MiB = 93.9% of 2048Mi NEW HIGH-WATER (18b).
   DECISION CHECKPOINT returned: (19) is now a live design decision. See Current
   Focus ROUND 15 OUTCOME + Evidence + Resolution."
+round19_status: "ROUND 19 IN PROGRESS (diagnostics-only, no production fix): five
+  instrumentation items implemented per user-confirmed charter -- orders DagRun/TI dump
+  (mirrors ROUND 5 customers dump), raw unfiltered scheduler-log signature capture (exact
+  'has timed-out'/'Error scheduling DAG run'/'Exception when executing SchedulerJob' text
+  confirmed via direct source read of the installed apache-airflow==3.3.0 on the LOCAL
+  persistent cluster), a new fast (2s) pod-termination watcher for stage/dbt_build/publish
+  pods (closes the KPO on_finish_action=delete_pod race ROUND 18 named), (26)'s query widened
+  to catch stale non-terminal (PENDING/RUNNING/STAGED, >20min old) rows, and (24)'s forensics-
+  rider pattern extended to sweep assertion (10) via a new _delete_detection_forensics()
+  helper (finished_at-equality pass-membership reconstruction, bronze presence check, last-
+  seen normalized.customers row). Offline battery clean (manifests/kubeconform, 564 unit,
+  14 dagtest, policy 157 passed + 2 pre-existing failures unrelated to this round, collection
+  + bash/python syntax checks all pass). Pushed; live-verification run ID pending -- see
+  Current Focus ROUND 19 + live_verification_state."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 18 post-run analysis complete; see Current Focus ROUND 18 OUTCOME)
+updated: 2026-08-28 (ROUND 19 diagnostics-only round implemented and pushed; see Current Focus ROUND 19)
 updated_prior_round15: 2026-08-27 (ROUND 14 POST-RUN ANALYSIS COMPLETE on run 33080823061 (headSha a247b67,
   conclusion CANCELLED at the NEW 150-min ceiling after 2h31m01s -- FIRST legible per-test
   census of the session via the -v rider, 28 result lines survived): fix (18) LIVE-CONFIRMED
@@ -366,6 +380,94 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 19 (2026-08-28, DIAGNOSTICS-ONLY round opened on user decision confirming this session's
+own diagnostics-first precedent -- NO production fix for the podkill stall or the sweep
+assertion-10 DELETE-detection gap this round; closes ROUND 18's two named evidence gaps so
+ROUND 20 can fix from confirmed root cause instead of reconstruction):
+  charter: "(1) Add an orders-DagRun/TaskInstance dump to end-of-job diagnostics, mirroring the
+      existing ROUND 5 customers dump exactly (same 6-task list: wait_for_files/discover/
+      stage/integrity_gate/dbt_build/publish -- confirmed csv_ingest_orders.py declares the
+      identical task_ids, including integrity_gate via .expand()). (2) Capture raw scheduler
+      stdout/stderr, UNFILTERED by dag_id, and grep for the EXACT dagrun_timeout/scheduling-
+      error log signatures -- confirmed by direct source read of the INSTALLED
+      apache-airflow==3.3.0 scheduler_job_runner.py on this session's own LOCAL persistent
+      cluster (same image version as CI): `self.log.info(\"Run %s of %s has timed-out\", ...)`
+      (line ~2833, fires exactly when dagrun_timeout trips), `self.log.exception(\"Error
+      scheduling DAG run %s of %s\", ...)` (line ~2785, a genuine scheduling-loop error), and
+      `\"Exception when executing SchedulerJob._run_scheduler_loop\"` (scheduler-loop-fatal).
+      All three carry dag_run_id/dag_id INSIDE the message text, so no dag_id pre-filter
+      needed -- `--since=200m` (vs ROUND 5's 100m) because this diagnostics step runs after
+      cluster-slice-verify completes, which can itself exceed 100 minutes. (3) Terminated-
+      container reason capture for stage/dbt_build/publish pods BEFORE KPO's own
+      `on_finish_action: \"delete_pod\"` (confirmed in airflow/dags/_common/kpo.py) deletes
+      them -- a SEPARATE fast (2s) background poll loop, narrowly scoped to only these three
+      pod-name substrings (not the whole etl namespace like the existing 15s cp-monitor loop),
+      extracting `status.containerStatuses[].state.terminated` / `.lastState.terminated`
+      (reason/exitCode/message/timestamps) via a `kubectl get pods -o json | python3` pipeline,
+      logged to /tmp/etl-pod-terminations.log, deduped with `sort -u` at dump time. (4) Widened
+      finding (26)'s error-bearing-runs query: added `OR (r.status IN ('PENDING', 'RUNNING',
+      'STAGED') AND r.started_at < now() - interval '20 minutes')` -- 20min is deliberately far
+      below dagrun_timeout=45min (unambiguously stale well before dagrun_timeout would even
+      fire) and far above this suite's own ~1-2min/file processing pace (no false-positive risk
+      against a normal in-flight run near job end); also surfaces `started_at`/
+      `lease_expires_at`/`age_since_started` columns directly in the dump text. (5) Extended
+      (24)'s exact forensics-rider pattern (same file, same helper-function shape) to sweep
+      assertion (10): new `_delete_detection_forensics()` helper streams, on EITHER of
+      assertion-10's two checks failing, (a) the final day's own publish pass's FULL
+      staged_run_ids batch -- reconstructed via `finished_at` equality across
+      meta.ingestion_runs (direct source read of pipeline/run.py's `publish_ingest` confirms
+      `finished_at` is computed ONCE per invocation, outside the per-run finalize loop, and
+      stamped IDENTICALLY onto every run_id that pass finalizes -- the durable, after-the-fact
+      pass-membership key, since meta.ingestion_runs itself carries no persistent
+      staged_run_ids/pass-id column), (b) whether the missing customer
+      (customer_id=2100100032) appears in staging.customers (bronze) for ANY run_id in that
+      batch, (c) the missing customer's own actual last-seen normalized.customers row. Both
+      former plain `assert` statements converted to `if not X: pytest.fail(msg + forensics)`,
+      matching (24)'s exact structural pattern. Converted find_vanished_customer_ids' own
+      `staged_run_ids` sourcing (`list_staged_run_ids` = every currently-STAGED run_id at
+      publish time, confirmed via direct source read of metadata/postgres.py) into the
+      forensics narrative so ROUND 20 can adjudicate the batching hypothesis from the dump
+      text alone, no further inference needed."
+  pre_registered_success_criterion: "If podkill or the sweep assertion-10 DELETE-detection
+      finding fails AGAIN in this round's live-verification run, the round's SUCCESS is judged
+      independently of whether either underlying bug reproduces: success means the NEW
+      diagnostics make the mechanism FORENSICALLY CLOSED with DIRECT evidence (exact 'has
+      timed-out' log line + exact orders-side DagRun/TI state for podkill; exact staged_run_ids
+      batch composition + exact bronze presence/absence for assertion 10) -- NOT 'confirmed via
+      inference' the way ROUND 18's podkill reconstruction was. Failure of this round means the
+      new diagnostics STILL leave a gap (e.g. the pod-termination watcher's 2s poll missed the
+      window, or the raw scheduler log rotated out the timed-out event, or the finished_at
+      grouping heuristic does not actually match how the batch was formed) -- in which case
+      ROUND 20 must close THAT gap before attempting any fix, never fix blind against a
+      still-reconstructed mechanism."
+  scope_guardrails: "NO production code touched this round (dags/, packages/dataplat/src/ all
+      unchanged) -- diagnostics/instrumentation only, in .github/workflows/e2e-full.yml and
+      tests/e2e/slice/test_backfill_2year_sweep.py (the LATTER only adds a forensics-capture
+      helper + converts 2 asserts to pytest.fail-with-forensics on the SAME two conditions --
+      the assertions' own pass/fail semantics are UNCHANGED, matching (24)'s own precedent of
+      the rider never repointing or weakening the assertion it instruments). Rounds 1-18 fixes
+      stay unchanged. Runner migration/job-splitting retired. Offline 'CI' workflow failures
+      out of scope. Carried follow-ups unchanged: sidecar mirror, stage-side
+      RejectionRateCircuitBreaker classification, teardown-race flake class, v_run_recovery
+      wording, ADR-0012's deferred silver disposition, merge.py delta-scoping before any
+      dataset adopts strategy 'merge', scd_concurrent duration-variance watch."
+  offline_battery: "make manifests (kubeconform -strict, 540 resources, 378 valid/0
+      invalid/0 errors -- unrelated to this round's changes but confirms nothing broke); make
+      test (564 passed); make test-dagtest (14 passed); make policy (157 passed, 2
+      PRE-EXISTING failures: test_csv_ingest_customers_stays_under_150_lines and
+      test_the_main_gate_does_not_lint_the_bad_samples -- BOTH confirmed pre-existing, matching
+      this round's own pre-registered expectation, unrelated to this round's diffs); ruff check
+      on the modified test file shows only the SAME pre-existing line-1258 E501/W505 (untouched
+      by this round's edits); ruff format --check shows 4 pre-existing reformatting diffs, NONE
+      inside this round's inserted code (verified by line-range inspection); `python3 -m
+      pytest tests/e2e/slice/test_backfill_2year_sweep.py --collect-only` succeeds (7 tests
+      collected, confirms the new helper/pytest.fail rewiring is syntactically and structurally
+      sound); bash -n + python ast.parse on the extracted heredoc scripts (cp-monitor.sh's new
+      pod-term-watch.sh block, including its embedded python3 -c snippet) all pass."
+  next_action: "CHECKPOINT REACHED (human-action) with the authoritative e2e-full.yml run ID
+      (+ companion publish.yml run ID as item 0) recorded in live_verification_state below --
+      session manager runs the single 60s watcher. Do NOT self-watch."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
