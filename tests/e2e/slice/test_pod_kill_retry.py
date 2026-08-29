@@ -337,9 +337,31 @@ _DBT_BUILD_LABEL_SELECTOR = "dag_id=csv_ingest_orders,task_id=dbt_build"
 _DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS = 120
 
 # Same generous ceiling as _RETRY_TIMEOUT_SECONDS -- a killed dbt_build pod's retry (Airflow's
-# own retries=2 on that task) must be requeued, scheduled, image-pulled, and re-run `dbt build`
-# to completion (dbt's own idempotent re-run, D-18) before meta.v_run_recovery reports 'complete'.
+# own retries=4 on that task, ROUND 22 -- was retries=2) must be requeued, scheduled,
+# image-pulled, and re-run `dbt build` to completion (dbt's own idempotent re-run, D-18) before
+# meta.v_run_recovery reports 'complete'.
 _DBT_BUILD_RECOVERY_TIMEOUT_SECONDS = 600
+
+# debug/ci-pipeline-ingestion-timeout ROUND 22: was a bare `timeout=300` inline at the call site
+# below -- a stale test-suite constant, never rebalanced alongside ROUND 20/21's DAG-level
+# arithmetic and flagged in ROUND 21's own decision-checkpoint as "even more clearly
+# under-sized" than the queue-idle budget. This poll waits for `stage` to fully SUCCEED (all of
+# this test's fixture's stage map indices) before `dbt_build` can even start -- i.e. it is
+# bounded by `stage`'s own worst-case-to-terminal time, not a fixed constant of its own. ROUND 22
+# bumps orders.stage's retries 3 -> 4 (matching customers -- see `_common/kpo.py`'s
+# HEAVY_TASK_EXECUTION_TIMEOUT comment), which raises `stage`'s own theoretical worst case to
+# 1920s/32.0min (5 attempts x 360s execution_timeout + 4 x 30s retry_delay, the CONFIRMED
+# constant-delay model). This round's OWN live evidence (dbtkill's real DagRun this test drives
+# reached stage try=4/state=failed -- genuine retry-exhaustion under real CPU-starvation
+# contention, not a hypothetical) confirms the THEORETICAL worst case is the right basis here,
+# not just the smaller real-observed sample (~9-10min this round, under the OLD retries=3
+# budget) -- retries can and do genuinely stack toward it under contention. 2400s gives
+# 480s/25% real margin over the 1920s theoretical ceiling (same derivation and same value as
+# `wait_for_orders_dagrun_queue_idle`'s own ROUND 22 rebalance -- see that function's docstring).
+# If `stage` itself exhausts its retries and never succeeds, this poll correctly still fails
+# (dbt_build can structurally never start) -- at 2400s instead of masking it faster, but legibly,
+# naming the last-observed status, exactly as this test's other pollers already do.
+_DBT_BUILD_POLL_TIMEOUT_SECONDS = 2400
 
 
 def _poll_dbt_build_pod_name(
@@ -481,7 +503,9 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
     run_id = run_row["run_id"]
 
-    _poll_dbt_build_running_signal(analytics_connection, run_id, timeout=300)
+    _poll_dbt_build_running_signal(
+        analytics_connection, run_id, timeout=_DBT_BUILD_POLL_TIMEOUT_SECONDS
+    )
     pod_name = _poll_dbt_build_pod_name(kubectl, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS)
 
     delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")

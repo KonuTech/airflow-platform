@@ -148,6 +148,23 @@ _DEFAULT_PUBLISH_RETRIES = "4"
 # test_dag_structure.py::test_worst_case_retry_budget_has_real_margin` for the enforced regression
 # guard (fails if any future retries/execution_timeout/retry_delay edit erodes this margin below
 # 10 minutes).
+#
+# debug/ci-pipeline-ingestion-timeout ROUND 22 (retry-exhaustion under CI contention): dbtkill
+# and orphan's own live evidence (both orders `stage` TIs reaching try=4/state=failed, a genuine
+# exhaustion of the OLD retries=3 budget under real ~420m-headroom CPU-starvation contention) showed
+# orders hitting the SAME KubernetesJobWatcher request-timeout race customers' `stage`/`dbt_build`
+# already compensate for with retries=4 -- orders never got that back-port when it was written to
+# mirror customers' shape (the same recurring gap class as ROUND 20's publish-resources finding and
+# ROUND 21's retry_delay finding). Bumped `csv_ingest_orders.py`'s `stage`/`dbt_build` retries
+# 3/2 -> 4 and `publish` from a hardcoded 3 to `publish_retries()` (this module's own function,
+# below) -- now byte-identical to customers' own retries treatment, matching D-06 instead of
+# leaving orders on a divergent, unjustified cut. Post-bump worst case: orders.stage/dbt_build
+# (retries=4) = 1920s = 32.0min (13.0min/28.9% margin, now identical to customers.stage/dbt_build);
+# orders.publish-local (retries=4) = 32.0min (13.0min/28.9% margin); orders.publish-CI (retries=3,
+# via the SAME `publish_retries()` Variable customers already reads) = 1530s = 25.5min (19.5min/
+# 43.3% margin) -- every orders combination now shares the exact same margin as its customers
+# counterpart, computed and enforced by the SAME `test_worst_case_retry_budget_has_real_margin`
+# regression guard above (no test change needed -- it already iterates both DAGs' 3 heavy tasks).
 HEAVY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=6)
 
 # debug/ci-pipeline-ingestion-timeout ROUND 21: renamed from customers-only `_KYVERNO_RETRY_DELAY`

@@ -887,7 +887,7 @@ def wait_for_orders_dagrun_queue_idle(
     airflow_conn: psycopg.Connection[Any],
     *,
     dag_id: str = "csv_ingest_orders",
-    timeout: float = 600,
+    timeout: float = 2400,
 ) -> None:
     """Bounded wait until `dag_id` has ZERO queued/running DagRuns — an honest test start line.
 
@@ -912,13 +912,38 @@ def wait_for_orders_dagrun_queue_idle(
     briefly hold the slot — bounded to one cron tick's worth, the same class
     ROUND 17 measured at ~50s, well inside a 180s discovery budget.
 
+    debug/ci-pipeline-ingestion-timeout ROUND 22: 600 -> 2400. The R18-era
+    600s value was sized off R17's OLD baseline (fast, mostly-successful
+    DagRuns draining a backlog in ~6min) and was never revisited when ROUND
+    21 rebalanced the DAG-level retry/execution-timeout arithmetic. ROUND 21
+    itself directly measured TWO real, independent misses against a
+    genuinely different failure shape (a DagRun reaching a real terminal
+    FAILED status via retry-exhaustion, not a slow success): u3's wait
+    needed 824s (37.3% over 600s) and orphan's needed ~631s (5.2% over). New
+    basis: ROUND 22 also bumps orders' stage/dbt_build retries 3/2 -> 4
+    (matching customers), which raises a SINGLE orders DagRun's own
+    worst-case time to reach ANY terminal state (success, retry-exhaustion
+    failure, or a dagrun_timeout-forced skip, whichever is smaller) to
+    1920s/32.0min (see kpo.py's HEAVY_TASK_EXECUTION_TIMEOUT comment for the
+    full retries=4 worst-case arithmetic) -- lower than dagrun_timeout=45min,
+    so 1920s is the binding ceiling. 2400s gives 480s/25% real margin over
+    that SINGLE-DagRun theoretical worst case, while also comfortably
+    covering the REAL, observed multi-DagRun-backlog shape this helper is
+    designed for at the actually-observed per-DagRun pace (~600-750s each,
+    post-bump estimate): up to ~3 slow, fully-retry-exhausting DagRuns
+    draining serially (~1800-2250s) still fits inside 2400s. A backlog that
+    still has not drained after 2400s is a genuine finding (a wedged or
+    deeply-backlogged pipeline), not a budget that needs inflating further.
+
     Args:
         airflow_conn: An open connection to the AIRFLOW metadata database
             (the `airflow_metadata_connection` fixture — `dag_run` lives
             there, not in the analytical cluster).
         dag_id: The DAG whose DagRun queue must be idle.
-        timeout: Maximum seconds to wait. Defaults to 600 (R17's worst
-            observed drain, podkill's ~5-run backlog, cleared in ~6min).
+        timeout: Maximum seconds to wait. Defaults to 2400 (ROUND 22; see
+            this docstring's own ROUND 22 paragraph for the full
+            worst-case-arithmetic derivation. R17/R18's original 600s is
+            preserved above in this docstring's history for context).
 
     Raises:
         AssertionError: `timeout` elapses with DagRuns still queued/running —

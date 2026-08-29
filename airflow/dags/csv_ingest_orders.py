@@ -32,6 +32,7 @@ from _common.kpo import (
     HEAVY_TASK_EXECUTION_TIMEOUT,
     HEAVY_TASK_RETRY_DELAY,
     common_kpo_kwargs,
+    publish_retries,
     stage_pod_resources,
 )
 from _common.run_stage_recorder import wire_dbt_build_tracking
@@ -131,12 +132,16 @@ def csv_ingest_orders() -> None:
     # D-12: stage is the trace root (OBS-10). No outlets here (D-16): orders produces no Asset.
     # retry_delay=HEAVY_TASK_RETRY_DELAY (ROUND 21): was UNSET here -- silently inheriting
     # Airflow's DEFAULT_RETRY_DELAY=300s/5min, the same back-port-gap shape as this DAG's own
-    # publish-resources finding below. See kpo.py's HEAVY_TASK_RETRY_DELAY/
-    # HEAVY_TASK_EXECUTION_TIMEOUT comments for the full worst-case-arithmetic math.
+    # publish-resources finding below. retries=4 (not 3; ROUND 22): dbtkill/orphan's real
+    # retry-exhaustion this round (try=4/state=failed under CPU-starvation contention) showed
+    # orders hitting the SAME KubernetesJobWatcher request-timeout race customers.stage already
+    # compensates for with retries=4 -- bumped to match (kpo.py's HEAVY_TASK_EXECUTION_TIMEOUT
+    # comment carries the full worst-case-arithmetic math; still >=13.0min/28.9% margin under
+    # dagrun_timeout, identical to customers.stage's own margin).
     stage = TracingKubernetesPodOperator.partial(
         task_id="stage",
         cmds=["dataplat"],
-        retries=3,
+        retries=4,
         retry_exponential_backoff=True,
         retry_delay=HEAVY_TASK_RETRY_DELAY,
         max_active_tis_per_dag=1,
@@ -145,9 +150,11 @@ def csv_ingest_orders() -> None:
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
     # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
+    # retries=4 (not 2; ROUND 22): same KubernetesJobWatcher-race / retry-exhaustion evidence as
+    # stage's own comment above -- bumped to match customers.dbt_build's own retries=4.
     dbt_build = KubernetesPodOperator(
         task_id="dbt_build",
-        retries=2,
+        retries=4,
         retry_exponential_backoff=True,
         retry_delay=HEAVY_TASK_RETRY_DELAY,
         max_active_tis_per_dag=1,
@@ -164,12 +171,14 @@ def csv_ingest_orders() -> None:
     # ROUND 20 (debug/ci-pipeline-ingestion-timeout, OOMKilled-publish finding): _STAGE_RESOURCES,
     # not _DISCOVER_RESOURCES -- publish runs the same in-memory SCD merge customers.py's publish
     # already needed _STAGE_RESOURCES for; this DAG never got that back-port, live-observed
-    # OOMKilled x3.
+    # OOMKilled x3. retries=publish_retries() (ROUND 22, not a hardcoded 3): matches
+    # customers.publish's own per-profile split (local=4/CI=3) instead of diverging without a
+    # stated reason (D-06) -- same worst-case-arithmetic margin as customers.publish.
     publish = KubernetesPodOperator(
         task_id="publish",
         cmds=["dataplat"],
         arguments=["publish", "--dataset", "orders"],
-        retries=3,
+        retries=publish_retries(),
         retry_exponential_backoff=True,
         retry_delay=HEAVY_TASK_RETRY_DELAY,
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
