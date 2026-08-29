@@ -11,7 +11,14 @@ round24_track_a_outcome: "ROUND 24 Track A TERMINAL 2026-08-29: run 33272229642 
   merits (which remain untested). Next step proposed, not yet actioned: push a normal follow-up
   commit on 4436311 to trigger a real image publish, then re-dispatch. See Current Focus's
   'ROUND 24 OUTCOME (Track A)' block and Evidence. Track B (run 33272070899) still in_progress,
-  not analyzed this turn."
+  not analyzed this turn.
+  RE-DISPATCH TERMINAL 2026-08-29: run 33273007625 (headSha 9810a32e, genuinely published image)
+  reached cluster-up and ran the scoped pytest invocation, but FAILED at an unrelated Step-0
+  fixture-seeding assertion (resolved_by_run_id 3 vs 2 -- customers DAG's 1-minute schedule
+  interacting with pipeline/run.py's documented multi-run finalize-pass attribution) before
+  scripts/rebuild-from-raw.py was ever invoked. FIFTH consecutive miss, FIFTH different reason,
+  still zero RebuildComparisonResult evidence on a0cc2f5. See Evidence and
+  rebuild-scd2-reconciliation.md for full detail."
 round20_status: "ROUND 20 offline COMPLETE 2026-08-28: all three ROUND 19 findings fixed.
   (1) podkill zombie-detection: LIVE-REPRODUCED via a minimal, faithful repro against the
   installed apache-airflow==3.3.0 + real KubernetesPodOperator/PodManager code on the LOCAL
@@ -11191,6 +11198,39 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     (Track A)' block for full detail. Track B (run 33272070899, full suite, dbtkill
     diagnostics) still in_progress as of this analysis -- not analyzed here, per scope.
   timestamp: 2026-08-29 (ROUND 24, Track A post-run analysis)
+
+- checked: >
+    ROUND 24 Track A RE-DISPATCH's terminal run (33273007625, headSha 9810a32e932a1e7704135d8
+    4717e1fb6ba628b11, workflow_dispatch, pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py,
+    against a genuinely published GHCR image this time). `gh run view --json jobs`,
+    `gh api .../jobs/<id>/logs` (2,973 lines, scratchpad round24-trackA-redispatch-job.log).
+  found: >
+    Cluster-up succeeded; the scoped `uv run pytest tests/e2e/slice/test_rebuild_from_raw.py -v`
+    invocation ran and collected 1 item, but FAILED after 268.92s at its own Step-0 fixture-
+    seeding assertion (`resolved_reject['resolved_by_run_id'] == corrected_run['run_id']` ->
+    `3 == 2`), BEFORE `scripts/rebuild-from-raw.py` was ever invoked. Root cause: the customers
+    DAG's 1-minute schedule interval re-swept the still-present original.csv object in a second
+    scheduled DagRun, creating a replay run (run_id=3, replay_of_run_id=1) that got finalized in
+    the same publish pass as the corrected file's own run (run_id=2) -- `pipeline/run.py`'s
+    documented `resolved_by_run_id=max(finalized_run_ids)` multi-run attribution then picked
+    run 3. Zero RebuildComparisonResult evidence obtained -- the FIFTH consecutive
+    live-verification attempt to miss, for a FIFTH distinct reason, unrelated to any of the prior
+    four AND unrelated to the SCD2 recompute logic (`dataplat/scd/recompute.py`,
+    `load/publish/scd.py`) that commit a0cc2f5 touches. Full detail recorded in the SCD2 fix's
+    own authoritative file, rebuild-scd2-reconciliation.md (Current Focus + Evidence + Resolution
+    updated this round).
+  implication: >
+    Five consecutive attempts, five different reasons, zero verdict on a0cc2f5's correctness --
+    a pattern worth flagging on its own. This specific miss is a pre-existing interaction between
+    the customers DAG's aggressive 1-minute schedule and an already-documented, deliberate
+    finalize-pass attribution simplification, surfaced only because the narrow-scope dispatch's
+    fixture-seeding window happens to straddle two scheduled DagRuns -- not a defect in this
+    session's rounds 1-23 timeout/retry work, and not a regression from a0cc2f5. Proposed next
+    step (in rebuild-scd2-reconciliation.md, not actioned here): fix the Step-0 race (pause/
+    unpause the customers DAG around fixture seeding, or relax the test assertion) before
+    spending a sixth live-dispatch attempt. Track B (run 33272070899) remains untouched and
+    unanalyzed by this task, per scope.
+  timestamp: 2026-08-29 (ROUND 24, Track A RE-DISPATCH post-run analysis)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->

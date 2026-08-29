@@ -2,21 +2,30 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29 (sibling session's ROUND 24 Track A TERMINAL: the dedicated narrow-scope
-  dispatch (run 33272229642, headSha 4436311, pytest_scope=test_rebuild_from_raw.py) failed at
-  `make cluster-up` (Kyverno denied the Airflow Helm install with MANIFEST_UNKNOWN -- the
-  dispatched commit was pushed `[skip ci]`, which as an unintended side effect also suppressed
-  that commit's own image publish) BEFORE pytest was ever invoked. test_rebuild_from_raw.py was
-  NEVER collected or executed. Zero RebuildComparisonResult information obtained -- this is now
-  the FOURTH consecutive live-verification attempt to fail to reach a verdict on this fix, for a
-  FOURTH different reason, this one a self-inflicted CI dispatch-sequencing gap entirely
-  unrelated to this fix's own recompute logic OR to the narrow-scope isolation design's own
-  merits (which remain genuinely untested, not refuted -- the run never got far enough to
-  exercise the orders-side settle-wait-avoidance claim). This fix's own status is UNCHANGED:
-  still self-verified only (see Resolution.verification below), still awaiting live-CI
-  confirmation. The sibling session has proposed (not yet actioned) pushing one more normal,
-  non-skip-ci commit to trigger a real image publish and re-dispatching against that new SHA.
-  See ci-pipeline-ingestion-timeout.md's 'ROUND 24 OUTCOME (Track A)' block for full detail.
+updated: 2026-08-29 (sibling session's ROUND 24 Track A RE-DISPATCH TERMINAL: run 33273007625,
+  headSha 9810a32e932a1e7704135d84717e1fb6ba628b11, workflow_dispatch,
+  pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py, against a genuinely published GHCR
+  image this time. Cluster-up succeeded, the scoped `uv run pytest
+  tests/e2e/slice/test_rebuild_from_raw.py -v` invocation ran and collected the 1 target test --
+  but the test FAILED at its own Step 0 fixture-seeding assertion (`assert
+  resolved_reject["resolved_by_run_id"] == corrected_run["run_id"]` -> `assert 3 == 2`,
+  test_rebuild_from_raw.py:550), BEFORE `scripts/rebuild-from-raw.py` was ever invoked (that is
+  Step 2, several steps later). Zero RebuildComparisonResult information obtained YET AGAIN --
+  this is now the FIFTH consecutive live-verification attempt to fail to reach a verdict on this
+  fix, for a FIFTH different reason. Root cause of this specific miss (see Evidence): the
+  customers DAG's 1-minute schedule interval, combined with the platform's own documented
+  multi-run finalize-pass attribution (`resolve_rejected_records_for_business_keys(...,
+  resolved_by_run_id=max(finalized_run_ids))`, pipeline/run.py), caused a REPLAY of the ALREADY-
+  SUCCEEDED original.csv file (run_id=3, replay_of_run_id=1) to be finalized in the SAME publish
+  pass as the corrected file's own run (run_id=2) -- so the reject's resolution was attributed to
+  run 3, not run 2, falsifying the test's own Step-0 assertion. This is a genuinely NEW,
+  DIFFERENT-MECHANISM miss, entirely unrelated to `dataplat/scd/recompute.py` or
+  `load/publish/scd.py` (the files this fix touches) -- it lives in `pipeline/run.py`'s
+  redrive-attribution logic and/or the test's own D-34 assertion design, not in the SCD2
+  tie-break sort key. This fix's own status is UNCHANGED: still self-verified only (see
+  Resolution.verification below), still awaiting live-CI confirmation -- the underlying
+  recompute correctness question remains completely untested after five attempts. See
+  ci-pipeline-ingestion-timeout.md's Evidence for this round's append and full job-log detail.
   Prior text retained below for history.)
 updated_prior_round24: 2026-08-29 (sibling session's ROUND 23 live-verification run, 33255828661: this fix's own
   test was REACHED for the first time this session (direct evidence: its own original/corrected
@@ -184,7 +193,36 @@ next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0
     actioned): push one more normal, non-skip-ci commit on top of 4436311 to trigger a real
     image publish via `publish.yml`, then re-dispatch `workflow_dispatch` against that new SHA.
     Awaiting that re-dispatch (or an equivalent) -- see the sibling session's
-    ci-pipeline-ingestion-timeout.md ROUND 24 OUTCOME (Track A) block for full detail."
+    ci-pipeline-ingestion-timeout.md ROUND 24 OUTCOME (Track A) block for full detail.
+    UPDATE (ROUND 24 Track A RE-DISPATCH TERMINAL): run 33273007625 (headSha 9810a32e, genuinely
+    published image confirmed) reached cluster-up successfully and ran the scoped pytest
+    invocation -- test_rebuild_from_raw.py WAS collected and executed this time. But it FAILED
+    at its own Step-0 fixture-seeding assertion (`resolved_by_run_id` mismatch, 3 vs 2) before
+    `scripts/rebuild-from-raw.py` was ever invoked -- the rebuild subprocess, the settle-wait,
+    and the RebuildComparisonResult comparison were all NEVER REACHED. This is the FIFTH
+    consecutive live-verification attempt to fail to reach a verdict, for a FIFTH different
+    reason, and it is DIFFERENT-MECHANISM from all four prior misses AND from the original
+    ROUND 21 mismatch: not an infra flake, not a job-ceiling cancellation, not a skip-ci/
+    image-publish gap, and not a checksum/SCD2-current-version content mismatch -- it is a
+    pre-existing interaction between the customers DAG's 1-minute schedule interval and
+    `pipeline/run.py`'s documented `resolved_by_run_id=max(finalized_run_ids)` multi-run
+    finalize-pass attribution (a scheduled re-discovery of the still-present original.csv object
+    created a REPLAY run, run_id=3/replay_of_run_id=1, which got finalized in the SAME publish
+    pass as the corrected file's run_id=2, so the reject's resolution was attributed to run 3
+    instead of run 2). See Evidence for full detail. This lives entirely in
+    `dataplat/pipeline/run.py` and/or the test's own D-34 assertion design -- NOT in
+    `dataplat/scd/recompute.py` or `load/publish/scd.py` (the two files a0cc2f5 touches). The
+    SCD2 recompute fix's own correctness remains COMPLETELY UNTESTED after five attempts.
+    PROPOSED NEXT STEP (not yet actioned, a scoping decision, not a blind retry): either (a)
+    pause/unpause the customers DAG around the Step-0 fixture-seeding window so no scheduled
+    DagRun can re-sweep the still-present original.csv object before the test proceeds to its
+    drop/rebuild steps, or (b) relax the test's own Step-0 assertion to accept
+    `resolved_by_run_id` in `{corrected_run['run_id'], any replay-of-original run_id finalized
+    in the same pass}`, since `max(finalized_run_ids)` is documented, deliberate platform
+    behavior, not a bug. (a) is likely higher-value since it also makes a future re-dispatch of
+    this same test far more likely to actually reach the rebuild step. A sixth live-dispatch
+    should wait until one of these is applied -- without a fix this exact Step-0 race is very
+    likely to recur under the same 1-minute schedule interval."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->
@@ -480,6 +518,52 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     re-dispatching against a new commit with a genuinely published image; this fix's own
     verification status is unchanged pending that retry."
 
+- timestamp: 2026-08-29
+  checked: "Sibling ci-pipeline-ingestion-timeout session's ROUND 24 Track A RE-DISPATCH
+    live-verification attempt (GitHub Actions run 33273007625, headSha
+    9810a32e932a1e7704135d84717e1fb6ba628b11, workflow_dispatch,
+    pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py, against a confirmed-published GHCR
+    image). `gh run view --json jobs` step-level conclusions, `gh api .../jobs/<id>/logs` (2,973
+    lines, saved as scratchpad round24-trackA-redispatch-job.log), the failing test's own
+    traceback, the end-of-job `meta.ingestion_runs -> meta.files` mapping dump, and
+    `dataplat/pipeline/run.py`'s own `resolve_rejected_records_for_business_keys` call site."
+  found: "Cluster-up succeeded this time; `uv run pytest tests/e2e/slice/test_rebuild_from_raw.py
+    -v` ran and collected exactly 1 item. The test FAILED after 268.92s at
+    `assert resolved_reject['resolved_by_run_id'] == corrected_run['run_id']` ->
+    `assert 3 == 2` (test_rebuild_from_raw.py:550) -- this is inside Step 0 (fixture seeding),
+    BEFORE Step 2's `scripts/rebuild-from-raw.py` subprocess invocation. The end-of-job
+    `meta.ingestion_runs` dump shows exactly 3 rows for this test's 2 uploaded files: run_id=1
+    (original.csv, SUCCEEDED, no replay_of_run_id), run_id=2 (corrected.csv, SUCCEEDED, no
+    replay_of_run_id), run_id=3 (original.csv AGAIN, SUCCEEDED, replay_of_run_id=1, a DIFFERENT
+    idempotency_key from run 1's). Airflow's own scheduler log shows the customers DAG (schedule
+    `*/1 * * * *`, airflow/dags/csv_ingest_customers.py:95) ran TWO separate scheduled DagRuns
+    inside the test's own window (`scheduled__2026-08-29T20:22:00` and
+    `scheduled__2026-08-29T20:24:00`), each with its own `wait_for_files` S3KeySensor poking the
+    WILDCARD `s3://raw/customers/*.csv` -- meaning the second scheduled run's own discovery pass
+    re-listed the still-present original.csv object (raw files are never deleted, D-13/README
+    §63 immutability) and produced a genuinely NEW ingestion run (run_id=3) for it via
+    discovery.py's D-18 replay mechanism (`find_latest_succeeded_run_for_file` ->
+    `replay_of_run_id`). `pipeline/run.py`'s own code comment at the
+    `resolve_rejected_records_for_business_keys` call site documents, as a DELIBERATE,
+    pre-existing simplification (predates this fix, predates this session): 'a multi-run
+    finalize pass attributes resolution to the LATEST run finalized this pass' via
+    `resolved_by_run_id=max(finalized_run_ids)`. Run 3 (the replay) and run 2 (the corrected
+    file) were evidently finalized in the SAME publish pass, so `max(finalized_run_ids)` picked
+    run 3, not run 2 -- directly explaining the observed `3 == 2` failure. No content mismatch,
+    no checksum mismatch, and no SCD2-recompute code path was ever exercised: the rebuild
+    subprocess itself was never invoked."
+  implication: "This is the FIFTH consecutive live-verification attempt to fail to produce a
+    RebuildComparisonResult pass/fail answer for this fix, and it fails for a FIFTH, entirely
+    DIFFERENT mechanism from all prior four AND from the original ROUND 21 mismatch. The failure
+    is fully attributable to (1) the customers DAG's aggressive 1-minute schedule interval
+    re-sweeping an already-succeeded, still-present raw file mid-test, interacting with (2) a
+    documented, pre-existing, deliberate multi-run finalize-pass attribution simplification in
+    `pipeline/run.py` that this test's own Step-0 D-34 assertion did not anticipate. NEITHER of
+    these lives in `dataplat/scd/recompute.py` or `load/publish/scd.py` -- the SCD2 tie-break
+    fix (a0cc2f5) this whole file exists to verify remains completely untouched by this failure
+    and completely unverified against live CI, five attempts in."
+  timestamp: 2026-08-29 (ROUND 24 Track A RE-DISPATCH, post-run analysis)
+
 ## Resolution
 <!-- Populated when RESOLVED -->
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
@@ -523,7 +607,17 @@ verification: "Self-verified: (1) direct isolated reproduction proved the pre-fi
     due to an orders-queue backlog; a dedicated narrow-scope dispatch itself never completed
     cluster-up, due to a self-inflicted skip-ci/image-publish sequencing gap). Still NOT
     verified against live CI. A re-dispatch against a commit with a genuinely published image
-    is the proposed next step."
+    is the proposed next step. UPDATE 2026-08-29 (ROUND 24 Track A RE-DISPATCH): that re-dispatch
+    happened (run 33273007625) and DID reach cluster-up + the scoped pytest invocation this time
+    -- but the test failed at an unrelated Step-0 fixture-seeding assertion (`resolved_by_run_id`
+    3 vs 2, caused by the customers DAG's 1-minute schedule interval interacting with
+    `pipeline/run.py`'s documented multi-run finalize-pass attribution) before ever invoking
+    `scripts/rebuild-from-raw.py`. FIVE consecutive live-verification attempts, five different
+    reasons, STILL zero pass/fail information on this fix's own RebuildComparisonResult
+    comparison. Still NOT verified against live CI. Proposed next step (not yet actioned): fix
+    the Step-0 race first (pause/unpause the customers DAG around fixture seeding, or relax the
+    assertion to accept any run finalized in the same pass) before spending a sixth live-dispatch
+    attempt -- see Current Focus's ROUND 24 Track A RE-DISPATCH TERMINAL update for detail."
 files_changed:
   - packages/dataplat/src/dataplat/scd/recompute.py
   - packages/dataplat/src/dataplat/load/publish/scd.py
