@@ -2,9 +2,21 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29 (second consecutive combined-verification run, 33246473899, failed to reach
-  this fix's own test -- cancelled at the 190-min job ceiling before test_rebuild_from_raw.py.
-  Zero new information either way; fix remains unverified against live data. See Evidence.)
+updated: 2026-08-29 (sibling session's ROUND 23 live-verification run, 33255828661: this fix's own
+  test was REACHED for the first time this session (direct evidence: its own original/corrected
+  fixture uploads at 15:54:24Z/15:56:05Z, and its own triggered backfill -- backfill_id=8, 3
+  DagRuns -- completed cleanly by 16:23:44Z) but still did NOT complete: the test appears to have
+  wedged in a later settle-wait (evidence points at the orders-side `_wait_for_all_raw_files_
+  settled` call, stuck behind a pre-existing, never-cleared backlog of unrelated PENDING orders
+  files -- the sibling session's own already-ticketed, out-of-scope queue-contention condition,
+  NOT a defect in this fix's own SCD2 recompute logic) before the sibling workflow's 190-min job
+  ceiling cancelled the whole run at 16:55:46Z, 32+ minutes after the test's own backfill had
+  already finished. Zero pass/fail information on the actual RebuildComparisonResult comparison
+  either way -- but qualitatively different from the prior two misses (which never started the
+  test at all). This is now the THIRD consecutive combined/full-suite live-verification attempt
+  to fail to produce a pass/fail answer for this fix, for three different reasons each time (1:
+  infra flake at cluster-up; 2: cancelled before the test started; 3: cancelled after the test
+  started and made real progress, but before its own comparison step). See Evidence.)
 ---
 
 ## Current Focus
@@ -108,16 +120,29 @@ reasoning_checkpoint:
 tdd_checkpoint: null
 next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0cc2f5, reviewed the
     3 diffs directly before committing -- no longer at risk from the concurrent-working-tree
-    hazard documented in Evidence). STILL AWAITS its first live-verification run: TWO consecutive
-    combined-verification attempts by the sibling ci-pipeline-ingestion-timeout session (run
-    33239055603, then run 33246473899) have both failed to reach
-    test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending at all -- the first died
-    in `make cluster-up` before the E2E suite started (an unrelated infra flake, since fixed);
-    the second was cancelled at the 190-min job ceiling while still mid-suite, several test files
-    before test_rebuild_from_raw.py is even reached in `pytest -v`'s alphabetical-by-file
-    collection order. Zero new information about this fix's correctness has been obtained either
-    way. Next combined-verification attempt (once the sibling session addresses its own
-    duration/timeout issues) remains the way to close this out."
+    hazard documented in Evidence). STILL AWAITS a completed live-verification run: THREE
+    consecutive full-suite live-verification attempts by the sibling ci-pipeline-ingestion-timeout
+    session (run 33239055603, run 33246473899, run 33255828661) have all failed to produce a
+    pass/fail answer for test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending's own
+    RebuildComparisonResult comparison -- the first died in `make cluster-up` before the E2E suite
+    started (an unrelated infra flake, since fixed); the second was cancelled at the 190-min job
+    ceiling while still several test files before this one in `pytest -v`'s collection order; the
+    THIRD (ROUND 23) genuinely REACHED and made real progress on this test for the first time
+    (its own triggered backfill completed cleanly) but was cancelled by the SAME 190-min ceiling
+    before the test's own settle-wait cleared and its comparison ran -- direct evidence points at
+    the sibling session's own already-ticketed, out-of-scope orders-queue-backlog/CPU-contention
+    condition as the blocker, not this fix's own recompute logic. Zero new information about this
+    fix's correctness has been obtained across all three attempts. Given three attempts in a row
+    have now failed to reach a verdict via a full-suite run -- and the third attempt shows that
+    even with substantial freed wall-clock, this test's own generous internal budgets (up to
+    1800s+600s+600s=3000s just for its own waits) plus a full ~2h10m of preceding suite time leave
+    too little runway inside a single 190-min job -- a DEDICATED, narrowly-scoped verification run
+    (e.g. `pytest tests/e2e/slice/test_rebuild_from_raw.py -v` alone, or with test selection
+    limited to this one node-ID, against a freshly-booted cluster with none of the preceding ~2
+    hours of other tests consuming the job's time budget) is now a genuinely stronger option than
+    continuing to rely on a full-suite run reaching this test by chance. This was raised at the
+    sibling session's own ROUND 23 decision checkpoint for the user to decide, not decided here
+    unilaterally -- see that session's own Current Focus for the proposed ROUND 24 shape."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->
@@ -349,6 +374,42 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     successfully and (b) completes (or is at least not cancelled before reaching) the E2E suite
     far enough to execute this specific test, which the sibling session's own duration/timeout
     issues have now prevented twice in a row."
+
+- timestamp: 2026-08-29
+  checked: "Sibling ci-pipeline-ingestion-timeout session's THIRD live-verification attempt
+    (GitHub Actions run 33255828661, headSha 61df23144709be8903a0651cf9fb0e959d8e1394 -- HEAD at
+    push time still contains this fix, commits a0cc2f5/3c2c4bf, confirmed an ancestor). Direct
+    job-log grep (scratchpad round23-job.log, 15,076 lines) for 'rebuild_from_raw'/
+    'RebuildComparisonResult'/any test_rebuild node-ID, the end-of-job S3 fixture-listing dump,
+    and the end-of-job meta.ingestion_runs/DagRun/backfill dumps."
+  found: "test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending was REACHED for the
+    FIRST TIME across all live-verification attempts so far: its own 'original'/'corrected'
+    customers fixtures appear in the S3 listing dump timestamped 2026-08-29 15:54:24 UTC and
+    2026-08-29 15:56:05 UTC respectively (2 seconds after the PRECEDING test's own failure line),
+    and its own subprocess-triggered rebuild-from-raw backfill produced exactly 3 new DagRuns
+    under a fresh backfill_id=8, all state=success, the last ending 2026-08-29 16:23:44 UTC --
+    i.e. the rebuild's own backfill genuinely completed, 32+ minutes before the job's 190-min
+    ceiling cancelled the whole run at 16:55:46 UTC. The test itself produced no PASSED/FAILED
+    line before cancellation (pytest -v gives no interim output for an in-flight test), so it was
+    still running its own post-backfill steps (`_wait_for_new_backfill_completed`, then two
+    `_wait_for_all_raw_files_settled` calls for customers then orders) when killed. The SAME
+    end-of-job dump shows orders file_ids 111-116 (run_ids 287-292) still PENDING at cancellation
+    time -- a backlog that was already PENDING earlier in the session and never cleared -- the
+    most likely explanation for where the test was still waiting (the orders-side settle call,
+    which gates on ALL orders raw files reaching a terminal status, not just this test's own two
+    customers files)."
+  implication: "This fix's own RebuildComparisonResult comparison remains completely unverified
+    (zero pass/fail information, THREE attempts in a row now), but the blocker this time is
+    directly evidenced as the sibling session's own already-ticketed, out-of-scope
+    queue-backlog/CPU-contention condition acting on an UNRELATED dataset (orders) that this
+    test's own settle-wait conservatively also waits on -- not any defect in the SCD2 recompute/
+    tie-break logic this fix touches (customers-side, never reached its own comparison step
+    either way). Given three consecutive full-suite attempts have now failed for three different
+    reasons, and even a genuinely freed-up run still ran out of job time before this specific
+    test could finish, a dedicated narrowly-scoped verification run (this test alone, or this
+    test's own file alone, against a fresh cluster with no preceding suite time consumed) is a
+    strong candidate for actually closing this out -- raised as an option at the sibling session's
+    own ROUND 23 checkpoint, not decided here."
 
 ## Resolution
 <!-- Populated when RESOLVED -->
