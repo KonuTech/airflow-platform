@@ -13,6 +13,32 @@ name: E2E full (merge)
 on:
   push:
     branches: [main]
+  # ROUND 24 (debug/ci-pipeline-ingestion-timeout): a manual, narrow-scope escape hatch.
+  # Three consecutive full-suite live-verification attempts (runs 33239055603/33246473899/
+  # 33255828661) each failed to produce a pass/fail verdict on
+  # `test_rebuild_from_raw.py::test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_
+  # pending` for three different reasons -- infra flake, cancelled before the test started,
+  # cancelled after real progress but before its own comparison step -- because that one test
+  # sits behind ~2+ hours of the rest of the suite inside a single 190-min job. `pytest_scope`
+  # lets a maintainer dispatch this SAME workflow (same cluster-up/migrations/vault-bootstrap
+  # setup, so the target test's own fixtures/dependencies are genuinely satisfied) against ONLY
+  # a chosen pytest target -- e.g. `tests/e2e/slice/test_rebuild_from_raw.py` -- against a
+  # freshly-booted cluster with none of the preceding suite's own wall-clock or queue-backlog
+  # consumed. Left empty (the default), `push` behavior is COMPLETELY UNCHANGED: every step
+  # below keys off `inputs.pytest_scope` being non-empty, never off `workflow_dispatch` alone,
+  # so a manual dispatch with the input left blank still runs the full suite exactly as `push`
+  # does. This is test-scoping only -- it does not touch, retire, or replace the CI-runner
+  # itself (runner migration/job-splitting stayed retired per this session's own scope
+  # guardrails; this workflow still runs on the SAME `ubuntu-latest` runner).
+  workflow_dispatch:
+    inputs:
+      pytest_scope:
+        description: >-
+          Optional pytest node-id/args to run INSTEAD of the full `tests/e2e/cluster
+          tests/e2e/slice` suite (e.g. "tests/e2e/slice/test_rebuild_from_raw.py"). Leave blank
+          to run the full suite exactly as a normal push would.
+        required: false
+        default: ""
 
 # Least privilege at the workflow level; `issues: write` is granted only at
 # the job level below, scoped to the D-22 failure-notification step.
@@ -259,8 +285,19 @@ jobs:
       # The shared `cluster-verify` Makefile target itself (used identically
       # by local devs) is untouched -- this staggering is CI-workflow-specific
       # orchestration only.
+      # ROUND 24: `inputs.pytest_scope` is only ever non-empty on a manual `workflow_dispatch`
+      # (the input does not exist on `push`, so `inputs.pytest_scope` alone -- without an
+      # `event_name` guard -- would be enough, but the explicit `github.event_name ==
+      # 'workflow_dispatch'` guard is kept for readability/defense-in-depth). A `push` run's
+      # own `run:` line is therefore byte-identical to before this round.
       - name: Run cluster + slice E2E suite (observability deferred, staggered below)
-        run: make cluster-slice-verify
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.pytest_scope }}" ]; then
+            echo "ROUND 24 narrow-scope dispatch: SCOPE='${{ inputs.pytest_scope }}'"
+            make cluster-slice-verify-scoped SCOPE="${{ inputs.pytest_scope }}"
+          else
+            make cluster-slice-verify
+          fi
 
       # THROWAWAY DIAGNOSTIC, paired with the monitor-start step above --
       # same never-to-be-merged scope. `if: always()` so this survives
@@ -501,22 +538,38 @@ jobs:
             SELECT _run_id, count(*) AS bronze_rows, count(DISTINCT customer_id) AS distinct_keys
               FROM staging.customers GROUP BY _run_id ORDER BY _run_id;" 2>&1 | tail -60 || echo "bronze per-run query failed"
 
+      # ROUND 24: skipped for a narrow-scope dispatch -- observability isn't part of what a
+      # `pytest_scope` run is verifying, and every minute here is a minute NOT available to the
+      # scoped test's own generous internal wait budgets inside the same 190-min job ceiling.
       - name: Install trimmed monitoring, run tests/e2e/observability, tear down
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.pytest_scope != '') }}
         run: make observability-verify-ci
 
       # D-24/D-30: runs strictly after cluster-verify above, on the SAME
       # cluster, with no data-seeding step between them — reusing
       # cluster-verify's own already-populated multi-dataset history as the
       # pre-drop baseline.
+      #
+      # ROUND 24: skipped for a narrow-scope dispatch targeting
+      # `tests/e2e/slice/test_rebuild_from_raw.py` specifically -- that test ALREADY invokes
+      # `scripts/rebuild-from-raw.py` itself as its own subprocess (module docstring's step 2);
+      # running this capstone step again immediately after would perform a SECOND, redundant
+      # `DROP SCHEMA ... CASCADE` + reprocessing cycle on top of the one the test itself just
+      # verified, wasting the narrow run's own time budget and risking confusing the very
+      # evidence this dispatch exists to capture cleanly.
       - name: Run rebuild-from-raw (D-24 capstone)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.pytest_scope != '') }}
         run: make rebuild-from-raw
 
       # D-22: an idempotent, commit-tagged failure issue in addition to the
       # red status check — since main already has this commit by
       # definition. Distinct title prefix from e2e-chaos.yml's own step so
       # the two suites never collide into one tracked issue.
+      #
+      # ROUND 24: gated to `push` only -- a manual narrow-scope debugging dispatch failing is
+      # not itself a "main is broken" signal worth filing/bumping the shared tracked issue for.
       - name: File or update failure issue
-        if: failure()
+        if: failure() && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

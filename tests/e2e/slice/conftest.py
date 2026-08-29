@@ -1021,11 +1021,91 @@ def poll_file_discovered(
     raise AssertionError(msg)
 
 
-def _poll_dbt_build_running_signal(
+# The 3 Airflow tasks that gate a DBT_BUILD `meta.run_stages` row ever being written at all
+# (`stage >> list_run_ids_pending_dbt_build >> mark_dbt_build_running`,
+# `airflow/dags/_common/run_stage_recorder.py::wire_dbt_build_tracking`) -- ROUND 24
+# (debug/ci-pipeline-ingestion-timeout) found the pre-existing end-of-job TaskInstance dump
+# (.github/workflows/e2e-full.yml's "ROUND 19: csv_ingest_orders key TaskInstance history")
+# never queried any of these 3, so a dbtkill-class "last observed: None" failure had no direct
+# evidence of WHERE in this chain things stalled -- only `stage`/`dbt_build`/`publish` etc.
+_DBT_BUILD_TRACKING_TASK_IDS = (
+    "stage",
+    "list_run_ids_pending_dbt_build",
+    "mark_dbt_build_running",
+)
+
+
+def _dbt_build_stall_diagnostics(
+    analytics_conn: psycopg.Connection[Any],
+    airflow_conn: psycopg.Connection[Any],
+    *,
+    run_id: int,
+    dag_id: str,
+    dag_run_id: str,
+) -> str:
+    """Direct-evidence dump for a `_poll_dbt_build_running_signal` timeout (ROUND 24).
+
+    debug/ci-pipeline-ingestion-timeout ROUND 23 found the end-of-job diagnostics dump
+    (`.github/workflows/e2e-full.yml`) is UNRELIABLE specifically on CANCELLED jobs -- GitHub
+    Actions' cancellation grace-period kill truncated the one query capable of answering this
+    exact question (the ROUND 12 `meta.ingestion_runs -> meta.files` mapping) mid-stream before
+    it reached the failing run's own `run_id`, for TWO consecutive live-verification attempts.
+    Rather than trying to make an end-of-job step survive an unpredictable, job-wide
+    cancellation, this embeds the equivalent evidence directly in the `AssertionError` message
+    at the moment `_poll_dbt_build_running_signal` itself times out -- inside the pytest
+    process, synchronously, before the test fails -- so it survives regardless of whether the
+    WHOLE JOB is later cancelled by the 190-min ceiling.
+
+    Gathers, all keyed to the SAME `run_id`/`dag_run_id`: (1) every `meta.run_stages` row for
+    `run_id`, not just `DBT_BUILD` -- shows whether `STAGE_LOAD` itself ever reached
+    `'SUCCEEDED'`, the exact predicate `list_run_ids_pending_dbt_build`'s own eligibility query
+    gates on; (2) `meta.ingestion_runs`' own status/error columns for `run_id`; (3)
+    `task_instance.(state, try_number, start_date, end_date)` for the 3
+    `_DBT_BUILD_TRACKING_TASK_IDS` tasks, for this exact DagRun -- never previously captured by
+    any diagnostics in this session (the pre-existing end-of-job TaskInstance dump's own task
+    list omits all three). Never raises: a failure gathering diagnostics is reported inline
+    rather than masking the real polling-timeout `AssertionError` this exists to enrich.
+    """
+    try:
+        with analytics_conn.cursor() as cur:
+            cur.execute(
+                "SELECT stage_name, status, started_at, finished_at "
+                "FROM meta.run_stages WHERE run_id = %s ORDER BY stage_name",
+                (run_id,),
+            )
+            run_stages_rows = cur.fetchall()
+        with analytics_conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, error_type, error_message, started_at "
+                "FROM meta.ingestion_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            ingestion_run_row = cur.fetchone()
+        with airflow_conn.cursor() as cur:
+            cur.execute(
+                "SELECT task_id, state, try_number, start_date, end_date FROM task_instance "
+                "WHERE dag_id = %s AND run_id = %s AND task_id = ANY(%s) ORDER BY task_id",
+                (dag_id, dag_run_id, list(_DBT_BUILD_TRACKING_TASK_IDS)),
+            )
+            ti_rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001 -- diagnostics-only, never mask the real timeout
+        return f"[ROUND 24 diagnostics FAILED to gather: {exc!r}]"
+    return (
+        f"[ROUND 24 diagnostics -- meta.run_stages[run_id={run_id!r}] (all stages): "
+        f"{run_stages_rows!r} | meta.ingestion_runs[run_id={run_id!r}]: "
+        f"{ingestion_run_row!r} | task_instance[dag_id={dag_id!r}, run_id={dag_run_id!r}] for "
+        f"{_DBT_BUILD_TRACKING_TASK_IDS}: {ti_rows!r}]"
+    )
+
+
+def _poll_dbt_build_running_signal(  # noqa: PLR0913 -- ROUND 24's 3 new keyword-only diagnostics-enrichment params (airflow_conn/dag_id/dag_run_id) are each independently optional and named for readability at the one call site, not accidental parameter creep
     conn: psycopg.Connection[Any],
     run_id: int,
     *,
     timeout: float,
+    airflow_conn: psycopg.Connection[Any] | None = None,
+    dag_id: str | None = None,
+    dag_run_id: str | None = None,
 ) -> str:
     """Poll `meta.run_stages` for D-18's `dbt_build` mid-flight signal: `stage_name='DBT_BUILD'`
     reaching `status='RUNNING'`.
@@ -1042,13 +1122,24 @@ def _poll_dbt_build_running_signal(
         conn: An open connection to the analytical database.
         run_id: The `meta.ingestion_runs.run_id` to watch.
         timeout: Maximum seconds to wait.
+        airflow_conn: ROUND 24 (debug/ci-pipeline-ingestion-timeout) -- an open connection to
+            the AIRFLOW metadata database. When provided together with `dag_id`/`dag_run_id`,
+            a timeout enriches its own `AssertionError` with `_dbt_build_stall_diagnostics`'
+            direct evidence instead of only naming the last-observed `meta.run_stages` status.
+            Optional and defaults to `None` (no enrichment) so existing callers are unaffected.
+        dag_id: The Airflow `dag_id` owning this run (required together with `dag_run_id` to
+            enable enrichment).
+        dag_run_id: The Airflow DagRun's own `run_id` string (required together with `dag_id`
+            to enable enrichment).
 
     Returns:
         The last-observed status once it equals `"RUNNING"`.
 
     Raises:
         AssertionError: `timeout` elapses first — names the last-observed status (or "no row
-            yet" if `DBT_BUILD` was never even written for this `run_id`).
+            yet" if `DBT_BUILD` was never even written for this `run_id`), enriched with
+            `_dbt_build_stall_diagnostics`' direct evidence whenever `airflow_conn`/`dag_id`/
+            `dag_run_id` are all supplied.
     """
     deadline = time.monotonic() + timeout
     last_status: str | None = None
@@ -1064,9 +1155,14 @@ def _poll_dbt_build_running_signal(
             if last_status == "RUNNING":
                 return last_status
         time.sleep(_POLL_INTERVAL_SECONDS)
+    diagnostics = ""
+    if airflow_conn is not None and dag_id is not None and dag_run_id is not None:
+        diagnostics = " " + _dbt_build_stall_diagnostics(
+            conn, airflow_conn, run_id=run_id, dag_id=dag_id, dag_run_id=dag_run_id
+        )
     msg = (
         f"meta.run_stages[run_id={run_id!r}, stage_name='DBT_BUILD'] never reached "
-        f"status='RUNNING' within {timeout}s (last observed: {last_status!r})"
+        f"status='RUNNING' within {timeout}s (last observed: {last_status!r}){diagnostics}"
     )
     raise AssertionError(msg)
 

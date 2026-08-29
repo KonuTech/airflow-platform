@@ -116,6 +116,23 @@ ARGUED_TESTS_E2E_TARGETS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        "cluster-slice-verify-scoped",
+        (
+            "debug/ci-pipeline-ingestion-timeout ROUND 24: a narrow-scope sibling of "
+            "cluster-slice-verify above, parametrized by SCOPE (a pytest node-id argument) "
+            "instead of hardcoding tests/e2e/cluster tests/e2e/slice -- exists so "
+            ".github/workflows/e2e-full.yml's own workflow_dispatch pytest_scope input can "
+            "verify a single test (e.g. test_rebuild_from_raw.py, which sits behind ~2+ hours "
+            "of the rest of the suite in file-collection order) against a freshly-booted "
+            "cluster, reusing the SAME cluster-up/migrations/vault-bootstrap setup "
+            "cluster-slice-verify itself needs rather than forking a second workflow. The "
+            "recipe's own usage-hint error message names a concrete tests/e2e/slice example "
+            "path, which is what surfaces this target here -- the recipe never hardcodes a "
+            "tests/e2e path as an actual pytest argument, that always comes from the caller-"
+            "supplied SCOPE variable."
+        ),
+    ),
+    (
         "observability-verify-ci",
         (
             "Quick task 260824-ayw: the CI-only staggered half of "

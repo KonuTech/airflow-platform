@@ -58,7 +58,7 @@ FILE ?=
         install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration test-dagtest image-csv-processor \
         image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
-        migrate-analytics rebuild-from-raw rollback smoke-verify cluster-slice-verify observability-verify-ci
+        migrate-analytics rebuild-from-raw rollback smoke-verify cluster-slice-verify cluster-slice-verify-scoped observability-verify-ci
 
 # `[a-z%-]` (not just `[a-z-]`) so the `stage-%` pattern rule (plan 02-01) is
 # discoverable too, without changing which concrete targets match.
@@ -391,6 +391,20 @@ cluster-verify:                 ## D-16: run tests/e2e/cluster, tests/e2e/slice 
 # exists ONLY for e2e-full.yml (see above); local `cluster-verify` keeps -q.
 cluster-slice-verify:           ## Quick task 260824-ayw: cluster+slice only, no observability -- exists ONLY for .github/workflows/e2e-full.yml's CONTEXT.md-locked staggering strategy
 	$(RUN_CLUSTER) pytest tests/e2e/cluster tests/e2e/slice -v
+
+# debug/ci-pipeline-ingestion-timeout ROUND 24: a narrow-scope sibling of cluster-slice-verify
+# above, parametrized by SCOPE (pytest node-id args) instead of hardcoding the whole
+# tests/e2e/cluster tests/e2e/slice tree. Exists so a single test (e.g. test_rebuild_from_raw.py,
+# behind ~2+ hours of the rest of the suite in file-collection order) can be verified against a
+# freshly-booted cluster inside `.github/workflows/e2e-full.yml`'s own `workflow_dispatch`
+# `pytest_scope` input, without the target it depends on -- the SAME cluster-up/migrations/
+# vault-bootstrap setup cluster-slice-verify itself needs -- being duplicated into a second,
+# forked workflow. `-v`, same reasoning as cluster-slice-verify's own precedent above. Not
+# reachable from `check`/`ci` (same D-16 reasoning: needs a live cluster) and not intended for
+# routine local use -- `cluster-verify`/`cluster-slice-verify` stay the normal, unscoped targets.
+cluster-slice-verify-scoped:    ## ROUND 24: scoped subset of cluster-slice-verify -- SCOPE is required, e.g. `make cluster-slice-verify-scoped SCOPE="tests/e2e/slice/test_rebuild_from_raw.py"`
+	@test -n "$(SCOPE)" || (echo "SCOPE is required, e.g. SCOPE=tests/e2e/slice/test_rebuild_from_raw.py" >&2; exit 1)
+	$(RUN_CLUSTER) pytest $(SCOPE) -v
 
 # Quick task 260824-ayw: CONTEXT.md's locked CPU-contention decision -- the
 # CI node has ~3 allocatable CPU shared by Airflow, 2x Postgres, MinIO,

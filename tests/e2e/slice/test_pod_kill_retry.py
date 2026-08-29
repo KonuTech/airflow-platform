@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from tests.e2e.slice.conftest import (
+    _ORDERS_DAG_ID,
     _poll_dbt_build_running_signal,
     build_orders_csv_bytes,
     existing_customer_ids,
@@ -365,6 +366,14 @@ _DBT_BUILD_RECOVERY_TIMEOUT_SECONDS = 600
 # Current Focus block). Do NOT re-bump this value without new evidence distinguishing "needs more
 # time" from "stuck/never-scheduled" -- this round's own live evidence already rules out the
 # former as the sole explanation.
+#
+# ROUND 24: the call site below now also passes `airflow_conn`/`dag_id`/`dag_run_id`, so a
+# timeout here is enriched with direct `stage`/`list_run_ids_pending_dbt_build`/
+# `mark_dbt_build_running` TaskInstance state plus every `meta.run_stages` row for this
+# `run_id` (see `_dbt_build_stall_diagnostics`) -- gathered synchronously inside this test's
+# own AssertionError, closing the diagnostics-truncation gap ROUND 23 found in the end-of-job
+# dump (GitHub Actions' cancellation grace-period kill truncated it mid-stream on 2 of the last
+# 2 CANCELLED runs, before it ever reached this failure's own run_id).
 _DBT_BUILD_POLL_TIMEOUT_SECONDS = 300
 
 
@@ -481,6 +490,7 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
         customer_ids=parent_ids,
     )
     marker = uuid.uuid4().hex[:12]
+    dag_run_id = f"e2e-dbtkill-{marker}"
     key = f"orders/e2e-dbtkill-{marker}.csv"
     object_uri = f"s3://raw/{key}"
 
@@ -490,7 +500,7 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
     app.put_object(Bucket="raw", Key=key, Body=payload)
-    trigger_orders_dagrun(kubectl, run_id=f"e2e-dbtkill-{marker}")
+    trigger_orders_dagrun(kubectl, run_id=dag_run_id)
 
     file_row = poll_file_discovered(
         analytics_connection,
@@ -507,8 +517,17 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
     run_id = run_row["run_id"]
 
+    # ROUND 24 (debug/ci-pipeline-ingestion-timeout): pass the Airflow-side identity through so
+    # a timeout here is enriched with `_dbt_build_stall_diagnostics`' direct TI/run_stages
+    # evidence, embedded synchronously in this test's own AssertionError -- immune to the
+    # end-of-job diagnostics dump's own cancellation-truncation gap (ROUND 23 finding).
     _poll_dbt_build_running_signal(
-        analytics_connection, run_id, timeout=_DBT_BUILD_POLL_TIMEOUT_SECONDS
+        analytics_connection,
+        run_id,
+        timeout=_DBT_BUILD_POLL_TIMEOUT_SECONDS,
+        airflow_conn=airflow_metadata_connection,
+        dag_id=_ORDERS_DAG_ID,
+        dag_run_id=dag_run_id,
     )
     pod_name = _poll_dbt_build_pod_name(kubectl, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS)
 
