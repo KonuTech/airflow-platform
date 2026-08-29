@@ -1,5 +1,5 @@
 ---
-status: awaiting_human_verify
+status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
 updated: 2026-08-29
@@ -104,11 +104,13 @@ reasoning_checkpoint:
       produced the original tie, since it closes the general non-determinism class, not one
       specific instance of it."
 tdd_checkpoint: null
-next_action: "Fix applied and self-verified (see Resolution). Awaiting human verification: user
-    should (1) commit these 3 files promptly given the concurrent-working-tree hazard documented
-    in Evidence, and (2) ideally re-run tests/e2e/slice/test_rebuild_from_raw.py in CI to confirm
-    the reconciliation comparison now passes end-to-end against live cluster data (this session
-    could not execute that ~1hr+ live test itself)."
+next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0cc2f5, reviewed the
+    3 diffs directly before committing -- no longer at risk from the concurrent-working-tree
+    hazard documented in Evidence). Remaining: re-run tests/e2e/slice/test_rebuild_from_raw.py in
+    CI (make cluster-slice-verify / e2e-full.yml) to confirm the reconciliation comparison now
+    passes end-to-end against live cluster data. This will be triggered either standalone or
+    folded into the sibling ci-pipeline-ingestion-timeout session's next round (both target the
+    same test suite) -- orchestrator's call, not yet scheduled."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->
