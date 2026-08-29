@@ -2,7 +2,9 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29
+updated: 2026-08-29 (second consecutive combined-verification run, 33246473899, failed to reach
+  this fix's own test -- cancelled at the 190-min job ceiling before test_rebuild_from_raw.py.
+  Zero new information either way; fix remains unverified against live data. See Evidence.)
 ---
 
 ## Current Focus
@@ -106,11 +108,16 @@ reasoning_checkpoint:
 tdd_checkpoint: null
 next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0cc2f5, reviewed the
     3 diffs directly before committing -- no longer at risk from the concurrent-working-tree
-    hazard documented in Evidence). Remaining: re-run tests/e2e/slice/test_rebuild_from_raw.py in
-    CI (make cluster-slice-verify / e2e-full.yml) to confirm the reconciliation comparison now
-    passes end-to-end against live cluster data. This will be triggered either standalone or
-    folded into the sibling ci-pipeline-ingestion-timeout session's next round (both target the
-    same test suite) -- orchestrator's call, not yet scheduled."
+    hazard documented in Evidence). STILL AWAITS its first live-verification run: TWO consecutive
+    combined-verification attempts by the sibling ci-pipeline-ingestion-timeout session (run
+    33239055603, then run 33246473899) have both failed to reach
+    test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending at all -- the first died
+    in `make cluster-up` before the E2E suite started (an unrelated infra flake, since fixed);
+    the second was cancelled at the 190-min job ceiling while still mid-suite, several test files
+    before test_rebuild_from_raw.py is even reached in `pytest -v`'s alphabetical-by-file
+    collection order. Zero new information about this fix's correctness has been obtained either
+    way. Next combined-verification attempt (once the sibling session addresses its own
+    duration/timeout issues) remains the way to close this out."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->
@@ -313,6 +320,35 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     tree -- a real risk of uncommitted work being silently clobbered. Flagged explicitly in the
     human-verification checkpoint below so the user can commit this fix promptly and coordinate
     with the sibling session before further large working-tree operations."
+
+- timestamp: 2026-08-29
+  checked: "Sibling ci-pipeline-ingestion-timeout session's second combined-verification live run
+    (GitHub Actions run 33246473899, headSha cba2a550886eff02f774654958051f77edfc64c7 -- HEAD at
+    push time included this fix, commits a0cc2f5/3c2c4bf, confirmed an ancestor of cba2a55).
+    Direct job-log grep (`gh api .../jobs/<id>/logs`, saved as scratchpad
+    round22-combined-job.log, 13,193 lines) for 'rebuild_from_raw'/'RebuildComparisonResult'/any
+    test_rebuild node-ID."
+  found: "ZERO hits anywhere in the log except already-quoted source/docstring text --
+    test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending was NEVER STARTED. The
+    job's own E2E suite (`pytest tests/e2e/cluster tests/e2e/slice -v`) was cancelled by the
+    workflow's 190-minute job-level ceiling (conclusion=CANCELLED, 09:51:58Z->13:02:49Z, not a
+    manual cancel, not superseded) while still working through tests/e2e/slice/
+    test_pod_kill_retry.py (2 failed / 32 passed / 6 skipped out of 44 total node-IDs reached,
+    90% progress) -- several test files before test_referential_orphan.py and
+    test_rebuild_from_raw.py are even reached in pytest's alphabetical-by-file collection order.
+    This is the SECOND consecutive combined-verification attempt to fail to reach this test, for
+    two entirely different reasons (the first, run 33239055603, died in `make cluster-up` before
+    the suite even started, an unrelated infra flake since fixed)."
+  implication: "This fix remains completely unverified against any live CI run -- no new
+    evidence either confirming or refuting the fix, in either direction. The blind spot already
+    named in this file's own reasoning_checkpoint ('not verified against the ACTUAL failing CI
+    run's live data') is UNCHANGED and still open. Nothing in this run's evidence bears on
+    whether the file_id tie-break fix actually resolves the original checksum/SCD2
+    current_valid_from/to/is_current mismatch for customer keys 2100100030/2100100032 -- that
+    question awaits a combined-verification run that both (a) reaches `make cluster-up`
+    successfully and (b) completes (or is at least not cancelled before reaching) the E2E suite
+    far enough to execute this specific test, which the sibling session's own duration/timeout
+    issues have now prevented twice in a row."
 
 ## Resolution
 <!-- Populated when RESOLVED -->
