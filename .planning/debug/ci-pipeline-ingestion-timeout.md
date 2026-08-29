@@ -1177,11 +1177,24 @@ CPU-starvation captured as a documented follow-up ticket, out of scope for fix-a
       formatting or type-checking regressions anywhere in the repo. `tests/integration`
       (testcontainers) NOT re-run, matching ROUND 20's own established precedent: zero
       packages/dataplat or csv_processor source changes this round, unaffected surface."
-  live_verification_state: "PENDING PUSH"
-  next_action: "Commit code + docs (docs-only push separately per this session's own established
-      push-ordering convention if pushed in the same session as a later docs-only follow-up),
-      push, record the authoritative e2e-full.yml + companion publish.yml run IDs, return a
-      human-action checkpoint (do not self-watch)."
+  live_verification_state: "RECORDED 2026-08-29T00:13:28Z: ROUND 21 pushed as docs commit
+      305910a (charter + pre/post-fix math, no code touched) + code commit c01d022 (HEAD, the
+      actual fix), BOTH in ONE `git push` -- per this session's own established push-ordering
+      rule (ROUND 19), neither commit message carries any skip-ci marker, since marking either
+      would suppress the whole push's workflow triggering. Confirmed triggered at headSha
+      c01d022: AUTHORITATIVE e2e-full.yml run 33222882138 (item 0 companion) publish.yml run
+      33222882062; also triggered (not this round's concern) CI run 33222882090, e2e-chaos.yml
+      run 33222881975. Analysis criteria = this round's own pre_registered_criteria above: (a)
+      podkill stays fixed (regression check); (b) dbtkill and its cascade (u3/rebuild/orphan)
+      clear; (c) worst-case retry arithmetic verifiably fits under 45min with real margin (already
+      proven offline via the new regression test -- live run confirms it holds under REAL
+      contention, not just on paper); (d) zero new failures; (e) guards green; (f) duration
+      decomposition. TARGET: fully green census or nameable-stragglers-only. Scratchpad
+      convention: save the job log as round21-job.log. Session manager runs the single 60s
+      watcher against run 33222882138 (and 33222882062 for completeness) -- do NOT self-watch
+      further this turn."
+  next_action: "SUPERSEDED once the live-verification run completes -- await session manager's
+      watcher result, then analyze against this round's pre_registered_criteria."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
