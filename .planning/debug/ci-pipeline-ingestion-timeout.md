@@ -1584,10 +1584,30 @@ parallel debug thread, explicitly out of scope here):
       constant/import wiring is syntactically and structurally sound). `tests/integration`
       (testcontainers) NOT re-run, matching ROUND 20/21's own established precedent: zero
       packages/dataplat or csv_processor source changes this round, unaffected surface."
-  live_verification_state: "PENDING -- see live_verification_state update immediately below,
-      recorded once pushed."
-  next_action: "SUPERSEDED once live_verification_state below is recorded -- see ROUND 22
-      OUTCOME (not yet written; awaiting the live-verification run this checkpoint requests)."
+  live_verification_state: "RECORDED 2026-08-29T06:41:20Z: ROUND 22 pushed as code commit
+      e6f37fb (the fix) + docs commit 2009065 (HEAD, charter + offline battery), BOTH in ONE
+      `git push` -- per this session's own established push-ordering rule, neither commit
+      message carries a skip-ci marker. Confirmed triggered at headSha 2009065 (no suppression
+      this time): AUTHORITATIVE e2e-full.yml run 33239055603 (item 0 companion) publish.yml run
+      33239055804; also triggered (not this round's concern) CI run 33239055781, e2e-chaos.yml
+      run 33239055601. Analysis criteria = this round's own pre_registered_criteria above: (a)
+      dbtkill and idempotent_reupload clear; (b) u3 and orphan clear; (c) podkill/sweep/OOM stay
+      clean; (d) zero new failures EXCEPT the expected/accepted rebuild finding; (e) guards green;
+      (f) duration decomposition. TARGET: fully green except rebuild, or
+      nameable-stragglers-only. Scratchpad convention: save the job log as round22-job.log.
+      Session manager runs the single 60s watcher against run 33239055603 (and 33239055804 for
+      completeness) -- do NOT self-watch further this turn. NOTE: this repo's working tree is
+      shared with a concurrent, unrelated parallel debug thread
+      (debug/rebuild-scd2-reconciliation, touching packages/dataplat/src/dataplat/load/publish/
+      scd.py, packages/dataplat/src/dataplat/scd/recompute.py, tests/unit/test_scd_recompute.py)
+      -- verified via `git stash` isolation that this round's own offline battery (567/157/14/
+      manifests) holds identically with or without that thread's in-progress, uncommitted
+      changes present in the working tree; this round's own commits (e6f37fb/2009065) contain
+      ONLY this round's own 6 files (5 code + 1 docs), confirmed via `git status`/`git diff
+      --stat` before staging."
+  next_action: "SUPERSEDED once ROUND 22 OUTCOME is written from live run 33239055603 -- see
+      Current Focus ROUND 22 OUTCOME (not yet written; awaiting the live-verification run this
+      checkpoint requests)."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
