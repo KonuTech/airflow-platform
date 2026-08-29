@@ -2,19 +2,22 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29 (sibling session's ROUND 24: after three consecutive failed full-suite
-  attempts, a DEDICATED narrow-scope verification run is being dispatched for this fix's own
-  test alone (`pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py`, a new
-  `workflow_dispatch` input on `.github/workflows/e2e-full.yml`), against a freshly-booted
-  cluster with none of the full suite's own preceding wall-clock or queue-backlog consumed.
-  Source-read confirms this is not merely faster but STRUCTURALLY safer than a full-suite run
-  for this fix specifically: `_wait_for_all_raw_files_settled`'s own orders-side call (the exact
-  step ROUND 23 found this test wedged behind) early-returns as a documented no-op when the
-  `orders/` prefix is empty -- true by construction on a fresh cluster with nothing else ever
-  uploaded, since this test seeds only its own customers fixtures. This fix's own recompute
-  logic (a0cc2f5/3c2c4bf) is untouched by this round -- only the verification PATH changed. See
-  that session's own ci-pipeline-ingestion-timeout.md ROUND 24 block for the live run ID and
-  criteria once dispatched. Prior text retained below for history.)
+updated: 2026-08-29 (sibling session's ROUND 24 Track A TERMINAL: the dedicated narrow-scope
+  dispatch (run 33272229642, headSha 4436311, pytest_scope=test_rebuild_from_raw.py) failed at
+  `make cluster-up` (Kyverno denied the Airflow Helm install with MANIFEST_UNKNOWN -- the
+  dispatched commit was pushed `[skip ci]`, which as an unintended side effect also suppressed
+  that commit's own image publish) BEFORE pytest was ever invoked. test_rebuild_from_raw.py was
+  NEVER collected or executed. Zero RebuildComparisonResult information obtained -- this is now
+  the FOURTH consecutive live-verification attempt to fail to reach a verdict on this fix, for a
+  FOURTH different reason, this one a self-inflicted CI dispatch-sequencing gap entirely
+  unrelated to this fix's own recompute logic OR to the narrow-scope isolation design's own
+  merits (which remain genuinely untested, not refuted -- the run never got far enough to
+  exercise the orders-side settle-wait-avoidance claim). This fix's own status is UNCHANGED:
+  still self-verified only (see Resolution.verification below), still awaiting live-CI
+  confirmation. The sibling session has proposed (not yet actioned) pushing one more normal,
+  non-skip-ci commit to trigger a real image publish and re-dispatching against that new SHA.
+  See ci-pipeline-ingestion-timeout.md's 'ROUND 24 OUTCOME (Track A)' block for full detail.
+  Prior text retained below for history.)
 updated_prior_round24: 2026-08-29 (sibling session's ROUND 23 live-verification run, 33255828661: this fix's own
   test was REACHED for the first time this session (direct evidence: its own original/corrected
   fixture uploads at 15:54:24Z/15:56:05Z, and its own triggered backfill -- backfill_id=8, 3
@@ -162,8 +165,26 @@ next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0
     `tests/e2e/slice/test_rebuild_from_raw.py` alone against a freshly-booted cluster -- offline
     battery complete, live dispatch imminent. This will be the FOURTH live-verification attempt
     for this fix, and the first one structurally immune to the orders-queue-backlog condition
-    that blocked attempt three. Awaiting the dispatched run's own result -- see the sibling
-    session's ci-pipeline-ingestion-timeout.md ROUND 24 block for the run ID once triggered."
+    that blocked attempt three.
+    UPDATE (ROUND 24 Track A TERMINAL): the dispatched run (33272229642, headSha 4436311) FAILED
+    at `make cluster-up` -- Kyverno denied the Airflow Helm install with MANIFEST_UNKNOWN because
+    the dispatched commit was pushed `[skip ci]`, which (unintendedly) also suppressed that
+    commit's own image publish, so no image existed at that tag to install. pytest was NEVER
+    invoked; test_rebuild_from_raw.py was never collected. This is a self-inflicted CI
+    dispatch-sequencing gap in the sibling session's own ROUND 24 Track A execution, entirely
+    unrelated to this fix's recompute logic or to the narrow-scope isolation design's own merits
+    (untested, not refuted -- see full detail in ci-pipeline-ingestion-timeout.md's ROUND 24
+    OUTCOME (Track A) block). This is now the FOURTH consecutive live-verification attempt to
+    fail to reach a verdict, for a FOURTH different reason (1: infra flake at cluster-up,
+    unrelated, since fixed; 2: cancelled before the test started; 3: cancelled after real
+    backfill progress but before the comparison step, due to an orders-queue backlog; 4: a
+    dedicated narrow-scope dispatch itself never completed cluster-up, due to a self-inflicted
+    skip-ci/image-publish sequencing gap). Zero new information on this fix's correctness has
+    been obtained across all FOUR attempts. Next step proposed by the sibling session (not yet
+    actioned): push one more normal, non-skip-ci commit on top of 4436311 to trigger a real
+    image publish via `publish.yml`, then re-dispatch `workflow_dispatch` against that new SHA.
+    Awaiting that re-dispatch (or an equivalent) -- see the sibling session's
+    ci-pipeline-ingestion-timeout.md ROUND 24 OUTCOME (Track A) block for full detail."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->
@@ -432,6 +453,33 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     strong candidate for actually closing this out -- raised as an option at the sibling session's
     own ROUND 23 checkpoint, not decided here."
 
+- timestamp: 2026-08-29
+  checked: "Sibling ci-pipeline-ingestion-timeout session's ROUND 24 Track A dedicated
+    narrow-scope live-verification attempt (GitHub Actions run 33272229642, headSha
+    4436311c11f8ac5f213359a52f2302a3e5916e89, workflow_dispatch with
+    pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py). `gh run view --json jobs`
+    step-level conclusions, `gh api .../jobs/<id>/logs`, plus check-runs/actions-runs lookups
+    for the dispatched SHA."
+  found: "conclusion=failure at step 7 ('Bring up the ephemeral kind cluster (CI profile)',
+    `make cluster-up`) -- every later step including the pytest-invocation step is SKIPPED.
+    test_rebuild_from_raw.py was NEVER collected or executed. Root cause: the dispatched commit
+    (4436311, the sibling session's own ROUND 24 concurrency-group fix) was pushed with
+    `[skip ci]`, which suppressed `publish.yml` for that SHA too (GitHub's native skip-ci
+    push-suppression is workflow-agnostic, not scoped to the workflow whose push triggered
+    it) -- so no `ghcr.io/konutech/airflow` image was ever published at that tag. cluster-up's
+    image-override mechanism correctly tried to install that tag; Kyverno's
+    `require-signed-images` policy correctly denied it with `MANIFEST_UNKNOWN: manifest
+    unknown` since the manifest genuinely does not exist."
+  implication: "This fix's RebuildComparisonResult comparison remains completely unverified
+    (zero pass/fail information, FOUR attempts in a row now). This attempt's blocker is a
+    self-inflicted CI dispatch-sequencing gap (workflow_dispatch against a skip-ci'd commit
+    with no published image), not any property of test_rebuild_from_raw.py's own fixtures or
+    this fix's recompute logic -- the narrow-scope isolation design's own structural-safety
+    claim (fresh cluster avoids the orders-queue backlog) remains genuinely untested, not
+    refuted, since the run never reached pytest at all. The sibling session has proposed
+    re-dispatching against a new commit with a genuinely published image; this fix's own
+    verification status is unchanged pending that retry."
+
 ## Resolution
 <!-- Populated when RESOLVED -->
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
@@ -468,7 +516,14 @@ verification: "Self-verified: (1) direct isolated reproduction proved the pre-fi
     the already-documented MergePublisher exclusion-constraint gap), not caused by this change.
     NOT YET verified against the original failing CI scenario itself (that requires a live
     tests/e2e/slice/test_rebuild_from_raw.py run in CI/kind, ~1+ hour, which this session could
-    not execute) -- see human-verification checkpoint."
+    not execute) -- see human-verification checkpoint. UPDATE 2026-08-29: FOUR consecutive
+    live-verification attempts by the sibling ci-pipeline-ingestion-timeout session have now
+    failed to produce a pass/fail answer, each for a different reason (infra flake; cancelled
+    before test start; cancelled after real backfill progress but before the comparison step,
+    due to an orders-queue backlog; a dedicated narrow-scope dispatch itself never completed
+    cluster-up, due to a self-inflicted skip-ci/image-publish sequencing gap). Still NOT
+    verified against live CI. A re-dispatch against a commit with a genuinely published image
+    is the proposed next step."
 files_changed:
   - packages/dataplat/src/dataplat/scd/recompute.py
   - packages/dataplat/src/dataplat/load/publish/scd.py
