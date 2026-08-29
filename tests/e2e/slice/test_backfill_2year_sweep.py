@@ -2215,6 +2215,28 @@ def test_mass_delete_snapshot_trips_circuit_breaker_without_mutating_gold_state(
 # Plan 10-08: D-10's dedicated same-key concurrency test
 # ---------------------------------------------------------------------------
 
+# debug/ci-pipeline-ingestion-timeout ROUND 23: this poll used to reuse the generic "2700s
+# single-window-backfill precedent" verbatim -- NUMERICALLY IDENTICAL to
+# csv_ingest_customers's own `dagrun_timeout=pendulum.duration(minutes=45)` (also 2700s). That
+# was a genuine zero-margin design flaw, not just a coincidence: `_wait_for_new_dag_run_terminal`
+# computes its OWN deadline from `time.monotonic()` at CALL time, while `dagrun_timeout` computes
+# its deadline from the DagRun's own `start_date` -- under this cluster's real, documented CPU
+# contention, a queued DagRun's `start_date` can land meaningfully AFTER this poll's own call
+# time, which means the test's clock can run out BEFORE the DAG's own dagrun_timeout would ever
+# fire, producing an ambiguous "last observed state: running" failure that cannot distinguish "the
+# platform is genuinely wedged past its own safety net" from "this test's own budget is simply
+# tighter than the mechanism it is racing." ROUND 23 fix: decouple the two clocks with real
+# margin, deliberately making the TEST's own poll the tighter of the two (900s/33% under
+# dagrun_timeout=2700s) so a slow run fails here FIRST with a clear, attributable "still running
+# after Ns" message, rather than this poll and dagrun_timeout's own blunt force-skip racing to
+# fire within the same ambiguous window on the SAME DagRun. 1800s matches this SAME test file's
+# own already-established precedent for the structurally-identical `_wait_for_new_dag_run_terminal`
+# call in `test_idempotent_rerun_of_full_backfill_produces_zero_delta` (orders' asset-cascade
+# wait, above) -- not a fresh guess, and comfortably above this test's own historical worst-observed
+# FULL-test duration (16.5min/990s, this debug file's own scd_concurrent duration-variance watch
+# item) with real margin (+82%) for legitimate slow-but-correct completion.
+_SCD_CONCURRENT_DAG_RUN_TERMINAL_TIMEOUT_SECONDS = 1800
+
 
 def test_scd_concurrent_attribute_change_and_correction_same_key(  # noqa: PLR0913, PLR0915, PLR0917
     # one param per fixture this test genuinely needs (corpus ordering, cross-test state,
@@ -2395,18 +2417,24 @@ def test_scd_concurrent_attribute_change_and_correction_same_key(  # noqa: PLR09
 
     # Sizing: same single-window-backfill/single-dagrun-settle precedent values this module
     # already establishes elsewhere (test_live_run_concurrent_with_backfill_same_dataset's own
-    # identical 2700s waits), under this cluster's real, documented CPU contention.
+    # identical 2700s waits), under this cluster's real, documented CPU contention. NOTE
+    # (ROUND 23): only `_wait_for_new_dag_run_terminal` below is a single-DagRun state poll that
+    # races directly against `dagrun_timeout` -- these other two (backfill-completion,
+    # per-file terminal status) are not the mechanism this round's finding identified, so their
+    # shared 2700s value is left unchanged (no evidence of the same race).
     _wait_for_new_backfill_completed(
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_backfill_id=since_backfill_id,
         timeout=2700,
     )
+    # ROUND 23: decoupled from dagrun_timeout=2700s -- see the module constant's own derivation
+    # comment above this test's definition.
     _wait_for_new_dag_run_terminal(
         airflow_metadata_connection,
         dag_id=_CUSTOMERS_DAG_ID,
         since_pk=since_dag_run_pk,
-        timeout=2700,
+        timeout=_SCD_CONCURRENT_DAG_RUN_TERMINAL_TIMEOUT_SECONDS,
     )
 
     results = _wait_for_dataset_files_terminal(

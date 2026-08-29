@@ -348,20 +348,24 @@ _DBT_BUILD_RECOVERY_TIMEOUT_SECONDS = 600
 # under-sized" than the queue-idle budget. This poll waits for `stage` to fully SUCCEED (all of
 # this test's fixture's stage map indices) before `dbt_build` can even start -- i.e. it is
 # bounded by `stage`'s own worst-case-to-terminal time, not a fixed constant of its own. ROUND 22
-# bumps orders.stage's retries 3 -> 4 (matching customers -- see `_common/kpo.py`'s
-# HEAVY_TASK_EXECUTION_TIMEOUT comment), which raises `stage`'s own theoretical worst case to
-# 1920s/32.0min (5 attempts x 360s execution_timeout + 4 x 30s retry_delay, the CONFIRMED
-# constant-delay model). This round's OWN live evidence (dbtkill's real DagRun this test drives
-# reached stage try=4/state=failed -- genuine retry-exhaustion under real CPU-starvation
-# contention, not a hypothetical) confirms the THEORETICAL worst case is the right basis here,
-# not just the smaller real-observed sample (~9-10min this round, under the OLD retries=3
-# budget) -- retries can and do genuinely stack toward it under contention. 2400s gives
-# 480s/25% real margin over the 1920s theoretical ceiling (same derivation and same value as
-# `wait_for_orders_dagrun_queue_idle`'s own ROUND 22 rebalance -- see that function's docstring).
-# If `stage` itself exhausts its retries and never succeeds, this poll correctly still fails
-# (dbt_build can structurally never start) -- at 2400s instead of masking it faster, but legibly,
-# naming the last-observed status, exactly as this test's other pollers already do.
-_DBT_BUILD_POLL_TIMEOUT_SECONDS = 2400
+# bumped this to 2400s (25% margin over the post-orders-retry-bump 1920s theoretical worst case)
+# on the theory that dbtkill's failures were retry-exhaustion running out of budget.
+#
+# ROUND 23 REVERT: the live-verification run that followed DISPROVED that theory --
+# `_poll_dbt_build_running_signal` burned the ENTIRE 2400s budget and still raised "last
+# observed: None" (meta.run_stages never got a DBT_BUILD row at all, meaning `stage` never even
+# reached SUCCEEDED once within the whole enlarged window -- not "exhausted its retries slowly",
+# but never scheduled/progressing at all under this run's contention). More budget bought ZERO
+# improvement in outcome (dbtkill still fails either way) and ONLY cost 40 wasted minutes of
+# wall-clock instead of ~10 -- directly contradicting ROUND 22's own stated goal. Reverted to
+# 300s (the value in effect for this poll from this test's original authoring through ROUND 21,
+# confirmed via `git log -p`), to stop burning wall-clock on an identical failing outcome while
+# the REAL question -- why does `stage` never get scheduled/progress promptly for dbtkill-class
+# runs? -- is investigated separately with direct TI/pod-log evidence (see this round's own
+# Current Focus block). Do NOT re-bump this value without new evidence distinguishing "needs more
+# time" from "stuck/never-scheduled" -- this round's own live evidence already rules out the
+# former as the sole explanation.
+_DBT_BUILD_POLL_TIMEOUT_SECONDS = 300
 
 
 def _poll_dbt_build_pod_name(
