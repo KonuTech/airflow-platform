@@ -758,9 +758,22 @@ sequencing for the real dbtkill scheduling investigation):
       diff --stat HEAD` confirms zero packages/dataplat or csv_processor source changes this round
       (2 tests/e2e/slice files + 1 pre-existing unrelated .planning/HANDOFF.json deletion not
       touched by or staged in this round's own commit)."
-  live_verification_state: "PENDING -- see the bottom of this section for the run ID and
-      criteria once pushed."
-  next_action: "SUPERSEDED once pushed -- see the live-verification recording appended below."
+  live_verification_state: "RECORDED 2026-08-29T13:45:30Z: ROUND 23 pushed as code commit 8f67ed8
+      (the two test-file fixes) + docs commit 61df231 (HEAD, charter + offline battery + dbtkill
+      diagnostics-mining outcome), BOTH in ONE `git push` -- neither commit message carries a
+      skip-ci marker, per this session's own established push-ordering rule. Confirmed triggered
+      at headSha 61df231 (no suppression): AUTHORITATIVE e2e-full.yml run 33255828661 (item 0
+      companion: publish.yml run 33255828581); also triggered (not this round's concern) CI run
+      33255828602, e2e-chaos.yml run 33255828528. Analysis criteria = this round's own
+      pre_registered_criteria above: (a) dbtkill fails FASTER than 2400s/40min; (b) scd_concurrent
+      resolved (clean fail on the test's own poll, or a clean pass, no more ambiguous zero-margin
+      timeout); (c) u3/podkill/OOMKilled-publish/MinIO-quoting/sweep-assertion-10 stay clean; (d)
+      STRETCH -- SCD2 rebuild fix and orphan/idempotent_reupload finally reached and verified if
+      wall-clock savings give enough headroom; (e) zero new failures beyond dbtkill's own known
+      (now-faster) failure. Scratchpad convention: save the job log as round23-job.log. Session
+      manager runs the single 60s watcher against run 33255828661 (and 33255828581 for
+      completeness) -- do NOT self-watch further this turn."
+  next_action: "SUPERSEDED -- see ROUND 23 OUTCOME once the live-verification run completes."
 
 COMBINED VERIFICATION OUTCOME (2026-08-29, post-run analysis of run 33246473899, headSha
 cba2a550886eff02f774654958051f77edfc64c7 -- CURRENT STATE, evaluated against THREE independent
