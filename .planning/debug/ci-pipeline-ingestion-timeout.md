@@ -1193,8 +1193,27 @@ CPU-starvation captured as a documented follow-up ticket, out of scope for fix-a
       convention: save the job log as round21-job.log. Session manager runs the single 60s
       watcher against run 33222882138 (and 33222882062 for completeness) -- do NOT self-watch
       further this turn."
+  push_ordering_incident: "A SECOND, distinct push-ordering mistake (inverse shape of ROUND 19's
+      own): the run-ID-recording docs commit (37fcffd) was pushed in its OWN separate `git push`
+      -- exactly the scenario ROUND 19's own convention says SHOULD carry a skip-ci marker (a
+      docs-only commit pushed strictly alone, no code needing to trigger CI) -- but was pushed
+      WITHOUT one, spawning a full WASTEFUL DUPLICATE set of e2e-full.yml (33222906530)/publish.yml
+      (33222906524)/e2e-chaos.yml (33222906520)/CI (33222906513) runs at headSha 37fcffd, testing
+      byte-identical code to the already-in-progress c01d022 runs. Attempted to cancel via `gh run
+      cancel` -- BLOCKED by this session's own tool-permission classifier (mutating CI-state
+      action). Left to complete/waste resources rather than force a workaround; documented here
+      instead, matching this session's own established honest-disclosure precedent. NO impact on
+      correctness: c01d022's own runs (33222882138 e2e-full, 33222882062 publish) are unaffected
+      and remain the sole authoritative reference for this round's analysis -- the duplicate
+      37fcffd runs are extra noise, not a competing or corrupting signal. CONVENTION REFINEMENT
+      (supersedes ROUND 19's rule for future rounds): a run-ID-recording docs commit MUST be
+      drafted with an explicit skip-ci marker check applied BEFORE its own `git push`, every time
+      it is pushed separately from the code commit that triggered the run being recorded -- do
+      not rely on remembering the rule in the moment; treat 'is this commit's OWN push its only
+      content, with no code needing to trigger CI' as a mandatory pre-push checklist item."
   next_action: "SUPERSEDED once the live-verification run completes -- await session manager's
-      watcher result, then analyze against this round's pre_registered_criteria."
+      watcher result (against AUTHORITATIVE run 33222882138 at headSha c01d022, NOT the duplicate
+      37fcffd runs), then analyze against this round's pre_registered_criteria."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
