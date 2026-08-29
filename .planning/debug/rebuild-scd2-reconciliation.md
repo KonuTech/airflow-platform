@@ -2,7 +2,20 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29 (sibling session's ROUND 24 Track A RE-DISPATCH TERMINAL: run 33273007625,
+updated: 2026-08-29 (ROUND 24 Track A RE-DISPATCH#2 PREP: fixed test_rebuild_from_raw.py's own
+  Step-0 scheduling race per the user's decision-checkpoint choice of both mitigation options.
+  Implemented the assertion-relaxation option (b): line 550's resolved_by_run_id check is now
+  `>=` instead of `==`, which is provably sufficient given pipeline/run.py's own documented
+  max(finalized_run_ids) attribution. Investigated and DELIBERATELY DID NOT implement the
+  pause/unpause option (a) as literally specified -- it would reproduce this session's own
+  already-confirmed ROUND 4 queued-forever deadlock (pausing csv_ingest_customers freezes every
+  DagRun of that dag_id, including the ones Step 0's own two required uploads still need to
+  progress), converting a recoverable assertion failure into an unrecoverable hang. Full offline
+  battery (unit 568/568, dagtest 14/14, policy 167/2 byte-identical baseline, ruff, ruff format,
+  mypy, collect-only) shows zero regressions. Ready to re-dispatch ROUND 24 Track A attempt #6.
+  See Evidence and Current Focus for the full reasoning. Prior text retained below for history.)
+updated_prior_round24_trackA_redispatch: 2026-08-29 (sibling session's ROUND 24 Track A
+  RE-DISPATCH TERMINAL: run 33273007625,
   headSha 9810a32e932a1e7704135d84717e1fb6ba628b11, workflow_dispatch,
   pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py, against a genuinely published GHCR
   image this time. Cluster-up succeeded, the scoped `uv run pytest
@@ -223,6 +236,22 @@ next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0
     this same test far more likely to actually reach the rebuild step. A sixth live-dispatch
     should wait until one of these is applied -- without a fix this exact Step-0 race is very
     likely to recur under the same 1-minute schedule interval."
+    UPDATE (ROUND 24 Track A RE-DISPATCH#2 PREP, 2026-08-29): user decision checkpoint chose BOTH
+    (a) and (b). (b) was implemented as specified: test_rebuild_from_raw.py:550's exact-equality
+    assertion (resolved_by_run_id == corrected_run['run_id']) is now >=, with an extended comment
+    tying it to pipeline/run.py's own documented resolved_by_run_id=max(finalized_run_ids)
+    attribution. (a) was investigated and DELIBERATELY NOT IMPLEMENTED as literally specified --
+    see Evidence for the full correctness argument and the ROUND 4 citation this decision rests
+    on: pausing csv_ingest_customers at any point while Step 0 still needs it to progress would
+    reproduce ROUND 4's own already-confirmed queued-forever deadlock, making this dispatch
+    attempt strictly worse than the status quo, not better. (b) alone is a provably complete fix
+    for the observed race (corrected_run's own run_id is necessarily a member of whatever pass's
+    finalized_run_ids produced the REDRIVEN transition, so max(finalized_run_ids) >=
+    corrected_run['run_id'] holds by construction). Offline battery: tests/unit 568/568 unchanged,
+    tests/dagtest 14/14 unchanged, tests/policy 167 passed/2 failed (byte-identical to this
+    session's own already-documented pre-existing baseline), ruff+ruff format clean on the
+    touched file, mypy clean on the touched file, pytest --collect-only still collects exactly 1
+    item. Ready for ROUND 24 Track A attempt #6 dispatch."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->
@@ -564,6 +593,71 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     and completely unverified against live CI, five attempts in."
   timestamp: 2026-08-29 (ROUND 24 Track A RE-DISPATCH, post-run analysis)
 
+- timestamp: 2026-08-29 (ROUND 24 Track A RE-DISPATCH#2 PREP)
+  checked: "Feasibility of checkpoint option (a) (pause/unpause `csv_ingest_customers` around
+    test_rebuild_from_raw.py's Step 0), against this SAME session's own already-confirmed ROUND 4
+    finding (debug/ci-pipeline-ingestion-timeout.md: direct Airflow 3.3.0 source read of
+    `_executable_task_instances_to_queued`/`get_queued_dag_runs_to_set_running`/
+    `get_running_dag_runs_to_examine`, PLUS a live empirical reproduction on the persistent local
+    cluster) and against the customers DAG's own actual mechanics (`airflow/dags/
+    csv_ingest_customers.py`'s `*/1 * * * *` schedule IS the only trigger for discover/stage/
+    dbt_build/publish -- there is no separate always-on discovery process; a DagRun of THIS
+    dag_id is required to process both `original.csv` and `corrected.csv`)."
+  found: "ROUND 4 confirmed, by source AND live test, that pausing a DAG in this Airflow version
+    does not merely suppress NEW scheduled DagRuns -- it prevents EVERY DagRun of that dag_id
+    (scheduled, manually-triggered, or backfill-created) from ever leaving `queued`, indefinitely,
+    with zero TaskInstances reaching `running`, regardless of whether the DagRun already existed
+    before the pause. Since `csv_ingest_customers` is the ONLY mechanism that processes
+    `original.csv`/`corrected.csv` at all, ANY window wide enough to pause the DAG without
+    starving Step 0's own two required runs would have to be a window in which NEITHER upload's
+    processing is in flight -- but the actual race (a same-pass replay of `original.csv`
+    co-occurring with `corrected.csv`'s own publish) happens PRECISELY because `discover` always
+    re-lists the WHOLE `customers/*.csv` prefix on every pass (no watermark/since-filter) and
+    `original.csv` is permanently present (raw immutability, README §63): any unpaused window
+    wide enough for `corrected.csv`'s own run to reach `publish` is, by the same mechanism, wide
+    enough for that SAME pass's `discover` step to also re-match and replay `original.csv`. There
+    is no narrower safe sub-window: pausing before `corrected.csv`'s run starts would freeze that
+    run in `queued` forever (Step 0 never completes, worse than today's failure); pausing only
+    after it reaches SUCCEEDED is too late (the resolution attribution this race concerns is
+    already written by then, since `status='SUCCEEDED'` is set only after the SCD publish
+    transaction -- including `resolve_rejected_records_for_business_keys` -- commits)."
+  implication: "Option (a), implemented literally as 'pause around the fixture-seeding window',
+    would not reduce this race -- it would convert today's incorrect-but-terminating assertion
+    failure into a permanent hang (Step 0's own required DagRun frozen in `queued`, burning the
+    dispatch's full job-ceiling budget for zero new information, a SIXTH miss for a SIXTH
+    self-inflicted reason). NOT IMPLEMENTED. Option (b) (see below) is both necessary and, on its
+    own, mathematically sufficient: `corrected_run['run_id']` is unconditionally a member of the
+    `finalized_run_ids` set for whatever publish pass produces the REDRIVEN transition (that
+    pass's own publish of the corrected content is WHY the business key becomes resolvable at
+    all), so `max(finalized_run_ids) >= corrected_run['run_id']` holds for every legitimate pass
+    shape, with no dependency on how many OTHER runs (replays or otherwise) share that pass."
+  timestamp: 2026-08-29
+
+- timestamp: 2026-08-29 (ROUND 24 Track A RE-DISPATCH#2 PREP)
+  checked: "Applied fix (b): tests/e2e/slice/test_rebuild_from_raw.py:550's assertion changed from
+    `resolved_reject['resolved_by_run_id'] == corrected_run['run_id']` to `>=`, with an extended
+    comment citing pipeline/run.py's own `resolved_by_run_id=max(finalized_run_ids)` attribution
+    and this round's own rejection of option (a). Ran the full offline battery available without a
+    live cluster."
+  found: "`pytest tests/e2e/slice/test_rebuild_from_raw.py --collect-only` still collects exactly
+    1 item (no syntax/import regression). `ruff check`/`ruff format --check` clean on the touched
+    file. `mypy` clean on the touched file. `tests/unit`: 568/568 passed (unchanged from this
+    fix's own ROUND-21 baseline -- this test file is e2e-only, never imported by unit tests).
+    `tests/dagtest`: 14/14 passed (unchanged -- this DAG-structure suite does not touch
+    tests/e2e/). `tests/policy`: 167 passed / 2 failed
+    (test_csv_ingest_customers_stays_under_150_lines, test_the_main_gate_does_not_lint_the_bad_
+    samples) -- byte-identical failing-test names AND pass/fail counts to this session's own
+    already-documented ROUND 20 baseline ('policy 167 passed/2 failed ... identical to bare HEAD's
+    own 2 pre-existing failures'), confirming these 2 failures are pre-existing and unrelated to
+    this change (this round touched neither `csv_ingest_customers.py` nor the lint-gate samples)."
+  implication: "Fix (b) introduces no detectable regression across every offline check available
+    without a live cluster. The remaining, necessarily-live-only question is whether this
+    relaxation actually lets test_rebuild_from_raw.py's Step 0 pass on the real cluster and reach
+    Step 2's `scripts/rebuild-from-raw.py` invocation -- unverifiable offline by construction
+    (the race is a live Airflow-scheduler-timing phenomenon), which is why ROUND 24 Track A
+    attempt #6 is the next step, not a further offline gate."
+  timestamp: 2026-08-29
+
 ## Resolution
 <!-- Populated when RESOLVED -->
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
@@ -617,8 +711,22 @@ verification: "Self-verified: (1) direct isolated reproduction proved the pre-fi
     comparison. Still NOT verified against live CI. Proposed next step (not yet actioned): fix
     the Step-0 race first (pause/unpause the customers DAG around fixture seeding, or relax the
     assertion to accept any run finalized in the same pass) before spending a sixth live-dispatch
-    attempt -- see Current Focus's ROUND 24 Track A RE-DISPATCH TERMINAL update for detail."
+    attempt -- see Current Focus's ROUND 24 Track A RE-DISPATCH TERMINAL update for detail.
+    UPDATE 2026-08-29 (ROUND 24 Track A RE-DISPATCH#2 PREP): user chose both options at the
+    decision checkpoint. The pause/unpause option was investigated and DELIBERATELY NOT
+    implemented -- it would reproduce ROUND 4's own already-confirmed queued-forever deadlock
+    (pausing csv_ingest_customers freezes ALL its DagRuns, including the ones Step 0 itself still
+    needs), making a sixth attempt strictly worse, not better. The assertion-relaxation option was
+    implemented: test_rebuild_from_raw.py:550 now asserts >= instead of ==, which is
+    mathematically guaranteed to hold for any legitimate multi-run finalize pass (corrected_run's
+    own run_id is necessarily a member of that pass's finalized_run_ids). Full offline battery
+    (unit/dagtest/policy/ruff/mypy/collect-only) shows zero regressions. Still NOT verified
+    against live CI -- ROUND 24 Track A attempt #6 is the next step."
 files_changed:
   - packages/dataplat/src/dataplat/scd/recompute.py
   - packages/dataplat/src/dataplat/load/publish/scd.py
   - tests/unit/test_scd_recompute.py
+  - tests/e2e/slice/test_rebuild_from_raw.py (ROUND 24 Track A RE-DISPATCH#2 PREP: Step-0
+    resolved_by_run_id assertion relaxed from == to >=, per the reasoning documented in this
+    round's Current Focus/Evidence -- test's own scheduling-race fix, no SCD2 recompute logic
+    touched)

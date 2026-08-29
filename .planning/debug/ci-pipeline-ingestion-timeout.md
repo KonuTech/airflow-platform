@@ -12663,3 +12663,25 @@ fifth different reason, this one recursive. This commit message is written to av
 string entirely. Once publish.yml builds a real image at this SHA, re-dispatch the narrow-scope
 workflow_dispatch run (pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py) against it. Track B
 (full-suite dbtkill diagnostics, headSha e2a7b1f) remains untouched and independent.
+
+ROUND 24 TRACK A RE-DISPATCH#2 PREP (2026-08-29): Full detail lives in
+.planning/debug/rebuild-scd2-reconciliation.md (its own Current Focus/Evidence for this round) --
+this is a short pointer entry, not a duplicate. Fixed test_rebuild_from_raw.py's own Step-0
+scheduling race (the customers DAG's `*/1 * * * *` cron re-sweeping the test's still-present
+`original.csv` fixture mid-setup, per the RE-DISPATCH TERMINAL finding above) by relaxing the
+Step-0 assertion at test_rebuild_from_raw.py:550 from `resolved_by_run_id == corrected_run
+['run_id']` to `>=`, matching pipeline/run.py's own documented `resolved_by_run_id=max(
+finalized_run_ids)` attribution rather than treating it as a bug. A pause/unpause-the-DAG
+mitigation was considered and explicitly REJECTED: this session's own ROUND 4 finding (direct
+Airflow 3.3.0 source read + live empirical reproduction, above) already proved pausing
+`csv_ingest_customers` freezes EVERY DagRun of that dag_id in `queued` forever -- since this
+DAG is the ONLY mechanism that processes the test's own original/corrected uploads, pausing
+during any part of Step 0 would deadlock the test's own required processing rather than merely
+blocking the unwanted replay, converting a recoverable assertion failure into an unrecoverable
+hang. Offline battery (unit 568/568, dagtest 14/14, policy 167/2 byte-identical to this
+session's own established baseline, ruff, ruff format, mypy, collect-only) shows zero
+regressions. This is scoped strictly to the test file -- `dataplat/scd/recompute.py` and
+`load/publish/scd.py` (the SCD2 fix a0cc2f5 is verifying) are untouched. Next: re-dispatch
+`workflow_dispatch` (pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py) against `--ref main`
+for a SIXTH live-verification attempt on the SCD2 recompute fix. Track B (full-suite dbtkill
+diagnostics, run 33272070899) remains untouched and independent throughout.

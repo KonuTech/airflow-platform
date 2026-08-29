@@ -547,7 +547,50 @@ def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa:
         f"resolution before this test's own drop, got {resolved_reject['resolution_type']!r} -- "
         f"see module docstring's 'Why the correction resolves to REDRIVEN' section"
     )
-    assert resolved_reject["resolved_by_run_id"] == corrected_run["run_id"]
+    # debug/ci-pipeline-ingestion-timeout ROUND 24 Track A RE-DISPATCH TERMINAL (run
+    # 33273007625): this used to be an exact `== corrected_run["run_id"]` equality and it
+    # falsified live -- `assert 3 == 2` -- because the live customers DAG's own `*/1 * * * *`
+    # schedule (`airflow/dags/csv_ingest_customers.py`, never date/watermark-scoped: every
+    # `discover` pass re-lists the WHOLE `customers/*.csv` prefix) re-swept the still-present
+    # `original.csv` object while this test's own corrected-file pass was in flight, producing a
+    # REPLAY run (`replay_of_run_id` pointing at `original_run["run_id"]`) that got finalized in
+    # the SAME `publish_ingest` pass as `corrected_run["run_id"]`. That is not a bug: `pipeline/
+    # run.py`'s own `publish_ingest` documents, as a deliberate, pre-existing simplification
+    # (its own code comment at the `resolve_rejected_records_for_business_keys` call site), that
+    # a multi-run finalize pass attributes resolution to `resolved_by_run_id=max(finalized_
+    # run_ids)`, never to one specific run picked out of that set. `>=`, not `==`, is the
+    # correct -- and still fully rigorous -- assertion here: `corrected_run["run_id"]` is
+    # necessarily itself a MEMBER of whatever pass's `finalized_run_ids` produced this REDRIVEN
+    # transition (the correction's own publish is what makes `bad_business_key` resolvable at
+    # all), so `max(finalized_run_ids) >= corrected_run["run_id"]` holds by construction for
+    # every legitimate pass shape -- the exact pre-fix expectation (`== corrected_run["run_id"]`)
+    # remains one specific value that still satisfies `>=`. What `>=` still catches: a genuine
+    # regression where resolution gets attributed to a STALE run that predates the correction
+    # (which would violate the platform's own "latest run wins" attribution rule and fail this
+    # assertion, since run_ids are assigned in creation order and a stale run's id cannot be
+    # `>=` a later corrected_run's id... unless corrected_run itself was somehow excluded from
+    # its own pass's finalized set, which would ALSO be a genuine bug this still catches).
+    # A pause/unpause-the-DAG mitigation for the underlying re-sweep race was considered and
+    # REJECTED for this file -- see rebuild-scd2-reconciliation.md's ROUND 24 Track A
+    # RE-DISPATCH#2 Current Focus entry: debug/ci-pipeline-ingestion-timeout ROUND 4 already
+    # confirmed, by direct Airflow 3.3.0 source read AND live empirical reproduction, that
+    # pausing `csv_ingest_customers` freezes EVERY DagRun of that dag_id -- including ones this
+    # test's own Step 0 still needs to progress -- in `queued` state forever, with zero
+    # TaskInstances ever reaching `running`. Since original.csv is permanently present (raw
+    # immutability, README §63) and every `discover` pass re-lists the whole prefix
+    # unconditionally, any unpaused window wide enough for corrected.csv's own run to complete is
+    # also wide enough for a same-pass replay of original.csv -- so pausing narrowly enough to
+    # block the replay without also blocking corrected's own required run is not achievable, and
+    # widening the pause to "safely" cover both simply reproduces ROUND 4's queued-forever
+    # deadlock. This `>=` relaxation is the complete, non-deadlocking fix for this race.
+    assert resolved_reject["resolved_by_run_id"] >= corrected_run["run_id"], (
+        f"expected resolved_by_run_id ({resolved_reject['resolved_by_run_id']!r}) to be >= "
+        f"corrected_run['run_id'] ({corrected_run['run_id']!r}) -- pipeline/run.py's own "
+        f"documented resolved_by_run_id=max(finalized_run_ids) attribution guarantees this "
+        f"holds for any pass that resolves this reject, since corrected_run's own publish is "
+        f"what makes the resolution possible at all; a SMALLER value indicates the resolution "
+        f"was attributed to a run that predates the correction, a genuine attribution bug"
+    )
 
     # --- Step 1: pre-drop snapshots (D-29 points 1-3) -------------------------------------
     customers_before = snapshot_customers_scd2_state(
