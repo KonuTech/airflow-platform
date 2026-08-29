@@ -1,5 +1,5 @@
 ---
-status: fixing
+status: investigating
 round20_status: "ROUND 20 offline COMPLETE 2026-08-28: all three ROUND 19 findings fixed.
   (1) podkill zombie-detection: LIVE-REPRODUCED via a minimal, faithful repro against the
   installed apache-airflow==3.3.0 + real KubernetesPodOperator/PodManager code on the LOCAL
@@ -196,7 +196,51 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-28 (ROUND 20 POST-RUN ANALYSIS COMPLETE on run 33205639775, headSha 5f3aa61,
+updated: 2026-08-29 (ROUND 21 POST-RUN ANALYSIS COMPLETE on run 33222882138, headSha c01d022,
+  conclusion FAILURE, SELF-TERMINATED at 184.73min -- 5.27min/2.8% under the 190-min ceiling
+  (correcting the checkpoint-response's "well past the ceiling" claim, which was a late-wake-up
+  misread of wall-clock elapsed vs the actual ceiling). Census: 5 failed/33 passed/6 skipped in
+  10608.60s (2:56:48) -- the BEST failure-count census of the entire session. CORE CLAIM (c)
+  CONFIRMED: worst-case retry arithmetic verifiably held with real margin under live contention --
+  ZERO DagRuns rode to their own dagrun_timeout=45min this round (both examined failing orders
+  DagRuns terminated in 9-10min real time, nowhere near 45min), a dramatic recovery from R20's
+  CANCELLED-at-190min/dbtkill-DagRun-riding-toward-dagrun_timeout outcome. The session's original
+  core-value bug (orphaned STAGED status, zero error, riding the blunt 45min sweep) did NOT recur
+  anywhere this run. NEW finding, not previously seen: stage now genuinely EXHAUSTS all 4 tries
+  (try=4, state=failed) within ~9-10min real time instead of R20's try=3/state=skipped
+  dagrun_timeout-force-skip signature -- a qualitatively different, faster, more legible failure
+  mode, but it reveals orders.stage/dbt_build/publish's retries (unchanged at 2-3 since ROUND
+  14/16, never bumped the way customers' were) may be genuinely insufficient under the confirmed,
+  still-unaddressed CPU-starvation condition (FailedScheduling 'Insufficient cpu' events observed
+  throughout, same chronic pattern as R19/R20). SECOND-ORDER FINDING CONFIRMED WITH DIRECT
+  EVIDENCE (user-flagged mid-run): wait_for_orders_dagrun_queue_idle's own 600s budget (sized in
+  ROUND 18 off R17's OLD 10min-execution_timeout/300s-default-delay baseline, never revisited
+  when ROUND 21 rebalanced the underlying arithmetic) is now too tight -- TWO independent misses
+  this run: u3's wait overran by ~224s (824s real drain vs 600s budget) and orphan's by ~31s
+  (631s vs 600s), both against DagRuns that reached genuine terminal FAILED (not a slow success)
+  via the same retry-exhaustion mechanism, plus real DagRun-queue-serialization delay on top (one
+  DagRun sat queued ~8m57s before even starting). The specific DagRun ID cited in the checkpoint
+  response (e2e-dbtkill-4e778f9b540e) does NOT appear in the authoritative run's log -- it was
+  almost certainly observed from the wasteful duplicate 37fcffd run set (see push_ordering_
+  incident below), not this round's authoritative evidence; the MECHANISM it flagged is real and
+  independently confirmed via e2e-dbtkill-98d1bd65e005 and asset_triggered__...bScqpFC6 instead.
+  Podkill regression check: test_pod_kill_mid_load_produces_no_duplicates PASSED cleanly, zero
+  regression. Cascade decomposed precisely: dbtkill + idempotent_reupload = retry-exhaustion
+  mechanism (own hardcoded budgets, e.g. dbtkill's 300s dbt_build-poll, also stale and unrebalanced,
+  even more clearly than the queue-idle one); u3 + orphan = queue-idle-budget mechanism (confirmed
+  twice, independently); rebuild = a GENUINELY NEW, DISTINCT, never-before-seen failure: the
+  settle-wait itself SUCCEEDED this round (no stall), but the post-rebuild reconciliation found
+  real content mismatches (checksum + SCD2 current_valid_from/to/is_current) for 2 specific
+  customer keys -- an out-of-scope, unrelated data-correctness finding needing its own dedicated
+  investigation. Guards green: Kyverno 0 unintended denials, restarts 0 all roles, scheduler peak
+  1943.5MiB/75.9% of 2560Mi (up from R20's 1901MiB/74.3%, a modest continued creep, not a new OOM
+  risk). Zero-new-failures nuanced, not flat: same 5 test NAMES as R20's implied set, but 2 of the
+  5 (dbtkill, rebuild) changed FAILURE MECHANISM entirely. DECISION CHECKPOINT returned proposing
+  ROUND 22: (1) raise wait_for_orders_dagrun_queue_idle's budget with real margin against the
+  now-measured ~824s worst case; (2) reconsider dbtkill's own stale 300s poll budget; (3) consider
+  bumping orders' retries to match customers' treatment; (4) open a separate thread for the new
+  rebuild reconciliation-mismatch finding. See Current Focus ROUND 21 OUTCOME + Evidence.)
+updated_prior_round21: 2026-08-28 (ROUND 20 POST-RUN ANALYSIS COMPLETE on run 33205639775, headSha 5f3aa61,
   CANCELLED at the 190-min ceiling: podkill CONFIRMED FIXED via a real same-DagRun retry (try=2,
   14.2min, well inside 900s); sweep assertion (10) PASSED cleanly; OOMKilled publish did NOT
   recur. NEW dbtkill failure mode (run_id=826, DBT_BUILD mark_running never written within 300s)
@@ -1211,9 +1255,149 @@ CPU-starvation captured as a documented follow-up ticket, out of scope for fix-a
       it is pushed separately from the code commit that triggered the run being recorded -- do
       not rely on remembering the rule in the moment; treat 'is this commit's OWN push its only
       content, with no code needing to trigger CI' as a mandatory pre-push checklist item."
-  next_action: "SUPERSEDED once the live-verification run completes -- await session manager's
-      watcher result (against AUTHORITATIVE run 33222882138 at headSha c01d022, NOT the duplicate
-      37fcffd runs), then analyze against this round's pre_registered_criteria."
+  next_action: "SUPERSEDED -- see ROUND 21 OUTCOME below."
+
+ROUND 21 OUTCOME (2026-08-29, post-run analysis of run 33222882138, headSha c01d022 -- CURRENT STATE):
+  run_facts: "conclusion=FAILURE, started 2026-08-29T00:13:28Z, completed 2026-08-29T03:18:12Z =
+      184.73min (00:13:28->03:18:12) -- SELF-TERMINATED 5.27min/2.8% under the 190-min ceiling.
+      CORRECTS the checkpoint-response's 'well past the 190-min ceiling' claim: that was a
+      late-wake-up misread of raw wall-clock-since-dispatch, not the job's actual measured
+      duration against the ceiling. Duration decomposition: setup (job start -> `make
+      cluster-slice-verify` invocation) 00:13:33->00:20:52 = 7m19s; pytest suite itself
+      00:20:52->03:17:43 = 2:56:48 (10608.60s = 176.81min, matching the printed pytest summary
+      line exactly); post-suite diagnostics/teardown 03:17:43->03:18:08 = ~25s. Census: `5 failed,
+      33 passed, 6 skipped, 16 warnings in 10608.60s (2:56:48)` -- the BEST failure-count census
+      of the entire session (previous best was R17/R18's 7)."
+  criterion_c_arithmetic: "CONFIRMED, with real margin, under live contention. Direct TI evidence
+      from the two failing orders DagRuns examined: (1) e2e-dbtkill-98d1bd65e005 (dbtkill test):
+      DagRun start=2026-08-29 01:46:05.046366, end=01:55:57.065325 = 9m52s (592s) total, ending
+      state=failed (NOT skipped/force-skipped) -- stage map_index=0 shows try=4 (its FINAL, last-
+      allowed attempt), state=failed, start=01:55:05.409541, end=01:55:33.714700; dbt_build shows
+      state=upstream_failed (never ran); nowhere near dagrun_timeout=45min. (2)
+      asset_triggered__2026-08-29T02:46:20.035154+00:00_bScqpFC6 (the DagRun that starved orphan's
+      queue-idle wait): DagRun start=02:55:16.956365, end=03:05:21.212026 = 10m4s (604s) of actual
+      execution once started (it also sat QUEUED for 8m57s before that, from the 02:46:20 asset-
+      event creation time to its 02:55:16.956 actual start, behind rebuild's own orders-DagRun
+      backlog) -- stage try=4/state=failed again (start=03:04:24.504635, end=03:04:54.492948),
+      dbt_build upstream_failed, nowhere near 45min either. ZERO DagRuns rode to dagrun_timeout
+      this round -- a categorical improvement over ROUND 20 (CANCELLED at 190min with dbtkill's
+      own DagRun-lineage riding toward its own 45-min death) and ROUND 18 (podkill's DagRun STAGED
+      forever, zero error, orphaned by the same blunt sweep). The session's original core-value
+      bug (a run permanently STAGED/orphaned with error_type=None, silently unresolved) did NOT
+      recur anywhere in this run's evidence."
+  new_finding_retry_exhaustion: "NOT PREVIOUSLY SEEN THIS SESSION: both stage TIs above show
+      try=4/state=failed -- i.e. stage genuinely EXHAUSTED all 4 allowed attempts (retries=3,
+      unchanged since ROUND 14/16) and reached a real terminal FAILED state, in ~9-10min of real
+      wall time. This is QUALITATIVELY DIFFERENT from ROUND 20's dbtkill signature (try=3,
+      state=SKIPPED -- force-skipped by the DagRun-level dagrun_timeout sweep before the task's
+      own retry logic could resolve either way). The mechanism shift is a direct, predictable
+      consequence of ROUND 21's own fix design: shrinking retry_delay from orders' old 300s
+      default to the new uniform 30s means the SAME number of retries now cycles through in
+      ~9-10min instead of ~30-55min -- fast enough to resolve (by exhausting) WITHIN the DagRun's
+      lifetime instead of being interrupted by dagrun_timeout partway through. This is progress
+      (a fast, legible, real task-level failure beats an orphaned, error-less, 45-min wedge) but
+      it exposes, rather than fixes, a possible SEPARATE gap: orders.stage/dbt_build/publish's
+      retries (2-3) were never bumped the way customers' were (4, specifically to statistically
+      absorb the KubernetesJobWatcher-race -- see ROUND 21's own fix_design rationale for why
+      customers kept a higher count). FailedScheduling 'Insufficient cpu' events are confirmed
+      present and numerous throughout this run (same chronic, already-ticketed CPU-starvation
+      condition as R19/20 -- exact count not re-tallied this round, pattern unchanged), a
+      plausible (not yet log-line-confirmed) contributor to each attempt failing before
+      completing. Direct task-pod-log evidence (e.g. an AirflowTaskTimeout/SIGALRM stack, or a
+      concrete container-level error) was NOT captured this round -- same class of residual gap
+      as ROUND 20's own honestly-declared sub-mechanism blind spot. Not yet forensically closed;
+      flagged as a ROUND 22 candidate, not a confirmed root cause."
+  second_order_finding_queue_idle_budget: "CONFIRMED WITH DIRECT EVIDENCE, exactly as the
+      checkpoint response hypothesized in mechanism (though not in its cited specifics -- see
+      correction below). `wait_for_orders_dagrun_queue_idle`'s default timeout=600 was sized in
+      ROUND 18 explicitly off R17's OLD baseline (function's own docstring: 'R17's worst observed
+      drain, podkill's ~5-run backlog, cleared in ~6min') and was NEVER revisited when ROUND 21
+      rebalanced execution_timeout/retry_delay/retries -- confirming the task's hypothesized gap:
+      DAG-level timeout arithmetic was rebalanced, but the TEST SUITE's own hardcoded budgets
+      (sized against the OLD, slower arithmetic) were not audited alongside it. TWO independent,
+      direct misses this run: (1) u3's wait started 01:42:12.854 (immediately after dbtkill's test
+      failure) and timed out at 01:52:14.965 (602s, matching its 600s budget) with
+      e2e-dbtkill-98d1bd65e005 still 'running' -- but that DagRun's REAL terminal end was
+      01:55:57.065, i.e. the true required wait was 824s (13m44s) -- a 224s/37.3% overrun past the
+      600s budget. (2) orphan's wait started 02:54:50.164 (immediately after rebuild's test
+      failure) and timed out at 03:05:00.528 (~610s) with asset_triggered__...bScqpFC6 still
+      'running' -- that DagRun's REAL terminal end was 03:05:21.212, i.e. the true required wait
+      was ~631s -- a smaller but still real 31s/5.2% overrun. Both misses are against DagRuns that
+      reached genuine terminal FAILED status (retry-exhaustion, see above), not a slow-but-real
+      SUCCESS as the checkpoint response's hypothesis phrased it -- the queue-idle budget is too
+      tight for the (now much faster than R20, but still non-trivial) fail-and-exhaust cycle,
+      further compounded by real DagRun-queue-serialization delay stacking on top (case (2)'s
+      DagRun sat QUEUED 8m57s before it even started executing, behind rebuild's own backlog).
+      CORRECTION to the checkpoint response's cited specifics: the DagRun ID it named,
+      `e2e-dbtkill-4e778f9b540e`, does NOT appear anywhere in this authoritative run's 17,828-line
+      job log (confirmed via direct grep) -- it must have been observed live from the wasteful
+      DUPLICATE run set at headSha 37fcffd (this round's own push_ordering_incident, a byte-
+      identical re-run of c01d022's code that was never cancelled), not from run 33222882138
+      itself. The MECHANISM the checkpoint flagged is real, confirmed independently via
+      e2e-dbtkill-98d1bd65e005 and asset_triggered__...bScqpFC6 in the actual authoritative run --
+      only the specific cited run_id was from the wrong (duplicate) source."
+  podkill_regression: "test_pod_kill_mid_load_produces_no_duplicates PASSED (2026-08-29T01:35:21) --
+      podkill's ROUND 20 fix (real same-DagRun retry mechanism) remains healthy, zero regression."
+  cascade_decomposition: "Precisely distinguished, not lumped: (1) dbtkill
+      (test_pod_kill_mid_dbt_build_produces_no_duplicates, FAILED 01:42:12) = retry-exhaustion
+      mechanism -- its OWN hardcoded budget (`_poll_dbt_build_running_signal(..., timeout=300)`,
+      i.e. 5min) is a SEPARATE stale test-suite constant from the queue-idle one, and is even more
+      clearly under-budgeted against worst-case stage-retry arithmetic (post-fix theoretical max
+      25.5min) though the REAL observed cycle this round (~9min) was 'only' ~3x the 300s poll.
+      (2) u3 (test_u3_throughput_and_peak_rss_baseline, FAILED 01:52:14) = queue-idle-budget
+      mechanism, confirmed. (3) orphan (test_orphan_order_quarantined_while_valid_rows_publish,
+      FAILED 03:05:00) = queue-idle-budget mechanism, confirmed a SECOND, independent time in the
+      same run. (4) idempotent_reupload (test_idempotent_reupload, FAILED 03:17:42, LAST test in
+      the suite) = its own `wait_for_orders_dagrun_queue_idle` call evidently succeeded (the
+      failure surfaced later, at the outcome_1['status']=='SUCCEEDED' assertion, not the
+      queue-idle assertion) -- the first upload's ingestion run (run_id=678,
+      e2e-idempotent-e5080d6f31e1-1.csv) genuinely reached status=FAILED (error_type=None,
+      error_message=None, same diagnostics-gap signature as prior rounds) -- most likely the SAME
+      retry-exhaustion mechanism as dbtkill/(1), inherited on top of the accumulated backlog from
+      4 prior failing tests, not independently investigated further this round. (5) rebuild
+      (test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending, FAILED 02:54:50) = a
+      GENUINELY NEW, DISTINCT failure signature, never seen before in this debug session (grep-
+      confirmed against the whole file): the monotonic-progress/settle wait (ROUND 18's own fix)
+      actually SUCCEEDED this round -- no stall, real forward progress, matching its ~62min
+      natural completion (test ran 01:52:15->02:54:50) well inside its 3600s hard cap -- but the
+      POST-rebuild reconciliation comparison found real content mismatches:
+      `RebuildComparisonResult(matches=False, mismatches=('checksum',
+      'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from',
+      'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'))`. This is
+      an UNRELATED, out-of-timeout-budget-scope, potential real data-correctness defect in
+      rebuild-from-raw's SCD2 reconstruction for 2 specific customer keys -- NOT investigated
+      further this round, explicitly flagged as needing its own dedicated thread."
+  zero_new_failures_nuanced: "By TEST NAME: the same 5 tests that would be expected from R20's own
+      partial census (dbtkill/u3/rebuild/orphan, all FAILED in R20 too) plus idempotent_reupload
+      (which never ran in R20, cut off by the 190-min cancellation) -- no NEW test name failed.
+      NOT flatly 'zero new failures', however: 2 of the 5 (dbtkill, rebuild) changed FAILURE
+      MECHANISM entirely between R20 and R21 (dbtkill: dagrun_timeout-force-skip ->
+      retry-exhaustion; rebuild: monotonic-stall -> content-reconciliation-mismatch) -- criterion
+      (d) is met at the test-identity level, not at the failure-content level, and that distinction
+      is load-bearing for what ROUND 22 should target."
+  guards: "Kyverno: 0 unintended denials (only the deliberate PASSED unsigned-image test). Restarts:
+      0 across all roles (cp-monitor's restart-count-timeline emitted zero changed-rows, and every
+      sampled restart-count value in the full per-poll dump was 0). Scheduler peak:
+      2,037,751,808 bytes = 1943.5MiB = 75.9% of 2560Mi -- up from R20's 1901MiB/74.3% and R18's
+      1804MiB/70.5%, a modest continued creep consistent with sustained retry volume, not a new
+      OOM/crash-loop risk. FailedScheduling 'Insufficient cpu' events: confirmed present and
+      numerous throughout the run (same chronic, already-ticketed condition as R19/R20; not
+      re-tallied to an exact count this round)."
+  decision_checkpoint_proposal_round22: "(1) Raise `wait_for_orders_dagrun_queue_idle`'s default
+      timeout from 600s with a real, measured margin against this round's own observed worst case
+      (~824s) -- following the SAME 'measure the real cycle, then set the budget with margin'
+      pattern ROUND 21 itself used for HEAVY_TASK_EXECUTION_TIMEOUT (e.g. a candidate ~1200s,
+      pending its own explicit arithmetic writeup). (2) Reconsider dbtkill's own stale
+      `_poll_dbt_build_running_signal(timeout=300)` budget -- also unrebalanced, and structurally
+      may never fire if stage keeps failing before dbt_build ever starts (a test-design question,
+      not just a number). (3) Consider whether orders.stage/dbt_build/publish's retries (2-3,
+      unchanged since ROUND 14/16) should be bumped toward customers' treatment (4), given the
+      SAME underlying race customers already compensates for now appears to be driving orders'
+      genuine retry-exhaustion under the still-unaddressed, already-ticketed CPU-starvation
+      condition. (4) Open a SEPARATE investigation thread for the new rebuild reconciliation-
+      mismatch finding (checksum/SCD2 current_valid_from/to/is_current for 2 keys) -- unrelated to
+      timeout budgets, not yet root-caused. CPU-starvation itself remains explicitly out of scope
+      (ticket already filed, unchanged this round)."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
@@ -9356,6 +9540,109 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     it does not require another investigation round to act on, unlike prior rounds' honest
     blind spots.
   timestamp: 2026-08-28 (ROUND 20 post-run analysis, run 33205639775)
+
+- timestamp: 2026-08-29 (ROUND 21 post-run analysis, run 33222882138, headSha c01d022,
+    SELF-TERMINATED at 184.73min, scratchpad round21-job.log, 17,828 lines)
+  checked: >
+    `gh run view 33222882138 --json jobs,conclusion,createdAt,updatedAt,headSha,status`; job logs
+    fetched via `gh api repos/.../actions/jobs/99020498958/logs`, saved to round21-job.log; pytest
+    summary line and full FAILED list; step-by-step timestamps for the setup/`make cluster-slice-
+    verify`/teardown boundary; direct TI/DagRun dumps for e2e-dbtkill-98d1bd65e005 and
+    asset_triggered__2026-08-29T02:46:20.035154+00:00_bScqpFC6 (both stage=try4/state=failed);
+    full text of the wait_for_orders_dagrun_queue_idle failure messages (both occurrences) and its
+    own docstring/default-timeout rationale; the dbtkill test's own _poll_dbt_build_running_signal
+    (timeout=300) failure; test_idempotent_reupload's and test_rebuild_from_raw's full failure
+    tracebacks; the ROUND 19 error-bearing/stale-non-terminal ingestion_runs dump (run_ids
+    42/197/678); FailedScheduling census and restart-count-timeline / scheduler peak-memory guard
+    dump; grep for `e2e-dbtkill-4e778f9b540e` (the checkpoint-response's cited run_id) across the
+    whole log, and for `RebuildComparisonResult`/`did not reconcile to its pre-drop state` across
+    the whole debug file to confirm rebuild's failure content is genuinely new.
+  found: >
+    (1) TIMING CORRECTION: job wall time 00:13:28Z->03:18:12Z = 184.73min, 5.27min/2.8% UNDER the
+    190-min ceiling -- SELF-TERMINATED, not cancelled. The checkpoint response's "well past the
+    190-min ceiling" was a late-wake-up misread of raw elapsed time, not the job's true relationship
+    to the ceiling; corrected here with the exact `gh run view` timestamps. (2) CENSUS: `5 failed,
+    33 passed, 6 skipped, 16 warnings in 10608.60s (2:56:48)` -- best failure-count census of the
+    session (previous best 7, ROUND 17/18). (3) CRITERION (c) ARITHMETIC CONFIRMED: both examined
+    failing orders DagRuns (e2e-dbtkill-98d1bd65e005: start=01:46:05.046366 end=01:55:57.065325 =
+    9m52s; asset_triggered__...bScqpFC6: start=02:55:16.956365 end=03:05:21.212026 = 10m4s of
+    actual execution, having also sat queued 8m57s before that) both terminated in state=failed
+    (genuine retry exhaustion) WELL under dagrun_timeout=45min -- zero DagRuns rode to their own
+    45-min death this round, a categorical change from ROUND 20's CANCELLED-at-190min/dbtkill-
+    riding-toward-dagrun_timeout outcome and ROUND 18's podkill-orphaned-STAGED-forever signature.
+    Neither recurred anywhere in this run's evidence. (4) NEW MECHANISM: both stage TIs show
+    try=4/state=failed (genuine exhaustion of all 4 allowed attempts, retries=3 unchanged since
+    ROUND 14/16) -- QUALITATIVELY DIFFERENT from ROUND 20's try=3/state=skipped (dagrun_timeout
+    force-skip mid-retry). Direct consequence of ROUND 21's own retry_delay shrink (300s
+    default->30s uniform): the same number of retries now cycles through in ~9-10min instead of
+    ~30-55min, fast enough to resolve (by exhausting) WITHIN the DagRun's lifetime rather than
+    being interrupted. FailedScheduling "Insufficient cpu" events confirmed present and numerous
+    throughout (same chronic, already-ticketed condition, not re-tallied to an exact count) --
+    plausible but not log-line-confirmed contributor to each attempt's failure; no
+    AirflowTaskTimeout/SIGALRM or container-level error line was found for either TI (same
+    diagnostics-gap class as ROUND 20's own residual sub-mechanism gap). (5) SECOND-ORDER FINDING
+    CONFIRMED, TWO INDEPENDENT DIRECT INSTANCES: u3's wait_for_orders_dagrun_queue_idle call
+    started 01:42:12.854, timed out 01:52:14.965 (602s) against e2e-dbtkill-98d1bd65e005 --
+    which did not reach its true terminal end until 01:55:57.065 (real requirement: 824s, a
+    224s/37.3% overrun past the 600s budget). orphan's call started 02:54:50.164, timed out
+    03:05:00.528 (~610s) against asset_triggered__...bScqpFC6 -- which did not reach its true
+    terminal end until 03:05:21.212 (real requirement: ~631s, a 31s/5.2% overrun). The 600s
+    default is traced to its exact origin: `wait_for_orders_dagrun_queue_idle`'s own docstring
+    states "Defaults to 600 (R17's worst observed drain, podkill's ~5-run backlog, cleared in
+    ~6min)" -- sized against R17's OLD arithmetic, never revisited when ROUND 21 rebalanced
+    execution_timeout/retry_delay/retries. Both misses are against DagRuns that reached genuine
+    terminal FAILED status (retry-exhaustion, finding 4), not a slow-but-real SUCCESS as the
+    checkpoint response's hypothesis phrased it. (6) CORRECTION: `e2e-dbtkill-4e778f9b540e` (the
+    run_id cited in the checkpoint response) does NOT appear anywhere in this authoritative run's
+    17,828-line log (direct grep, zero matches) -- it was almost certainly observed live from the
+    wasteful DUPLICATE run set at headSha 37fcffd (this round's own documented push_ordering_
+    incident: a byte-identical re-run of c01d022's code, never cancelled, left to complete). The
+    MECHANISM the checkpoint flagged is real and independently confirmed via the two DagRuns
+    named in (5); only the specific cited run_id was from the wrong (duplicate) source. (7)
+    PODKILL REGRESSION CHECK: test_pod_kill_mid_load_produces_no_duplicates PASSED (01:35:21) --
+    zero regression, ROUND 20's fix holds. (8) CASCADE PRECISELY DECOMPOSED: dbtkill (01:42:12
+    FAILED at `meta.run_stages[run_id=784, stage_name='DBT_BUILD'] never reached status='RUNNING'
+    within 300s`) and idempotent_reupload (03:17:42 FAILED, first upload run_id=678 reached
+    status=FAILED, error_type=None) = the SAME retry-exhaustion mechanism as finding (4), each
+    against their OWN separate stale hardcoded test budget (dbtkill's own 300s dbt_build-poll,
+    even more clearly under-budgeted than the queue-idle one against the post-fix theoretical
+    worst case of 25.5min, though the real observed cycle was ~9min); u3 and orphan = the
+    queue-idle-budget mechanism, confirmed twice independently per finding (5); rebuild
+    (02:54:50 FAILED) = a GENUINELY NEW, DISTINCT signature -- grep-confirmed absent from every
+    prior round's documented findings in this file -- the monotonic-progress settle-wait (ROUND
+    18's own fix) SUCCEEDED this round (real forward progress, ~62min natural completion, well
+    inside its 3600s hard cap), but the POST-rebuild reconciliation comparison found real content
+    mismatches: `RebuildComparisonResult(matches=False, mismatches=('checksum',
+    'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from',
+    'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'))` -- an
+    unrelated, out-of-scope potential data-correctness defect in rebuild-from-raw's SCD2
+    reconstruction for 2 specific customer keys, not investigated further this round. (9) ZERO-
+    NEW-FAILURES NUANCED: same 5 test NAMES as R20's implied set (no new test failed by identity),
+    but 2 of 5 (dbtkill, rebuild) changed FAILURE MECHANISM entirely between rounds -- criterion
+    (d) met at test-identity level only. (10) GUARDS GREEN: Kyverno 0 unintended denials, restarts
+    0 all roles (restart-count-timeline emitted zero changed rows; every sampled value was 0),
+    scheduler peak 2,037,751,808B = 1943.5MiB = 75.9% of 2560Mi (up from R20's 1901MiB/74.3%, a
+    modest continued creep, not a new OOM/crash-loop risk).
+  implication: >
+    ROUND 21's core fix WORKS: the timeout-budget rebalance verifiably eliminated the
+    dagrun_timeout-force-skip/orphaned-STAGED pathology that every prior round (18/19/20) had
+    diagnosed as this session's central, recurring mechanism -- criterion (c) is CONFIRMED with
+    real, live-measured margin, not just offline arithmetic. However, the fix's own design
+    (shorter retry_delay -> faster exhaustion) surfaced a previously-masked reality: orders'
+    stage/dbt_build/publish tasks now genuinely FAIL (not wedge) under the still-unaddressed,
+    already-ticketed CPU-starvation condition, and TWO of the test suite's own hardcoded budgets
+    (wait_for_orders_dagrun_queue_idle's 600s, dbtkill's own 300s dbt_build-poll) were sized
+    against the OLD, slower arithmetic and were never revisited alongside ROUND 21's DAG-level
+    rebalance -- confirming the task's hypothesized second-order gap with direct, repeatable
+    evidence (two independent misses in one run). This is a genuinely new, well-evidenced,
+    actionable set of findings for ROUND 22, not a diagnostics gap requiring another investigation
+    round: (a) raise the queue-idle budget with real margin against the now-measured ~824s worst
+    case; (b) reconsider dbtkill's own stale 300s poll budget; (c) consider bumping orders'
+    retries toward customers' treatment given the shared underlying race; (d) rebuild's NEW
+    reconciliation-mismatch finding is unrelated to timeout budgets and needs its own separate
+    investigation thread. CPU-starvation remains explicitly out of scope (ticket already filed,
+    unchanged this round).
+  timestamp: 2026-08-29 (ROUND 21 post-run analysis, run 33222882138)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
