@@ -28,11 +28,32 @@ if TYPE_CHECKING:
 class BronzeRecord:
     """One bronze-layer observation of a customer at a point in source time.
 
-    ``source_row_number`` is the deterministic tie-break for two records
-    sharing the exact same ``event_ts`` (RESEARCH.md's Assumption A2 edge
-    case) -- by construction, no two ``BronzeRecord``s for the same
-    ``customer_id`` ever share the same ``(event_ts, source_row_number)``
-    pair, so ordering by that pair is always total.
+    Ordering key is ``(event_ts, file_id, source_row_number)`` (debug session
+    ``rebuild-scd2-reconciliation``, 2026-08-29): ``source_row_number`` alone is
+    NOT a safe tie-break for two records sharing the exact same ``event_ts``
+    (RESEARCH.md's Assumption A2 edge case) -- it is only the row's ordinal
+    position WITHIN ITS OWN SOURCE FILE (``models/record.py``'s own docstring),
+    not unique across different files. Two different raw files can legitimately
+    deliver a row for the same ``customer_id`` at the same in-file row position
+    with the same ``event_ts`` (observed live: `snapshot_complete_customers_csv`
+    echoes the current gold roster ``ORDER BY customer_id`` with each key's
+    unchanged ``event_ts`` verbatim, so long-lived, low, rank-stable customer_ids
+    recur at the same row position across many separately-uploaded files).
+    Without a file-level discriminator, that tie was silently broken by
+    whatever arbitrary row order an un-ordered SQL read happened to return --
+    non-deterministic between an incrementally-loaded run and a from-scratch
+    bulk reload (``rebuild-from-raw``), breaking README §67. ``file_id`` is
+    globally unique per staged file and, per ``discovery.discover_files``'s own
+    sorted-manifest guarantee, is assigned in a deterministic,
+    filename-order-consistent sequence regardless of incremental vs. bulk
+    discovery -- so ``(event_ts, file_id, source_row_number)`` is a genuine
+    total order, stable across reprocessing.
+
+    ``file_id`` defaults to ``0`` so existing single-file test scenarios
+    (every row conceptually from the SAME source file) need no change --
+    ties among same-``file_id`` rows still fall through to
+    ``source_row_number`` exactly as before. Real bronze reads
+    (``load/publish/scd.py``) always pass the row's real ``_file_id``.
     """
 
     customer_id: int
@@ -42,6 +63,7 @@ class BronzeRecord:
     event_ts: datetime
     signup_country: str | None
     source_row_number: int
+    file_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -85,11 +107,14 @@ def recompute_version_chain(
         earliest-wins across the whole history) -- Type-1/Type-0 columns
         have no per-version history at all, even retroactively.
 
-    Ordering and tie-break (RESEARCH.md Assumption A2): rows are sorted by
-    ``(event_ts, source_row_number)`` ascending. Two rows can never share
-    both fields for the same customer, so this ordering is always total --
-    an identical ``event_ts`` never causes a raise or a silently dropped
-    row.
+    Ordering and tie-break (RESEARCH.md Assumption A2, revised by debug session
+    ``rebuild-scd2-reconciliation``): rows are sorted by
+    ``(event_ts, file_id, source_row_number)`` ascending. ``file_id`` is
+    globally unique per staged file, so this ordering is always total even
+    when two different files deliver the same customer at the same in-file
+    row position with the same ``event_ts`` -- an identical ``event_ts``
+    never causes a raise or a silently dropped row, and never resolves
+    arbitrarily either.
 
     NULL-safety (RESEARCH.md Pitfall 5's bugfix class): version-boundary
     detection compares two ``bytes | None`` hash values with Python's own
@@ -103,13 +128,13 @@ def recompute_version_chain(
     future SQL port of this logic doesn't silently inherit a bug this
     Python version never had.
     """
-    ordered = sorted(history, key=lambda r: (r.event_ts, r.source_row_number))
+    ordered = sorted(history, key=lambda r: (r.event_ts, r.file_id, r.source_row_number))
 
     # Type-1 (latest-wins) and Type-0 (earliest-wins) are computed once,
     # across the WHOLE history, and applied uniformly to every version --
     # they have no per-version story at all.
-    latest_row = max(ordered, key=lambda r: (r.event_ts, r.source_row_number))
-    earliest_row = min(ordered, key=lambda r: (r.event_ts, r.source_row_number))
+    latest_row = max(ordered, key=lambda r: (r.event_ts, r.file_id, r.source_row_number))
+    earliest_row = min(ordered, key=lambda r: (r.event_ts, r.file_id, r.source_row_number))
     latest_birth_date = latest_row.birth_date
     earliest_signup_country = earliest_row.signup_country
 

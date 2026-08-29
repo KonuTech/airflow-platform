@@ -212,11 +212,14 @@ def _select_lineage_rows(history: Sequence[_BronzeLineageRow]) -> list[_BronzeLi
     """Return, per Type-2 version group, the group's LAST-ordered bronze row.
 
     Reproduces ``recompute_version_chain``'s own grouping rule exactly (sort
-    by ``(event_ts, source_row_number)`` ascending, then split on a
-    ``tracked_attribute_hash(name, country)`` change) so this module can
-    source each emitted ``VersionRow``'s lineage columns from the correct
-    bronze row without ``recompute_version_chain`` itself needing to expose
-    lineage -- plan 10-02's own settled, lineage-free ``VersionRow``
+    by ``(event_ts, file_id, source_row_number)`` ascending -- debug session
+    ``rebuild-scd2-reconciliation``, 2026-08-29: ``source_row_number`` alone is
+    only unique WITHIN one source file, so ``file_id`` is required to make this
+    a genuine total order across a customer_id's full, multi-file history --
+    then split on a ``tracked_attribute_hash(name, country)`` change) so this
+    module can source each emitted ``VersionRow``'s lineage columns from the
+    correct bronze row without ``recompute_version_chain`` itself needing to
+    expose lineage -- plan 10-02's own settled, lineage-free ``VersionRow``
     interface stays unchanged.
 
     Args:
@@ -226,7 +229,7 @@ def _select_lineage_rows(history: Sequence[_BronzeLineageRow]) -> list[_BronzeLi
         One lineage row per emitted version group, in the SAME oldest-first
         order ``recompute_version_chain`` returns its ``VersionRow``s in.
     """
-    ordered = sorted(history, key=lambda r: (r.event_ts, r.source_row_number))
+    ordered = sorted(history, key=lambda r: (r.event_ts, r.file_id, r.source_row_number))
     hashes = [tracked_attribute_hash(r.name, r.country) for r in ordered]
 
     group_start_indices: list[int] = [0]
@@ -354,6 +357,7 @@ class SCDPublisher(Publisher):
                     signup_country=row[4],
                     event_ts=row[5],
                     source_row_number=row[6],
+                    file_id=row[8],
                 )
                 for row in bronze_rows
             ]

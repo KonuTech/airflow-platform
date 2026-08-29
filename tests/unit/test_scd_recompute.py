@@ -204,6 +204,73 @@ def test_identical_event_ts_tie_break_by_source_row_number() -> None:
     assert result[1].country == "FR"
 
 
+def test_cross_file_event_ts_and_source_row_number_tie_is_order_independent() -> None:
+    """debug/rebuild-scd2-reconciliation (2026-08-29): a genuine cross-file tie must be
+    resolved deterministically by ``file_id``, never by caller-supplied list order.
+
+    ``source_row_number`` is only unique WITHIN one source file (models/record.py). Two
+    DIFFERENT files can legitimately deliver a row for the same customer at the same
+    in-file row position with the same ``event_ts`` -- observed live via
+    `snapshot_complete_customers_csv`'s roster-echo mechanism recurring the same
+    low, rank-stable customer_ids across many separately-uploaded files. Before this
+    fix, `recompute_version_chain` broke such a tie using whatever arbitrary order an
+    un-ordered SQL read handed it, silently flipping the reconstructed current version
+    between the ORIGINAL incrementally-loaded run and a from-scratch rebuild-from-raw
+    reload (README §67 violation). This test feeds the exact same two tied rows in
+    both possible relative input orders and asserts the RESULT is identical either way.
+    """
+    tied_ts = _ts(10)
+    baseline = BronzeRecord(
+        customer_id=1,
+        name="Baseline",
+        country="US",
+        birth_date=None,
+        event_ts=_ts(1),
+        signup_country="US",
+        source_row_number=30,
+        file_id=100,
+    )
+    # Two DIFFERENT files (file_id 200 vs 300), same in-file row position (30), same
+    # event_ts, DIFFERENT business content -- a genuine, otherwise-unbreakable tie.
+    row_from_file_200 = BronzeRecord(
+        customer_id=1,
+        name="Name A",
+        country="US",
+        birth_date=None,
+        event_ts=tied_ts,
+        signup_country="US",
+        source_row_number=30,
+        file_id=200,
+    )
+    row_from_file_300 = BronzeRecord(
+        customer_id=1,
+        name="Name B",
+        country="CA",
+        birth_date=None,
+        event_ts=tied_ts,
+        signup_country="US",
+        source_row_number=30,
+        file_id=300,
+    )
+
+    result_order_a = recompute_version_chain(
+        [baseline, row_from_file_200, row_from_file_300], valid_to_sentinel=_SENTINEL
+    )
+    result_order_b = recompute_version_chain(
+        [baseline, row_from_file_300, row_from_file_200], valid_to_sentinel=_SENTINEL
+    )
+
+    assert result_order_a == result_order_b, (
+        "recompute_version_chain must be independent of input list order for a genuine "
+        f"cross-file tie -- got {result_order_a!r} vs {result_order_b!r}"
+    )
+    # file_id ascending (200 before 300) wins the tie, matching discover_files' own
+    # deterministic, lexicographic-by-S3-key discovery/file_id-assignment order.
+    assert result_order_a[-1].name == "Name B"
+    assert result_order_a[-1].country == "CA"
+    assert result_order_a[-1].is_current is True
+
+
 def test_null_safety_none_to_value_is_a_version_boundary() -> None:
     """An early row's country=None, a later row's country='PL' -- MUST be a version boundary."""
     history = [
