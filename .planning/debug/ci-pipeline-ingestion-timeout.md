@@ -196,17 +196,35 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-29 (ROUND 22 OUTCOME: live run 33239055603 VOID for ROUND 22's own
-  pre_registered_criteria -- job died in 3m24s inside `make cluster-up` (step 7), before the E2E
-  suite ever started, due to an unrelated, previously-latent, now-FIXED infra bug in
-  `scripts/minio-credentials.sh` (unquoted YAML stringData scalar resolved to a YAML integer when
-  the random hex rootUser happened to be all-digit, ~1-in-1845 odds, first occurrence in 22
-  rounds -- kubectl apply rejected the resulting numeric JSON field). None of dbtkill/
-  idempotent_reupload/u3/orphan/podkill/sweep/OOM/rebuild could be evaluated. Fixed the quoting bug
-  directly (zero-risk, orthogonal to all named scope areas) so it cannot recur and block the next
-  verification run. HEAD now contains ROUND 22's timeout/retry fixes + the SCD2 fix + this quoting
-  fix -- recommending ONE fresh combined verification run next. See Current Focus ROUND 22 OUTCOME.
-  Prior text retained below for history.
+updated: 2026-08-29 (COMBINED VERIFICATION OUTCOME: live run 33246473899, headSha cba2a55,
+  conclusion=CANCELLED at the 190-min job ceiling (09:51:58Z->13:02:49Z), NOT a manual cancel and
+  NOT superseded. MinIO credentials bootstrap SUCCEEDED cleanly this run (`cluster-up complete` at
+  09:57:57Z, zero unmarshal/stringData errors) -- the quoting fix is CONFIRMED, no regression.
+  Pytest ran 09:58:47Z->13:02:11Z (killed by the job ceiling, never printed a final summary) and
+  reached only 40 of the suite's 44 node-IDs (2 failed / 32 passed / 6 skipped) before being
+  cancelled -- orphan, idempotent_reupload, rebuild-from-raw, and smoke_dag_xcom were NEVER
+  STARTED (zero mentions anywhere in the log). Of ROUND 22's own four items: u3 CLEARED (PASSED,
+  queue-idle budget item resolved); orphan/idempotent_reupload UNTESTABLE (never reached);
+  podkill/sweep-assertion-10/OOMKilled-publish all stayed CLEAN (zero regressions). dbtkill did
+  NOT clear -- but its failure MECHANISM changed for the worse: instead of R21's ~9-10min
+  retry-exhaustion, it now burned the FULL new 2400s poll budget with the DBT_BUILD signal never
+  once observed (`last observed: None`), meaning `stage` never even reached SUCCEEDED within the
+  new, larger budget -- the R22 fix bought MORE wasted wall-clock per failure, not a fix. WORSE: a
+  GENUINELY NEW failure appeared for the first time in this session's history --
+  `test_scd_concurrent_attribute_change_and_correction_same_key` (previously always-passing,
+  unrelated to orders/ROUND 22's own scope) -- a customers DagRun never reached a terminal state
+  within its own 2700s poll budget (last observed: 'running'), a near-zero-margin race against
+  `dagrun_timeout=45min` (also 2700s) that this run's heavier aggregate CPU contention (still the
+  same already-ticketed, out-of-scope condition -- 81 unique FailedScheduling/Insufficient-cpu
+  event lines this run, guards otherwise green: 0 Kyverno, 0 restarts, scheduler peak 1944MiB/
+  75.9%, essentially flat vs R21's 1943.5MiB) tipped over for the first time. The SCD2
+  rebuild-from-raw fix (a0cc2f5/3c2c4bf) got ZERO new information this run either -- its own test
+  was never reached. Net verdict: MinIO fix CONFIRMED; SCD2 fix STILL UNVERIFIED (0 live runs);
+  ROUND 22's timeout/retry-budget fixes are PARTIALLY WORKING (u3 clears) but NOT sufficient
+  (dbtkill still fails, now more expensively) and have a plausible NEW side effect (the
+  scd_concurrent near-zero-margin race tipping over under sustained higher contention). See
+  Current Focus's new top block for full detail and the proposed next-round shape. Prior text
+  retained below for history.
   ROUND 22 offline COMPLETE: bundled three timeout/retry-budget fixes.
   (1) orders.stage/dbt_build retries 3/2 -> 4 (byte-identical to customers, D-06); orders.publish
   hardcoded 3 -> publish_retries() (same shared function/Variable customers' publish already uses,
@@ -527,6 +545,157 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+COMBINED VERIFICATION OUTCOME (2026-08-29, post-run analysis of run 33246473899, headSha
+cba2a550886eff02f774654958051f77edfc64c7 -- CURRENT STATE, evaluated against THREE independent
+pre-registered criteria sets simultaneously: ROUND 22's own four timeout/retry-budget items, the
+separate rebuild-scd2-reconciliation SCD2 fix's live confirmation, and the minio-credentials.sh
+quoting fix's regression check):
+  run_facts: "conclusion=CANCELLED (confirmed via `gh run view --json conclusion`), NOT a manual
+      cancel and NOT superseded by a later push -- job ran 09:51:58Z->13:02:49Z = 3h10m51s,
+      matching the 190-min (11400s) `timeout-minutes` ceiling almost exactly (##[error]The
+      operation was canceled. fired at 13:02:11Z, i.e. 190m13s after job start). Step 7 (`make
+      cluster-up`) SUCCEEDED this time (`==> cluster-up complete` at 09:57:57Z, ~6min) --
+      confirms this run is NOT a repeat of ROUND 22's own prior void run (33239055603, which died
+      in cluster-up in 3m24s). Step 13 (`pytest tests/e2e/cluster tests/e2e/slice -v`) ran
+      09:58:47Z->13:02:11Z (killed mid-suite by the job-level cancel, never printed a final
+      pytest summary line) and reached 40 of 44 total node-IDs before being killed: 2 failed / 32
+      passed / 6 skipped (confirmed via direct grep of PASSED/FAILED/SKIPPED lines). Steps 15/16
+      (observability + `make rebuild-from-raw` D-24 capstone) both show status=skipped -- GHA's
+      standard behavior once the job-level cancel fires, not an independent finding. Step 14
+      (diagnostics dump) still ran post-cancel and captured a full ROUND 5/10/12/19 forensic
+      snapshot at cancellation time, used below."
+  criterion_1_minio_quoting_fix: "CONFIRMED, no regression. `scripts/minio-credentials.sh
+      ensure`'s `_create_secret` (job log lines 464-874) completed cleanly with zero
+      `stringData`/`cannot unmarshal number` errors regardless of this run's own random secret's
+      digit composition -- the single-quoting fix holds structurally as designed. This closes
+      the quoting-fix side of this combined run's own charter fully; no further verification
+      needed for this item."
+  criterion_2_scd2_rebuild_fix: "ZERO NEW INFORMATION, same as ROUND 22's own prior void run.
+      `test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending`
+      (tests/e2e/slice/test_rebuild_from_raw.py, alphabetically AFTER test_referential_orphan.py
+      within `tests/e2e/slice`) was NEVER STARTED -- confirmed via a full-log grep for
+      'rebuild_from_raw'/'RebuildComparisonResult'/any test_rebuild node-ID: zero hits anywhere
+      in the 13,193-line job log except in already-quoted source/docstring text. The suite was
+      cancelled while still working through test_pod_kill_retry.py (u3 was the last COMPLETED
+      test, at 90% progress, [ 90%]), several files before test_referential_orphan.py and
+      test_rebuild_from_raw.py are even reached in `pytest -v`'s alphabetical-by-file collection
+      order. The SCD2 recompute file_id tie-break fix (a0cc2f5/3c2c4bf,
+      .planning/debug/rebuild-scd2-reconciliation.md) remains completely unverified against a
+      live CI run -- STILL AWAITS its first live-verification attempt. Recorded identically in
+      that session's own debug file (see its Evidence)."
+  criterion_3_round22_items: "MIXED -- (a) dbtkill/idempotent_reupload: dbtkill did NOT clear,
+      and its failure MECHANISM got WORSE, not better (see dbtkill_new_failure_signature below);
+      idempotent_reupload UNTESTABLE (never reached, same reason as the rebuild test above --
+      it's the LAST test in test_smoke_and_idempotency.py, later in file-collection order than
+      test_referential_orphan.py/test_rebuild_from_raw.py, both also never reached). (b)
+      u3/orphan: u3 CLEARED -- `test_u3_throughput_and_peak_rss_baseline` PASSED at 12:44:10Z (the
+      LAST test the suite completed before being killed) -- the queue-idle-budget fix (600s->2400s)
+      is CONFIRMED working for this specific test. orphan UNTESTABLE (never reached, same reason).
+      (c) podkill/sweep-assertion-10/OOMKilled-publish: ALL THREE stayed CLEAN.
+      `test_pod_kill_mid_load_produces_no_duplicates` (podkill) PASSED at 11:56:13Z, zero
+      regression. `test_full_2year_sweep_customers_and_orders` (the sweep-assertion-10 vehicle)
+      PASSED at 10:25:00Z. Zero 'OOMKilled' occurrences anywhere in the job log (grep -c
+      OOMKilled = 0). (d) zero new failures EXCEPT the expected/accepted rebuild finding: NOT
+      MET -- a genuinely NEW, unexpected failure appeared this run
+      (`test_scd_concurrent_attribute_change_and_correction_same_key`, see below), the first
+      failure of this specific test anywhere in this debug session's history (grep-confirmed:
+      its only 2 prior mentions in this whole file are (i) an ancient ROUND-~3-era 17-test
+      failure-storm list from when almost everything failed, and (ii) an unrelated ROUND 4
+      DAG-pause-fixture-removal note -- neither is this run's failure mode). (e) guards: green
+      (Kyverno 0 unintended denials; restarts 0 across all roles; scheduler peak
+      2,038,743,040 bytes = 1944.0MiB/75.9% of 2560Mi, essentially flat vs R21's 1943.5MiB/75.9%
+      -- no new memory-pressure trend). (f) duration decomposition: see below -- verdict is a
+      COMBINATION of (a) and (b), amplified by (c), not a single clean explanation."
+  dbtkill_new_failure_signature: "`test_pod_kill_mid_dbt_build_produces_no_duplicates` FAILED
+      again at 12:38:17Z, but its failure MECHANISM changed for the worse compared to ROUND 21.
+      R21: stage genuinely EXHAUSTED all 4 retries and reached terminal FAILED in ~9-10min real
+      wall time (fast, legible). THIS run: `_poll_dbt_build_running_signal(run_id=1348,
+      timeout=2400)` burned the ENTIRE new 2400s budget (40 minutes) and raised
+      `AssertionError: meta.run_stages[run_id=1348, stage_name='DBT_BUILD'] never reached
+      status='RUNNING' within 2400s (last observed: None)` -- 'last observed: None' means the
+      DBT_BUILD row was NEVER EVEN WRITTEN, i.e. `stage` never reached SUCCEEDED even once within
+      the entire, deliberately-enlarged 2400s window (stage's own post-R22 theoretical worst case
+      is 1920s/32min, so 2400s should have comfortably covered even full retry-exhaustion -- it
+      did not, meaning either stage is stuck/never-scheduled rather than exhausting cleanly, or
+      the effective per-attempt time under this run's own real contention now exceeds the
+      arithmetic ROUND 22 assumed). ROUND 22's OWN stated goal was 'reducing wasted time' -- this
+      is the opposite: the SAME test now wastes 40 minutes instead of ~10 before failing, for
+      zero improvement in outcome. This is direct, first-hand evidence against ROUND 22's own
+      falsification_test scenario (a): 'a single real attempt is taking longer than execution_timeout
+      allows even with more attempts available' is plausible, but the more direct read of 'last
+      observed: None' is that `stage` itself may not even be getting SCHEDULED promptly under
+      this run's contention -- not definitively distinguished this round (see blind_spots)."
+  new_regression_scd_concurrent: "GENUINELY NEW finding, outside ROUND 22's own four named items,
+      unrelated to the orders DAG or anything ROUND 22 touched:
+      `test_scd_concurrent_attribute_change_and_correction_same_key`
+      (tests/e2e/slice/test_backfill_2year_sweep.py, operates on `csv_ingest_customers` only)
+      FAILED at 11:31:42Z -- `_wait_for_new_dag_run_terminal(dag_id='csv_ingest_customers',
+      since_pk=35, timeout=2700)` raised `AssertionError: no NEW dag_run for
+      dag_id='csv_ingest_customers' (since_pk=35) reached a terminal state within 2700s (last
+      observed state: 'running')`. Direct source read of both this test's OWN poll budget (2700s)
+      AND `csv_ingest_customers`'s `dagrun_timeout=pendulum.duration(minutes=45)` (also exactly
+      2700s, added back in an early round specifically using this test suite's own '2700s
+      precedent') shows these two independent timers are set to the IDENTICAL value with ZERO
+      designed margin between them: the test's own poll clock starts BEFORE the target DagRun
+      even exists (captured at `since_dag_run_pk`, before the live-change file is even uploaded),
+      while `dagrun_timeout`'s clock only starts at the DagRun's OWN `start_date` -- any
+      real scheduling delay between those two reference points (queueing behind the shared
+      `max_active_runs=1` slot, scheduler-loop latency under contention) eats directly into the
+      test's own budget without correspondingly eating into the DagRun's -- a latent, near-zero
+      real margin that this specific test had apparently never hit before in this session's
+      history until this run. This test was NOT touched by ROUND 22 (customers-side, not
+      orders-side), so it cannot be attributed to ROUND 22's own retries/budget changes directly
+      -- but it IS plausible collateral damage from ROUND 22's INDIRECT effect on aggregate
+      cluster load: dbtkill's own new 2400s-long stuck poll (above) and orders' now-larger
+      retry/timeout budgets mean MORE task attempts stay in-flight, competing for the SAME
+      already-CPU-starved single node, for LONGER, during the SAME wall-clock window this test's
+      own tight-margin race was running in. FailedScheduling 'Insufficient cpu' events: 81 unique
+      event lines captured this run (same chronic, already-ticketed condition as every prior
+      round -- not a new phenomenon in itself, but its INTERACTION with ROUND 22's own
+      longer-lived retries is new evidence worth flagging, not a unilateral scope decision)."
+  duration_decomposition_verdict: "COMBINATION of (a) and (b), not a single clean explanation,
+      per the checkpoint response's own framing: (a) YES, partially -- for dbtkill, ROUND 22's
+      fix did NOT reduce wasted time, it INCREASED it (~10min -> 40min for the exact same
+      eventual failure), directly contradicting ROUND 22's own charter goal, though u3's
+      queue-idle fix genuinely DID work as intended (0 -> cleared). (b) YES -- a genuinely NEW
+      mechanism surfaced this run: the scd_concurrent near-zero-margin timer race, never observed
+      before in 22 prior rounds, most plausibly tipped over by increased aggregate contention
+      (not a code change to that test or its DAG). (c) CPU-starvation itself (guard evidence: 81
+      FailedScheduling lines, scheduler memory flat/not the driver) remains the SAME chronic,
+      already-ticketed condition as every prior round -- NOT scoring it as 'newly the dominant
+      blocking mechanism' outright, since guards show no NEW resource ceiling being hit (memory
+      flat, zero OOM, zero restarts) -- but its INTERACTION with ROUND 22's own choice to let
+      failing tasks retry longer/poll longer is flagged explicitly per the checkpoint's own
+      guardrail instruction, for the next-round decision, not decided unilaterally here. Net
+      effect: total suite wall-clock this run (09:58:47Z->13:02:11Z, ~3h3m24s to reach only 90%
+      of node-IDs) is WORSE throughput than R21 (10608s/2:56:48 to reach 100% of node-IDs,
+      5 failed/33 passed/6 skipped) despite ROUND 22's own stated intent to reduce wasted time."
+  census_vs_r21_baseline: "PARTIAL (suite cancelled at 90% of 44 total node-IDs, R21's own
+      last-complete baseline was 5 failed/33 passed/6 skipped = 44 total). This run: 2 failed
+      (dbtkill -- carried over from R21, NEW failure mechanism; scd_concurrent -- genuinely NEW)
+      / 32 passed / 6 skipped, with u3 now passing (cleared from R21's 5) and 4 tests never
+      reached (orphan, idempotent_reupload, rebuild-from-raw, smoke_dag_xcom -- all 4 were
+      COLLECTED and RUN to a terminal state in R21; this run could not reach them at all, so
+      'zero new failures' cannot be fully adjudicated for those 4 -- they are simply unknown,
+      not passing or failing). Guards: Kyverno 0 unintended denials, restarts 0 across all roles,
+      scheduler peak 1944.0MiB/75.9% of 2560Mi (flat vs R21)."
+  next_action: "DECISION CHECKPOINT returned to user (see below) -- this run partially confirms
+      ROUND 22 (u3 clears, podkill/sweep/OOM stay clean, MinIO quoting fix confirmed) but leaves
+      dbtkill still failing (worse mechanism), orphan/idempotent_reupload/rebuild still completely
+      untested, and surfaces one genuinely new regression (scd_concurrent) whose most likely
+      explanation is collateral contention from ROUND 22's own longer retry/poll windows rather
+      than a code defect in the SCD path itself. Recommending a ROUND 23 that (1) investigates
+      dbtkill's 'last observed: None' more precisely (direct stage TI/pod-log evidence for
+      run_id=1348 specifically -- was it ever even scheduled?) before assuming more budget is the
+      answer, (2) considers whether the scd_concurrent test's own 2700s poll needs REAL margin
+      over dagrun_timeout=2700s (the two should never be numerically identical -- give the test's
+      own poll a shorter budget than the DAG's own timeout, or vice versa, so one fails cleanly
+      before the other times out ambiguously) rather than raising both in lockstep again, and (3)
+      a fresh combined run once (1)/(2) are addressed, still targeting the still-fully-unverified
+      SCD2 rebuild fix and orphan/idempotent_reupload. NOT unilaterally moving CPU-starvation
+      remediation into scope -- flagging its interaction with ROUND 22's own design choice for the
+      user's explicit decision, per this task's own guardrails."
 
 ROUND 19 (2026-08-28, DIAGNOSTICS-ONLY round opened on user decision confirming this session's
 own diagnostics-first precedent -- NO production fix for the podkill stall or the sweep
@@ -9995,6 +10164,64 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     headSha 2009065 via `git merge-base --is-ancestor`) + this quoting fix -- recommending ONE
     fresh combined verification run rather than a new dedicated round.
   timestamp: 2026-08-29 (ROUND 22 post-run analysis, run 33239055603)
+
+- checked: >
+    Combined verification run 33246473899 (headSha cba2a550886eff02f774654958051f77edfc64c7),
+    triggered against a HEAD containing ROUND 22's timeout/retry fixes + the SCD2
+    recompute file_id tie-break fix + the minio-credentials.sh quoting fix, all three at once.
+    `gh run view --json jobs`, `gh api .../jobs/<id>/logs` saved as scratchpad
+    round22-combined-job.log (13,193 lines), direct grep for PASSED/FAILED/SKIPPED node-IDs,
+    minio-credentials.sh step output, dbtkill's own AssertionError detail, the NEW
+    scd_concurrent failure's own AssertionError detail, FailedScheduling census, and the
+    ROUND 5/19 post-cancel diagnostics dump (customers/orders DagRun+TI history).
+  found: >
+    conclusion=CANCELLED at the 190-min job ceiling (09:51:58Z->13:02:49Z, "The operation was
+    canceled." at 13:02:11Z), not manual, not superseded. `make cluster-up` (step 7) SUCCEEDED
+    cleanly (09:57:57Z) -- zero minio-credentials.sh stringData/unmarshal errors, confirming the
+    quoting fix. Pytest (step 13) ran 09:58:47Z->13:02:11Z and reached only 40/44 node-IDs before
+    being killed: 2 failed (test_pod_kill_mid_dbt_build_produces_no_duplicates /dbtkill --
+    NEW failure signature, burned the full new 2400s poll with DBT_BUILD's status never once
+    observed, "last observed: None", vs R21's ~9-10min clean retry-exhaustion;
+    test_scd_concurrent_attribute_change_and_correction_same_key -- GENUINELY NEW, first
+    occurrence in this session, a customers DagRun stuck 'running' past its own 2700s poll
+    budget, which is numerically IDENTICAL to `csv_ingest_customers`'s own
+    dagrun_timeout=45min=2700s with zero designed margin between the two independent clocks) /
+    32 passed (including u3 -- test_u3_throughput_and_peak_rss_baseline PASSED, confirming the
+    queue-idle-budget fix; podkill and the sweep-assertion-10 vehicle
+    test_full_2year_sweep_customers_and_orders both PASSED clean) / 6 skipped. orphan,
+    idempotent_reupload, rebuild-from-raw's reconciliation comparison, and smoke_dag_xcom were
+    NEVER STARTED (zero mentions anywhere in the 13,193-line log besides already-quoted source
+    text) -- all four are later in `pytest -v`'s alphabetical-by-file collection order than
+    where the suite was killed (mid test_pod_kill_retry.py, at the 90% mark). Zero 'OOMKilled'
+    occurrences in the whole log. FailedScheduling 'Insufficient cpu' census: 81 unique event
+    lines (same chronic condition as every prior round). Guards: Kyverno 0 unintended denials,
+    restarts 0 across all roles, scheduler peak 2,038,743,040 bytes = 1944.0MiB/75.9% of 2560Mi
+    (flat vs R21's 1943.5MiB/75.9%, no new memory trend).
+  implication: >
+    THREE-WAY adjudication: (1) minio-credentials.sh quoting fix CONFIRMED, no regression -- this
+    item is CLOSED. (2) The SCD2 rebuild-from-raw fix (a0cc2f5/3c2c4bf, owned by the parallel
+    debug/rebuild-scd2-reconciliation.md thread) got ZERO new information -- its own test was
+    never reached, exactly as ROUND 22's own prior void run also failed to reach it -- STILL
+    completely unverified against any live run, two consecutive combined-verification attempts
+    now having failed to reach it for two entirely different reasons (infra flake, then job
+    ceiling). (3) ROUND 22's own four items are MIXED: u3 clears (queue-idle-budget class fixed,
+    confirmed), podkill/sweep-assertion-10/OOMKilled-publish stay clean (zero regression,
+    confirmed), but dbtkill does NOT clear and its own fix (raising the poll timeout to 2400s)
+    made the WASTED TIME WORSE (40min vs ~10min) for the identical eventual outcome -- directly
+    contradicting ROUND 22's own stated charter goal of reducing wasted time for this specific
+    test. orphan/idempotent_reupload remain completely untested (never reached). PLUS a
+    genuinely new, previously-never-seen regression (scd_concurrent) surfaced this run, most
+    plausibly explained not as a code defect but as a long-latent near-zero-margin race (test
+    poll budget == DAG dagrun_timeout, both exactly 2700s) finally tipped over by this run's own
+    heavier, LONGER-lived aggregate CPU contention -- itself plausibly a second-order consequence
+    of ROUND 22's own design choice to let failing orders tasks retry/poll for longer. Duration
+    decomposition verdict is a COMBINATION, not a single clean cause: ROUND 22's fix partially
+    worked (u3) but also partially backfired (dbtkill wastes more time; scd_concurrent's
+    near-zero margin got exposed) -- CPU-starvation itself is NOT scored as newly-dominant (no
+    new resource ceiling in the guards: memory flat, zero OOM, zero restarts), but its
+    INTERACTION with ROUND 22's own longer retry/poll windows is flagged explicitly for the next
+    round's decision rather than resolved unilaterally here.
+  timestamp: 2026-08-29 (combined-verification post-run analysis, run 33246473899)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
