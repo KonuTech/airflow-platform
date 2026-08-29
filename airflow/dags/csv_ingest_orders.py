@@ -28,7 +28,12 @@ from kubernetes.client import models as k8s
 
 from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
-from _common.kpo import HEAVY_TASK_EXECUTION_TIMEOUT, common_kpo_kwargs, stage_pod_resources
+from _common.kpo import (
+    HEAVY_TASK_EXECUTION_TIMEOUT,
+    HEAVY_TASK_RETRY_DELAY,
+    common_kpo_kwargs,
+    stage_pod_resources,
+)
 from _common.run_stage_recorder import wire_dbt_build_tracking
 from _common.tracing_kpo import TracingKubernetesPodOperator
 
@@ -124,13 +129,18 @@ def csv_ingest_orders() -> None:
     )
     wait_for_files >> matched_keys >> gate >> discover
     # D-12: stage is the trace root (OBS-10). No outlets here (D-16): orders produces no Asset.
+    # retry_delay=HEAVY_TASK_RETRY_DELAY (ROUND 21): was UNSET here -- silently inheriting
+    # Airflow's DEFAULT_RETRY_DELAY=300s/5min, the same back-port-gap shape as this DAG's own
+    # publish-resources finding below. See kpo.py's HEAVY_TASK_RETRY_DELAY/
+    # HEAVY_TASK_EXECUTION_TIMEOUT comments for the full worst-case-arithmetic math.
     stage = TracingKubernetesPodOperator.partial(
         task_id="stage",
         cmds=["dataplat"],
         retries=3,
         retry_exponential_backoff=True,
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
         max_active_tis_per_dag=1,
-        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        # ROUND 20/21 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
@@ -139,8 +149,9 @@ def csv_ingest_orders() -> None:
         task_id="dbt_build",
         retries=2,
         retry_exponential_backoff=True,
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
         max_active_tis_per_dag=1,
-        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        # ROUND 20/21 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(
             resources=_DISCOVER_RESOURCES,
@@ -160,6 +171,7 @@ def csv_ingest_orders() -> None:
         arguments=["publish", "--dataset", "orders"],
         retries=3,
         retry_exponential_backoff=True,
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES),
     )

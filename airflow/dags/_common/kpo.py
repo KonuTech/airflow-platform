@@ -66,15 +66,18 @@ _DEFAULT_STAGE_CPU_REQUEST = "500m"
 # debug/ci-pipeline-ingestion-timeout ROUND 14 (finding 18a, trim iii): CI
 # trims customers' publish retries via Airflow Variable publish_retries=3
 # (scripts/ci-set-workload-images.sh, the stage_cpu_request precedent above);
-# local never sets it and keeps this default -- byte-identical to the
-# retries=6 the DAG hardcoded before this change. Post-ROUND-14, publish
+# local never sets it and keeps this default. Post-ROUND-14, publish
 # retries exist ONLY for the transient-infrastructure class (the
 # KubernetesJobWatcher 30s-read-timeout race, Kyverno admission hiccups,
 # co-scheduling CPU bursts) -- deterministic quality-gate trips no longer
 # consume retries at all (publish_ingest quarantines the batch and exits 0),
 # so the CI value is sized against the measured transient burst window
-# (~5min self-healed, ROUND 13), not against breaker-trip burn.
-_DEFAULT_PUBLISH_RETRIES = "6"
+# (~5min self-healed, ROUND 13), not against breaker-trip burn. ROUND 21
+# (timeout-budget rebalance): "6" -> "4", matching stage/dbt_build's own
+# ROUND 21 cut -- see HEAVY_TASK_EXECUTION_TIMEOUT's comment below for the
+# full worst-case-arithmetic justification. CI's own publish_retries=3 stays
+# unchanged (already the safest of every combination under the new budget).
+_DEFAULT_PUBLISH_RETRIES = "4"
 
 # debug/ci-pipeline-ingestion-timeout ROUND 20 (finding: podkill zombie-detection gap):
 # `stage`/`dbt_build`/`publish` had NO per-task wall-clock ceiling of their own -- the only
@@ -111,7 +114,53 @@ _DEFAULT_PUBLISH_RETRIES = "6"
 # `stage`/`dbt_build`/`publish` tasks -- the same three tasks ROUND 19 named for the podkill gap
 # and the OOMKilled-publish bonus finding, both of which share this exact missing-ceiling
 # mechanism.
-HEAVY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+#
+# debug/ci-pipeline-ingestion-timeout ROUND 21 (dbtkill: internally-inconsistent timeout-budget
+# hierarchy): ROUND 20's own combination could exceed dagrun_timeout=45min in the worst case --
+# e.g. customers.stage's old retries=6 x execution_timeout=10min alone is 70min before any
+# retry_delay is even added. Live-confirmed via dbtkill: stage try=3/up_for_retry rode toward its
+# OWN dagrun_timeout without ever reaching a terminal state, under real ~420m-CPU-headroom
+# contention (see kind/cluster.yaml capacity vs baseline platform-pod requests; tracked as its
+# own out-of-scope follow-up, .planning/todos/pending/). SUB-FINDING (direct source read of the
+# installed apache-airflow==3.3.0 `taskinstance.py::next_retry_datetime`): `retry_exponential_
+# backoff=True` -- the literal value every task below passes -- is a SILENT NO-OP in this Airflow
+# version. The field is now a literal float MULTIPLIER, not a bool flag; `multiplier = task.
+# retry_exponential_backoff if ... != 0 else 1.0`, and the growth branch only runs `if multiplier
+# != 1.0`. Python's `bool` is an `int` subclass (`True == 1`), so `multiplier == 1.0` and every
+# retry uses a CONSTANT, un-jittered `retry_delay` regardless of try_number -- confirmed via a
+# standalone reproduction of the exact formula. There is therefore no "exponential growth" to cap;
+# the only real levers are execution_timeout, retries, and retry_delay itself. 10min -> 6min:
+# justified against the only direct single-attempt evidence available (ROUND 17 live measurement:
+# dbt_build+publish COMBINED on a real 1M-row file took <=2min; the full stage+dbt_build+publish
+# cycle took ~5.6min, implying stage alone is on the order of ~3.6min) -- 6min leaves ~2.4min
+# (67%) headroom over that estimate, and execution_timeout wraps the ENTIRE KPO.execute() call
+# (confirmed via TimeoutPosix source read, ROUND 20), so any CPU-starvation-induced pod-scheduling
+# wait is already inside this budget, not on top of it. More, shorter-ceiling attempts fit more
+# retries inside the SAME 45min ceiling under contention than fewer, longer ones ever did.
+# Worst-case math (attempts=retries+1, CONSTANT delay per the sub-finding above), computed for
+# every call site below post-fix: customers.stage/dbt_build (retries=4, delay=30s) = 5x360s +
+# 4x30s = 1920s = 32.0min (13.0min/28.9% margin, the TIGHTEST of all combinations); customers.
+# publish-local (retries=4) = same, 32.0min; customers.publish-CI (retries=3) = 4x360s + 3x30s =
+# 1530s = 25.5min (19.5min/43.3% margin); orders.stage/publish (retries=3, delay=30s) = 25.5min
+# (19.5min/43.3% margin); orders.dbt_build (retries=2) = 3x360s + 2x30s = 1140s = 19.0min
+# (26.0min/57.8% margin). Minimum margin across every combination: 13.0min (28.9% of
+# dagrun_timeout) -- a real, substantial margin, not a barely-under fit. See `tests/unit/
+# test_dag_structure.py::test_worst_case_retry_budget_has_real_margin` for the enforced regression
+# guard (fails if any future retries/execution_timeout/retry_delay edit erodes this margin below
+# 10 minutes).
+HEAVY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=6)
+
+# debug/ci-pipeline-ingestion-timeout ROUND 21: renamed from customers-only `_KYVERNO_RETRY_DELAY`
+# (identical 30s value, identical Kyverno-admission-flakiness rationale from ROUND 6 -- see that
+# round's own comment history) and promoted to a SHARED constant so `csv_ingest_orders.py`'s
+# stage/dbt_build/publish can use it too. Orders never had an explicit retry_delay at all before
+# this round, silently inheriting Airflow's DEFAULT_RETRY_DELAY=300s/5min -- the exact same shape
+# of back-port gap as ROUND 20's own orders-publish-resources finding (a customers-side
+# improvement never mirrored into orders when orders was written to mirror customers' shape). A
+# shorter, uniform delay is a pure win under CPU-starvation contention: it does not shrink actual
+# single-attempt processing time, only how quickly a FAILED attempt re-enters the scheduling
+# queue, so it strictly helps cycle through the fixed retries budget faster.
+HEAVY_TASK_RETRY_DELAY = timedelta(seconds=30)
 
 
 def publish_retries() -> int:

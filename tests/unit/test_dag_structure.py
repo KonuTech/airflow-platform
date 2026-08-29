@@ -37,6 +37,7 @@ def _kpo_attrs(task: object) -> dict[str, object] | None:
             "container_resources": task.container_resources,
             "retries": task.retries,
             "execution_timeout": task.execution_timeout,
+            "retry_delay": task.retry_delay,
         }
     return None
 
@@ -107,6 +108,54 @@ def test_heavy_tasks_bound_by_execution_timeout(dagbag: DagBag) -> None:
             assert timedelta(0) < timeout < dagrun_timeout, (
                 f"{dag_id}.{task_id}'s execution_timeout={timeout!r} must be strictly between "
                 f"zero and dagrun_timeout={dagrun_timeout!r}"
+            )
+            checked += 1
+    assert checked == 6, "expected stage/dbt_build/publish checked in both DAGs"
+
+
+_MIN_REQUIRED_MARGIN = timedelta(minutes=10)
+
+
+def test_worst_case_retry_budget_has_real_margin(dagbag: DagBag) -> None:
+    """debug/ci-pipeline-ingestion-timeout ROUND 21: worst-case retry arithmetic for `stage`/
+    `dbt_build`/`publish` in BOTH DAGs must stay safely under `dagrun_timeout` with a REAL margin,
+    not a barely-under fit -- the live-confirmed dbtkill root cause was exactly this: `stage`'s
+    retries=3(then) x execution_timeout=10min(then) + retry_delay could sum PAST dagrun_timeout=
+    45min by design, so a task needing multiple timeout cycles under real CPU-starvation
+    contention got force-skipped by the DagRun-level sweep before its own retry logic concluded.
+
+    Formula (`retry_exponential_backoff=True` is a confirmed silent no-op in this installed
+    Airflow version -- see `_common/kpo.py`'s `HEAVY_TASK_EXECUTION_TIMEOUT` comment for the
+    direct source-read proof -- so `retry_delay` is CONSTANT per retry, not exponentially
+    growing): worst_case = (retries + 1) * execution_timeout + retries * retry_delay. This test
+    asserts worst_case <= dagrun_timeout - 10 minutes for every one of the 6 ROUND-20 call sites,
+    enforcing a real, mechanically-checked safety margin rather than a hoped-for one.
+    """
+    checked = 0
+    for dag_id in ("csv_ingest_customers", "csv_ingest_orders"):
+        dag = dagbag.dags[dag_id]
+        dagrun_timeout = dag.dagrun_timeout
+        assert dagrun_timeout is not None, f"{dag_id} has no dagrun_timeout at all"
+        for task_id in _HEAVY_TASK_IDS:
+            task = dag.task_dict[task_id]
+            attrs = _kpo_attrs(task)
+            assert attrs is not None, f"{dag_id}.{task_id} is not a KPO-shaped task"
+            retries = attrs.get("retries")
+            execution_timeout = attrs.get("execution_timeout")
+            retry_delay = attrs.get("retry_delay")
+            assert retries is not None, f"{dag_id}.{task_id} has no retries"
+            assert isinstance(execution_timeout, timedelta), (
+                f"{dag_id}.{task_id} has no execution_timeout"
+            )
+            assert isinstance(retry_delay, timedelta), f"{dag_id}.{task_id} has no retry_delay"
+            attempts = retries + 1
+            worst_case = attempts * execution_timeout + retries * retry_delay
+            margin = dagrun_timeout - worst_case
+            assert margin >= _MIN_REQUIRED_MARGIN, (
+                f"{dag_id}.{task_id}'s worst-case retry budget ({attempts} attempts x "
+                f"{execution_timeout} + {retries} x {retry_delay} = {worst_case}) leaves only "
+                f"{margin} of margin under dagrun_timeout={dagrun_timeout!r} -- needs at least "
+                f"{_MIN_REQUIRED_MARGIN}"
             )
             checked += 1
     assert checked == 6, "expected stage/dbt_build/publish checked in both DAGs"

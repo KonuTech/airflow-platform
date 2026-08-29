@@ -67,15 +67,20 @@ echo "==> registering stage_cpu_request=200m (CI profile; local default is 500m)
   airflow variables set stage_cpu_request "200m"
 
 # debug/ci-pipeline-ingestion-timeout ROUND 14 (finding 18a, trim iii): CI
-# trims customers' publish retries 6 -> 3. Post-ROUND-14, deterministic
+# trims customers' publish retries. Post-ROUND-14, deterministic
 # quality-gate trips (mass-delete breaker) quarantine + exit 0 and never
 # consume a retry, so publish retries serve ONLY the transient class
 # (KubernetesJobWatcher read-timeout race, Kyverno hiccups, co-scheduling
-# CPU bursts). With retry_delay=30s exponential backoff, retries=3 spans 4
-# attempts over ~12min -- covering ROUND 13's measured ~5min self-healed
-# FailedScheduling burst with margin. Local never runs this script and
-# keeps the DAG's own default of 6 (airflow/dags/_common/kpo.py).
-echo "==> registering publish_retries=3 (CI profile; local default is 6)"
+# CPU bursts). ROUND 21 correction: retry_delay=30s is a CONSTANT delay, not
+# real exponential growth (`retry_exponential_backoff=True` is a silent
+# no-op in this installed Airflow version -- see `_common/kpo.py`'s
+# HEAVY_TASK_EXECUTION_TIMEOUT comment for the full source-read proof).
+# retries=3 (4 attempts) x execution_timeout=6min + 3x30s = 1530s = 25.5min
+# worst case, well under dagrun_timeout=45min (19.5min margin) -- covering
+# ROUND 13's measured ~5min self-healed FailedScheduling burst many times
+# over. Local never runs this script and keeps the DAG's own default of 4
+# (ROUND 21, was 6; airflow/dags/_common/kpo.py).
+echo "==> registering publish_retries=3 (CI profile; local default is 4)"
 "${kubectl_bin}" --context "${ctx}" exec -n airflow deploy/airflow-api-server -- \
   airflow variables set publish_retries "3"
 

@@ -29,6 +29,7 @@ from _common.gap_recorder import record_processing_gap_if_empty
 from _common.integrity_gate import integrity_gate, list_matched_keys
 from _common.kpo import (
     HEAVY_TASK_EXECUTION_TIMEOUT,
+    HEAVY_TASK_RETRY_DELAY,
     common_kpo_kwargs,
     publish_retries,
     stage_pod_resources,
@@ -45,13 +46,6 @@ _DISCOVER_RESOURCES = k8s.V1ResourceRequirements(
 # see stage_pod_resources()'s own comment (debug/ci-pipeline-ingestion-timeout ROUND 10).
 _STAGE_RESOURCES = stage_pod_resources()
 _INGEST_EXTRA_ENV_VARS = [k8s.V1EnvVar(name="DATAPLAT_HEARTBEAT_INTERVAL_SECONDS", value="2")]
-# debug/ci-pipeline-ingestion-timeout ROUND 6: Kyverno's require-signed-images admission check
-# makes a live, uncached cosign/registry round-trip on every pod CREATE; under this CI node's own
-# established CPU contention that can intermittently deny a genuinely, correctly-signed image. The
-# stock 5min exponential retry_delay only fits 2-3 attempts into dagrun_timeout=45min -- this short,
-# still-backed-off delay fits far more independent attempts into the same budget.
-_KYVERNO_RETRY_DELAY = pendulum.duration(seconds=30)
-
 customers_asset = Asset("s3://normalized/customers")  # D-15: referenced by URI in orders DAG
 
 
@@ -137,47 +131,51 @@ def csv_ingest_customers() -> None:
         arguments=["discover", "--dataset", "customers"],
         retries=6,
         retry_exponential_backoff=True,
-        retry_delay=_KYVERNO_RETRY_DELAY,
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
         **common_kpo_kwargs(resources=_DISCOVER_RESOURCES),
     )
     wait_for_files >> matched_keys >> gate >> discover
     # D-12: stage is the trace root (OBS-10). No outlets here (08.1-12): stage only lands bronze.
-    # retries=6 (not the DAG's usual 2-3): providers-cncf-kubernetes's KubernetesJobWatcher uses
-    # a documented client-side _request_timeout=30s socket read timeout (separate from the
-    # server-side timeout_seconds=3600 watch duration -- see kubernetes-client/python's own
-    # timeout-settings.md, referenced in kubernetes_executor_utils.py's _run()). Under this DAG's
-    # deliberate max_active_tis_per_dag=1 cap, idle gaps between stage pods are common, so this
-    # watch reconnects constantly; each reconnect has a ~1s gap with no active watch, in which a
-    # pod's own completion event can be missed -- a known race in the pinned watcher, confirmed
-    # live 2026-08-21/22 (clean pod lifecycle, no app error, scheduler received
-    # state=None/failure_details=None). Not fixable from application code. A large mapped stage
-    # fan-out (20+ files) gives many independent chances to hit this low-probability race per
-    # DagRun; 6 retries gives the existing retry mechanism enough attempts to statistically
-    # absorb it without masking a genuine, repeatable application failure.
+    # retries=4 (not the DAG's usual 2-3; was 6 before ROUND 21's timeout-budget rebalance -- see
+    # kpo.py's own HEAVY_TASK_EXECUTION_TIMEOUT comment for the full worst-case-arithmetic math):
+    # providers-cncf-kubernetes's KubernetesJobWatcher uses a documented client-side
+    # _request_timeout=30s socket read timeout (separate from the server-side timeout_seconds=3600
+    # watch duration -- see kubernetes-client/python's own timeout-settings.md, referenced in
+    # kubernetes_executor_utils.py's _run()). Under this DAG's deliberate max_active_tis_per_dag=1
+    # cap, idle gaps between stage pods are common, so this watch reconnects constantly; each
+    # reconnect has a ~1s gap with no active watch, in which a pod's own completion event can be
+    # missed -- a known race in the pinned watcher, confirmed live 2026-08-21/22 (clean pod
+    # lifecycle, no app error, scheduler received state=None/failure_details=None). Not fixable
+    # from application code. A large mapped stage fan-out (20+ files) gives many independent
+    # chances to hit this low-probability race per DagRun; 4 retries still gives the retry
+    # mechanism ample attempts to statistically absorb it (kept HIGHER than orders' 2-3 to
+    # preserve more of the original absorption margin than a uniform cut would) without masking a
+    # genuine, repeatable application failure.
     stage = TracingKubernetesPodOperator.partial(
         task_id="stage",
         cmds=["dataplat"],
-        retries=6,
+        retries=4,
         retry_exponential_backoff=True,
-        retry_delay=_KYVERNO_RETRY_DELAY,
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
         max_active_tis_per_dag=1,
-        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        # ROUND 20/21 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(resources=_STAGE_RESOURCES, extra_env_vars=_INGEST_EXTRA_ENV_VARS),
     ).expand(arguments=build_stage_args(discover.output))
     # No cmds/arguments: the dbt image's own ENTRYPOINT resolves secrets and runs `dbt build`.
-    # retries=6 (not the DAG's usual 2): same KubernetesJobWatcher request-timeout race as
-    # `stage` above (see that task's own comment) -- live-confirmed 2026-08-22 during plan
-    # 10-08's concurrency test to also hit dbt_build, recovering via resolve_dbt_build_status's
-    # own resilience but still needing more than 2 attempts under this max_active_tis_per_dag=1
-    # cap's idle-gap-heavy scheduling.
+    # retries=4 (not the DAG's usual 2; was 6 before ROUND 21 -- see stage's own comment above and
+    # kpo.py's HEAVY_TASK_EXECUTION_TIMEOUT comment): same KubernetesJobWatcher request-timeout
+    # race as `stage` above -- live-confirmed 2026-08-22 during plan 10-08's concurrency test to
+    # also hit dbt_build, recovering via resolve_dbt_build_status's own resilience but still
+    # needing more than 2 attempts under this max_active_tis_per_dag=1 cap's idle-gap-heavy
+    # scheduling.
     dbt_build = KubernetesPodOperator(
         task_id="dbt_build",
-        retries=6,
+        retries=4,
         retry_exponential_backoff=True,
-        retry_delay=_KYVERNO_RETRY_DELAY,
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
         max_active_tis_per_dag=1,
-        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        # ROUND 20/21 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         **common_kpo_kwargs(
             resources=_DISCOVER_RESOURCES,
@@ -188,17 +186,19 @@ def csv_ingest_customers() -> None:
         ),
     )
     # publish_retries() (debug/ci-pipeline-ingestion-timeout ROUND 14 trim iii; was a hardcoded
-    # 6 for the KubernetesJobWatcher race `stage` documents above): local keeps 6 verbatim; CI
-    # sets Variable publish_retries=3 -- retries now serve ONLY the transient class, since
-    # deterministic breaker trips quarantine + exit 0 (see _common/kpo.py's own comment).
+    # 6 for the KubernetesJobWatcher race `stage` documents above): local's own default is now 4
+    # (ROUND 21, matching stage/dbt_build's own cut -- see kpo.py's _DEFAULT_PUBLISH_RETRIES and
+    # HEAVY_TASK_EXECUTION_TIMEOUT comments for the full worst-case-arithmetic math); CI keeps its
+    # own Variable publish_retries=3 unchanged -- retries now serve ONLY the transient class,
+    # since deterministic breaker trips quarantine + exit 0 (see _common/kpo.py's own comment).
     publish = KubernetesPodOperator(
         task_id="publish",
         cmds=["dataplat"],
         arguments=["publish", "--dataset", "customers"],
         retries=publish_retries(),
         retry_exponential_backoff=True,
-        retry_delay=_KYVERNO_RETRY_DELAY,
-        # ROUND 20 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
+        retry_delay=HEAVY_TASK_RETRY_DELAY,
+        # ROUND 20/21 (debug/ci-pipeline-ingestion-timeout): see kpo.py's own doc for the fix.
         execution_timeout=HEAVY_TASK_EXECUTION_TIMEOUT,
         outlets=[customers_asset],
         # 10-07-PLAN.md (Rule 1 fix, live-cluster finding): was
