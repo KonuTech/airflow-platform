@@ -196,7 +196,28 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-29 (ROUND 21 POST-RUN ANALYSIS COMPLETE on run 33222882138, headSha c01d022,
+updated: 2026-08-29 (ROUND 22 offline COMPLETE: bundled three timeout/retry-budget fixes.
+  (1) orders.stage/dbt_build retries 3/2 -> 4 (byte-identical to customers, D-06); orders.publish
+  hardcoded 3 -> publish_retries() (same shared function/Variable customers' publish already uses,
+  local=4/CI=3). Post-bump worst case: every orders combination now shares the EXACT same margin
+  as its customers counterpart (13.0min/28.9% minimum), enforced by the pre-existing
+  test_worst_case_retry_budget_has_real_margin with zero test-file changes needed. (2) dbtkill's
+  stale `_poll_dbt_build_running_signal(timeout=300)`: 300s -> 2400s (new
+  _DBT_BUILD_POLL_TIMEOUT_SECONDS), basis = the THEORETICAL post-bump worst case (1920s, since
+  this round's own live evidence already confirmed retries genuinely stack toward it under real
+  contention), not just the smaller real-observed sample. (3) wait_for_orders_dagrun_queue_idle:
+  600s -> 2400s, same derivation/value as (2) (both bounded by the same single-DagRun
+  worst-case-to-terminal quantity), also covers a realistic ~3-DagRun serial backlog at the
+  post-bump per-DagRun pace. Offline battery green at established baseline parity: unit 567
+  passed (byte-identical to R21, existing regression test already covers both DAGs generically);
+  dagtest 14 passed; policy 2/157 (SAME 2 pre-existing failures as R21, confirmed via inspection;
+  orders' own line-budget test now passes at the bumped 191-line ceiling); manifests 540/378/0/0
+  (identical to R21); ruff/format/mypy confirmed via git-stash diff to be byte-identical to R21's
+  baseline outside this round's own intended edits. The NEW rebuild SCD2/checksum finding is
+  explicitly OUT of scope this round (owned by .planning/debug/rebuild-scd2-reconciliation.md) --
+  its test is EXPECTED to still fail. Awaiting live CI verification. See Current Focus ROUND 22
+  block.)
+updated_prior_round22: 2026-08-29 (ROUND 21 POST-RUN ANALYSIS COMPLETE on run 33222882138, headSha c01d022,
   conclusion FAILURE, SELF-TERMINATED at 184.73min -- 5.27min/2.8% under the 190-min ceiling
   (correcting the checkpoint-response's "well past the ceiling" claim, which was a late-wake-up
   misread of wall-clock elapsed vs the actual ceiling). Census: 5 failed/33 passed/6 skipped in
@@ -1398,6 +1419,175 @@ ROUND 21 OUTCOME (2026-08-29, post-run analysis of run 33222882138, headSha c01d
       mismatch finding (checksum/SCD2 current_valid_from/to/is_current for 2 keys) -- unrelated to
       timeout budgets, not yet root-caused. CPU-starvation itself remains explicitly out of scope
       (ticket already filed, unchanged this round)."
+
+ROUND 22 (2026-08-29, opened on user decision: bundle three timeout/retry-budget fixes --
+queue-idle budget, dbtkill's stale dbt_build-poll budget, orders' retries bumped toward
+customers' treatment; the NEW rebuild SCD2/checksum finding is opened as its OWN separate
+parallel debug thread, explicitly out of scope here):
+  charter: "(1) Raise `wait_for_orders_dagrun_queue_idle`'s default timeout with real margin
+      against this round's own measured worst case (~824s, u3's +37.3% miss; ~631s, orphan's
+      +5.2% miss) -- pick a number with headroom, not just barely-clears. (2) Fix dbtkill's stale
+      hardcoded `_poll_dbt_build_running_signal(..., timeout=300)` -- flagged in ROUND 21's own
+      decision-checkpoint as even more clearly under-sized than the queue-idle budget; apply the
+      same real-margin-over-measured-worst-case discipline, explicitly investigating whether the
+      REAL observed cycle (~9min) or the THEORETICAL worst case (retries can genuinely stack
+      toward it under contention, per ROUND 21's own dbtkill/orphan evidence) is the correct
+      basis. (3) Bump orders' stage/dbt_build/publish retries toward customers' treatment (or
+      justify a different number with direct evidence), since orders now shows genuine
+      retry-exhaustion (try=4/state=failed, ROUND 21's new_finding_retry_exhaustion) under the
+      SAME KubernetesJobWatcher race customers already compensates for with retries=4. The
+      rebuild SCD2/checksum finding stays explicitly out of scope, owned by a new parallel debug
+      thread (.planning/debug/rebuild-scd2-reconciliation.md) -- its test is EXPECTED to still
+      fail this round, not a regression."
+  pre_registered_criteria:
+    - "(a) dbtkill and idempotent_reupload clear (retry-exhaustion class fixed by more retries
+      fitting under the rebalanced budget)."
+    - "(b) u3 and orphan clear (queue-idle budget class fixed)."
+    - "(c) podkill/sweep/OOM stay clean (regression checks, unrelated mechanisms untouched)."
+    - "(d) zero new failures EXCEPT the expected/accepted rebuild finding (owned by the parallel
+      thread, not fixed here)."
+    - "(e) guards green."
+    - "(f) duration decomposition."
+    - "TARGET: fully green except rebuild, or nameable-stragglers-only."
+  investigation_findings: >
+      Read orders' and customers' actual current retries/execution_timeout/retry_delay values
+      directly from both DAG files (not from memory of ROUND 21's own summary): customers.stage/
+      dbt_build retries=4 uniformly (both CI and local -- no per-profile split; only `publish`
+      has one, via `publish_retries()`, local=4/CI=3, `_common/kpo.py`'s own
+      `_DEFAULT_PUBLISH_RETRIES="4"` + CI's `publish_retries` Airflow Variable=3). orders.stage=3,
+      orders.dbt_build=2, orders.publish=hardcoded 3 (never called `publish_retries()` at all --
+      a THIRD instance of the same back-port-gap shape ROUND 20 (publish resources) and ROUND 21
+      (retry_delay) already found: a customers-side improvement never mirrored into orders when
+      orders was written to mirror customers' shape). `_poll_dbt_build_running_signal`'s 300s
+      poll waits for `stage` to fully SUCCEED (this test's fixture has exactly one discovered
+      unit/map_index, confirmed via `build_stage_args`'s "one stage CLI argv per discovered
+      unit" contract) before `dbt_build` can even start -- i.e. it is bounded by `stage`'s own
+      worst-case-to-terminal time, not an independent constant. `wait_for_orders_dagrun_queue_idle`
+      is bounded, in the worst realistic case, by however many orders DagRuns are backlogged in
+      the queue at wait-start time, each now taking up to `stage`'s own worst-case time to reach
+      a terminal state (success OR retry-exhaustion failure) -- the SAME underlying quantity as
+      the dbt_build-poll budget, just potentially multiplied by backlog depth."
+  fix_design: >
+      (1) Orders' retries: bumped `stage`/`dbt_build` 3/2 -> 4 (byte-identical to customers'
+      values, no per-profile split, matching D-06) and `publish` from hardcoded 3 to
+      `publish_retries()` (the SAME shared function/Variable customers' publish already uses --
+      matching customers' own per-profile local=4/CI=3 split instead of leaving orders on a
+      divergent, unjustified cut). Post-bump worst case (formula unchanged from ROUND 21, constant
+      delay confirmed no-op on exponential growth): orders.stage/dbt_build (retries=4) = 5x360s +
+      4x30s = 1920s = 32.0min (13.0min/28.9% margin -- now IDENTICAL to customers.stage/dbt_build's
+      own margin); orders.publish-local (retries=4) = 32.0min (13.0min/28.9% margin);
+      orders.publish-CI (retries=3) = 4x360s + 3x30s = 1530s = 25.5min (19.5min/43.3% margin) --
+      every orders combination now shares the exact same margin as its customers counterpart,
+      enforced by the SAME existing `test_worst_case_retry_budget_has_real_margin` regression
+      guard (already iterates both DAGs' 3 heavy tasks -- no test change needed). (2) dbtkill's
+      `_poll_dbt_build_running_signal` timeout: 300s -> 2400s (new `_DBT_BUILD_POLL_TIMEOUT_SECONDS`
+      constant, `tests/e2e/slice/test_pod_kill_retry.py`). Basis: THEORETICAL, not just the
+      smaller real-observed sample -- this round's OWN live evidence (dbtkill's real DagRun
+      reaching `stage` try=4/state=failed, genuine exhaustion under real contention) confirms
+      retries can and do genuinely stack toward the worst case, so 2400s is sized with 480s/25%
+      margin over the post-bump 1920s theoretical ceiling for a SINGLE orders DagRun's
+      stage-to-terminal time (the binding constraint, since 1920s < dagrun_timeout=45min). If
+      `stage` itself exhausts and never succeeds, this poll still fails correctly (dbt_build can
+      structurally never start) -- slower, but legible, naming the last-observed status like this
+      test's other pollers. (3) `wait_for_orders_dagrun_queue_idle`'s default timeout: 600s ->
+      2400s (SAME derivation and SAME value as (2), since both budgets are fundamentally bounded
+      by the same quantity -- a single orders DagRun's worst-case time to reach ANY terminal
+      state). 2400s gives 480s/25% margin over the SINGLE-DagRun theoretical worst case (1920s)
+      while also comfortably covering a REALISTIC multi-DagRun-backlog scenario at the
+      actually-observed per-DagRun pace (~600-750s each, post-bump estimate): up to ~3 slow,
+      fully-retry-exhausting DagRuns draining serially (~1800-2250s) still fits inside 2400s. A
+      backlog that still has not drained after 2400s is treated as a genuine finding (a wedged or
+      deeply-backlogged pipeline), not a budget that needs inflating further -- matching this
+      helper's own designed philosophy (bounded wait, legible failure, not an unbounded drain)."
+  reasoning_checkpoint:
+    hypothesis: "ROUND 21's own two decision-checkpoint-proposal items (queue-idle budget
+        unrebalanced when DAG-level arithmetic changed; dbtkill's poll budget stale and
+        structurally coupled to stage's own worst-case-to-succeed time) plus orders' genuine
+        retry-exhaustion under the SAME KubernetesJobWatcher race customers already compensates
+        for, together explain dbtkill/u3/orphan/idempotent_reupload's remaining failures -- fixing
+        all three (rebalanced test-suite budgets + orders retries matched to customers) clears
+        this whole cluster of failures without touching the rebuild finding (unrelated mechanism,
+        owned elsewhere) or the podkill/sweep/OOM mechanisms (unrelated, already fixed)."
+    confirming_evidence:
+      - "ROUND 21's own direct TI evidence: dbtkill's stage try=4/state=failed (genuine
+        retry-exhaustion, not a force-skip) and orphan's asset-triggered DagRun's stage also
+        try=4/state=failed -- both under orders' OLD retries=3, both exhausting within ~9-10min
+        real wall time, both matching the SAME KubernetesJobWatcher-race mechanism customers'
+        stage/dbt_build already carry retries=4 specifically to statistically absorb."
+      - "ROUND 21's own direct measurement of the queue-idle budget's TWO independent misses
+        (824s/37.3% and 631s/5.2% over the OLD 600s budget), against DagRuns reaching genuine
+        terminal FAILED status via retry-exhaustion, not a slow-but-real success as originally
+        hypothesized -- confirming the budget itself, not the underlying mechanism, was the gap."
+      - "Direct source read of `_poll_dbt_build_running_signal`'s call site confirms it polls
+        `meta.run_stages` for `DBT_BUILD` reaching `RUNNING`, which the platform code only writes
+        AFTER `stage` fully succeeds -- structurally coupling this budget to `stage`'s own
+        worst-case time, exactly as ROUND 21's decision-checkpoint proposal (2) flagged."
+    falsification_test: "Live CI run: if dbtkill/u3/orphan/idempotent_reupload STILL fail with
+        the SAME failure signatures (retry-exhaustion or queue-idle timeout) despite the
+        rebalanced budgets and bumped retries, this hypothesis is refuted -- it would mean either
+        (a) a single real attempt is taking longer than 6min execution_timeout allows even with
+        more attempts available (a different mechanism than budget/retry-count), or (b)
+        CPU-starvation has worsened enough that even 4 retries + 2400s budgets cannot statistically
+        absorb it, meaning CPU-starvation (still out of scope) needs to move back in-scope sooner
+        than planned."
+    fix_rationale: "Addresses the ROOT gap directly at each of its three named layers: orders'
+        retries were genuinely under-provisioned relative to the race customers already handles
+        (not a symptom patch); the two test-suite budgets were stale constants sized against
+        OLD, faster arithmetic and never re-audited when ROUND 21 changed the DAG-level numbers
+        they depend on -- both rebalanced using the SAME confirmed theoretical worst-case basis,
+        not a one-off patch to either individually."
+    blind_spots: "(1) The 2400s figure for both test-suite budgets is a REASONED estimate
+        (theoretical worst case + 25% margin, cross-checked against a rough multi-DagRun-backlog
+        estimate), not a live-measured value under the NEW retries=4 regime -- this round's own
+        live-verification run is the first real test of whether 2400s is enough under TODAY's
+        actual contention. (2) Bumping orders' retries 3/2->4 makes a genuinely-failing DagRun
+        (one that will never succeed) take LONGER to reach terminal failure (up to 32.0min
+        theoretical vs the old 25.5min/19.0min) -- slower failure legibility is an accepted
+        trade-off per this round's own design, not a regression, but it does mean any FUTURE
+        genuine application-level failure in orders takes longer to surface. (3) CPU-starvation
+        itself remains unchanged and unaddressed (already-ticketed, explicitly out of scope).
+        (4) The rebuild SCD2/checksum finding is untouched by design -- its own thread owns it."
+  offline_status: "COMPLETE 2026-08-29: (1) `airflow/dags/csv_ingest_orders.py`: `stage`/
+      `dbt_build` retries 3/2 -> 4; `publish` retries hardcoded 3 -> `publish_retries()` (new
+      import from `_common.kpo`); all three comments updated in-place with the ROUND 22
+      rationale + worst-case math. (2) `airflow/dags/_common/kpo.py`: new ROUND 22 addendum
+      comment on `HEAVY_TASK_EXECUTION_TIMEOUT` documenting orders' bump and the post-bump
+      worst-case arithmetic (no constant VALUES changed in this file -- only orders' own DAG file
+      call sites). (3) `tests/e2e/slice/conftest.py`: `wait_for_orders_dagrun_queue_idle` default
+      timeout 600 -> 2400, docstring extended with the full ROUND 22 derivation. (4) `tests/e2e/
+      slice/test_pod_kill_retry.py`: new `_DBT_BUILD_POLL_TIMEOUT_SECONDS = 2400` module constant
+      (replacing the inline `timeout=300` at the dbtkill call site) with full derivation comment;
+      `_DBT_BUILD_RECOVERY_TIMEOUT_SECONDS`'s own comment corrected from a stale 'retries=2' to
+      'retries=4' (factual accuracy only, value unchanged at 600s, out of this round's charter).
+      (5) `tests/policy/test_dag_line_budget.py`: orders' budget bumped 182->191 (exact 9 lines
+      added: +1 import, +4 stage-comment addendum, +2 dbt_build comment, +2 publish-comment
+      addendum -- documented in-file per this file's own established per-round precedent);
+      customers' budget UNCHANGED (still tracked separately, no changes made to customers this
+      round). VERIFICATION: `make manifests` unaffected (540/378/0/0, identical to R21 baseline,
+      zero helm/ touched); `pytest tests/unit` 567 passed (byte-identical count to R21 -- the
+      existing `test_worst_case_retry_budget_has_real_margin` already iterates both DAGs' 3 heavy
+      tasks, so it re-verified the new orders values with ZERO test-file changes needed); `pytest
+      tests/dagtest` 14 passed (unchanged); `pytest tests/policy` 2 failed/157 passed -- confirmed
+      the SAME 2 pre-existing failures as R21's own documented baseline
+      (test_csv_ingest_customers_stays_under_150_lines, test_the_main_gate_does_not_lint_the_bad_
+      samples); orders' own line-budget test NOW PASSES (not in the failure list), confirming the
+      191-line bump is correct; `ruff check` on all 5 modified files: all checks passed (zero new
+      findings); `ruff format --check` on all 5 modified files: 4 already formatted, 1
+      (test_pod_kill_retry.py) shows the SAME pre-existing unrelated drift as before this round's
+      edits (confirmed via `git stash` -- identical finding, only the line number shifted from
+      414 to 436 due to this round's own insertions above it); `ruff format --check .` (whole
+      repo) and `mypy airflow/dags` both confirmed via `git stash` diff to be BYTE-IDENTICAL
+      pre- and post-fix (17 files reformatted/333 formatted; 222 mypy errors in 10 files, both
+      counts unchanged) -- zero new formatting or type-checking regressions anywhere in the repo.
+      `python3 -m pytest tests/e2e/slice/test_pod_kill_retry.py tests/e2e/slice/
+      test_backfill_2year_sweep.py --collect-only` succeeds (10 tests collected, confirms the new
+      constant/import wiring is syntactically and structurally sound). `tests/integration`
+      (testcontainers) NOT re-run, matching ROUND 20/21's own established precedent: zero
+      packages/dataplat or csv_processor source changes this round, unaffected surface."
+  live_verification_state: "PENDING -- see live_verification_state update immediately below,
+      recorded once pushed."
+  next_action: "SUPERSEDED once live_verification_state below is recorded -- see ROUND 22
+      OUTCOME (not yet written; awaiting the live-verification run this checkpoint requests)."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
