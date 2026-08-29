@@ -19,6 +19,23 @@ round24_track_a_outcome: "ROUND 24 Track A TERMINAL 2026-08-29: run 33272229642 
   scripts/rebuild-from-raw.py was ever invoked. FIFTH consecutive miss, FIFTH different reason,
   still zero RebuildComparisonResult evidence on a0cc2f5. See Evidence and
   rebuild-scd2-reconciliation.md for full detail."
+round24_track_b_outcome: "ROUND 24 Track B TERMINAL 2026-08-30: run 33272070899 (headSha
+  e2a7b1f) conclusion=cancelled at the 190-min ceiling. The new `_dbt_build_stall_diagnostics`
+  instrumentation WORKED as designed (survived the cancellation, embedded directly in the
+  test's own AssertionError). DEFINITIVE ANSWER obtained to the dbtkill 'last observed: None'
+  question, unresolved since ROUND 21: `stage`'s own task_instance for the failing DagRun never
+  even started (state=None, try=0) because `csv_ingest_orders`' `max_active_runs=1` slot was
+  captured by a co-occupying `asset_triggered` DagRun that took ~15m31s to reach its own
+  terminal FAILED state -- far exceeding `wait_for_orders_dagrun_queue_idle`'s own documented
+  'brief hold, ~50s' race assumption -- starving the test's own newly-triggered DagRun of any
+  scheduler attention for its entire polling budget. This REFUTES this round's own opening
+  hypothesis (stage crashing/being skipped via the DBT_BUILD tracking chain's trigger_rule).
+  Census: 2 failed (dbtkill, u3) / 32 passed / 6 skipped = 40 of 44, byte-identical composition
+  to ROUND 23's own outcome run -- u3's ROUND 23 regression reproduced identically a second
+  time. Guards green (0 Kyverno, 0 new restarts, 0 OOMKilled, scheduler peak 71.6%). No fix
+  applied this round (diagnosis was the explicit charter). See Current Focus's 'ROUND 24 OUTCOME
+  (Track B)' block and Evidence for full detail. Decision checkpoint returned to user on ROUND
+  25's shape."
 round20_status: "ROUND 20 offline COMPLETE 2026-08-28: all three ROUND 19 findings fixed.
   (1) podkill zombie-detection: LIVE-REPRODUCED via a minimal, faithful repro against the
   installed apache-airflow==3.3.0 + real KubernetesPodOperator/PodManager code on the LOCAL
@@ -215,7 +232,16 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-29 (ROUND 24 opened on user decision: two parallel tracks. Track A -- a
+updated: 2026-08-30 (ROUND 24 Track B TERMINAL: run 33272070899 cancelled at the 190-min
+  ceiling; new `_dbt_build_stall_diagnostics` instrumentation survived cancellation as designed
+  and produced a DEFINITIVE answer to the dbtkill scheduling question unresolved since ROUND 21
+  -- `csv_ingest_orders`' `max_active_runs=1` DagRun-admission contention, not the
+  `wire_dbt_build_tracking` trigger_rule-skip hypothesis this round opened with. No fix applied
+  (diagnosis was the charter); decision checkpoint returned to user on ROUND 25's shape. See
+  Current Focus's 'ROUND 24 OUTCOME (Track B)' block. Track A's own SCD2-fix verification chase
+  is separately CLOSED per the sibling rebuild-scd2-reconciliation.md session (SQL-layer
+  integration test, not live-E2E) -- unaffected by and independent of this entry.)
+updated_prior_round24_track_a: 2026-08-29 (ROUND 24 opened on user decision: two parallel tracks. Track A -- a
   dedicated, narrow-scope `workflow_dispatch` verification run for
   `test_rebuild_from_raw.py` alone, decoupled from the full mega-suite's own
   scheduling/CPU-contention problems (new `pytest_scope` input on e2e-full.yml + new
@@ -841,9 +867,12 @@ diagnostics-truncation gap. Track C (u3 replay finding) captured as a todo only.
       A's job log as round24-track-a-job.log, Track B's as round24-track-b-job.log. Session
       manager runs ONE 60s watcher PER live run (two now genuinely in flight in parallel) --
       do NOT self-watch further this turn."
-  next_action: "SUPERSEDED -- see ROUND 24 OUTCOME (Track A) below. Track B (run 33272070899)
-      still in_progress as of this writing -- NOT analyzed this turn, per explicit scope
-      instruction; will be analyzed separately when it terminates."
+  next_action: "SUPERSEDED -- see ROUND 24 OUTCOME (Track A) and ROUND 24 OUTCOME (Track B)
+      below. Both tracks are now terminal: Track A's SCD2-fix verification chase closed via the
+      sibling rebuild-scd2-reconciliation.md session (SQL-layer integration test); Track B
+      produced a definitive, directly-evidenced answer to the dbtkill scheduling question
+      (max_active_runs=1 DagRun-admission contention). Awaiting user decision on ROUND 25's
+      shape."
 
 ROUND 24 OUTCOME (Track A) (2026-08-29, post-run analysis of run 33272229642, headSha
 4436311c11f8ac5f213359a52f2302a3e5916e89, workflow_dispatch with pytest_scope=
@@ -972,6 +1001,220 @@ tests/e2e/slice/test_rebuild_from_raw.py -- terminal conclusion=failure, 19:58:0
         question at all -- that remains exactly as unverified as before this round. (3) Track B's
         own outcome (still in_progress) is unrelated to and unaffected by this finding, per
         scope."
+
+ROUND 24 OUTCOME (Track B) (2026-08-30, post-run analysis of run 33272070899, headSha
+e2a7b1fd4efdb6c30404d41601650c09093a01a6 -- CURRENT STATE, terminal conclusion=cancelled at the
+190-min ceiling, 19:54:13Z->23:05:20Z = 3h11m2s):
+  instrumentation_worked: "CONFIRMED -- the new `_dbt_build_stall_diagnostics` design goal (survive
+      GitHub Actions' cancellation grace-period kill) is validated with direct proof: the
+      dbtkill-class AssertionError text, embedded synchronously at the moment
+      `_poll_dbt_build_running_signal` timed out (21:23:27Z, ~1h42m before the job's own
+      23:05:19Z cancellation), was captured cleanly in pytest's own -v output regardless of the
+      later cancellation. ROUND 23's diagnostics-truncation gap is definitively closed for this
+      question -- direct evidence no longer depends on the end-of-job dump surviving a cancel."
+  the_dbtkill_scheduling_question_ANSWERED: "DEFINITIVE, with full direct evidence -- hypothesis
+      (A) from this round's own reasoning_checkpoint (stage crashes/is skipped via the
+      `trigger_rule='all_success'` chain) is REFUTED. The real mechanism, cross-confirmed by
+      THREE independent, mutually-consistent direct-evidence sources:
+      (1) `_dbt_build_stall_diagnostics`' embedded AssertionError for run_id=851: `meta.run_stages`
+      is EMPTY (not even `STAGE_LOAD` was ever written -- ruling out 'stage succeeded, tracking
+      tasks skipped'); `meta.ingestion_runs[run_id=851]` = `('FAILED', None, None,
+      2026-08-29T21:18:41.228745Z)` (status/error_type/error_message/started_at) -- `FAILED` with
+      BOTH error columns NULL, the exact signature of `_release_failed_claim`/
+      `fail_ingestion_run_claim` (packages/dataplat/src/dataplat/pipeline/run.py:677-711 /
+      metadata/postgres.py:459-473), which never records error detail and only fires from
+      inside a `stage` pod's own crash-handling `finally` block; task_instance state for
+      `stage`/`list_run_ids_pending_dbt_build`/`mark_dbt_build_running`, ALL THREE, for THIS
+      exact DagRun (`e2e-dbtkill-109e0af99035`) = `(None, try=0, start=None, end=None)` -- not
+      'skipped' (which would read `state='skipped'`), but never scheduled/attempted at all.
+      (2) End-of-job `csv_ingest_orders DagRun history` dump (survived uncancelled, step 14):
+      `csv_ingest_orders` has `max_active_runs=1` (airflow/dags/csv_ingest_orders.py:95); DagRun
+      `asset_triggered__2026-08-29T21:00:32...` occupied the SOLE active slot 21:17:03Z->21:32:34Z
+      (~15m31s, ending `state=failed`) -- i.e. for the test's ENTIRE trigger-to-timeout window
+      (the dbtkill test triggers immediately after `e2e-podkill` ends at 21:17:02Z, and its own
+      300s dbt_build poll gives up at 21:23:27Z, squarely inside that occupied window). DagRun
+      `e2e-dbtkill-109e0af99035` itself could not start ANY task until 21:32:35Z -- 9 minutes
+      AFTER the test had already asserted failure -- directly explaining why every tracked
+      task_instance for it reads `state=None`. (3) Direct source read of
+      `wait_for_orders_dagrun_queue_idle` (tests/e2e/slice/conftest.py:886-946, the test's own
+      pre-upload guard): its own docstring EXPLICITLY names and accepts this exact race
+      ('Residual race, accepted: a DagRun created AFTER this returns... can still briefly hold
+      the slot -- bounded to one cron tick's worth, ~50s, well inside a 180s discovery budget')
+      -- but sizes that acceptance on the racing DagRun reaching a FAST terminal state. This
+      run's racing DagRun instead went through a SLOW retry-exhaustion failure path (~15m31s,
+      consistent with ROUND 22's own documented worst-case-per-DagRun arithmetic of up to
+      ~1920s/32min), which is 18-30x the '~50s' magnitude every downstream budget in the dbtkill
+      test (180s discovery + 60s run-lookup + 300s dbt_build poll = 540s total) was implicitly
+      sized against. ROOT MECHANISM, fully named: `csv_ingest_orders`' `max_active_runs=1`
+      admission-control slot can be captured, between `wait_for_orders_dagrun_queue_idle`'s own
+      idle-check and the test's own trigger call, by an independently-scheduled `asset_triggered`
+      DagRun (fired by a customers-publish asset event) whose OWN worst-case failure-path
+      duration (up to ~32min, per ROUND 22's own retry/timeout arithmetic) is never reflected in
+      the helper's own 'brief hold' framing or in any of the dbtkill test's own downstream
+      per-step budgets -- so when that specific race outcome occurs (an asset_triggered DagRun
+      that goes on to retry-exhaust rather than succeed fast), the newly-triggered DagRun is
+      starved of the scheduler's single execution slot for the test's ENTIRE remaining budget,
+      producing exactly the 'last observed: None' signature this session has seen, unchanged,
+      since ROUND 21. This is NOT the `wire_dbt_build_tracking`/`trigger_rule` mechanism this
+      round's own pre-registered hypothesis (A) named -- it is upstream of the entire DAG, at
+      the Airflow scheduler's own DagRun-admission layer, and does not implicate
+      `run_stage_recorder.py`'s tracking-chain logic at all. NOT YET INVESTIGATED (a legitimate,
+      narrower follow-up, not a gap in this round's own charter): WHICH specific
+      `asset_triggered` DagRun claimed-and-crashed `run_id=851`'s own file via ITS `stage` task
+      (not directly queried this round -- would require a task_instance lookup keyed to
+      `asset_triggered__2026-08-29T21:00:32...` specifically) and WHY that DagRun's own `stage`
+      attempt crashed in the first place (its own crash cause is independent of, and does not
+      change, the scheduling-contention mechanism just confirmed)."
+  criteria_c_and_d_disposition: "(c) MET -- direct TI/pod-log-equivalent evidence obtained for
+      run_id=851 via the metadata-DB route (task_instance state, not raw pod logs, but
+      unambiguous and more precise for this question than a pod log would have been): `stage`
+      never scheduled/attempted for the target DagRun within the window. (d) MET -- a named
+      mechanism with full evidence: `max_active_runs=1` DagRun-slot contention from a
+      co-occupying `asset_triggered` DagRun whose slow retry-exhaustion path (~15m31s) vastly
+      exceeds `wait_for_orders_dagrun_queue_idle`'s own accepted-race sizing (~50s) and every
+      downstream test budget. This is a genuinely new, well-evidenced, previously-unconfirmed
+      root cause -- not the `trigger_rule`-skip hypothesis carried since ROUND 24's own opening,
+      and not merely 'CPU contention' in the generic, already-ticketed sense (this is a specific
+      Airflow scheduler admission-control mechanism, `max_active_runs=1`, interacting with the
+      test's own pre-upload guard's documented and accepted race window)."
+  census: "2 failed / 32 passed / 6 skipped = 40 of 44 total node-IDs reached before cancellation
+      (44 collected, confirmed via `collected 44 items`). BYTE-IDENTICAL reached-count AND
+      failure/pass composition to ROUND 23's own OUTCOME run (32P/2F/6S of 40): the SAME two
+      tests fail both times (`test_pod_kill_mid_dbt_build_produces_no_duplicates` /dbtkill/,
+      `test_u3_throughput_and_peak_rss_baseline` /u3/), the same 6 cluster-marker skips, and the
+      SAME 4 never-reached node-IDs (`test_rebuild_from_raw_reconciles_and_reverts_quarantine_
+      to_pending`, `test_orphan_order_quarantined_while_valid_rows_publish`,
+      `test_idempotent_reupload_disposition`'s own test, plus one more from
+      test_smoke_and_idempotency.py) -- two consecutive full-suite live-verification runs have
+      now reproduced the IDENTICAL failure signature twice in a row, confirming u3's ROUND 23
+      regression is stable/reproducible (not a one-off), and confirming dbtkill's mechanism (just
+      root-caused above) is consistent across runs. Per this round's own scope guardrails, u3's
+      own root cause is NOT investigated further here (captured todo:
+      .planning/todos/pending/2026-08-29-investigate-u3-replay-idempotency-row.md) -- but this
+      round's OWN direct evidence (see duration_decomposition) shows u3's test itself took an
+      anomalous ~55m49s this run (vs historically fast), independently consistent with the SAME
+      `max_active_runs=1` DagRun-queue-contention mechanism dbtkill's own root-cause finding just
+      confirmed (u3's own `wait_for_orders_dagrun_queue_idle(timeout=2400s)` pre-upload guard is
+      the same helper, same race)."
+  duration_decomposition: "Job 19:54:17Z->23:05:19Z (190m53s wall, `##[error]The operation was
+      canceled.` at the 190-min ceiling). Setup (steps 1-12): 19:54:17Z->20:01:16Z (~6m59s,
+      pytest `test session starts` logged 20:01:16Z, `collected 44 items`). tests/e2e/cluster (30
+      node-IDs, 6 skipped): 20:01:17Z->20:01:34Z (~17s). Gap to slice suite start (fixture
+      spin-up): 20:01:34Z->20:02:20Z (~46s). test_backfill_2year_sweep.py (7 tests, ALL PASSED):
+      20:02:20Z->20:53:29Z (~51m9s) -- scd_concurrent (criterion b, this round's own prior-round
+      fix) passed cleanly again within this block, ~6m5s, comfortably under its 1800s budget.
+      test_backfill_reentry.py: ~6m49s (->21:00:18Z). test_concurrent_select.py: ~3m21s
+      (->21:03:39Z). test_dbt_silver_pipeline.py: ~1m27s (->21:05:06Z). test_pod_kill_retry.py:
+      podkill ~9m40s PASSED (->21:14:46Z); dbtkill ~8m41s FAILED (->21:23:27Z, criterion (a)
+      MET -- fast, matching ROUND 23's own ~6-7min reference, and root-caused above); u3 ~55m49s
+      FAILED (->22:19:16Z) -- a NEW, much larger duration outlier than ROUND 23's own ~41m43s u3
+      anomaly, consistent with the SAME queue-contention mechanism, now apparently worse this
+      run. POST-u3 STALL: 22:19:16Z->23:05:19Z cancellation (~46m3s) -- test_rebuild_from_raw.py
+      (next in pytest's alphabetical-by-file collection order per this session's own established
+      ordering) was collected but produced ZERO PASSED/FAILED/SKIPPED output before cancellation;
+      the end-of-job `csv_ingest_orders DagRun history` dump's own LAST row
+      (`asset_triggered__2026-08-29T22:05:18...`, `state=running`, `start=22:34:58Z`, `end=None`)
+      confirms the orders DagRun queue was STILL actively churning/contended, unresolved, at
+      cancellation time -- fully consistent with test_rebuild_from_raw.py (or whichever test's
+      own settle-wait/queue-wait was in flight) being alive but blocked on the SAME chronic
+      backlog, not stalled on a bug in its own logic. `test_referential_orphan.py` and
+      `test_smoke_and_idempotency.py` (orphan, idempotent_reupload) NEVER STARTED -- 0 of these
+      node-IDs reached, identical to ROUND 23's own experience. Net: with dbtkill fast and
+      scd_concurrent fixed, this run's 190 minutes were consumed by (a) ~51m of legitimately slow
+      but PASSING backfill/sweep tests (unchanged, pre-existing baseline pace), (b) u3's own
+      anomalous ~56m (new, queue-contention-driven, tracked as the existing u3 todo plus this
+      round's own scheduling-contention finding), and (c) a ~46m post-u3 stall on the SAME
+      chronic orders-queue backlog this whole debug session has repeatedly ticketed out of scope
+      -- NOT a new, unexplained sink; every minute is now attributable to either an established
+      baseline cost or the SAME single root mechanism this round's own charter set out to find."
+  guards: "GREEN. Kyverno: 0 admission denials (`denied the request` grep count = 0 for this
+      run's entire job log -- unlike Track A's own MANIFEST_UNKNOWN denial, which was a
+      DIFFERENT, self-inflicted skip-ci/image-publish gap specific to Track A's own dispatch,
+      confirmed not applicable here since Track B's own image at headSha e2a7b1f published
+      successfully before this job ran). Restarts: 0 NEW restarts -- the restart-count-timeline
+      section (rows where restarts changed) is EMPTY across the whole run; the sole non-zero
+      restart count observed (`airflow-api-server-...` at RESTARTS=1, `1 (3h5m ago)` per `kubectl
+      get pods`) is the SAME long-documented early-boot restart baseline from this session's
+      prior rounds, unchanged and non-recurring during the run itself. OOMKilled: 0 occurrences
+      (grep -c = 0). Scheduler peak memory: 1,921,740,800 bytes = 1832.7MiB = 71.6% of the
+      2560Mi limit -- between ROUND 21's 1943.5MiB/75.9% and ROUND 23's 1762.7MiB/68.9%, no new
+      concern."
+  reasoning_checkpoint:
+    hypothesis: "The dbtkill-class 'last observed: None' DBT_BUILD signature is caused by
+        `csv_ingest_orders`' `max_active_runs=1` DagRun-slot being captured, between
+        `wait_for_orders_dagrun_queue_idle`'s own idle-check and the test's own trigger call, by
+        an independently-scheduled `asset_triggered` DagRun whose failure path is slow enough
+        (observed: ~15m31s) to starve the newly-triggered DagRun's `stage` task of ANY scheduler
+        attention for the test's entire polling budget -- refuting this round's own opening
+        hypothesis (A) that `stage` itself crashes or is skipped via the `trigger_rule`-gated
+        tracking chain."
+    confirming_evidence:
+      - "Direct AssertionError text (round24-trackB-job.log:1420): `meta.run_stages[run_id=851]
+          (all stages): []` (STAGE_LOAD never written) and task_instance state=None/try=0 for
+          `stage`/`list_run_ids_pending_dbt_build`/`mark_dbt_build_running`, all three, for THIS
+          exact DagRun -- not 'skipped', never attempted."
+      - "End-of-job DagRun history (round24-trackB-job.log:11127-11128): `asset_triggered__
+          2026-08-29T21:00:32...` occupies `csv_ingest_orders`' sole `max_active_runs=1` slot
+          21:17:03Z->21:32:34Z (state=failed), spanning the dbtkill test's ENTIRE trigger
+          (~21:17Z) through its own poll-timeout (21:23:27Z); `e2e-dbtkill-109e0af99035` itself
+          does not start until 21:32:35Z, 9 minutes after the test already asserted failure."
+      - "Direct source read confirms `csv_ingest_orders` has `max_active_runs=1`
+          (airflow/dags/csv_ingest_orders.py:95) and `wait_for_orders_dagrun_queue_idle`'s own
+          docstring explicitly names and accepts this exact race class, sized against a ~50s
+          'brief hold' -- not the ~15-32min a slow retry-exhausting racer can actually take per
+          ROUND 22's own documented worst-case arithmetic."
+    falsification_test: "This round's own pre-registered falsification test for hypothesis (A)
+        (stage's task_instance reaching state='success') was met in spirit but exceeded: rather
+        than 'success', task_instance state was `None` (never attempted) -- an even stronger
+        refutation of (A) than anticipated, landing squarely in the pre-registered 'or something
+        else entirely' branch. A further falsification test for THIS round's new hypothesis
+        would be: a dbtkill-class failure recurring WITHOUT any co-occupying `asset_triggered` (or
+        other) DagRun visible in the DagRun-history dump for the relevant window -- that would
+        mean a max_active_runs=1 slot-contention story is insufficient and some other scheduler
+        mechanism is also at play. Not observed this round; not yet tested against a future run."
+    fix_rationale: "No fix applied this round (goal: find_and_fix, but this round's own charter
+        was direct-evidence diagnosis of the scheduling QUESTION, not a fix -- the underlying
+        `max_active_runs=1`-contention mechanism is a genuine platform/test-environment tradeoff,
+        not an obvious one-line fix, and any fix (e.g. widening the dbtkill test's own budgets to
+        cover a ~32min worst-case race, or making `wait_for_orders_dagrun_queue_idle` re-check
+        immediately before the trigger call to shrink the race window, or reducing
+        `max_active_runs` contention by scoping backfill/asset-triggered DagRuns differently)
+        is a decision for the user, not unilaterally chosen here, per this session's own
+        established norm of returning root-cause findings to a checkpoint before acting when
+        multiple remediation shapes exist and none is a strict continuation of a prior round's
+        already-approved direction)."
+    blind_spots: "(1) WHICH specific DagRun's `stage` task claimed-and-crashed run_id=851's own
+        file, and WHY that crash happened, remain unqueried this round -- the scheduling-
+        contention mechanism is confirmed regardless of that crash's own cause, but a full
+        picture of dbtkill's file-level fate would need it. (2) This round did not test whether
+        widening the dbtkill test's own budgets (to absorb a ~32min worst-case race) would
+        actually make the test pass, or would just relocate the same 'last observed: None'
+        signature further out in time if scheduler contention is chronic across the FULL suite's
+        runtime rather than a one-off race. (3) u3's own anomalous ~56m duration this round is
+        ASSERTED (not directly proven) to share this same root mechanism -- plausible and
+        consistent (same helper, same DAG, same max_active_runs=1), but not independently
+        confirmed via u3's own dedicated DagRun-history trace this round, per the explicit
+        scope guardrail keeping u3 investigation out of this round."
+  disposition: "ROUND 24 Track B's own charter is CLOSED with a definitive, directly-evidenced
+      answer: the dbtkill 'last observed: None' signature is caused by `csv_ingest_orders`'
+      `max_active_runs=1` DagRun-admission contention (a co-occupying `asset_triggered` DagRun's
+      slow retry-exhaustion path starving the test's own newly-triggered DagRun of any scheduler
+      attention for the entire polling window), NOT by the `wire_dbt_build_tracking`
+      `trigger_rule`-skip mechanism this round opened with as its leading hypothesis. This closes
+      a question this session has carried, unresolved, since ROUND 21. No fix was applied this
+      round (diagnosis was the explicit charter); a fix decision (widen budgets vs. shrink the
+      race window vs. accept as a known, already-partially-ticketed contention class) is returned
+      to the user via the checkpoint below, alongside u3's own continuing regression (unchanged
+      disposition: captured todo, not investigated) and the persistent post-u3 orders-queue
+      backlog stall (unchanged disposition: the same chronic, already out-of-scope
+      CPU-starvation-adjacent condition)."
+  next_action: "AWAITING USER DECISION at the CHECKPOINT REACHED below on ROUND 25's shape: (a)
+      whether to fix the newly-confirmed max_active_runs=1 scheduling-contention mechanism (and
+      how -- widen dbtkill/u3's own budgets, shrink wait_for_orders_dagrun_queue_idle's own race
+      window via a re-check immediately before trigger, or something else), (b) whether to
+      pursue u3's own replay/idempotency-row root cause (still a captured todo, now reproduced
+      twice), or (c) whether to accept ROUND 24 Track B as closing this session's dbtkill-scheduling
+      investigation without a code fix, given the mechanism is now fully named and evidenced."
 
 ROUND 23 (2026-08-29, opened on user decision after the combined-verification outcome below:
 revert dbtkill's ROUND 22 poll-budget bump (confirmed to just burn wall-clock for an identical
@@ -12725,3 +12968,38 @@ as SQL-layer-integration-verified rather than live-E2E-confirmed. No further Tra
 dispatches for the SCD2 fix specifically are planned; Track B (dbtkill diagnostics, run
 33272070899, this session's own separate, ongoing scope) is entirely unaffected and untouched
 by this closure.
+
+---
+
+ROUND 24 TRACK B TERMINAL (2026-08-30): run 33272070899 (headSha e2a7b1f) concluded=cancelled at
+the 190-min ceiling (19:54:13Z->23:05:20Z). Full detail in Current Focus's 'ROUND 24 OUTCOME
+(Track B)' block above. Summary: the new `_dbt_build_stall_diagnostics` instrumentation worked
+exactly as designed -- its evidence, embedded synchronously inside the failing test's own
+AssertionError at 21:23:27Z, survived the job's later 23:05:19Z cancellation intact (job log
+saved as scratchpad round24-trackB-job.log, 13,431 lines). Direct AssertionError text for
+run_id=851:
+`meta.run_stages[run_id=851, stage_name='DBT_BUILD'] never reached status='RUNNING' within 300s
+(last observed: None) [ROUND 24 diagnostics -- meta.run_stages[run_id=851] (all stages): [] |
+meta.ingestion_runs[run_id=851]: ('FAILED', None, None, datetime.datetime(2026, 8, 29, 21, 18,
+41, 228745, tzinfo=zoneinfo.ZoneInfo(key='Etc/UTC'))) |
+task_instance[dag_id='csv_ingest_orders', run_id='e2e-dbtkill-109e0af99035'] for ('stage',
+'list_run_ids_pending_dbt_build', 'mark_dbt_build_running'): [('list_run_ids_pending_dbt_build',
+None, 0, None, None), ('mark_dbt_build_running', None, 0, None, None), ('stage', None, 0, None,
+None)]]`
+Cross-referenced against the end-of-job `csv_ingest_orders DagRun history` dump (survived
+uncancelled): DagRun `asset_triggered__2026-08-29T21:00:32...` held `csv_ingest_orders`' sole
+`max_active_runs=1` slot 21:17:03Z->21:32:34Z (state=failed, ~15m31s), spanning the dbtkill
+test's entire trigger-to-poll-timeout window; `e2e-dbtkill-109e0af99035` itself did not start
+until 21:32:35Z. ANSWER: the dbtkill 'last observed: None' signature (unresolved since ROUND 21)
+is caused by Airflow scheduler DagRun-admission contention (`max_active_runs=1` slot captured by
+a slow-failing co-occupant, exceeding `wait_for_orders_dagrun_queue_idle`'s own accepted ~50s
+race-window sizing), NOT by the `wire_dbt_build_tracking` `trigger_rule`-skip mechanism this
+round opened with as its leading hypothesis -- that hypothesis is REFUTED (task_instance state
+was `None`/never-attempted, not `success` or `skipped`). Census this run: 2 failed (dbtkill, u3)
+/ 32 passed / 6 skipped = 40 of 44, byte-identical to ROUND 23's own outcome run -- u3's ROUND 23
+regression reproduced identically a second time (still out of scope, captured todo). Guards
+green: 0 Kyverno denials, 0 new restarts, 0 OOMKilled, scheduler peak 1832.7MiB/71.6% of 2560Mi.
+No fix applied (diagnosis was this round's explicit charter). Decision checkpoint returned to
+user on ROUND 25's shape (fix the newly-confirmed contention mechanism, pursue u3's own root
+cause, or accept this round as closing the dbtkill-scheduling investigation without a code
+fix).
