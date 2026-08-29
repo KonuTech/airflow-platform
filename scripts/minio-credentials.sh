@@ -74,7 +74,16 @@ _create_secret() {
     for kv in "$@"; do
       key="${kv%%=*}"
       value="${kv#*=}"
-      printf '  %s: %s\n' "${key}" "${value}"
+      # Single-quote the scalar so YAML's core schema cannot ever resolve it
+      # to a non-string type. _random_hex output is pure lowercase hex
+      # (0-9a-f), so an unquoted value that happens to be all-digits (e.g.
+      # "0123456789012345") is a syntactically valid YAML integer -- kubectl
+      # then submits a JSON payload with a numeric stringData field, which
+      # the API server rejects: "cannot unmarshal number into Go struct
+      # field Secret.stringData of type string". Safe here because the only
+      # values ever passed through this helper (openssl rand -hex output)
+      # can never contain a single quote to escape.
+      printf "  %s: '%s'\n" "${key}" "${value}"
     done
   } | _kubectl apply -f - >/dev/null
 }
