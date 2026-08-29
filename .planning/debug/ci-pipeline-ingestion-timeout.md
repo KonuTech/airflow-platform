@@ -12614,3 +12614,12 @@ image for Kyverno to admit. This commit carries no skip marker so publish.yml bu
 image at this SHA before the workflow_dispatch re-run. Track B (full-suite dbtkill diagnostics,
 headSha e2a7b1f) is NOT touched or re-dispatched by this commit -- the two tracks remain fully
 independent per this round's own charter.
+
+TRACK A RE-DISPATCH TRIGGER, ATTEMPT 2 (2026-08-29): The prior trigger commit (a53358b) itself
+carried the CI-suppression marker as a literal substring inside its own explanatory prose
+(quoting the marker text to describe the bug it was fixing), so GitHub's substring-anywhere-in-
+message detection suppressed every workflow for that push too -- a fifth consecutive miss for a
+fifth different reason, this one recursive. This commit message is written to avoid the marker
+string entirely. Once publish.yml builds a real image at this SHA, re-dispatch the narrow-scope
+workflow_dispatch run (pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py) against it. Track B
+(full-suite dbtkill diagnostics, headSha e2a7b1f) remains untouched and independent.
