@@ -1,5 +1,17 @@
 ---
 status: investigating
+round24_track_a_outcome: "ROUND 24 Track A TERMINAL 2026-08-29: run 33272229642 (headSha 4436311,
+  workflow_dispatch, pytest_scope=test_rebuild_from_raw.py) conclusion=failure at `make
+  cluster-up` (step 7) -- Kyverno denied the Airflow Helm install with MANIFEST_UNKNOWN because
+  commit 4436311 was pushed `[skip ci]`, which also (as an unintended side effect) suppressed
+  `publish.yml` for that SHA, leaving no GHCR image published to install. pytest was never
+  invoked; test_rebuild_from_raw.py was never collected. FOURTH consecutive live-verification
+  attempt to fail to produce a verdict on the SCD2 fix (a0cc2f5), for a FOURTH different reason,
+  this one entirely self-inflicted and unrelated to the fix or to the narrow-scope design's own
+  merits (which remain untested). Next step proposed, not yet actioned: push a normal follow-up
+  commit on 4436311 to trigger a real image publish, then re-dispatch. See Current Focus's
+  'ROUND 24 OUTCOME (Track A)' block and Evidence. Track B (run 33272070899) still in_progress,
+  not analyzed this turn."
 round20_status: "ROUND 20 offline COMPLETE 2026-08-28: all three ROUND 19 findings fixed.
   (1) podkill zombie-detection: LIVE-REPRODUCED via a minimal, faithful repro against the
   installed apache-airflow==3.3.0 + real KubernetesPodOperator/PodManager code on the LOCAL
@@ -822,10 +834,137 @@ diagnostics-truncation gap. Track C (u3 replay finding) captured as a todo only.
       A's job log as round24-track-a-job.log, Track B's as round24-track-b-job.log. Session
       manager runs ONE 60s watcher PER live run (two now genuinely in flight in parallel) --
       do NOT self-watch further this turn."
-  next_action: "SUPERSEDED -- see live_verification_state above. Awaiting BOTH run 33272070899
-      (Track B) and run 33272229642 (Track A) against their respective pre-registered criteria.
-      CHECKPOINT REACHED (human-action) returned this turn -- do NOT self-watch either run
-      beyond confirming both were genuinely accepted/running (already done above)."
+  next_action: "SUPERSEDED -- see ROUND 24 OUTCOME (Track A) below. Track B (run 33272070899)
+      still in_progress as of this writing -- NOT analyzed this turn, per explicit scope
+      instruction; will be analyzed separately when it terminates."
+
+ROUND 24 OUTCOME (Track A) (2026-08-29, post-run analysis of run 33272229642, headSha
+4436311c11f8ac5f213359a52f2302a3e5916e89, workflow_dispatch with pytest_scope=
+tests/e2e/slice/test_rebuild_from_raw.py -- terminal conclusion=failure, 19:58:05Z->20:01:45Z,
+~3m40s total):
+  run_facts: "Job 'Full local E2E suite + rebuild-from-raw capstone' conclusion=failure. Step-level
+      breakdown (`gh run view --json jobs`): steps 1-6 (checkout/setup-uv/install-cluster/point-
+      image-at-commit) all conclusion=success; step 7 ('Bring up the ephemeral kind cluster (CI
+      profile)', i.e. `make cluster-up`) conclusion=FAILURE; EVERY subsequent step (8-13, including
+      step 13 'Run cluster + slice E2E suite' -- the step that would invoke pytest at all) is
+      conclusion=SKIPPED; step 14 (DEBUG diagnostics dump) still ran and completed successfully;
+      steps 15-16 (observability, D-24 rebuild-from-raw capstone) SKIPPED as designed for a
+      narrow-scope dispatch. The job never reached pytest collection, let alone execution, of
+      test_rebuild_from_raw.py."
+  question_1_scoping_mechanism: "The workflow_dispatch/pytest_scope/concurrency-group SCOPING
+      mechanism itself worked correctly in the sense this round's own mid-round fix intended: the
+      run was genuinely ACCEPTED and started immediately in parallel with Track B (not queued
+      behind it -- confirmed by `Set up job`/checkout/setup-uv all succeeding within seconds of
+      dispatch), and the E2E-suite step and capstone step were correctly gated to skip for a
+      narrow-scope dispatch. BUT the test itself never got a chance to run: `make cluster-up`
+      itself failed BEFORE step 13 (the pytest invocation) was ever reached. This is a
+      setup/cluster-bring-up failure, not a collection or in-test failure -- and it has NOTHING to
+      do with test_rebuild_from_raw.py's own fixtures, scoping, or the orders-side
+      settle-wait-avoidance design this round's own track_a_design argued for."
+  question_2_and_4_root_cause: "Direct log evidence (job log tail, `##[error]` lines): `make
+      cluster-up` failed at the `70-airflow.sh` stage's `helm upgrade --install airflow
+      apache-airflow/airflow ...` with `admission webhook \"ivpol.validate.kyverno.svc-fail-
+      finegrained-require-signed-images\" denied the request: Policy require-signed-images error:
+      failed to evaluate policy: GET https://ghcr.io/v2/konutech/airflow/manifests/
+      4436311c11f8ac5f213359a52f2302a3e5916e89: MANIFEST_UNKNOWN: manifest unknown` (fired for
+      airflow-dag-processor/airflow-api-server/airflow-triggerer/airflow-scheduler, all 4
+      Deployments/StatefulSets, then `make: *** [Makefile:167: cluster-up] Error 1`). ROOT CAUSE,
+      confirmed via `gh api .../commits/4436311.../check-runs` (only 'Full local E2E suite +
+      rebuild-from-raw capstone' ever ran for this SHA) and `gh api .../actions/runs?head_sha=
+      4436311...` (zero other workflow runs for this SHA at all): commit 4436311 -- this SAME
+      round's own concurrency-group fix commit -- was deliberately pushed with a `[skip ci]`
+      marker (per this round's own live_verification_state entry: 'a workflow-orchestration
+      bugfix needs no live verification of its own beyond the re-dispatch succeeding'). GitHub's
+      OWN native `[skip ci]` push-suppression is workflow-agnostic: it suppressed EVERY
+      push-triggered workflow for that commit, including `.github/workflows/publish.yml`
+      ('Publish images', push-triggered, no workflow_dispatch trigger of its own) -- so NO
+      `ghcr.io/konutech/airflow` image was EVER built/pushed tagged `4436311...`. When Track A's
+      OWN `workflow_dispatch` was then run against headSha=4436311 (the ONLY way to pick up the
+      concurrency-group fix's own YAML change), `cluster-up`'s `AIRFLOW_IMAGE_OVERRIDE_REPO/TAG`
+      mechanism correctly derived the image tag from that same headSha and tried to install it --
+      but the image manifest genuinely does not exist at that tag, so Kyverno's
+      `require-signed-images` ImageValidatingPolicy denied the request with `MANIFEST_UNKNOWN`
+      (correct, safe policy behavior given a nonexistent image -- NOT a Kyverno false-positive
+      of the kind prior rounds have occasionally found). This is a narrow-scope-run-SPECIFIC,
+      entirely self-inflicted CI/dispatch-sequencing gap: `[skip ci]`'s side effect of also
+      suppressing the commit's own image publish was not accounted for when this round decided a
+      `workflow_dispatch` would later need to run AGAINST that exact skip-ci'd commit. Track B
+      (the full-suite push run, headSha e2a7b1f -- the PRIOR, non-skip-ci commit) is entirely
+      unaffected: its own 'Publish images' run 33272070893 completed successfully BEFORE Track B's
+      cluster-up ran (confirmed in this round's own live_verification_state), so its image exists
+      at tag e2a7b1f."
+  question_3_reconciliation_comparison: "N/A -- test_rebuild_from_raw.py was never collected or
+      invoked in any form. RebuildComparisonResult never ran. Zero new information, in either
+      direction, on the SCD2 fix's (commit a0cc2f5) correctness. This is the FOURTH consecutive
+      live-verification attempt to fail to produce a pass/fail answer for this fix, for a FOURTH
+      different reason each time (1: cluster-up infra flake, unrelated, since fixed; 2: cancelled
+      before the test started; 3: cancelled after the test started and made real backfill
+      progress, but before its own comparison step, due to an unrelated orders-queue backlog; 4:
+      dedicated narrow-scope dispatch itself never reached cluster-up completion, due to a
+      self-inflicted skip-ci/image-publish gap in HOW the dispatch was sequenced -- not due to
+      anything the narrow-scope DESIGN got wrong about test_rebuild_from_raw.py's own fixtures)."
+  disposition: "Track A's underlying engineering claim (narrow-scope isolation is structurally
+      safer than the full suite for this specific test, because a fresh cluster has zero prior
+      orders uploads) remains UNTESTED, not refuted -- the run never got far enough to exercise
+      it. The failure is 100% attributable to a CI dispatch-sequencing gap (dispatching
+      workflow_dispatch against a `[skip ci]` commit whose own image was consequently never
+      published), fully diagnosed with direct, unambiguous log evidence, and trivially avoidable
+      on a retry. The SCD2 fix's own correctness question is UNCHANGED and still completely open."
+  next_step_proposal: "Re-dispatch Track A against a commit that (a) contains the ROUND 24
+      concurrency-group fix (i.e. is 4436311 or a descendant of it) AND (b) has a genuinely
+      published GHCR Airflow image. Concretely: push one more small, NORMAL (non-skip-ci) commit
+      on top of 4436311 (even a no-op/comment change, or simply amend the skip-ci commit's message
+      -- but per this session's own git-safety norms, prefer a new commit over rewriting history)
+      so that `publish.yml` triggers normally and builds+pushes an image tagged with the NEW
+      commit SHA, THEN re-run `gh workflow run e2e-full.yml --ref <new-sha>
+      -f pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py` against that new SHA. This is a
+      one-line, low-risk, easily-reviewable change (a git push + a workflow_dispatch invocation)
+      -- proposing rather than doing it unprompted, since it triggers new CI spend and Track B is
+      still in flight under a DIFFERENT (older) concurrency-group scheme that this proposal
+      does not touch or risk. NOT proposing: re-dispatching against e2a7b1f (Track B's own
+      already-published-image commit) -- doing so would silently regress to the OLD, pre-fix
+      concurrency-group behavior this round's own mid-round correction was written to escape,
+      and could re-queue behind Track B."
+  reasoning_checkpoint:
+    hypothesis: "Track A's run 33272229642 failed at `make cluster-up` (Airflow Helm install,
+        Kyverno admission denial with MANIFEST_UNKNOWN) because commit 4436311 was pushed with
+        `[skip ci]`, which suppressed publish.yml (a push-triggered workflow with no
+        workflow_dispatch trigger) for that SHA, leaving no GHCR image published at tag
+        4436311 for cluster-up's image-override mechanism to install -- a self-inflicted
+        dispatch-sequencing gap, unrelated to test_rebuild_from_raw.py's own fixtures, the SCD2
+        recompute fix (a0cc2f5), or any platform/scheduling defect this session has been
+        investigating."
+    confirming_evidence:
+      - "Direct job log line (round24-trackA-job.log:812): 'admission webhook ... denied the
+          request: Policy require-signed-images error: failed to evaluate policy: GET
+          https://ghcr.io/v2/konutech/airflow/manifests/4436311...: MANIFEST_UNKNOWN: manifest
+          unknown' -- the exact tag requested is the exact headSha dispatched against."
+      - "`gh api repos/.../commits/4436311.../check-runs` returns exactly ONE check-run ('Full
+          local E2E suite + rebuild-from-raw capstone') for this SHA -- zero 'Publish images'
+          check-run, confirming that workflow never ran for this commit."
+      - "`gh api repos/.../actions/runs?head_sha=4436311...` returns exactly ONE workflow run
+          total (the workflow_dispatch itself) -- confirming GitHub's native skip-ci
+          push-suppression applied workflow-wide to this SHA, not just to e2e-full.yml."
+      - "The commit's own message (`gh api .../git/commits/4436311...`) explicitly states 'marked
+          skip ci to avoid spawning a redundant duplicate full-suite push run' -- confirming the
+          skip-ci marker was an intentional, reasoned decision this round, whose side effect
+          (also suppressing the image publish this round's OWN later workflow_dispatch would
+          need) was not anticipated at commit time."
+    falsification_test: "If a re-dispatch against a commit descending from 4436311 WITH a
+        published image at that SHA still failed at cluster-up with the same MANIFEST_UNKNOWN
+        signature, that would refute this hypothesis and point at something else (e.g. a Kyverno
+        policy regression, or a genuinely broken image build) -- not yet tested."
+    fix_rationale: "The proposed next step (push a normal follow-up commit to trigger a real image
+        publish, then re-dispatch against that SHA) directly addresses the root cause (missing
+        image for the dispatched SHA), not a symptom (e.g. it would not help to just re-run the
+        SAME dispatch against the SAME SHA, or to disable the Kyverno policy, which is correctly
+        denying an install of a genuinely nonexistent image)."
+    blind_spots: "(1) Not yet verified whether `publish.yml`'s own build would succeed cleanly for
+        a trivial follow-up commit on top of 4436311 (no reason to expect it wouldn't, but
+        untested). (2) This diagnosis does not touch or re-open the SCD2 fix's own correctness
+        question at all -- that remains exactly as unverified as before this round. (3) Track B's
+        own outcome (still in_progress) is unrelated to and unaffected by this finding, per
+        scope."
 
 ROUND 23 (2026-08-29, opened on user decision after the combined-verification outcome below:
 revert dbtkill's ROUND 22 poll-budget bump (confirmed to just burn wall-clock for an identical
@@ -11020,6 +11159,38 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     the OLD group name), then re-dispatched. See live_verification_state for the resulting run
     IDs.
   timestamp: 2026-08-29 (ROUND 24, live-discovered mid-round)
+
+- checked: >
+    ROUND 24 Track A's terminal run 33272229642 (headSha 4436311, workflow_dispatch,
+    pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py). `gh run view --json jobs` for
+    step-level conclusions, `gh api .../jobs/<id>/logs` saved as scratchpad
+    round24-trackA-job.log (1,266 lines), plus `gh api .../commits/4436311.../check-runs` and
+    `gh api .../actions/runs?head_sha=4436311...` to check what else ran for that SHA.
+  found: >
+    conclusion=failure at step 7 ('Bring up the ephemeral kind cluster (CI profile)', i.e. `make
+    cluster-up`) -- every later step including the pytest-invocation step is SKIPPED.
+    test_rebuild_from_raw.py was NEVER collected or executed; zero RebuildComparisonResult
+    information obtained. Direct failure text: Kyverno's `require-signed-images`
+    ImageValidatingPolicy denied the Airflow Helm install with `MANIFEST_UNKNOWN: manifest
+    unknown` for `ghcr.io/konutech/airflow/manifests/4436311...`. Root cause: commit 4436311
+    (this round's OWN concurrency-group fix) was pushed with `[skip ci]`; GitHub's native
+    skip-ci push-suppression is workflow-agnostic and suppressed `publish.yml` for that SHA
+    too, so no image was ever published at tag 4436311 for cluster-up's image-override
+    mechanism to install. Confirmed via `check-runs` (only the E2E job itself ran for this SHA)
+    and `actions/runs?head_sha=...` (zero other workflow runs for this SHA).
+  implication: >
+    This is a narrow-scope-run-SPECIFIC, self-inflicted CI dispatch-sequencing gap -- entirely
+    unrelated to test_rebuild_from_raw.py's own fixtures, the orders-side settle-wait-avoidance
+    design this round's own track_a_design argued for, or the SCD2 recompute fix (a0cc2f5)
+    itself. The SCD2 fix's own correctness question remains completely open -- this is now the
+    FOURTH consecutive live-verification attempt to fail to reach a verdict, for a FOURTH
+    different reason. Track A's underlying isolation claim (fresh cluster avoids the orders
+    backlog) is UNTESTED, not refuted. Next step proposed (not yet actioned): push one more
+    normal (non-skip-ci) commit on top of 4436311 so `publish.yml` builds a real image, then
+    re-dispatch workflow_dispatch against that new SHA. See Current Focus's 'ROUND 24 OUTCOME
+    (Track A)' block for full detail. Track B (run 33272070899, full suite, dbtkill
+    diagnostics) still in_progress as of this analysis -- not analyzed here, per scope.
+  timestamp: 2026-08-29 (ROUND 24, Track A post-run analysis)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
