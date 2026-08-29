@@ -2,7 +2,33 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29 (ROUND 24 Track A RE-DISPATCH#2 PREP: fixed test_rebuild_from_raw.py's own
+updated: 2026-08-30 (ROUND 24 Track A ATTEMPT #6 TERMINAL: run 33277154631, headSha
+  8b9d5ee53e018ce02b481af0ce9f8483c9758f28, workflow_dispatch,
+  pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py, terminal conclusion=failure,
+  2026-08-29T21:52:03Z -> 22:02:51Z (~11 min). GENUINE FORWARD PROGRESS: the Step-0
+  `>=` relaxation from RE-DISPATCH#2 PREP worked exactly as designed -- the test's own Step 0
+  (fixture seeding through `resolved_reject["resolved_by_run_id"] >= corrected_run["run_id"]`)
+  completed with NO assertion failure this time, and execution reached Step 2 -- invoking
+  `scripts/rebuild-from-raw.py` as a real subprocess -- for the FIRST TIME across all six
+  live-verification attempts. But the subprocess itself then failed (exit 1) with a SIXTH,
+  entirely NEW mechanism: `_trigger_backfills` (rebuild-from-raw.py:666-687) iterates EVERY
+  configured dataset (customers AND orders) and hard-fails with `RuntimeError: dataset 'orders'
+  ... has ZERO files under raw/orders/ -- refusing to silently skip it` if any one of them has
+  zero raw objects -- and on this narrow-scope dispatch's fresh, empty-MinIO ephemeral cluster,
+  ONLY test_rebuild_from_raw.py ran, so no orders/*.csv fixture was ever uploaded and
+  raw/orders/ genuinely has 0 objects. The rebuild subprocess never reached the customers
+  backfill's completion wait, the settle-wait, or the RebuildComparisonResult comparison --
+  zero pass/fail information on the SCD2 fix obtained, a SIXTH consecutive miss for a SIXTH
+  distinct reason. This is a direct, structural side effect of the narrow-scope isolation
+  design itself (adopted specifically to dodge ROUND 23's orders-queue-backlog contention):
+  isolating the dispatch down to one customers-only test now trips a DIFFERENT orders-related
+  guard (total absence of orders raw history) than the one it was designed to avoid (orders
+  queue backlog). Per the user's own stated threshold, six consecutive distinct-reason misses
+  is flagged as a decision point, not grounds for an unprompted seventh attempt -- see
+  ci-pipeline-ingestion-timeout.md's Evidence for full job-log detail and options. Prior text
+  retained below for history.)
+updated_prior_round24_trackA_attempt6_prep: 2026-08-29 (ROUND 24 Track A RE-DISPATCH#2 PREP:
+  fixed test_rebuild_from_raw.py's own
   Step-0 scheduling race per the user's decision-checkpoint choice of both mitigation options.
   Implemented the assertion-relaxation option (b): line 550's resolved_by_run_id check is now
   `>=` instead of `==`, which is provably sufficient given pipeline/run.py's own documented
@@ -156,7 +182,32 @@ reasoning_checkpoint:
       produced the original tie, since it closes the general non-determinism class, not one
       specific instance of it."
 tdd_checkpoint: null
-next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0cc2f5, reviewed the
+next_action: "UPDATE (ROUND 24 Track A ATTEMPT #6 TERMINAL, 2026-08-30): run 33277154631 reached
+    and PASSED Step 0 cleanly for the first time (the `>=` relaxation is confirmed working live,
+    not just offline), then FAILED inside `scripts/rebuild-from-raw.py` itself before the
+    customers backfill it triggers could complete, before any settle-wait, and before
+    RebuildComparisonResult -- `_trigger_backfills`'s own all-datasets-must-have-raw-history
+    guard tripped on `orders` (0 raw objects, because narrow-scope dispatch never uploads any
+    orders fixture). Zero new information on the SCD2 fix's correctness. This is the SIXTH
+    consecutive live-verification attempt, SIXTH distinct reason. DECISION POINT (per the
+    user's own stated threshold for stepping back after repeated distinct-reason misses,
+    not decided here): (1) seed one minimal orders raw CSV as part of the narrow-scope dispatch
+    path (Makefile `cluster-slice-verify-scoped` target or a workflow step) before invoking
+    rebuild-from-raw.py, then attempt a SEVENTH live dispatch -- a plausible, narrowly-targeted
+    fix, but this session has now used six attempts to shave off six different obstacles one at
+    a time, each revealing the next; (2) accept the SCD2 fix (a0cc2f5) as OFFLINE-VERIFIED-ONLY
+    given diminishing returns -- the fix's own mechanism (file_id as a third tie-break level) was
+    independently proven correct in isolation (direct reproduction + regression test), and
+    six consecutive live-verification misses have all been infrastructure/test-harness/
+    orchestration issues unrelated to `recompute.py`/`scd.py`'s own logic, never once
+    implicating the fix itself; (3) pursue a fundamentally different verification approach, e.g.
+    a smaller, self-contained integration-level reproduction of the rebuild-from-raw path against
+    a testcontainers Postgres + a hand-seeded bronze history with a genuine cross-file tie,
+    bypassing the live Airflow/kind orchestration entirely (this would directly exercise
+    `recompute_version_chain`'s fix under the ORIGINAL failure conditions without depending on
+    live CI's scheduling/orchestration behavior at all). Awaiting user decision -- not actioned
+    unilaterally.
+    ORIGINAL (pre-attempt-6) text retained below for history: Fix applied, self-verified, and COMMITTED (orchestrator, commit a0cc2f5, reviewed the
     3 diffs directly before committing -- no longer at risk from the concurrent-working-tree
     hazard documented in Evidence). STILL AWAITS a completed live-verification run: THREE
     consecutive full-suite live-verification attempts by the sibling ci-pipeline-ingestion-timeout
@@ -658,6 +709,46 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     attempt #6 is the next step, not a further offline gate."
   timestamp: 2026-08-29
 
+- timestamp: 2026-08-30 (ROUND 24 Track A ATTEMPT #6 TERMINAL)
+  checked: "GitHub Actions run 33277154631 (headSha 8b9d5ee53e018ce02b481af0ce9f8483c9758f28,
+    workflow_dispatch, pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py), conclusion=failure,
+    21:52:03Z-22:02:51Z. `gh run view --json jobs` step conclusions, `gh api .../jobs/<id>/logs`
+    (3,262 lines, saved as scratchpad round24-trackA-attempt6-job.log), the failing test's own
+    full traceback, and `scripts/rebuild-from-raw.py`'s `_trigger_backfills` (lines 666-687)."
+  found: "Cluster-up succeeded; `uv run pytest tests/e2e/slice/test_rebuild_from_raw.py -v`
+    collected exactly 1 item, ran 21:58:16Z-22:02:26Z (~4m10s). Step 0's relaxed `>=` assertion
+    (line 550ish: `resolved_reject['resolved_by_run_id'] >= corrected_run['run_id']`) executed
+    with NO failure -- confirmed by the failure traceback showing execution reached line 619
+    (`assert proc.returncode == 0` after invoking `scripts/rebuild-from-raw.py`), several dozen
+    lines past Step 0's own assertions in the same function body. This is the FIRST attempt of
+    six to ever pass Step 0 live and reach Step 2 (the real rebuild-from-raw.py subprocess
+    invocation). The subprocess itself then failed: exit 1, stdout shows
+    `DROP SCHEMA IF EXISTS staging, silver, normalized, meta CASCADE` succeeded, `alembic upgrade
+    head` succeeded, S3 wipe succeeded (3 objects from validated/, 0 from processed/, 0 from
+    quarantine/), and `triggered backfill for csv_ingest_customers: 2026-08-29T22:00:00+00:00 ..
+    2026-08-29T22:02:00+00:00` printed -- meaning `_trigger_backfills`'s loop over configured
+    datasets processed `customers` successfully FIRST, then moved to `orders` and raised:
+    `RuntimeError: dataset 'orders' (configs/datasets/orders.yaml) has ZERO files under
+    raw/orders/ -- refusing to silently skip it. If this dataset genuinely has no history yet,
+    remove it from configs/datasets/ or seed it before rebuilding.` No customers backfill
+    completion wait, no settle-wait, and no RebuildComparisonResult computation ever ran --
+    the subprocess crashed with an unhandled RuntimeError immediately after triggering (but not
+    waiting on) the customers backfill."
+  implication: "SIXTH consecutive live-verification attempt, SIXTH distinct reason for failing
+    to reach a RebuildComparisonResult verdict -- and unlike all five priors, this one is a
+    DIRECT, STRUCTURAL side effect of the ROUND 24 narrow-scope isolation design itself:
+    `_trigger_backfills` treats ALL configured datasets (not just the one under test) as
+    mandatory-must-have-raw-history, so isolating the dispatch down to customers-only
+    (deliberately done to dodge ROUND 23's orders-queue-backlog contention) now trips a
+    DIFFERENT orders-related failure mode (total absence of orders raw objects on a genuinely
+    fresh, empty-MinIO ephemeral CI cluster) instead. Zero new information on the SCD2
+    recompute fix's correctness -- the fix's own code (`recompute.py`/`scd.py`) was never
+    exercised by rebuild-from-raw.py's backfill in this run at all, since the process aborted
+    before the triggered customers backfill could even be waited on, let alone before any
+    snapshot comparison. This does, however, provide genuinely new positive evidence: the
+    Step-0 `>=` relaxation (fix (b) from RE-DISPATCH#2 PREP) is now LIVE-CONFIRMED correct,
+    not just offline-verified -- that specific race is resolved for good."
+
 ## Resolution
 <!-- Populated when RESOLVED -->
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
@@ -721,7 +812,25 @@ verification: "Self-verified: (1) direct isolated reproduction proved the pre-fi
     mathematically guaranteed to hold for any legitimate multi-run finalize pass (corrected_run's
     own run_id is necessarily a member of that pass's finalized_run_ids). Full offline battery
     (unit/dagtest/policy/ruff/mypy/collect-only) shows zero regressions. Still NOT verified
-    against live CI -- ROUND 24 Track A attempt #6 is the next step."
+    against live CI -- ROUND 24 Track A attempt #6 is the next step. UPDATE 2026-08-30 (ROUND 24
+    Track A ATTEMPT #6 TERMINAL): that attempt happened (run 33277154631). The Step-0 `>=`
+    relaxation is now LIVE-CONFIRMED correct -- Step 0 passed cleanly for the first time across
+    six attempts, and execution reached Step 2 (the real `scripts/rebuild-from-raw.py`
+    subprocess invocation) for the first time ever. But the subprocess itself then failed
+    (exit 1) before completing: `_trigger_backfills`'s all-datasets-must-have-raw-history guard
+    raised `RuntimeError: dataset 'orders' ... has ZERO files under raw/orders/`, because this
+    narrow-scope dispatch's fresh ephemeral cluster never uploads any orders fixture. No
+    customers backfill completion wait, no settle-wait, and NO RebuildComparisonResult ever
+    computed. SIX consecutive live-verification attempts, SIX distinct reasons, STILL zero
+    pass/fail information on this fix's own correctness against live CI. This crosses the user's
+    own stated threshold for stepping back from further blind live-dispatch retries -- three
+    options presented as a decision point (see Current Focus.next_action): (1) seed a minimal
+    orders raw file into the narrow-scope dispatch path and attempt a seventh live dispatch;
+    (2) accept this fix as offline-verified-only, given diminishing returns and that all six
+    live misses have been infrastructure/orchestration/test-harness issues, never once
+    implicating recompute.py/scd.py's own logic; (3) pursue a fundamentally different,
+    non-live-CI verification approach (e.g. a testcontainers-based integration reproduction of
+    the exact cross-file-tie rebuild scenario). Awaiting user decision."
 files_changed:
   - packages/dataplat/src/dataplat/scd/recompute.py
   - packages/dataplat/src/dataplat/load/publish/scd.py

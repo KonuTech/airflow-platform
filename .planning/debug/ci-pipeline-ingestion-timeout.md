@@ -12685,3 +12685,26 @@ regressions. This is scoped strictly to the test file -- `dataplat/scd/recompute
 `workflow_dispatch` (pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py) against `--ref main`
 for a SIXTH live-verification attempt on the SCD2 recompute fix. Track B (full-suite dbtkill
 diagnostics, run 33272070899) remains untouched and independent throughout.
+DISPATCHED: run 33277154631, headSha 8b9d5ee53e018ce02b481af0ce9f8483c9758f28, workflow_dispatch,
+pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py, confirmed in_progress at the correct
+headSha immediately after dispatch. Awaiting outcome.
+
+ROUND 24 TRACK A ATTEMPT #6 TERMINAL (2026-08-30): Full detail lives in
+.planning/debug/rebuild-scd2-reconciliation.md (its own Current Focus/Evidence for this round) --
+this is a short pointer entry, not a duplicate. Run 33277154631 concluded failure
+(21:52:03Z-22:02:51Z). Genuine forward progress: Step 0's `>=` relaxation is now LIVE-CONFIRMED
+correct (no assertion failure), and execution reached Step 2 -- the real
+`scripts/rebuild-from-raw.py` subprocess invocation -- for the first time across all six
+attempts. The subprocess itself then failed (exit 1): `_trigger_backfills` (rebuild-from-raw.py)
+requires every configured dataset to have raw history and hard-fails otherwise; it triggered the
+customers backfill successfully, then hit `orders` with 0 raw objects (this narrow-scope
+dispatch's fresh, empty-MinIO cluster never uploads any orders fixture) and raised
+`RuntimeError: dataset 'orders' ... has ZERO files under raw/orders/`. No settle-wait, no
+RebuildComparisonResult. This is a SIXTH consecutive miss for a SIXTH distinct reason -- and a
+direct structural side effect of the narrow-scope isolation design itself (built to dodge ROUND
+23's orders-queue-backlog contention, it now trips a different orders-related guard: total
+absence of orders raw history). Track B (full-suite dbtkill diagnostics, run 33272070899)
+remains untouched and independent throughout. Per the user's own stated threshold, this crosses
+into a decision point (options: seed a minimal orders fixture and attempt #7; accept the SCD2
+fix as offline-verified-only; or pursue a non-live-CI verification approach) rather than an
+unprompted seventh attempt -- returned via checkpoint, not decided here.
