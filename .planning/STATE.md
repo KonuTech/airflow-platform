@@ -118,9 +118,10 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-2 pending — `/gsd:capture --list` to review:
+3 pending — `/gsd:capture --list` to review:
 - Fix e2e-chaos.yml (QUAL-15 chaos suite) failing on every push (2026-08-28)
 - Draft ADR: dbt silver layer boundary
+- Investigate CI node CPU-starvation (~420m headroom after baseline platform pods) (2026-08-29)
 
 ### Blockers/Concerns
 

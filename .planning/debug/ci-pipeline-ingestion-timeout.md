@@ -964,6 +964,225 @@ ROUND 20 OUTCOME (2026-08-28, post-run analysis of run 33205639775 -- CURRENT ST
       v_run_recovery wording, ADR-0012's deferred silver disposition, merge.py delta-scoping
       before any dataset adopts strategy 'merge', scd_concurrent duration-variance watch."
 
+ROUND 21 (2026-08-29, opened on user decision: option C -- timeout-budget rebalance now,
+CPU-starvation captured as a documented follow-up ticket, out of scope for fix-and-verify):
+  charter: "(1) Timeout-budget rebalance: lower execution_timeout and/or stage's retries, and/or
+      cap exponential-backoff growth so worst-case retry math stays safely under dagrun_timeout=
+      45min with REAL margin (not barely under) -- account for the ~420m CPU headroom reality
+      when picking numbers (a killed/retried task under this contention needs realistic time to
+      actually complete a retry, not just theoretically fit). D-06 local/CI non-divergence
+      applies unless a reason emerges to diverge (ROUND 10 Airflow-Variable-per-profile
+      precedent). Apply consistently to stage/dbt_build/publish in BOTH DAGs (ROUND 20's exact
+      6 call sites). (2) CPU-starvation follow-up ticket: same treatment as the e2e-chaos.yml
+      item -- document ~86%/420m figures, propose investigation (right-size platform-pod CPU
+      requests and/or ETL concurrency caps), explicitly out of scope this round. (3) Confirm
+      test_idempotent_reupload's ROUND 20 non-run needs no separate action (re-observed once the
+      queue-serialization wedge clears with the rebalanced budget)."
+  pre_registered_criteria:
+    - "(a) podkill stays fixed (regression check -- same real-retry mechanism as R20)."
+    - "(b) dbtkill and its cascade (u3/rebuild/orphan) clear."
+    - "(c) worst-case retry arithmetic verifiably fits under 45min with real margin (math shown:
+      attempts x execution_timeout + retries x retry_delay, with a stated safety margin)."
+    - "(d) zero new failures."
+    - "(e) guards green."
+    - "(f) duration decomposition."
+    - "TARGET: fully green census or nameable-stragglers-only."
+  worst_case_arithmetic_pre_fix: >
+      CRITICAL SUB-FINDING (direct source read of the INSTALLED apache-airflow==3.3.0
+      `taskinstance.py::next_retry_datetime`, cross-checked with a standalone Python
+      reproduction of its exact formula): `retry_exponential_backoff=True` -- the literal value
+      EVERY task in both DAGs passes -- is a SILENT NO-OP in this Airflow version. The field's
+      type changed from Airflow 2's bool flag to a literal float MULTIPLIER
+      (`multiplier = task.retry_exponential_backoff if ... != 0 else 1.0`; growth only applies
+      `if multiplier != 1.0`). Python's `bool` is a subclass of `int`: `True == 1`, so
+      `multiplier == 1.0` and the ENTIRE exponential-growth branch is skipped -- `delay` stays
+      exactly `task.retry_delay`, a CONSTANT, un-jittered value, for every retry attempt
+      regardless of try_number. Verified live via a standalone reproduction of the exact source
+      formula (`min_backoff`/`modded_hash`/`MAX_RETRY_DELAY` logic) run for
+      retry_exponential_backoff={True, 1.0, 2.0}: both `True` and `1.0` produce a flat 300s for
+      every try_number 1-7; only `2.0` produces real 300/600/1200/2400s+ growth. This REFINES
+      (does not refute) ROUND 20's own finding: the numeric conclusion (worst-case totals exceed
+      45min) still holds, but via CONSTANT retry_delay stacking, not genuine exponential growth --
+      so "cap exponential-backoff growth" is not an available lever here (there is no growth to
+      cap); the only real levers are execution_timeout, retries count, and retry_delay itself.
+      PRE-FIX WORST CASE (attempts=retries+1; delay is CONSTANT per the finding above), computed
+      for all 6 ROUND-20 call sites at their then-current values (execution_timeout=10min for
+      all six; customers stage/dbt_build retries=6 delay=30s; customers publish retries=6-local/
+      3-CI delay=30s; orders stage/publish retries=3 delay=DEFAULT 300s [no override existed];
+      orders dbt_build retries=2 delay=DEFAULT 300s): customers.stage = 7x600s + 6x30s = 4380s =
+      73.0min (28min OVER dagrun_timeout=45min); customers.dbt_build = 73.0min (same); customers.
+      publish-local = 73.0min (same, 6 retries); customers.publish-CI = 4x600s + 3x30s = 2490s =
+      41.5min (UNDER but only 3.5min/7.8% margin -- dangerously tight, not previously flagged);
+      orders.stage = 4x600s + 3x300s = 3300s = 55.0min (10min OVER, matches ROUND 20's own
+      dbtkill finding exactly); orders.dbt_build = 3x600s + 2x300s = 2400s = 40.0min (UNDER but
+      only 5min/11.1% margin -- also dangerously tight, not previously flagged); orders.publish =
+      55.0min (10min OVER, same as stage). CONCLUSION: the arithmetic gap is WORSE and WIDER than
+      ROUND 20 diagnosed -- customers' stage/dbt_build/publish-local are the single worst
+      offenders (73min, 62% over budget), not just orders' family, and even the two
+      previously-fitting cases (customers.publish-CI, orders.dbt_build) had unacceptably thin
+      margins that any minor contention increase could have blown.
+  fix_design: >
+      NEW VALUES (all six ROUND-20 call sites, D-06-compliant -- identical across both DAGs and
+      both CI/local profiles except the pre-existing, already-justified publish_retries
+      CI-vs-local divergence from ROUND 14, which is PRESERVED, not introduced): (1)
+      HEAVY_TASK_EXECUTION_TIMEOUT: 10min -> 6min. Justified against the only direct single-
+      attempt-duration evidence this session has (ROUND 17, live-measured): dbt_build+publish
+      COMBINED on a real 1M-row file took <=2min; the full stage+dbt_build+publish CYCLE
+      (ROUND 17/18) took ~5.6min, implying stage ALONE is on the order of ~3.6min -- 6min leaves
+      ~2.4min (67%) headroom over that estimate for EVERY single attempt, which structurally
+      already includes any CPU-starvation-induced pod-scheduling wait (execution_timeout wraps
+      the ENTIRE KPO.execute() call via a SIGALRM set at attempt start, not just in-container
+      processing time -- confirmed ROUND 20 via `TimeoutPosix` source read). Honestly declared
+      blind spot: the ~5.6min anchor was itself measured under whatever CI contention existed at
+      R17/18 time, not explicitly isolated from the ~420m-headroom condition -- if a genuinely
+      larger file or worse contention ever needs more than 6min for a SINGLE attempt, this would
+      force-fail it prematurely; MITIGATED by more attempts fitting inside the SAME 45min ceiling
+      than the old 10min design ever allowed under contention (the old design's problem was never
+      "attempts too short", it was "so few attempts fit that dagrun_timeout kills the WHOLE
+      DagRun before retries could exhaust" -- more, shorter-ceiling attempts is MORE robust under
+      contention than fewer, longer ones, not less). (2) NEW shared `HEAVY_TASK_RETRY_DELAY =
+      timedelta(seconds=30)` in kpo.py (renamed from customers-only `_KYVERNO_RETRY_DELAY`,
+      identical value) applied to ALL SIX call sites in BOTH DAGs -- orders' stage/dbt_build/
+      publish never had an explicit retry_delay (silently inheriting Airflow's 300s/5min
+      DEFAULT_RETRY_DELAY, a back-port gap of the EXACT same shape as ROUND 20's own
+      orders-publish-resources finding: a customers-side improvement that was never mirrored into
+      orders when orders was written to mirror customers' shape). A shorter, uniform delay is a
+      pure win under contention: it does not reduce single-attempt processing time, only how
+      quickly a FAILED attempt re-enters the scheduling queue, so it strictly helps by cycling
+      through the fixed retries budget faster. (3) customers.stage/dbt_build retries: 6 -> 4
+      (kept HIGHER than orders' 2-3 specifically to preserve MORE of the original
+      KubernetesJobWatcher-race statistical-absorption intent than a uniform cut would, while
+      still fitting safely -- see math below). _DEFAULT_PUBLISH_RETRIES (kpo.py, local profile
+      default): "6" -> "4", kept consistent with customers.stage/dbt_build's new value. CI's
+      publish_retries Airflow Variable (scripts/ci-set-workload-images.sh) stays "3" UNCHANGED --
+      already the tightest-fitting case at the OLD execution_timeout (41.5min/3.5min margin) and
+      now the safest of all eight combinations at the NEW one (25.5min/19.5min margin), no reason
+      to touch it. orders.stage/dbt_build/publish retries: UNCHANGED (3/2/3) -- adding the 30s
+      delay and shrinking execution_timeout alone already brings orders comfortably under budget
+      without touching its retry counts at all.
+  worst_case_arithmetic_post_fix: >
+      POST-FIX WORST CASE (execution_timeout=6min=360s, retry_delay=30s uniformly, CONSTANT per
+      the no-op finding above -- no growth to model): customers.stage = 5x360s + 4x30s = 1920s =
+      32.0min (13.0min / 28.9% margin under dagrun_timeout=45min). customers.dbt_build = 32.0min
+      (same, 13.0min/28.9% margin). customers.publish-local (retries=4) = 32.0min (same,
+      13.0min/28.9% margin -- the TIGHTEST of all eight combinations, still a real, substantial
+      margin). customers.publish-CI (retries=3) = 4x360s + 3x30s = 1530s = 25.5min (19.5min/
+      43.3% margin). orders.stage (retries=3) = 1530s = 25.5min (19.5min/43.3% margin).
+      orders.dbt_build (retries=2) = 3x360s + 2x30s = 1140s = 19.0min (26.0min/57.8% margin).
+      orders.publish (retries=3) = 25.5min (19.5min/43.3% margin). MINIMUM margin across all
+      eight combinations: 13.0min (28.9% of dagrun_timeout) -- a real, substantial margin per
+      this round's own charter, not a barely-under fit. Every combination's worst case remains
+      comfortably fittable even if the actual per-attempt duration under live ~420m-headroom
+      contention runs meaningfully longer than the ~3.6min stage-alone estimate, since the
+      execution_timeout ceiling itself (not a hoped-for shorter real duration) is what the
+      arithmetic is bounded by.
+  reasoning_checkpoint:
+    hypothesis: "dbtkill's dagrun_timeout-force-skip is caused by an internally-inconsistent
+        timeout-budget hierarchy (ROUND 20's own execution_timeout/retries/retry_delay
+        combination can sum past dagrun_timeout=45min in the worst case) COMPOUNDED by a
+        pre-existing CPU-starvation condition that makes worst-case retry sequences a live,
+        recurring reality rather than a theoretical edge case -- rebalancing the arithmetic so
+        every combination fits with a real (>=10min/22%) margin removes the timeout-budget
+        contributing factor without needing to fix CPU-starvation itself this round."
+    confirming_evidence:
+      - "Direct arithmetic, both pre- and post-fix, computed from the ACTUAL installed values in
+        both DAG files (not estimated) -- pre-fix shows 4 of 8 combinations exceed dagrun_timeout
+        outright (customers stage/dbt_build/publish-local at 73.0min; orders stage/publish at
+        55.0min), matching ROUND 20's own live-observed dbtkill mechanism exactly (stage
+        try=3/up_for_retry riding toward its own dagrun_timeout, never reaching a terminal state
+        before the DagRun-level sweep)."
+      - "Direct source read + standalone reproduction of taskinstance.py's exact
+        next_retry_datetime formula confirms retry_exponential_backoff=True is a no-op in this
+        Airflow version -- removing any uncertainty about whether growth (vs constant delay) was
+        driving the over-budget totals; the fix's math uses the CONFIRMED constant-delay model,
+        not an assumed growth model."
+      - "ROUND 20's own root_cause_dbtkill entry explicitly names this as one of TWO contributing
+        factors (the other being CPU-starvation, out of this round's charter) -- this round
+        closes the one factor in scope."
+    falsification_test: "Live CI run: if dbtkill or an equivalent stage/dbt_build/publish task
+        STILL rides to its own dagrun_timeout without reaching a terminal state, despite the
+        rebalanced arithmetic showing >=13min margin in every case, this hypothesis is refuted --
+        it would mean either (a) a single real attempt is taking longer than the new 6min
+        execution_timeout allows for reasons beyond CPU-starvation-induced scheduling delay
+        (execution_timeout itself not being honored, or a genuinely larger workload), or (b) the
+        CPU-starvation condition is now SO severe that even a comfortably-margined arithmetic
+        budget cannot survive it, meaning the two contributing factors are not as separable as
+        ROUND 20 characterized them and CPU-starvation may need to move back in-scope."
+    fix_rationale: "Addresses the ROOT arithmetic defect directly (the budget hierarchy could
+        exceed its own enclosing ceiling BY DESIGN, independent of any contention) rather than
+        papering over dbtkill's specific symptom -- every one of the 6 call sites ROUND 20
+        touched is rebalanced using the SAME formula and the SAME confirmed constant-delay model,
+        not a one-off patch to orders alone (which is all the observed dbtkill failure would have
+        strictly required fixing)."
+    blind_spots: "(1) The ~3.6min single-stage-attempt estimate is derived, not directly
+        measured (measured directly: dbt_build+publish combined <=2min; full cycle ~5.6min;
+        stage-alone is the residual, not an independent live measurement). (2) The 6min
+        execution_timeout is NOT validated against the actual ~420m-headroom contention level
+        specifically -- this round's live-verification run is the first real test of whether 6min
+        is long enough for a single attempt under TODAY's real contention, not just numerically
+        safe on paper. (3) Reducing customers' stage/dbt_build retries 6->4 reduces (does not
+        eliminate) the original KubernetesJobWatcher-race statistical-absorption margin from
+        ROUND 6-era fixes -- if that race turns out to need more than 4 attempts per mapped
+        instance to self-resolve, a NEW named failure could surface, distinct from dbtkill's own
+        CPU-starvation-driven pattern. (4) CPU-starvation itself is unchanged and unaddressed --
+        captured as a follow-up ticket (see cpu_starvation_followup_ticket below), explicitly
+        out of scope this round per the user's own decision."
+  cpu_starvation_followup_ticket: "FILED: .planning/todos/pending/2026-08-29-investigate-cpu-
+      starvation-headroom.md, mirroring .planning/todos/pending/2026-08-28-fix-e2e-chaos-
+      workflow.md's exact frontmatter (created/title/area/files) + ## Problem/## Solution shape.
+      Documents the 86%/2580m-of-3000m baseline + ~420m headroom figures, the 3483 (R19)/3657
+      (R20) FailedScheduling event counts, names ROUND 20's own dbtkill root-cause attribution
+      explicitly, and proposes 4 candidate investigation directions (right-size platform-pod CPU
+      requests; reduce ETL concurrency/requests on the CI profile; trim non-essential CI-profile
+      components; re-run kubectl top/describe for a fresh per-pod audit). .planning/STATE.md's
+      Pending Todos bumped 2 -> 3 with the new bullet."
+  test_idempotent_reupload_disposition: "CONFIRMED no separate action needed: ROUND 20's census
+      showed this test never ran (cut off mid-suite before it could start, behind the
+      still-unresolved DagRun pile-up from finding (4)(d)). It will be re-observed naturally once
+      the rebalanced timeout budget clears the queue-serialization wedge upstream of it -- no
+      test-layer or platform change is needed FOR this test specifically."
+  offline_status: "COMPLETE 2026-08-29: (1) `_common/kpo.py`: HEAVY_TASK_EXECUTION_TIMEOUT
+      10min->6min, new shared HEAVY_TASK_RETRY_DELAY=30s (renamed/promoted from customers-only
+      `_KYVERNO_RETRY_DELAY`), _DEFAULT_PUBLISH_RETRIES '6'->'4', all with the full worst-case-
+      arithmetic math in-comment. (2) `csv_ingest_customers.py`: removed local
+      `_KYVERNO_RETRY_DELAY` (now imports the shared kpo.py constant), stage/dbt_build retries
+      6->4, all 4 retry_delay call sites renamed. (3) `csv_ingest_orders.py`: NEW
+      retry_delay=HEAVY_TASK_RETRY_DELAY on stage/dbt_build/publish (previously unset, silently
+      inheriting Airflow's 300s default); retries UNCHANGED (3/2/3) -- already fit once
+      execution_timeout+delay shrank. (4) `scripts/ci-set-workload-images.sh`: corrected the
+      exponential-backoff comment (was factually wrong per the no-op sub-finding), updated local-
+      default references '6'->'4', CI's own publish_retries=3 left unchanged. (5) `tests/unit/
+      test_dag_structure.py`: `_kpo_attrs` now also captures `retry_delay` for plain (non-mapped)
+      KPO tasks; NEW `test_worst_case_retry_budget_has_real_margin` computes
+      (retries+1)*execution_timeout + retries*retry_delay for all 6 heavy-task call sites and
+      asserts >=10min margin under dagrun_timeout. RED-CONFIRMED via `git stash`: fails against
+      pre-fix code with the EXACT predicted number (customers.publish: '7 attempts x 0:10:00 + 6
+      x 30 seconds = 1 hour 13 minutes' / '-28 minutes' margin, matching the hand-computed 73.0min
+      pre-fix worst case precisely) -- GREEN against the fix. (6) `tests/policy/
+      test_dag_line_budget.py`: orders' budget bumped 170->182 (exact 12 lines added, documented
+      in-file per this file's own established per-round precedent); customers' budget UNCHANGED
+      (still tracked separately, net line count unchanged at 219 -- removal of the 6-line
+      _KYVERNO_RETRY_DELAY block offset by comment/import additions). VERIFICATION: `make
+      manifests` unaffected (540/378/0/0, identical to R20 baseline, zero helm/ touched this
+      round); `pytest tests/unit` 567 passed (566 R20 baseline + 1 new test); `pytest tests/
+      dagtest` 14 passed (unchanged); `pytest tests/policy` 2 failed/167 passed -- confirmed via
+      direct inspection to be the SAME 2 pre-existing failures as R20's own documented baseline
+      (test_csv_ingest_customers_stays_under_150_lines -- customers still over its own
+      separately-tracked budget at 219 lines; test_the_main_gate_does_not_lint_the_bad_samples --
+      unrelated pre-existing lint-sample issue); `ruff check` on all modified files: all checks
+      passed (zero new findings); `ruff format --check` on all modified files: all 5 already
+      formatted (zero new diffs); `ruff format --check .` (whole repo) and `mypy airflow/dags`
+      both confirmed via `git stash` diff to be BYTE-IDENTICAL pre- and post-fix (17 files
+      reformatted/333 formatted; 222 mypy errors in 10 files, both counts unchanged) -- zero new
+      formatting or type-checking regressions anywhere in the repo. `tests/integration`
+      (testcontainers) NOT re-run, matching ROUND 20's own established precedent: zero
+      packages/dataplat or csv_processor source changes this round, unaffected surface."
+  live_verification_state: "PENDING PUSH"
+  next_action: "Commit code + docs (docs-only push separately per this session's own established
+      push-ordering convention if pushed in the same session as a later docs-only follow-up),
+      push, record the authoritative e2e-full.yml + companion publish.yml run IDs, return a
+      human-action checkpoint (do not self-watch)."
+
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
 dispositions; ceiling stays 190 -- SUPERSEDED BY ROUND 18 OUTCOME BELOW):
