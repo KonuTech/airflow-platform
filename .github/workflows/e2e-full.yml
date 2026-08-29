@@ -45,8 +45,27 @@ on:
 permissions:
   contents: read
 
+# ROUND 24 live-discovered trap: the ORIGINAL `${{ github.workflow }}-${{ github.ref }}` group
+# put every `workflow_dispatch` (narrow-scope) run in the EXACT SAME concurrency group as every
+# `push`-triggered full-suite run on `main` -- with `cancel-in-progress: false` for non-`pull_
+# request` events, a `workflow_dispatch` dispatched while a `push` run was already `in_progress`
+# does not run in parallel, it QUEUES silently behind the full-suite run (observed live: `gh run
+# view` showed `status: pending`, zero jobs, for several minutes) -- defeating Track A's entire
+# purpose (a CHEAP, FAST narrow verification, decoupled from the full suite's own wall-clock).
+# Appending `inputs.pytest_scope` (empty string for `push`/a blank-scope dispatch, the target
+# node-id string for a genuine narrow-scope dispatch) gives every DISTINCT narrow scope its own
+# concurrency group, so it runs independently of (never queues behind, never cancels) whatever
+# full-suite run happens to already be `in_progress` on the same ref. A `push` and a blank-scope
+# manual dispatch still correctly share ONE group (both mean "run the whole suite"), preserving
+# the original single-full-suite-at-a-time semantics for that case.
+# NOTE: `github.event.inputs.pytest_scope`, NOT the `inputs.pytest_scope` context used
+# elsewhere in this file's own job/step-level `if:`/`run:` blocks -- live-verified (GitHub's own
+# community discussions, cross-checked before use) that the newer `inputs` context is NOT
+# available in a WORKFLOW-level (top-level) `concurrency:` key for a `workflow_dispatch`-
+# triggered run; only the classic `github.event.inputs.*` path resolves there. Job/step-level
+# `if:`/`run:` contexts (used elsewhere in this file) do not have this restriction.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pytest_scope || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

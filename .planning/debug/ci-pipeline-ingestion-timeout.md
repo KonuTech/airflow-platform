@@ -10969,6 +10969,35 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     detail (criteria a-e, duration decomposition, guards).
   timestamp: 2026-08-29 (ROUND 23 post-run analysis)
 
+- checked: "Live dispatch behavior of the new `workflow_dispatch` `pytest_scope` input
+    immediately after this round's first push (commit e2a7b1f): `gh workflow run e2e-full.yml
+    --ref main -f pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py` while the push-
+    triggered Track B run (33272070899) was already `in_progress` on the same ref."
+  found: >
+    The dispatched run (33272084103) sat at `status: pending` with ZERO jobs (`gh run view
+    --json status,conclusion,jobs` returned `jobs: []`) for several minutes -- not merely
+    "waiting for a runner" (which would show a queued job entry) but genuinely blocked. Root
+    cause: the workflow's original top-level `concurrency: { group: "${{ github.workflow }}-${{
+    github.ref }}" }` put EVERY `workflow_dispatch` run in the EXACT SAME group as every `push`
+    run on `main` -- and `cancel-in-progress` is `false` for non-`pull_request` events, so a
+    `workflow_dispatch` started while a `push` run is `in_progress` does not run in parallel,
+    it silently QUEUES behind it. This would have defeated Track A's entire purpose (get a
+    result MUCH faster than the full 190-min job) had it gone unnoticed.
+  implication: >
+    Fixed by keying the concurrency group on `github.event.inputs.pytest_scope` (empty string
+    for `push`/a blank-scope dispatch, the target string for a genuine narrow-scope dispatch) --
+    confirmed via GitHub's own community discussions that the newer `inputs` context is NOT
+    available in a workflow-level (top-level) `concurrency:` key for `workflow_dispatch`, only
+    the classic `github.event.inputs.*` path resolves there (the job/step-level `if:`/`run:`
+    blocks elsewhere in this same file correctly use `inputs.pytest_scope`, a DIFFERENT context
+    scope with no such restriction). Cancelled the wedged dispatch (33272084103), pushed the
+    fix as a standalone `[skip ci]` commit (a workflow-orchestration bugfix needs no live
+    verification of its own beyond the re-dispatch succeeding, and a redundant duplicate
+    full-suite `push`-triggered run would be pure waste while Track B is already running under
+    the OLD group name), then re-dispatched. See live_verification_state for the resulting run
+    IDs.
+  timestamp: 2026-08-29 (ROUND 24, live-discovered mid-round)
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
