@@ -1697,6 +1697,23 @@ ROUND 22 OUTCOME (2026-08-29, post-run analysis of run 33239055603, headSha 2009
       splitting retired; CPU-starvation remediation stays out of scope; SCD2/rebuild fix owned by
       its own parallel thread; offline 'CI' workflow failures out of scope; carried follow-ups
       unchanged."
+  push_ordering_note: "This turn's own two commits (e1f8782, the minio-credentials.sh fix; then a
+      docs commit carrying this round's outcome, marked skip-ci per this session's established
+      convention since triggering a run was not yet authorized) were pushed together in ONE `git
+      push` -- confirmed via `gh api .../commits/e1f8782/check-runs` and `.../commits/<docs-sha>/
+      check-runs` both returning `total_count: 0`. Per this session's own push_ordering_correction
+      precedent (recorded under ROUND 19 above), GitHub evaluates the skip-ci marker against the
+      PUSH's head commit only -- since the docs commit was HEAD, the entire push's workflow
+      triggering was suppressed, INCLUDING the minio-credentials.sh fix commit. In this specific
+      case that outcome is actually convenient (no live-verification run should start before the
+      user decides how to proceed on this checkpoint) but it is NOT yet confirmed intentional
+      going forward -- flagging explicitly so it is not mistaken for a deliberate choice. ACTION
+      FOR WHOEVER TRIGGERS THE NEXT VERIFICATION RUN: the retrigger push must be its own separate
+      `git push` whose head commit's message does not carry the marker text anywhere (not even in
+      an explanatory/quoting context, per this session's own rule 2) -- an empty-diff or small
+      correction commit pushed alone is sufficient to retrigger against the current HEAD (which
+      already contains the ROUND 22 fixes, the SCD2 fix, and this round's minio-credentials.sh
+      fix)."
 
 ROUND 18 (2026-08-28, opened on user decision confirming the FINAL targeted round exactly as
 recommended -- fix (24) + (26) diagnostics rider + three accepted-behavior/test-budget
