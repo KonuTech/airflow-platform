@@ -196,7 +196,20 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-29 (COMBINED VERIFICATION OUTCOME: live run 33246473899, headSha cba2a55,
+updated: 2026-08-29 (ROUND 23 offline COMPLETE: reverted dbtkill's ROUND 22 poll-budget bump
+  (_DBT_BUILD_POLL_TIMEOUT_SECONDS 2400 -> 300) after the combined-verification run's own direct
+  evidence ("last observed: None" regardless of budget size) disproved its retry-exhaustion
+  theory; fixed the newly-found scd_concurrent zero-margin timeout race by decoupling its own
+  `_wait_for_new_dag_run_terminal` poll (new 1800s constant, reusing this file's own established
+  precedent) from `dagrun_timeout`'s numerically-identical 2700s; deferred the real dbtkill
+  scheduling investigation to ROUND 24 after confirming the 'fast, safe, no-new-run' diagnostics
+  path was NOT viable (the existing end-of-job dump is truncated by the job-cancellation grace
+  period on CANCELLED runs -- a genuine, newly-found gap, itself deferred). Offline battery green
+  at established baseline parity: manifests 540/378/0/0, unit 568 (ROUND 22 baseline 567 + 1 from
+  the already-committed, unrelated SCD2 fix landing on HEAD between rounds), dagtest 14, policy
+  2/167 (same 2 pre-existing baseline failures), ruff/mypy/format zero NEW findings (confirmed via
+  git-stash diff). Awaiting live CI verification. See Current Focus ROUND 23 block.)
+updated_prior_round23: 2026-08-29 (COMBINED VERIFICATION OUTCOME: live run 33246473899, headSha cba2a55,
   conclusion=CANCELLED at the 190-min job ceiling (09:51:58Z->13:02:49Z), NOT a manual cancel and
   NOT superseded. MinIO credentials bootstrap SUCCEEDED cleanly this run (`cluster-up complete` at
   09:57:57Z, zero unmarshal/stringData errors) -- the quoting fix is CONFIRMED, no regression.
@@ -545,6 +558,209 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 23 (2026-08-29, opened on user decision after the combined-verification outcome below:
+revert dbtkill's ROUND 22 poll-budget bump (confirmed to just burn wall-clock for an identical
+failing outcome), fix the newly-found scd_concurrent zero-margin timeout race, and decide
+sequencing for the real dbtkill scheduling investigation):
+  charter: "(1) Revert `_DBT_BUILD_POLL_TIMEOUT_SECONDS` (tests/e2e/slice/test_pod_kill_retry.py)
+      from ROUND 22's 2400s back to 300s -- the EXACT value in effect from this test's original
+      authoring through ROUND 21 (confirmed via `git log -p`: always a bare inline `timeout=300`
+      until ROUND 22 introduced the named constant and bumped it), since the combined-verification
+      run's own direct evidence (`last observed: None` -- meta.run_stages never got a DBT_BUILD
+      row at all within the FULL 2400s window) proves more budget buys ZERO improvement in
+      eventual outcome for this specific failure, only 40 wasted minutes instead of ~10. Leave
+      ROUND 22's other two changes (`wait_for_orders_dagrun_queue_idle`'s 2400s budget -- u3
+      CONFIRMED clearing this run; orders' retries bumped to match customers) untouched -- neither
+      is implicated by this finding. (2) Fix `test_scd_concurrent_attribute_change_and_correction_
+      same_key`'s newly-discovered zero-margin design flaw: its own `_wait_for_new_dag_run_terminal`
+      poll and `csv_ingest_customers`'s `dagrun_timeout=45min` were both set to the numerically
+      IDENTICAL 2700s with no designed margin, producing an ambiguous race between two
+      independently-clocked timers. (3) Decide dbtkill scheduling-investigation sequencing
+      (second half this round, or explicit ROUND 24 deferral) based on whether direct stage
+      TI/pod-log evidence for a dbtkill-class run can be gathered safely from ALREADY-SAVED
+      diagnostics data, without a new live run or any budget/code change to production paths."
+  pre_registered_criteria:
+    - "(a) dbtkill fails FASTER than ROUND 22's 2400s/40min (confirms the revert stops the
+      wall-clock bleeding), even if it still fails for its real underlying reason."
+    - "(b) scd_concurrent's race is resolved -- clean fail on whichever side is correct
+      (this test's own poll, per the fix below), no more ambiguous zero-margin timeout."
+    - "(c) u3/podkill/OOMKilled-publish/MinIO-quoting/sweep-assertion-10 stay clean (regression
+      checks -- none of this round's changes touch their mechanisms)."
+    - "(d) STRETCH, not a hard requirement: if the dbtkill revert's wall-clock savings give this
+      run enough headroom before the 190-min ceiling, the SCD2 rebuild fix and
+      orphan/idempotent_reupload finally get REACHED and verified (still zero live-verification
+      information on any of the three as of this round's own start)."
+    - "(e) zero new failures beyond dbtkill's own known (and now faster) failure."
+  dbtkill_diagnostics_investigation: >
+      Attempted the 'fast, safe, no-new-run' path FIRST, per this round's own sequencing
+      guardrail: mined the ALREADY-SAVED scratchpad log from the combined-verification run
+      (round22-combined-job.log, 13,193 lines, still present in this session's scratchpad) for
+      direct stage/discover TI or pod-log evidence naming meta.ingestion_runs.run_id=1348 (the
+      exact run_id the failing assertion named). RESULT: the evidence is NOT recoverable from this
+      saved log, and the reason is itself a genuine, newly-found diagnostics gap, distinct from
+      the original dbtkill question. Direct evidence: (1) grepping the entire log for
+      'e2e-dbtkill-' finds exactly ONE dag_run_id anywhere (`e2e-dbtkill-599155fd318d`,
+      12:00:28Z->12:02:31Z, ~2min) -- but this DagRun's own TI history shows `stage` and
+      `dbt_build` BOTH state='skipped'/try=0/start=None while `discover`/`integrity_gate`(x15)/
+      `publish` all state='success', a NO-OP-publish-pass signature (nothing new to stage), NOT
+      the failing test's own DagRun (which drove run_id=1348 through a 2400s dbt_build-signal
+      poll that never once saw a DBT_BUILD row -- structurally incompatible with `stage` having
+      already reached SUCCEEDED, which `e2e-dbtkill-599155fd318d`'s own publish=success implies
+      it must have). (2) The 'ROUND 12: meta.ingestion_runs -> meta.files mapping' end-of-job dump
+      (the ONE query capable of directly confirming which file/DagRun owns run_id=1348) is
+      PIPED THROUGH `tail -120` in `.github/workflows/e2e-full.yml` and, for this CANCELLED run,
+      printed only 17 total rows before the transcript moves straight to the NEXT diagnostics
+      section's echoed header -- implausibly few for a 3-hour session that ran a full 2-year
+      backfill sweep (dozens of files), and with zero '(N rows)' psql footer ever printed for this
+      query. CONCLUSION: the job's cancellation grace-period kill (GH Actions' SIGTERM->SIGKILL
+      window when a `timeout-minutes` ceiling fires) truncated this psql query MID-STREAM, before
+      it reached later run_ids including 1348 -- the existing end-of-job diagnostics dump is
+      UNRELIABLE specifically on CANCELLED (vs self-terminated) jobs, a real gap distinct from and
+      in addition to the original dbtkill scheduling question, not something this round's own
+      charter scoped in to fix (no diagnostics-script changes made this round)."
+  dbtkill_sequencing_decision: >
+      DEFERRING the dedicated dbtkill scheduling investigation to ROUND 24, explicitly, per the
+      charter's own allowance. Rationale: the 'fast, safe, no-new-run' path was tried in good
+      faith first and failed to produce usable evidence (see above) -- the direct TI/pod-log
+      evidence this investigation needs genuinely requires a FRESH live run, which is exactly the
+      kind of live-observation dependency this round's own guardrail names as the reason to defer
+      rather than force this round. Building diagnostics instrumentation robust to
+      cancellation-truncation (e.g., writing the ingestion_runs/schema_versions/silver dumps to a
+      file INSIDE the cluster as each query completes, rather than accumulating psql output in a
+      single shell pipeline vulnerable to a mid-stream kill) is itself a real, scoped diagnostics
+      change deserving its own round, mirroring this session's own ROUND 19 diagnostics-first
+      precedent -- not something to improvise as a rushed 'second half' alongside two already-real
+      fixes in the same round. This round's own revert (2400s->300s) should also, as a side
+      effect, free up ~35+ minutes of job wall-clock on the next run (dbtkill now fails in
+      ~minutes instead of ~40min), which improves (but does not guarantee) the odds that a future
+      run's own end-of-job diagnostics dump completes untruncated -- worth observing on this
+      round's own upcoming live-verification run before designing ROUND 24's specific
+      instrumentation."
+  fix_design: >
+      (1) `_DBT_BUILD_POLL_TIMEOUT_SECONDS`: 2400 -> 300 (tests/e2e/slice/test_pod_kill_retry.py),
+      comment rewritten in place documenting the ROUND 22 bump, the ROUND 23 disproof (`last
+      observed: None` regardless of budget size), and the explicit instruction not to re-bump
+      without new evidence distinguishing 'needs more time' from 'stuck/never-scheduled'. (2) New
+      module constant `_SCD_CONCURRENT_DAG_RUN_TERMINAL_TIMEOUT_SECONDS = 1800`
+      (tests/e2e/slice/test_backfill_2year_sweep.py), replacing the bare `timeout=2700` at
+      `_wait_for_new_dag_run_terminal`'s call site inside
+      `test_scd_concurrent_attribute_change_and_correction_same_key` ONLY -- the other two 2700s
+      waits in the same test (`_wait_for_new_backfill_completed`, `_wait_for_dataset_files_
+      terminal`) are left untouched, since neither is the single-DagRun-state-poll-vs-
+      dagrun_timeout race this round's own finding identified, and touching them would be
+      unscoped. 1800s reuses this SAME test file's own already-established precedent value for
+      the structurally-identical `_wait_for_new_dag_run_terminal` call in
+      `test_idempotent_rerun_of_full_backfill_produces_zero_delta` (orders' asset-cascade wait) --
+      not a fresh guess -- and gives 900s/33% real margin under `dagrun_timeout=2700s`, comfortably
+      above this test's own historical worst-observed FULL-test duration (16.5min/990s, this
+      debug file's own long-running scd_concurrent duration-variance watch item) with +82% margin
+      for legitimate slow-but-correct completion."
+  reasoning_checkpoint:
+    hypothesis: "(A) dbtkill: ROUND 22's poll-budget bump (300s->2400s) did not address the real
+        mechanism behind dbtkill's failure (stage never reaching SUCCEEDED / DBT_BUILD's status
+        row never being written) -- it only made the SAME eventual failure slower to observe,
+        because the bump's own theory (retries genuinely stacking toward a larger but still
+        finite worst case) is contradicted by 'last observed: None' at 2400s (a budget already
+        25% over the post-bump theoretical retry-exhaustion ceiling of 1920s). (B) scd_concurrent:
+        the test's own poll and the DAG's own dagrun_timeout being numerically identical (2700s
+        both) is a genuine zero-margin design defect, not a coincidence, because the two clocks
+        start from different reference points (poll: call-time; dagrun_timeout: DagRun start_date)
+        that can diverge under real scheduling delay, making the ambiguous 'last observed state:
+        running' failure structurally likely whenever a run's total time approaches the shared
+        ceiling."
+    confirming_evidence:
+      - "dbtkill: direct AssertionError text from the combined-verification run --
+        'meta.run_stages[run_id=1348, stage_name=DBT_BUILD] never reached status=RUNNING within
+        2400s (last observed: None)' -- None means DBT_BUILD's row was NEVER WRITTEN, i.e. `stage`
+        never reached SUCCEEDED even once in 2400s, directly falsifying ROUND 22's own
+        retry-exhaustion-needs-more-budget theory (retry exhaustion would still eventually WRITE
+        the DBT_BUILD row once `stage` succeeds on some attempt within budget; 'None' means it
+        never got there at all)."
+      - "scd_concurrent: direct source read of both `_wait_for_new_dag_run_terminal` (deadline =
+        `time.monotonic() + timeout` at CALL time) and `csv_ingest_customers`'s
+        `dagrun_timeout=pendulum.duration(minutes=45)` (deadline = DagRun's own `start_date` +
+        2700s) -- two different reference points for numerically identical budgets is sufficient,
+        by construction, to make the poll's own deadline arrive before the DAG's own enforcement
+        whenever the DagRun's `start_date` lags the poll's call time (exactly what real CPU
+        contention on this cluster produces, per every prior round's own FailedScheduling
+        evidence)."
+    falsification_test: "dbtkill: if the NEXT live run's dbtkill failure still burns anywhere near
+        300s waiting (rather than failing near-instantly the way a poll with 'last observed: None'
+        the whole time should), or if it now unexpectedly PASSES, that would refute 'more budget
+        never helps' and require re-examining whether contention level varies enough run-to-run to
+        make this a timing coincidence rather than a structural finding. scd_concurrent: if a
+        FUTURE run's scd_concurrent test still shows the SAME 'last observed state: running'
+        message with the NEW 1800s budget, that would mean this specific poll's own worst-case
+        completion time now regularly exceeds 1800s under current contention levels -- a real,
+        adjudicable finding pointing at contention severity, not a design flaw in the timer
+        separation itself (which will have done its job: producing an unambiguous, attributable
+        failure instead of a coin-flip race)."
+    fix_rationale: "Both fixes address the ROOT cause each finding actually named, not a
+        symptom: dbtkill's revert removes a budget increase whose own justifying theory is
+        directly disproven by this session's own live evidence, restoring wall-clock efficiency
+        while the REAL 'why does DBT_BUILD never appear' question is investigated separately with
+        the right evidence (deferred, not abandoned). scd_concurrent's fix removes the specific
+        zero-margin coincidence a direct source read identified as the actual defect (two
+        differently-clocked timers sharing one numeric value), reusing this file's OWN established
+        precedent value rather than inventing a new number, and deliberately keeping the test's
+        own poll the tighter of the two so a slow run in the future fails here first with an
+        attributable message instead of racing dagrun_timeout's own blunt force-skip."
+    blind_spots: "(1) 300s for dbtkill's poll is a REVERT to a value that itself predates every
+        later DAG-level retry/timeout rebalance in this session (ROUND 20/21/22) -- it is possible
+        the correct HEALTHY-case duration for `stage` to reach SUCCEEDED (not exhaust) has grown
+        even under normal conditions, in which case 300s could now be genuinely too tight for a
+        completely healthy run, not just fast-failing for a stuck one; this round has zero live
+        evidence either way and is treating 'faster failure for an identical bad outcome' as the
+        only claim actually being tested. (2) The dbtkill scheduling investigation itself remains
+        completely open -- 'why does DBT_BUILD never appear' is NOT answered this round, only
+        deferred with a documented reason; ROUND 24 could find the real mechanism is unrelated to
+        budgets entirely (e.g., a genuine scheduling starvation or eligibility-query bug). (3)
+        1800s for scd_concurrent is reused from a DIFFERENT test's own precedent (orders'
+        asset-cascade wait) -- it has not been independently measured for THIS specific
+        customers-dataset concurrent-SCD-write scenario, so it carries the same kind of
+        estimation risk this session has repeatedly found in reused/borrowed budget values. (4)
+        CPU-starvation itself remains unaddressed and out of scope, per every round's own
+        guardrail -- if it has worsened further, BOTH of this round's fixes could still produce
+        failures, just faster/cleaner ones than before, which is the actual, explicitly-scoped
+        goal (not a claim that CPU-starvation itself is fixed)."
+  offline_status: "COMPLETE 2026-08-29: (1) tests/e2e/slice/test_pod_kill_retry.py:
+      `_DBT_BUILD_POLL_TIMEOUT_SECONDS` 2400 -> 300, comment rewritten with the ROUND 23 revert
+      rationale (kept as a named constant, not reverted to an inline literal). (2)
+      tests/e2e/slice/test_backfill_2year_sweep.py: new module constant
+      `_SCD_CONCURRENT_DAG_RUN_TERMINAL_TIMEOUT_SECONDS = 1800` with full derivation comment,
+      placed immediately above `test_scd_concurrent_attribute_change_and_correction_same_key`;
+      that test's own `_wait_for_new_dag_run_terminal` call site switched from the bare
+      `timeout=2700` to this constant, with an inline ROUND 23 note; the OTHER two 2700s waits in
+      the same test left untouched with a note explaining why. VERIFICATION: `make manifests`
+      540/378/0/0 (byte-identical to every prior round's baseline -- zero helm/ touched, expected,
+      since this round touches only tests/e2e); `pytest tests/unit` 568 passed (+1 vs ROUND 22's
+      567 -- confirmed via `git status`/`git log` this is the ALREADY-COMMITTED, unrelated SCD2
+      rebuild-fix's own new test landing on HEAD between rounds, NOT a regression or an effect of
+      this round's own 2-file diff, which touches only tests/e2e/slice); `pytest tests/dagtest` 14
+      passed (unchanged); `pytest tests/policy` 2 failed/167 passed -- CONFIRMED the SAME 2
+      pre-existing baseline failures (`test_csv_ingest_customers_stays_under_150_lines`,
+      `test_the_main_gate_does_not_lint_the_bad_samples`) as every prior round; the second of
+      those two surfaces a pre-existing (confirmed via `git stash` diff, present on HEAD before
+      this round's own edits) unrelated W505/E501 line-length violation at
+      test_backfill_2year_sweep.py:1286 that this round did NOT introduce and is not in scope to
+      fix. `ruff check` on both modified files: zero NEW findings (the one E501/W505 pair at line
+      1286 confirmed pre-existing via `git stash` diff, unrelated to either of this round's own
+      edited regions). `ruff format --check` on both files: pre-existing unrelated drift only
+      (5 blocks in test_backfill_2year_sweep.py, 1 in test_pod_kill_retry.py, confirmed
+      byte-identical via `git stash` diff -- same drift, same line content, exists on HEAD before
+      this round's edits). `mypy airflow/dags` (the established baseline scope): 222 errors in 10
+      files, byte-identical count to every prior round's baseline (this round touches zero
+      airflow/dags files). `pytest tests/e2e/slice/test_pod_kill_retry.py
+      tests/e2e/slice/test_backfill_2year_sweep.py --collect-only` succeeds (10 tests collected,
+      confirms both edited files remain syntactically/structurally sound). `tests/integration`
+      (testcontainers) NOT re-run, matching every prior round's own established precedent: `git
+      diff --stat HEAD` confirms zero packages/dataplat or csv_processor source changes this round
+      (2 tests/e2e/slice files + 1 pre-existing unrelated .planning/HANDOFF.json deletion not
+      touched by or staged in this round's own commit)."
+  live_verification_state: "PENDING -- see the bottom of this section for the run ID and
+      criteria once pushed."
+  next_action: "SUPERSEDED once pushed -- see the live-verification recording appended below."
 
 COMBINED VERIFICATION OUTCOME (2026-08-29, post-run analysis of run 33246473899, headSha
 cba2a550886eff02f774654958051f77edfc64c7 -- CURRENT STATE, evaluated against THREE independent
@@ -10222,6 +10438,48 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     INTERACTION with ROUND 22's own longer retry/poll windows is flagged explicitly for the next
     round's decision rather than resolved unilaterally here.
   timestamp: 2026-08-29 (combined-verification post-run analysis, run 33246473899)
+
+- checked: >
+    ROUND 23 offline: source read of tests/e2e/slice/test_pod_kill_retry.py's
+    `_DBT_BUILD_POLL_TIMEOUT_SECONDS` derivation and `git log -p` for the constant's own history;
+    the ALREADY-SAVED scratchpad log from the combined-verification run
+    (round22-combined-job.log) for direct run_id=1348 stage/discover TI or pod-log evidence;
+    csv_ingest_customers.py's `dagrun_timeout` value vs test_backfill_2year_sweep.py's
+    `_wait_for_new_dag_run_terminal` call site inside `test_scd_concurrent_attribute_change_and_
+    correction_same_key`; `.github/workflows/e2e-full.yml`'s ROUND 12 ingestion_runs/meta.files
+    mapping dump's own `tail -120` pipeline.
+  found: >
+    (1) `git log -p` confirms `_poll_dbt_build_running_signal`'s timeout was a bare inline
+    `timeout=300` from this test's original authoring through ROUND 21 -- ROUND 22 was the ONLY
+    round that ever changed this value (300 -> 2400). (2) Mining the saved combined-verification
+    log for direct run_id=1348 evidence FAILED: the only 'e2e-dbtkill-*' dag_run_id anywhere in
+    the 13,193-line log (`e2e-dbtkill-599155fd318d`) shows a NO-OP-publish-pass TI signature
+    (stage/dbt_build both skipped/try=0, discover/integrity_gate/publish all success) --
+    structurally incompatible with the failing test's own run_id=1348 (which polled for a
+    DBT_BUILD row that never appeared, implying `stage` never reached SUCCEEDED at all) -- so this
+    is NOT the same DagRun/run despite being the only dbtkill-prefixed marker in the log. The
+    'ROUND 12: meta.ingestion_runs -> meta.files mapping' dump (the one query that could directly
+    resolve which file/DagRun owns run_id=1348) printed only 17 total rows for this CANCELLED run
+    (implausibly few for a 3-hour session with a full 2-year backfill sweep) with no '(N rows)'
+    footer -- consistent with the job's own cancellation grace-period kill truncating this `psql`
+    query mid-stream in `.github/workflows/e2e-full.yml`'s `| tail -120` pipeline, before later
+    run_ids (including 1348) were ever reached. (3) Direct source read confirms
+    `_wait_for_new_dag_run_terminal`'s deadline is computed from `time.monotonic()` at CALL time,
+    while `dagrun_timeout` is computed from the DagRun's own `start_date` -- both set to the
+    numerically identical 2700s, these are two independently-clocked timers whose divergence is
+    driven entirely by real scheduling delay between poll-call-time and actual DagRun start,
+    exactly the condition this cluster's chronic CPU-starvation produces every round.
+  implication: >
+    (1) Confirms 300s is a genuine REVERT (not a fresh guess) -- the exact value this poll used
+    for the entire session prior to ROUND 22's now-disproven bump. (2) The 'fast, safe, no-new-run'
+    path for the dbtkill scheduling investigation is NOT viable this round -- the needed evidence
+    was never captured due to an independent, newly-found diagnostics-truncation-on-cancellation
+    gap, not because the data doesn't exist in principle. This gap itself is a real finding worth
+    fixing, but is explicitly deferred (not fixed) this round -- see ROUND 24 sequencing decision
+    in Current Focus. (3) Confirms the scd_concurrent zero-margin design flaw is real and
+    structural (not a one-off coincidence), justifying decoupling the two clocks with real margin
+    rather than treating this as an unexplained one-time contention spike.
+  timestamp: 2026-08-29 (ROUND 23 offline investigation, pre-fix)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
