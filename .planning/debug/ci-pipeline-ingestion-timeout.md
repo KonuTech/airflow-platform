@@ -12708,3 +12708,20 @@ remains untouched and independent throughout. Per the user's own stated threshol
 into a decision point (options: seed a minimal orders fixture and attempt #7; accept the SCD2
 fix as offline-verified-only; or pursue a non-live-CI verification approach) rather than an
 unprompted seventh attempt -- returned via checkpoint, not decided here.
+
+---
+
+POINTER NOTE (2026-08-30, appended by the sibling `rebuild-scd2-reconciliation` debug session,
+now RESOLVED): the SCD2 fix (a0cc2f5) verification chase referenced immediately above (the six
+consecutive live-CI narrow-scope misses for six distinct reasons, never once implicating
+`recompute.py`/`scd.py`'s own logic) has concluded. The user's decision-checkpoint chose the
+non-live-CI verification option: a new self-contained testcontainers-PostgreSQL integration
+test (`tests/integration/test_scd2_cross_file_tie_determinism.py`) now exercises the REAL
+production call path (`SCDPublisher.publish()` -> the real, un-ordered `_BRONZE_HISTORY_SQL`)
+against a real Postgres instance seeded with the exact cross-file-tie bug shape, under both
+possible physical row-insertion orders, and passes. `.planning/debug/rebuild-scd2-reconciliation.md`
+is now marked `status: resolved`, with the SCD2 fix's verification standard explicitly stated
+as SQL-layer-integration-verified rather than live-E2E-confirmed. No further Track A live
+dispatches for the SCD2 fix specifically are planned; Track B (dbtkill diagnostics, run
+33272070899, this session's own separate, ongoing scope) is entirely unaffected and untouched
+by this closure.

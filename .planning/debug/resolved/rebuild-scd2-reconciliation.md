@@ -1,8 +1,37 @@
 ---
-status: awaiting_live_verification
+status: resolved
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-30 (ROUND 24 Track A ATTEMPT #6 TERMINAL: run 33277154631, headSha
+updated: 2026-08-30 (ROUND 25 -- SESSION RESOLVED via SQL-layer testcontainers integration
+  verification, closing the live-CI narrow-scope chase after six consecutive infra-only misses.
+  User decision-checkpoint chose option (3): a self-contained testcontainers PostgreSQL
+  integration reproduction of the exact cross-file-tie bug shape, bypassing live Airflow/kind
+  orchestration entirely. New file `tests/integration/test_scd2_cross_file_tie_determinism.py`
+  (2 tests) drives the REAL production entry point (`SCDPublisher.publish()`, which internally
+  executes the REAL, un-ordered `_BRONZE_HISTORY_SQL` -- not a hand-built Python list) against
+  a real Postgres instance seeded with a genuine cross-file tie (two bronze rows, same
+  event_ts, same source_row_number, different file_id, different name/country -- the exact
+  shape this file's root_cause identifies), in two sub-cases whose PHYSICAL row-insertion
+  order into Postgres is reversed relative to each other (ascending vs descending file_id).
+  Both sub-cases published an IDENTICAL version chain, with the current/winning row correctly
+  carrying the HIGHER file_id's content in both -- direct, real-SQL-layer confirmation that
+  the fix's `(event_ts, file_id, source_row_number)` sort key neutralizes Postgres' own
+  genuinely-unordered read order, closing the exact non-determinism class this session
+  diagnosed. A second test reconstructs the PRE-FIX `(event_ts, source_row_number)`-only
+  tie-break against the SAME real, Postgres-fetched rows and shows it disagrees with itself
+  (and with the fix's correct answer) depending purely on hypothetical retrieval order --
+  strengthening, not duplicating, the existing pure-function regression test
+  (`test_cross_file_event_ts_and_source_row_number_tie_is_order_independent`) with genuine
+  SQL-layer evidence. Both new tests pass; the full offline battery (unit 568/568, the 5
+  SCD-related integration files run together incl. the new one -- 33/33, policy 167
+  passed/2 failed byte-identical to the established pre-existing baseline, ruff/ruff-format
+  clean on the new file) shows zero regressions. NO production code
+  (`recompute.py`/`scd.py`) was touched -- this round only adds a test. See Resolution for
+  the final verification-standard wording. Live end-to-end verification via CI is formally
+  abandoned as a goal for this fix -- see Resolution.verification for the explicit reasoning.
+  Prior six-round live-CI narrative retained below for history.)
+updated_prior_round24_trackA_attempt6_terminal: 2026-08-30 (ROUND 24 Track A ATTEMPT #6
+  TERMINAL: run 33277154631, headSha
   8b9d5ee53e018ce02b481af0ce9f8483c9758f28, workflow_dispatch,
   pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py, terminal conclusion=failure,
   2026-08-29T21:52:03Z -> 22:02:51Z (~11 min). GENUINE FORWARD PROGRESS: the Step-0
@@ -109,15 +138,21 @@ hypothesis: CONFIRMED (framing (B), not (A) -- see Evidence). `dataplat.scd.reco
     sibling session (settle-wait only started succeeding then) -- NOT something introduced by rounds
     18-21's changes, which touched only test-harness timeout/quarantine/schema code, never
     `dataplat/scd/*` or `load/publish/scd.py`.
-test: Executed a direct, isolated reproduction of `recompute_version_chain` (scratch script,
-    packages/dataplat importable standalone, no cluster needed) with two synthetic `BronzeRecord`s
-    for the same customer_id sharing an identical `(event_ts, source_row_number)` pair but
-    different `name`/`country`, fed in the two possible relative orders. See Evidence for the
-    exact result.
-expecting: If the hypothesis is correct, the two input orderings must produce DIFFERENT
-    `VersionRow` chains (different `is_current` row's name/country, and a different group-boundary
-    assignment) purely as a function of input list order, despite `recompute_version_chain`
-    re-sorting its input itself (proving the sort key alone is not a safe total order).
+test: ROUND 25 (final): built a self-contained testcontainers-Postgres integration test
+    (`tests/integration/test_scd2_cross_file_tie_determinism.py`) that drives the REAL
+    production entry point (`SCDPublisher.publish()` -> the real `_BRONZE_HISTORY_SQL`, no
+    `ORDER BY`) against a real Postgres instance seeded with the exact cross-file-tie bug shape,
+    in two sub-cases whose PHYSICAL bronze-row insertion order is reversed relative to each
+    other. A second test reconstructs the pre-fix `(event_ts, source_row_number)`-only tie-break
+    against the SAME real, Postgres-fetched rows. This SUPERSEDES the SIXTH-consecutive-live-CI-
+    miss chase documented in `updated_prior_round24_trackA_attempt6_terminal` above and in the
+    Evidence entries below (retained for history) -- see the newest Evidence entry and
+    Resolution for the outcome.
+expecting: Both physical-insertion-order sub-cases must publish an IDENTICAL version chain
+    with the current/winning row carrying the HIGHER file_id's content in both, proving the real
+    SQL path (not just the pure function) is order-independent; the pre-fix reconstruction must
+    disagree with itself across hypothetical retrieval orders, proving the OLD key was unsafe
+    against real SQL-layer data too.
 reasoning_checkpoint:
   hypothesis: "`recompute_version_chain`'s (and `_select_lineage_rows`'s duplicated copy of its
       grouping rule) sort/tie-break key `(event_ts, source_row_number)` is not actually a total
@@ -182,7 +217,15 @@ reasoning_checkpoint:
       produced the original tie, since it closes the general non-determinism class, not one
       specific instance of it."
 tdd_checkpoint: null
-next_action: "UPDATE (ROUND 24 Track A ATTEMPT #6 TERMINAL, 2026-08-30): run 33277154631 reached
+next_action: "NONE -- SESSION RESOLVED (ROUND 25, 2026-08-30). User decision-checkpoint chose
+    option (3) from the ROUND 24 Track A ATTEMPT #6 TERMINAL decision point below: a
+    self-contained testcontainers-Postgres integration reproduction, bypassing live Airflow/kind
+    orchestration. That test now exists
+    (`tests/integration/test_scd2_cross_file_tie_determinism.py`), passes, and the fix is
+    considered verified to the standard documented in Resolution.verification. No further
+    live-CI dispatch for this fix. See Resolution for full closing detail; the remainder of this
+    field (below) is the six-round live-CI narrative retained for history, unchanged.
+    HISTORICAL, ROUND 24 Track A ATTEMPT #6 TERMINAL (2026-08-30): run 33277154631 reached
     and PASSED Step 0 cleanly for the first time (the `>=` relaxation is confirmed working live,
     not just offline), then FAILED inside `scripts/rebuild-from-raw.py` itself before the
     customers backfill it triggers could complete, before any settle-wait, and before
@@ -749,6 +792,50 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     Step-0 `>=` relaxation (fix (b) from RE-DISPATCH#2 PREP) is now LIVE-CONFIRMED correct,
     not just offline-verified -- that specific race is resolved for good."
 
+- timestamp: 2026-08-30 (ROUND 25 -- SQL-layer integration verification, session closure)
+  checked: "User decision-checkpoint response chose option (3) from the ROUND 24 Track A
+    ATTEMPT #6 TERMINAL decision point (see next_action above): build a self-contained
+    testcontainers-Postgres integration reproduction of the exact cross-file-tie scenario,
+    bypassing live Airflow/kind orchestration entirely. Built
+    `tests/integration/test_scd2_cross_file_tie_determinism.py` (new file, 2 tests), following
+    this suite's own established `test_publish_scd.py` convention (session-scoped
+    `migrated_dsn`/`repository` fixtures, per-file-duplicated seeding helpers, disjoint
+    `customer_id` range 976001-976003). Test 1 seeds one baseline bronze row plus a genuine
+    cross-file tie (two rows: same event_ts=2026-01-10T00:00:00+00:00, same
+    _source_row_number=30, DIFFERENT file_id, DIFFERENT name/country) for two customer_ids,
+    physically INSERTing the tied pair in file_id-ASCENDING order for one and
+    file_id-DESCENDING order for the other, then calls the REAL `SCDPublisher().publish()` (the
+    actual production entry point, which internally executes the REAL, un-ordered
+    `_BRONZE_HISTORY_SQL`) for each. Test 2 fetches the SAME real rows back via a raw,
+    unordered `SELECT` (mirroring `_BRONZE_HISTORY_SQL`'s own no-ORDER-BY shape) and evaluates
+    a locally-reconstructed PRE-FIX `(event_ts, source_row_number)`-only tie-break against both
+    the as-fetched order and that fetch reversed."
+  found: "Test 1 PASSED: both physical-insertion-order sub-cases published byte-identical
+    3-version chains (business content + temporal boundaries, customer_id aside), and the
+    current/winning version in BOTH carried the HIGHER file_id's content
+    ('CorrectedBranch'/'DE'), matching `recompute.py`'s own documented tie-break direction
+    (already established by the existing unit-level regression test). Test 2 PASSED: the
+    pre-fix reconstruction disagreed with itself between the as-fetched and reversed orderings
+    (`('LegacyBranch', 'FR')` vs `('CorrectedBranch', 'DE')`), and the as-fetched order actually
+    matched Postgres' real physical insertion sequence for that sub-case, meaning the pre-fix
+    algorithm's answer would have depended entirely on which order Postgres happened to return
+    rows in -- directly reproducing, at the SQL layer with real fetched data, the same
+    non-determinism class the pure-function regression test already proved in isolation. Full
+    offline battery: `tests/unit` 568/568, the 5 SCD-related integration files run together
+    (`test_publish_scd.py`, `test_scd_delete_detection.py`,
+    `test_scd_replay_delete_detection.py`, `test_rebuild_reconciliation.py`, and the new file)
+    33/33 with zero cross-test interference, `tests/policy` 167 passed/2 failed
+    (byte-identical to this session's own already-documented pre-existing baseline), `ruff
+    check`/`ruff format --check` clean on the new file. No production code
+    (`recompute.py`/`load/publish/scd.py`) was touched -- this round only adds a test."
+  implication: "The a0cc2f5 fix is now verified against the REAL SQL execution path (real
+    Postgres, real `_BRONZE_HISTORY_SQL`, real `SCDPublisher.publish()`), not merely against a
+    hand-built Python list -- closing the specific blind spot every one of the six live-CI
+    attempts failed to close for reasons entirely unrelated to the fix's own logic. This is the
+    session's closing action: live end-to-end verification via CI is formally abandoned as a
+    goal for this fix (see Resolution.verification for the explicit standard and reasoning),
+    and this debug session is marked RESOLVED."
+
 ## Resolution
 <!-- Populated when RESOLVED -->
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
@@ -831,6 +918,51 @@ verification: "Self-verified: (1) direct isolated reproduction proved the pre-fi
     implicating recompute.py/scd.py's own logic; (3) pursue a fundamentally different,
     non-live-CI verification approach (e.g. a testcontainers-based integration reproduction of
     the exact cross-file-tie rebuild scenario). Awaiting user decision."
+    UPDATE 2026-08-30 (ROUND 25 -- FINAL, SESSION RESOLVED): user decision-checkpoint chose
+    option (3). Built `tests/integration/test_scd2_cross_file_tie_determinism.py`, a
+    self-contained testcontainers-PostgreSQL integration test that drives the REAL production
+    call path (`SCDPublisher.publish()` -> the real, un-ordered `_BRONZE_HISTORY_SQL`) against
+    a real Postgres instance seeded with the exact cross-file-tie shape (same event_ts, same
+    source_row_number, different file_id, differing business content), in two sub-cases whose
+    PHYSICAL bronze-row insertion order is reversed relative to each other. Both sub-cases
+    published byte-identical version chains, with the current/winning version correctly
+    carrying the higher file_id's content in both -- direct confirmation, at the real SQL
+    layer, that the fix neutralizes Postgres' genuinely-unordered read order. A second test
+    reconstructed the pre-fix `(event_ts, source_row_number)`-only tie-break against the SAME
+    real, Postgres-fetched rows and showed it disagrees with itself depending on hypothetical
+    retrieval order -- strengthening (not duplicating) the existing pure-function regression
+    test with genuine SQL-layer evidence. Both new tests pass (see Evidence's newest entry for
+    full detail); the offline battery (unit 568/568, 5 SCD-related integration files run
+    together including the new one -- 33/33, policy 167/2 byte-identical baseline, ruff clean)
+    shows zero regressions, and no production code was touched.
+
+    FINAL VERIFICATION STANDARD (this fix, closed at this standard, no further live-CI
+    dispatch planned): SQL-layer integration-verified via a real testcontainers PostgreSQL
+    instance exercising the actual production code path (`SCDPublisher.publish()` /
+    `_BRONZE_HISTORY_SQL` / `recompute_version_chain`) under both possible physical row-
+    insertion orders for a genuine cross-file tie, PLUS the pre-existing unit-level pure-function
+    regression test and self-verification (full unit/regression/dedicated-SCD-integration
+    suites, zero regressions). Live end-to-end verification via CI (an actual
+    `tests/e2e/slice/test_rebuild_from_raw.py` run reaching its own `RebuildComparisonResult`
+    comparison in a live kind cluster) was ATTEMPTED SIX CONSECUTIVE TIMES by the sibling
+    ci-pipeline-ingestion-timeout session and failed all six times for six DIFFERENT
+    infrastructure/orchestration/test-harness reasons (1: infra flake at cluster-up, unrelated,
+    since fixed; 2: cancelled before the test started; 3: cancelled after real backfill
+    progress but before the comparison step, due to an orders-queue backlog; 4: a dedicated
+    narrow-scope dispatch itself never completed cluster-up, due to a self-inflicted
+    skip-ci/image-publish sequencing gap; 5: a customers-DAG scheduling race in the test's own
+    Step-0 fixture seeding, unrelated to this fix's own files; 6: the narrow-scope isolation
+    design's own all-datasets-must-have-raw-history guard tripping on the absent orders
+    dataset) -- NOT ONCE did any of the six attempts implicate `recompute.py`'s or `scd.py`'s
+    own logic. Given this track record, and now that the fix has genuine real-Postgres,
+    real-SQL-path integration coverage under both insertion orders, further live-CI dispatch
+    attempts for this specific fix are judged to have diminishing returns disproportionate to
+    their cost (each attempt consumes a ~190-minute CI job and, per the six-attempt history,
+    has better than even odds of failing for an orchestration reason unrelated to this fix).
+    This is documented here as a DELIBERATE, reasoned stopping point, not an unexamined
+    abandonment -- if a future live E2E run reaches this test's own RebuildComparisonResult
+    comparison as a side effect of other work, that would be strictly additional confirmation,
+    but is no longer a precondition for treating this fix as verified."
 files_changed:
   - packages/dataplat/src/dataplat/scd/recompute.py
   - packages/dataplat/src/dataplat/load/publish/scd.py
@@ -839,3 +971,7 @@ files_changed:
     resolved_by_run_id assertion relaxed from == to >=, per the reasoning documented in this
     round's Current Focus/Evidence -- test's own scheduling-race fix, no SCD2 recompute logic
     touched)
+  - tests/integration/test_scd2_cross_file_tie_determinism.py (ROUND 25, NEW FILE: SQL-layer
+    testcontainers integration test that closes this session -- exercises the real
+    SCDPublisher.publish()/_BRONZE_HISTORY_SQL path against real Postgres under both physical
+    insertion orders for a genuine cross-file tie; no production code touched)
