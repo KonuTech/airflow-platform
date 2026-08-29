@@ -791,18 +791,41 @@ diagnostics-truncation gap. Track C (u3 replay finding) captured as a todo only.
       the (now-shifted) `_poll_run_recovery_complete` call site is byte-identical pre-existing
       drift, present on HEAD before this round's edits, same as every prior round's own
       documented baseline)."
-  live_verification_state: "PENDING -- see next_action below for the exact trigger sequence
-      about to run."
-  next_action: "Commit code (workflow/Makefile/test changes) + docs (this round's charter +
-      offline status) separately per this session's own push-ordering convention, push the
-      code+docs commits together in ONE git push carrying NO skip-ci marker anywhere (Track B
-      needs this SAME push to trigger a normal e2e-full.yml push-triggered run). Then, as a
-      SECOND, separate action, manually dispatch e2e-full.yml via `gh workflow run` with
-      `pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py` against the SAME headSha (Track
-      A). Record BOTH resulting run IDs (the push-triggered full-suite run for Track B, and the
-      workflow_dispatch narrow-scope run for Track A) plus their respective pre-registered
-      criteria, then return a CHECKPOINT REACHED (human-action) -- do NOT self-watch either run
-      beyond confirming both were accepted/queued."
+  live_verification_state: "RECORDED 2026-08-29T19:58:09Z: code commit db06306 (workflow/
+      Makefile/test changes) + docs commit e2a7b1f (charter + offline status + Track C todo)
+      pushed together in ONE push, headSha e2a7b1f, neither commit carrying a skip-ci marker
+      (Track B needs a normal push trigger). AUTHORITATIVE Track B (full-suite, push-triggered):
+      e2e-full.yml run 33272070899, headSha e2a7b1f, status=in_progress as of this recording
+      (companion: CI run 33272071243 already completed with conclusion=failure -- pre-existing,
+      unrelated to this round, NOT this round's concern; Publish images run 33272070893
+      completed success; E2E chaos run 33272071062 in_progress, not this round's concern).
+      MID-ROUND CORRECTION: the first `workflow_dispatch` attempt (run 33272084103, same
+      headSha e2a7b1f) was discovered QUEUED (not running) behind Track B due to a shared
+      concurrency group -- see the new Evidence entry immediately above. Cancelled, fixed via a
+      standalone `[skip ci]` commit 4436311 (concurrency group now keys on
+      `github.event.inputs.pytest_scope`), pushed, then RE-DISPATCHED. AUTHORITATIVE Track A
+      (narrow-scope, workflow_dispatch): e2e-full.yml run 33272229642, headSha 4436311,
+      CONFIRMED genuinely `status=in_progress` with real steps executing (not queued -- verified
+      via `gh run view --json jobs`, checkout/setup-uv steps already `conclusion=success`) as of
+      this recording, running IN PARALLEL with Track B. Analysis criteria: Track A -- (a) the
+      run completes (pass or fail) well inside a much shorter window than 190min; (b)
+      `RebuildComparisonResult.matches` is finally observed (True or False) -- a REAL verdict on
+      the SCD2 fix, ending the 3-rounds-unresolved streak. Track B -- (c) direct TI/pod-log
+      evidence for a dbtkill-class run_id showing exactly what state `stage` is in (never
+      scheduled, crashed, still running, or something else) via the new
+      `_dbt_build_stall_diagnostics` embedded in the test's own AssertionError -- no
+      diagnostics-truncation gap this time; (d) a named mechanism with evidence, or an honest
+      'still inconclusive, here's exactly what's missing' if the evidence remains incomplete;
+      (e) regression checks -- podkill/scd_concurrent/u3/OOMKilled-publish/MinIO-quoting/
+      sweep-assertion-10 stay at their ROUND 23 disposition (u3's own new replay finding is
+      Track C, captured as a todo, not re-tested this round). Scratchpad convention: save Track
+      A's job log as round24-track-a-job.log, Track B's as round24-track-b-job.log. Session
+      manager runs ONE 60s watcher PER live run (two now genuinely in flight in parallel) --
+      do NOT self-watch further this turn."
+  next_action: "SUPERSEDED -- see live_verification_state above. Awaiting BOTH run 33272070899
+      (Track B) and run 33272229642 (Track A) against their respective pre-registered criteria.
+      CHECKPOINT REACHED (human-action) returned this turn -- do NOT self-watch either run
+      beyond confirming both were genuinely accepted/running (already done above)."
 
 ROUND 23 (2026-08-29, opened on user decision after the combined-verification outcome below:
 revert dbtkill's ROUND 22 poll-budget bump (confirmed to just burn wall-clock for an identical
