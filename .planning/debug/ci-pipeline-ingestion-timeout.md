@@ -12604,3 +12604,13 @@ succeeds this run regardless of the random secret's digit composition -- the quo
 structurally correct independent of any specific draw, so a repeat all-digit draw (if it
 recurs) should no longer crash cluster-up. Full census, duration decomposition, and guards to
 be judged as usual once this run terminates.
+
+TRACK A RE-DISPATCH TRIGGER (2026-08-29): Deliberate plain, non-skip-ci push to publish a real
+GHCR image for a fresh SHA, then re-dispatch the narrow-scope workflow_dispatch run
+(pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py) against it. The prior narrow-scope
+attempt (run 33272229642, headSha 4436311) failed at cluster-up because that commit -- and
+every docs commit since -- carried [skip ci], which also suppressed publish.yml, leaving no
+image for Kyverno to admit. This commit carries no skip marker so publish.yml builds a real
+image at this SHA before the workflow_dispatch re-run. Track B (full-suite dbtkill diagnostics,
+headSha e2a7b1f) is NOT touched or re-dispatched by this commit -- the two tracks remain fully
+independent per this round's own charter.
