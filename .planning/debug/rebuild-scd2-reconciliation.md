@@ -2,7 +2,20 @@
 status: awaiting_live_verification
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-29 (sibling session's ROUND 23 live-verification run, 33255828661: this fix's own
+updated: 2026-08-29 (sibling session's ROUND 24: after three consecutive failed full-suite
+  attempts, a DEDICATED narrow-scope verification run is being dispatched for this fix's own
+  test alone (`pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py`, a new
+  `workflow_dispatch` input on `.github/workflows/e2e-full.yml`), against a freshly-booted
+  cluster with none of the full suite's own preceding wall-clock or queue-backlog consumed.
+  Source-read confirms this is not merely faster but STRUCTURALLY safer than a full-suite run
+  for this fix specifically: `_wait_for_all_raw_files_settled`'s own orders-side call (the exact
+  step ROUND 23 found this test wedged behind) early-returns as a documented no-op when the
+  `orders/` prefix is empty -- true by construction on a fresh cluster with nothing else ever
+  uploaded, since this test seeds only its own customers fixtures. This fix's own recompute
+  logic (a0cc2f5/3c2c4bf) is untouched by this round -- only the verification PATH changed. See
+  that session's own ci-pipeline-ingestion-timeout.md ROUND 24 block for the live run ID and
+  criteria once dispatched. Prior text retained below for history.)
+updated_prior_round24: 2026-08-29 (sibling session's ROUND 23 live-verification run, 33255828661: this fix's own
   test was REACHED for the first time this session (direct evidence: its own original/corrected
   fixture uploads at 15:54:24Z/15:56:05Z, and its own triggered backfill -- backfill_id=8, 3
   DagRuns -- completed cleanly by 16:23:44Z) but still did NOT complete: the test appears to have
@@ -142,7 +155,15 @@ next_action: "Fix applied, self-verified, and COMMITTED (orchestrator, commit a0
     hours of other tests consuming the job's time budget) is now a genuinely stronger option than
     continuing to rely on a full-suite run reaching this test by chance. This was raised at the
     sibling session's own ROUND 23 decision checkpoint for the user to decide, not decided here
-    unilaterally -- see that session's own Current Focus for the proposed ROUND 24 shape."
+    unilaterally -- see that session's own Current Focus for the proposed ROUND 24 shape.
+    UPDATE (ROUND 24): the user chose the dedicated narrow-scope option. A new
+    `workflow_dispatch` `pytest_scope` input on `.github/workflows/e2e-full.yml` plus a new
+    `cluster-slice-verify-scoped` Makefile target now exist to run exactly
+    `tests/e2e/slice/test_rebuild_from_raw.py` alone against a freshly-booted cluster -- offline
+    battery complete, live dispatch imminent. This will be the FOURTH live-verification attempt
+    for this fix, and the first one structurally immune to the orders-queue-backlog condition
+    that blocked attempt three. Awaiting the dispatched run's own result -- see the sibling
+    session's ci-pipeline-ingestion-timeout.md ROUND 24 block for the run ID once triggered."
 
 ## Symptoms
 <!-- Written during gathering, then immutable -->

@@ -196,7 +196,21 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-29 (ROUND 23 OUTCOME, live run 33255828661, headSha 61df231, conclusion=CANCELLED
+updated: 2026-08-29 (ROUND 24 opened on user decision: two parallel tracks. Track A -- a
+  dedicated, narrow-scope `workflow_dispatch` verification run for
+  `test_rebuild_from_raw.py` alone, decoupled from the full mega-suite's own
+  scheduling/CPU-contention problems (new `pytest_scope` input on e2e-full.yml + new
+  `cluster-slice-verify-scoped` Makefile target). Track B -- direct-evidence investigation of
+  the dbtkill scheduling question (why DBT_BUILD's status never appears at all), addressing
+  ROUND 23's own diagnostics-truncation gap by embedding the critical dump SYNCHRONOUSLY
+  inside the failing test's own AssertionError (`_dbt_build_stall_diagnostics`,
+  tests/e2e/slice/conftest.py) rather than relying on the end-of-job dump GitHub Actions'
+  cancellation grace-period kill has now truncated twice in a row. Track C (u3 replay/
+  idempotency finding) captured as a todo only
+  (.planning/todos/pending/2026-08-29-investigate-u3-replay-idempotency-row.md), not
+  investigated this round. Offline battery COMPLETE, both live runs about to be triggered.
+  See Current Focus ROUND 24 block.)
+updated_prior_round24_outcome: 2026-08-29 (ROUND 23 OUTCOME, live run 33255828661, headSha 61df231, conclusion=CANCELLED
   at the 190-min job ceiling (13:45:33Z->16:56:24Z). BOTH of this round's own fixes CONFIRMED
   working exactly as designed: (a) dbtkill's poll-budget revert stops the wall-clock bleed --
   FAILED in ~6m41s (300s poll + setup) instead of R22's 40min, SAME underlying "last observed:
@@ -586,6 +600,209 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 24 (2026-08-29, opened on user decision after ROUND 23's own checkpoint: two parallel
+tracks -- a dedicated narrow-scope verification run for the SCD2 fix's own test, and direct-
+evidence investigation of the dbtkill scheduling question, addressing ROUND 23's own named
+diagnostics-truncation gap. Track C (u3 replay finding) captured as a todo only.):
+  charter: >
+      Track A (cheap, do first): trigger a separate, narrow-scope CI run limited to just
+      `tests/e2e/slice/test_rebuild_from_raw.py` against a fresh cluster -- decoupled from the
+      full cluster-slice-verify mega-suite's own unrelated scheduling/CPU-contention problems.
+      This is the THIRD consecutive combined/full-suite live-verification attempt to fail to
+      reach a verdict on the SCD2 rebuild fix (packages/dataplat/src/dataplat/scd/recompute.py,
+      commit a0cc2f5) for three different reasons in a row -- isolating it is now clearly
+      justified rather than continuing to rely on a full-suite run reaching it by chance.
+      Track B (this round's own main charter, per ROUND 23's own deferred item): get direct
+      evidence for why DBT_BUILD's status never appears at all for dbtkill-class runs
+      (run_id=817's "last observed: None" signature, unchanged across ROUNDS 22/23). Address
+      the diagnostics-truncation gap ROUND 23 flagged (end-of-job dumps truncated by GitHub
+      Actions' cancellation grace-period kill on CANCELLED jobs, confirmed on 2 consecutive
+      CANCELLED runs for the exact query capable of answering this question). Determine: is
+      `stage` not being scheduled promptly, crashing before `mark_dbt_build_running`, or
+      something else entirely? Do NOT touch the poll budget again without new evidence.
+      Track C: capture the u3 replay/idempotency finding as a todo, do not investigate.
+  track_a_design: >
+      Investigated `test_rebuild_from_raw.py`'s own fixtures/dependencies first (source read):
+      it seeds its OWN small customers correction pair (no dependency on any other test's
+      fixtures) and separately calls `_wait_for_all_raw_files_settled` for BOTH `customers/`
+      and `orders/` prefixes against the WHOLE bucket history. This is the KEY finding that
+      makes isolation not just faster but STRUCTURALLY SAFER than the full suite: on a
+      freshly-booted cluster with nothing else ever uploaded, the `orders/` prefix has ZERO
+      objects, so that settle-wait's own early-return-on-empty-prefix path fires immediately --
+      completely sidestepping the exact orders-queue-backlog condition ROUND 23 found blocking
+      this test's own completion inside the full suite. Implementation: added a
+      `workflow_dispatch` trigger with an optional `pytest_scope` input to
+      `.github/workflows/e2e-full.yml` (default empty -- `push` behavior is BYTE-IDENTICAL to
+      before this round, every conditional keys off `inputs.pytest_scope` being non-empty AND
+      `github.event_name == 'workflow_dispatch'`, never off `workflow_dispatch` alone) plus a
+      new `cluster-slice-verify-scoped` Makefile target (parametrized by `SCOPE`, mirroring
+      `cluster-slice-verify`'s own `-v` precedent) -- reuses the SAME cluster-up/migrations/
+      vault-bootstrap setup `cluster-slice-verify` needs, rather than forking a second workflow
+      or duplicating that machinery. The observability step and the D-24 rebuild-from-raw
+      capstone step are both skipped for a narrow-scope dispatch (the target test already
+      invokes `scripts/rebuild-from-raw.py` itself; running the capstone again would be a
+      redundant, time-wasting second `DROP SCHEMA ... CASCADE` cycle). The failure-issue step
+      is gated to `push` only (a manual debugging dispatch failing is not a "main is broken"
+      signal). This is test-SCOPING only -- explicitly NOT a CI-runner migration (runner
+      migration/job-splitting stays retired per this session's own guardrails; same
+      `ubuntu-latest` runner, same 190-min job ceiling, same setup).
+  track_b_design: >
+      Direct source read of `airflow/dags/_common/run_stage_recorder.py`
+      (`wire_dbt_build_tracking`) confirms the EXACT mechanism gating a DBT_BUILD
+      `meta.run_stages` row ever being written: `stage >> list_run_ids_pending_dbt_build >>
+      mark_dbt_build_running >> dbt_build`. `list_run_ids_pending_dbt_build`'s own eligibility
+      query requires `STAGE_LOAD` to have reached `'SUCCEEDED'` in `meta.run_stages` for the
+      target run_id; `mark_dbt_build_running` is a plain `@task`-decorated function (default
+      `trigger_rule="all_success"`), so if `stage` never succeeds, both downstream tracking
+      tasks are SKIPPED and DBT_BUILD's row is never written at all -- structurally consistent
+      with "last observed: None". Confirmed via grep that the PRE-EXISTING end-of-job
+      TaskInstance dump (ROUND 5/19's `csv_ingest_orders key TaskInstance history`) queries
+      ONLY `["wait_for_files", "discover", "stage", "integrity_gate", "dbt_build", "publish"]`
+      -- it has NEVER queried `list_run_ids_pending_dbt_build`/`mark_dbt_build_running`/
+      `resolve_dbt_build_status`/`mark_dbt_build_done` at all, in any prior round -- a genuine,
+      previously-unnoticed diagnostics gap independent of (and more specific than) the
+      cancellation-truncation gap ROUND 23 named. Rather than widening the end-of-job dump
+      (still vulnerable to the SAME cancellation-truncation risk ROUND 23 documented -- the
+      exact query needed sits deep in a single, long, sequential shell step), addressed BOTH
+      gaps at once by embedding the evidence SYNCHRONOUSLY inside the failing test's own
+      `AssertionError`: `_dbt_build_stall_diagnostics` (new helper,
+      tests/e2e/slice/conftest.py) queries, at the moment `_poll_dbt_build_running_signal`
+      times out, (1) every `meta.run_stages` row for the run_id (not just DBT_BUILD -- shows
+      whether STAGE_LOAD itself ever reached SUCCEEDED), (2) `meta.ingestion_runs`' own status/
+      error columns, (3) `task_instance.(state, try_number, start_date, end_date)` for `stage`/
+      `list_run_ids_pending_dbt_build`/`mark_dbt_build_running` for the EXACT DagRun, all
+      embedded directly in the raised message -- captured by pytest's own -v output regardless
+      of whether the WHOLE JOB is later cancelled by the 190-min ceiling. Backward-compatible
+      (new params default to None, existing behavior unchanged if omitted); wired through
+      `test_pod_kill_mid_dbt_build_produces_no_duplicates`'s own call site with
+      `airflow_metadata_connection`/`_ORDERS_DAG_ID`/the test's own `dag_run_id`, all already
+      available as existing fixtures/locals -- no new fixtures needed. Never masks the real
+      timeout failure (wrapped in `except Exception` at the diagnostics-gathering level only).
+  reasoning_checkpoint:
+    hypothesis: "(A) dbtkill: DBT_BUILD's row never appearing (`last observed: None`) is
+        EXPLAINED by `stage` never reaching Airflow TaskInstance state `success` for the
+        target run's DagRun within the poll window, which (per `wire_dbt_build_tracking`'s
+        `trigger_rule='all_success'` default on `list_run_ids_pending_dbt_build`) causes BOTH
+        downstream dbt_build-tracking tasks to be SKIPPED, so no INSERT into `meta.run_stages`
+        for DBT_BUILD is even attempted -- this round does not yet have LIVE evidence
+        confirming this over the alternative (stage succeeds but the tracking tasks themselves
+        are starved of scheduler time), which is exactly what the new diagnostics are designed
+        to distinguish on the next live run. (B) Track A: running `test_rebuild_from_raw.py`
+        alone against a freshly-booted cluster avoids ROUND 23's own identified blocker (the
+        orders-side `_wait_for_all_raw_files_settled` call waiting on a pre-existing backlog)
+        BY CONSTRUCTION, because a fresh cluster has zero prior orders uploads and that wait's
+        own early-return-on-empty-prefix path fires immediately -- not a probabilistic
+        improvement (more headroom) but a structural one (the blocking condition cannot exist)."
+    confirming_evidence:
+      - "Direct source read of `_wait_for_all_raw_files_settled` (test_rebuild_from_raw.py):
+        `if not filenames: return` -- an empty S3 listing for the prefix is an explicit,
+        documented no-op, confirmed by the function's own docstring: 'A dataset with no raw
+        history has nothing to settle... an empty prefix is a legitimate no-op'."
+      - "Direct source read of `wire_dbt_build_tracking`/`list_run_ids_pending_dbt_build`/
+        `record_dbt_build_stage` (run_stage_recorder.py): the eligibility query's own JOIN
+        requires `sl.stage_name = 'STAGE_LOAD' AND sl.status = 'SUCCEEDED'`; `record_dbt_build_
+        stage` is a no-op for an empty `run_ids` list ('zero rows written, no exception, no
+        connection even opened') -- structurally consistent with a permanent `None` observation
+        whenever `stage` never succeeds for the target run."
+      - "grep of the existing end-of-job TaskInstance dump's own `tasks = [...]` literal (both
+        the ROUND 5 customers and ROUND 19 orders copies) confirms zero mentions of
+        `list_run_ids_pending_dbt_build`/`mark_dbt_build_running` anywhere in this session's
+        diagnostics history -- a genuine, previously-uninvestigated blind spot, not merely a
+        truncation artifact."
+    falsification_test: "Track B: if the next live run's `_dbt_build_stall_diagnostics` output
+        shows `stage`'s own task_instance reaching `state='success'` (not stuck/skipped/never-
+        scheduled) for the failing run's DagRun, that refutes hypothesis (A) and points at the
+        tracking tasks themselves (or the eligibility query) as the real blocker instead --
+        exactly the 'or something else entirely' branch the user's own framing allowed for.
+        Track A: if the narrow-scope run's own orders-side settle-wait is STILL observed
+        pending/stalling despite a fresh cluster, that would refute the 'structurally safe by
+        construction' claim and point at some OTHER source of orders raw objects on a fresh
+        cluster (e.g. a bootstrap/smoke fixture uploading to `orders/` during cluster-up) not
+        yet accounted for."
+    fix_rationale: "Track A's fix is test-invocation scoping, not a code fix -- it changes
+        WHERE/HOW the SCD2 test's own already-existing logic is exercised, not the logic
+        itself (a0cc2f5's own fix stays untouched this round, per the user's explicit
+        guardrail). Track B's fix (embedding diagnostics inside the test's own exception path)
+        addresses the ROOT gap ROUND 23 named -- an end-of-job dump that cannot survive GitHub
+        Actions' own cancellation grace-period kill -- by moving the evidence-gathering to a
+        point in time that is NEVER subject to job-level cancellation (the moment the test
+        itself raises), rather than trying to make the end-of-job step itself more resilient
+        (reordering/incrementalizing it was considered and rejected as a larger, riskier change
+        for the SAME single round given the end-of-job step's own ~230-line sequential shell
+        script)."
+    blind_spots: "(1) Track A's structural safety claim rests on `test_rebuild_from_raw.py`
+        being the ONLY thing running on the fresh cluster -- if `make cluster-up`/migrations/
+        vault-bootstrap themselves upload anything to `orders/` (not found in this round's own
+        source read, but not exhaustively ruled out either), the same blocker could resurface.
+        (2) Track B's new diagnostics are UNTESTED against a real failure until the next live
+        dbtkill failure actually occurs and exercises the new code path -- the `except
+        Exception` wrapper means a bug in the diagnostics-gathering SQL itself would silently
+        degrade to a one-line '[ROUND 24 diagnostics FAILED to gather: ...]' rather than
+        crashing the test differently, which is intentional but means this round cannot fully
+        verify the new diagnostics query syntax against the REAL live schema until the live run
+        completes. (3) Track A and Track B are triggered as two SEPARATE workflow runs this
+        round (Track A: workflow_dispatch with pytest_scope set; Track B: a plain push, since
+        dbtkill needs the SAME full-suite contention context ROUNDS 22/23 both needed to
+        reproduce at all) -- both runs share the SAME code changes (both files are pushed
+        together), so Track A's own dispatch will ALSO carry Track B's diagnostics
+        instrumentation even though Track A's own scope never exercises dbtkill; this is
+        harmless (the instrumentation is inert unless `_poll_dbt_build_running_signal` times
+        out) but worth noting as not a perfectly separated pair of experiments."
+  offline_status: "COMPLETE 2026-08-29: (1) `.github/workflows/e2e-full.yml`: new
+      `workflow_dispatch` trigger with optional `pytest_scope` input; the cluster-slice-verify
+      step branches on it; the observability step and the D-24 rebuild-from-raw capstone step
+      are both skipped for a narrow-scope dispatch; the failure-issue step gated to `push`
+      only. (2) `Makefile`: new `cluster-slice-verify-scoped` target (SCOPE-parametrized),
+      added to `.PHONY`. (3) `tests/e2e/slice/conftest.py`: new `_DBT_BUILD_TRACKING_TASK_IDS`
+      constant + `_dbt_build_stall_diagnostics` helper; `_poll_dbt_build_running_signal`
+      extended with 3 new optional keyword-only params (`airflow_conn`/`dag_id`/`dag_run_id`),
+      backward-compatible defaults. (4) `tests/e2e/slice/test_pod_kill_retry.py`: imports
+      `_ORDERS_DAG_ID`; captures `dag_run_id` as a named local (was an inline f-string used
+      twice); wires the 3 new params through at the dbtkill test's own call site. (5) New todo
+      `.planning/todos/pending/2026-08-29-investigate-u3-replay-idempotency-row.md` (Track C).
+      VERIFICATION: `python3 -c 'import yaml; yaml.safe_load(...)'` confirms e2e-full.yml
+      parses cleanly, `workflow_dispatch`/`push` both present as trigger keys, and every new/
+      modified step's `run`/`if` text resolved exactly as intended (spot-checked via direct
+      parse, not just visual review). `bash -n` on both new/modified shell fragments (the
+      cluster-slice-verify step's if/else block; the new Makefile recipe's guard clause) --
+      both syntactically valid. `uv run --group cluster pytest tests/e2e/slice/
+      test_pod_kill_retry.py tests/e2e/slice/test_rebuild_from_raw.py tests/e2e/slice/
+      test_backfill_2year_sweep.py --collect-only` succeeds (11 tests collected, confirms all
+      3 touched/adjacent files remain structurally sound). `make test` (tests/unit +
+      tests/regression): 568 passed -- byte-identical to ROUND 23's own baseline (this round
+      touches zero packages/dataplat source). `make test-dagtest`: 14 passed -- unchanged.
+      `make policy`: 2 failed/157 passed -- CONFIRMED (via `git stash` diff) the SAME 2
+      pre-existing baseline failures every prior round has documented
+      (`test_csv_ingest_customers_stays_under_150_lines`,
+      `test_the_main_gate_does_not_lint_the_bad_samples`); the +1 pass vs ROUND 23's 156 is
+      this round's own new `test_offline_gate_stays_offline.py::ARGUED_TESTS_E2E_TARGETS` entry
+      for `cluster-slice-verify-scoped` (added because its own usage-hint error message names
+      a literal `tests/e2e/slice/...` example path -- confirmed this is the ONLY reason it
+      surfaced, its actual pytest invocation is fully parametrized via `$(SCOPE)`, never a
+      hardcoded tests/e2e path). `make manifests`: 540/378/0/0 -- byte-identical to every prior
+      round's baseline (zero helm/ files touched). `uv run mypy airflow/dags`: 222 errors in 10
+      files -- byte-identical to ROUND 23's own documented baseline (zero airflow/dags files
+      touched this round). `ruff check` on all touched files: zero findings after adding one
+      `# noqa: PLR0913` (justified inline -- 3 new independently-optional keyword-only
+      diagnostics params) to `_poll_dbt_build_running_signal`. `ruff format --check`: zero NEW
+      drift introduced by this round's own edits (confirmed via `git stash` diff on both
+      touched test files -- the one pre-existing unformatted line in test_pod_kill_retry.py at
+      the (now-shifted) `_poll_run_recovery_complete` call site is byte-identical pre-existing
+      drift, present on HEAD before this round's edits, same as every prior round's own
+      documented baseline)."
+  live_verification_state: "PENDING -- see next_action below for the exact trigger sequence
+      about to run."
+  next_action: "Commit code (workflow/Makefile/test changes) + docs (this round's charter +
+      offline status) separately per this session's own push-ordering convention, push the
+      code+docs commits together in ONE git push carrying NO skip-ci marker anywhere (Track B
+      needs this SAME push to trigger a normal e2e-full.yml push-triggered run). Then, as a
+      SECOND, separate action, manually dispatch e2e-full.yml via `gh workflow run` with
+      `pytest_scope=tests/e2e/slice/test_rebuild_from_raw.py` against the SAME headSha (Track
+      A). Record BOTH resulting run IDs (the push-triggered full-suite run for Track B, and the
+      workflow_dispatch narrow-scope run for Track A) plus their respective pre-registered
+      criteria, then return a CHECKPOINT REACHED (human-action) -- do NOT self-watch either run
+      beyond confirming both were accepted/queued."
 
 ROUND 23 (2026-08-29, opened on user decision after the combined-verification outcome below:
 revert dbtkill's ROUND 22 poll-budget bump (confirmed to just burn wall-clock for an identical
