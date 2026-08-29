@@ -11392,3 +11392,19 @@ files_changed:
     helpers extracted from _delete_detection_forensics)
   - tests/unit/test_dag_structure.py (2 new red/green regression tests)
   - tests/policy/test_dag_line_budget.py (orders budget 161 -> 170, documented precedent)
+
+COMBINED VERIFICATION TRIGGER (2026-08-29): Deliberate plain, non-skip-ci push against current
+HEAD (stack: ROUND 22's timeout/retry-budget bundle commit e6f37fb/2009065 + the separate
+rebuild-scd2-reconciliation fix a0cc2f5/3c2c4bf + this session's own minio-credentials.sh
+stringData-quoting fix e1f8782) to obtain one live e2e-full.yml run verifying all three
+simultaneously, since run 33239055603 died at cluster-up (unrelated infra flake, now fixed)
+before observing any of them. Pre-registered criteria for this run: (1) ROUND 22's four items
+-- dbtkill/idempotent_reupload retry-exhaustion cleared, u3/orphan queue-idle-budget cleared,
+podkill/sweep-assertion-10/OOMKilled-publish regressions stay clean; (2)
+test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending's post-rebuild reconciliation
+comparison finally passes clean (RebuildComparisonResult.matches=True), live-confirming the
+SCD2 recompute file_id tie-break fix; (3) MinIO credentials bootstrap (`make cluster-up`)
+succeeds this run regardless of the random secret's digit composition -- the quoting fix is
+structurally correct independent of any specific draw, so a repeat all-digit draw (if it
+recurs) should no longer crash cluster-up. Full census, duration decomposition, and guards to
+be judged as usual once this run terminates.
