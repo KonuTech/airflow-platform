@@ -1,6 +1,25 @@
 ---
-status: fixing
-round25_status: "ROUND 25 offline COMPLETE 2026-08-30, awaiting live verification: (1) new
+status: investigating
+round25_status: "ROUND 25 LIVE-VERIFIED 2026-08-30, run 33286862950 terminal (cancelled at the
+  190-min ceiling, 43/44 node-IDs reached). Fix 1 (`wait_for_orders_dagrun_admitted`) CONFIRMED
+  WORKING for its own stated purpose -- dbtkill's own DagRun was admitted and completed
+  end-to-end (state=success, 03:43:58->03:45:54) with zero queued-starvation -- but dbtkill still
+  FAILED via a newly-exposed, DISTINCT mechanism: a competing, independently-scheduled DagRun
+  claimed and fully processed the same freshly-uploaded file before this DagRun's own
+  discover/stage tasks ran, leaving them correctly 'skipped'. Fix 2 (`poll_run_for_file` replay
+  determinism) CONFIRMED WORKING -- u3's own `outcome['status']=='SUCCEEDED'` assertion passed
+  cleanly (no replay-row confusion); u3 failed instead on a genuinely NEW, unrelated
+  memory-sampler timing race (`peak_bytes > 0`) never seen before this session. `test_rebuild_
+  from_raw` reached a REAL RebuildComparisonResult for the first time in this session's own
+  full-suite runs and reproduced the EXACT ROUND 21 pre-fix mismatch signature -- now confirmed
+  TWICE post-a0cc2f5 (this run + the incidental bonus run) -- flagged as bearing on the CLOSED
+  rebuild-scd2-reconciliation.md session, not re-investigated here. STRUCTURAL: with both named
+  contention mechanisms fixed and previously-failing tests (scd_concurrent, orphan, smoke) now
+  running their full organic duration, the suite reached 43/44 node-IDs (best-ever completion
+  depth for a cancelled run) with only the final test's 2-upload cycle not finishing -- an
+  honest-floor signature, not a single-mechanism budget drain. See Current Focus's 'ROUND 25
+  OUTCOME' block for full analysis. Decision checkpoint returned to user."
+round25_status_prior: "ROUND 25 offline COMPLETE 2026-08-30, awaiting live verification: (1) new
   `wait_for_orders_dagrun_admitted` helper closes the max_active_runs=1 admission-starvation
   race ROUND 24 Track B named (waits for the caller's OWN dag_run_id to leave 'queued', reusing
   the already-validated 2400s worst-case budget), applied at all 6 existing
@@ -250,7 +269,20 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-30 (ROUND 25 offline COMPLETE: two fixes -- `wait_for_orders_dagrun_admitted`
+updated: 2026-08-30 (ROUND 25 LIVE-VERIFIED: run 33286862950 cancelled at the 190-min ceiling,
+  43/44 reached. Both named contention mechanisms CONFIRMED CLOSED with direct evidence -- dbtkill's
+  DagRun was admitted and ran end-to-end successfully, u3's SUCCEEDED assertion passed cleanly --
+  but each test still fails via a newly-exposed, distinct, out-of-round-scope mechanism (dbtkill:
+  cross-DagRun file-claim race; u3: memory-sampler timing race). test_rebuild_from_raw reached a
+  real RebuildComparisonResult for the first time this session and reproduced the exact ROUND 21
+  pre-fix mismatch signature -- a SECOND live confirmation (with the incidental bonus run) that
+  bears on the CLOSED rebuild-scd2-reconciliation.md session, flagged for user decision, not
+  reopened here. Structural ceiling analysis: evidence now leans toward the 190-min ceiling being
+  close to the true honest floor for a maximally-fixed suite, with a modest (single-digit-percent)
+  estimated overrun -- not large enough to revisit the retired runner-migration/job-splitting
+  restructure. Decision checkpoint returned to user on ROUND 26's shape. See Current Focus's
+  'ROUND 25 OUTCOME' block.)
+updated_prior_round25_offline: 2026-08-30 (ROUND 25 offline COMPLETE: two fixes -- `wait_for_orders_dagrun_admitted`
   closes the max_active_runs=1 admission-starvation race ROUND 24 Track B named, and
   `poll_run_for_file`'s ORDER BY/LIMIT fix root-causes+closes u3's replay/idempotency-row
   regression (legitimate D-18 replay collateral damage from the sweep's own schema-widening
@@ -828,29 +860,204 @@ fix):
       collect cleanly, 0 import errors (confirms `wait_for_orders_dagrun_admitted`'s new import
       resolves at every one of the 5 files it was added to)."
   pre_registered_criteria:
-    - "(a) dbtkill clears -- PENDING live verification."
-    - "(b) u3 clears -- PENDING live verification."
-    - "(c) zero new failures -- offline battery shows zero regressions; live census pending."
-    - "(d) guards green (Kyverno 0, restarts 0, scheduler peak vs 2560Mi) -- PENDING live
-        verification."
-    - "(e) duration decomposition -- PENDING live verification."
+    - "(a) dbtkill clears -- NOT MET, but the NAMED mechanism (max_active_runs=1 admission
+        starvation) is CONFIRMED CLOSED -- see ROUND 25 OUTCOME below for the newly-exposed,
+        distinct cross-DagRun file-claim race."
+    - "(b) u3 clears -- NOT MET at the test-outcome level, but the CHARTER mechanism (replay-row
+        misread) is CONFIRMED CLOSED -- u3's own SUCCEEDED assertion passed; failure moved to an
+        unrelated memory-sampler timing race. See ROUND 25 OUTCOME."
+    - "(c) zero new failures -- NOT MET at the raw node-ID level (test_rebuild_from_raw newly
+        REACHED and failed, was never reached in the R23/R24 baseline) but this is a
+        newly-reached PRE-EXISTING defect (ROUND 21 signature, out of this round's own scope),
+        not a regression introduced by either of this round's fixes. See ROUND 25 OUTCOME."
+    - "(d) guards green (Kyverno 0, restarts 0, scheduler peak vs 2560Mi) -- MET. See ROUND 25
+        OUTCOME."
+    - "(e) duration decomposition -- DONE. See ROUND 25 OUTCOME."
     - "TARGET: fully green census or green-except-known-out-of-scope for
-        cluster-slice-verify -- PENDING live verification."
-  live_verification_state: "RECORDED 2026-08-30T01:58Z: both fixes pushed as plain (non-skip-ci)
-      commit c03624a1dffc2d8c1d973f6f514b4d2f2df00812 (`fix(debug/ci-pipeline-ingestion-timeout):
-      ROUND 25 -- close orders DagRun admission race + u3 replay misdiagnosis`), confirmed clean
-      of the 'skip ci' substring before commit. Four workflows dispatched at this exact headSha,
-      all confirmed in_progress immediately after push: Publish images (run 33286862946) --
-      companion image build, gates e2e-full's own Kyverno admission; E2E full (merge) (run
-      33286862950) -- the AUTHORITATIVE run for this round's pre-registered criteria; CI (run
-      33286862954); E2E chaos (merge) (run 33286862944, unrelated to this round's scope).
-      Awaiting terminal outcome -- NOT watched by this agent per this round's own instructions."
-  next_action: "AWAITING LIVE VERIFICATION (session manager's single 60s watcher on run
-      33286862950). On terminal: check pre_registered_criteria (a)-(e) and TARGET against the
-      job log/end-of-job diagnostics dump, update Current Focus + Evidence with a 'ROUND 25
-      OUTCOME' block, and either (i) archive/request human-verify if fully green or
-      green-except-known-out-of-scope, or (ii) return to investigation_loop with any new
-      finding if either fix did not close its target failure."
+        cluster-slice-verify -- NOT MET (cancelled at ceiling, 43/44 reached). See ROUND 25
+        OUTCOME's structural analysis."
+  live_verification_state: "TERMINAL 2026-08-30T05:08:57Z: run 33286862950 (headSha c03624a1dffc2d8c1d
+      973f6f514b4d2f2df00812) conclusion=cancelled at the 190-min ceiling (started 01:58:01Z,
+      cancel signal fired 05:08:14.99Z = 190m14s in, job completed 05:08:57Z = 190m56s wall). No
+      superseding push, not a manual cancel. Job log fetched (16,367 lines, scratchpad
+      round25-job.log). Full analysis in ROUND 25 OUTCOME below."
+  next_action: "SUPERSEDED -- see ROUND 25 OUTCOME below. Decision checkpoint returned to user on
+      ROUND 26's shape (candidates: (i) reopen/re-flag rebuild-scd2-reconciliation.md given the
+      second live reproduction of the exact pre-fix mismatch signature -- user decision, not this
+      agent's to make; (ii) fix the newly-exposed dbtkill cross-DagRun file-claim race (would need
+      a production max_active_runs/scheduling-semantics conversation, per this session's own
+      escalation norm); (iii) fix u3's memory-sampler race (small, test-harness-only,
+      uncontroversial); (iv) revisit the 190-min ceiling itself given the honest-floor evidence
+      below (a modest bump, not the previously-retired runner-migration/job-splitting
+      restructure)."
+
+ROUND 25 OUTCOME (2026-08-30, post-run analysis of run 33286862950, headSha
+c03624a1dffc2d8c1d973f6f514b4d2f2df00812 -- CURRENT STATE):
+  run_facts: "conclusion=cancelled, job 01:58:01Z->05:08:57Z = 190m56s wall (`##[error]The
+      operation was canceled.` fired 05:08:14.99Z, 190m14s in -- matching every prior cancelled
+      run's own ~190m ceiling margin). Step 13 (pytest) cancelled mid-suite; step 14 (end-of-job
+      diagnostics dump) completed. Companion incidental bonus run 33279501503 (headSha 371949c,
+      carries ROUND 22/23/24's fixes but NOT this round's) completed conclusion=failure,
+      self-terminated at 2:30:51 (150.85min) pytest wall time, 4 failed/34 passed/6 skipped/44
+      total -- folded in below where directly relevant (its own rebuild-from-raw finding
+      especially)."
+  census: "34 passed / 3 failed (dbtkill, u3, test_rebuild_from_raw) / 6 skipped / 1 cancelled
+      mid-execution (test_idempotent_reupload, never logged PASSED/FAILED) = 44 total node-IDs.
+      43 of 44 REACHED a resolved outcome -- the deepest any cancelled run has reached this
+      session (previous best: ROUND 20's 43/44, but via a materially different mechanism -- see
+      structural analysis). The 6 skips are the same established cluster-marker baseline as every
+      prior round."
+  fix_1_dbtkill_admission_race_verdict: "CONFIRMED WORKING for its own stated, narrow purpose --
+      but dbtkill's test-level outcome is still FAILED via a newly-exposed, DISTINCT mechanism,
+      not a regression of the fix. Direct evidence: `e2e-dbtkill-36281dc5fa33`'s own DagRun
+      (type=manual) ran state=success end-to-end, start=03:43:58.506685Z, end=03:45:54.448596Z
+      (1m56s total) -- `wait_for_orders_dagrun_admitted` did NOT raise (no admission-timeout
+      AssertionError anywhere in the log for this call), meaning the caller's own dag_run_id left
+      'queued' promptly, closing the exact ROUND 24 Track B mechanism (a captor DagRun starving
+      this DagRun of scheduler attention for 15-32min) with direct, positive evidence -- the
+      previous multi-tens-of-minutes captive-queued signature does not recur anywhere in this run.
+      The test still FAILED because, by the time this DagRun's own `discover` task ran
+      (03:45:15.14-03:45:25.47Z), the freshly-uploaded file had ALREADY been fully discovered and
+      processed to PUBLISH/SUCCEEDED by run_id=1060 (`meta.ingestion_runs` created 03:42:08.49Z,
+      PUBLISH SUCCEEDED 03:43:31.71Z) -- i.e. by an INDEPENDENTLY-SCHEDULED, already-running
+      competing DagRun that claimed the same object, entirely before this DagRun even started.
+      This DagRun's own `stage`/`dbt_build`/`list_run_ids_pending_dbt_build`/`mark_dbt_build_
+      running` tasks then correctly self-skipped (nothing pending for a file already fully
+      published) while `discover`/`integrity_gate`/`wait_for_files`/`publish` all ran and
+      succeeded normally. This is a CROSS-DAGRUN FILE-CLAIM RACE, categorically distinct from the
+      ADMISSION-STARVATION race Fix 1 targeted: Fix 1's own blind_spots explicitly named
+      `max_active_runs=1` production-semantics changes as out of this round's scope, and this new
+      mechanism is exactly the kind of thing revisiting DagRun/asset-trigger scoping would touch.
+      Fix 1 is NOT refuted by this -- its own falsification_test (an admission-timeout despite the
+      2400s budget) did NOT fire."
+  fix_2_u3_replay_determinism_verdict: "CONFIRMED WORKING, cleanly. u3's own
+      `outcome['status'] == 'SUCCEEDED'` assertion (the exact line the ROUND 25 fix targets)
+      PASSED without incident -- zero replay-row confusion, zero 'rows_loaded=0 on a SUCCEEDED
+      run' signature anywhere in this test's failure text. u3 instead failed several lines later,
+      on a GENUINELY NEW, PREVIOUSLY-UNSEEN-THIS-SESSION assertion: `assert peak_bytes > 0` ->
+      `AssertionError: no memory.current sample was ever captured -- the pod may have completed
+      and been deleted before the first sample landed (on_finish_action=delete_succeeded_pod)`.
+      Grep-confirmed against the whole debug file: zero prior occurrences of 'memory.current
+      sample' or 'peak_bytes' before this round. Mechanism (from direct source read of the test):
+      a background sampler thread polls `/sys/fs/cgroup/memory.current` inside the ETL pod every
+      `_MEMORY_SAMPLE_INTERVAL_SECONDS`, started only after `_poll_pod_name` resolves a pod name --
+      if the 250k-row fixture's pod completes and is deleted (KPO's `delete_succeeded_pod`) before
+      the sampler's own first tick lands, zero samples are ever captured. This is a test-harness
+      timing race, unrelated to the replay/idempotency mechanism this round fixed, and is a strong
+      candidate for a small, uncontroversial follow-up fix (e.g. sample immediately on pod-name
+      resolution rather than waiting a full interval first) -- NOT investigated further here per
+      this task's own scope."
+  rebuild_from_raw_flagged_finding: "PROMINENT FLAG, NOT investigated further here (out of this
+      round's charter and this task's explicit scope) -- bears directly on the CLOSED
+      rebuild-scd2-reconciliation.md session. `test_rebuild_from_raw_reconciles_and_reverts_
+      quarantine_to_pending` was REACHED for the first time in ANY full-suite live run this
+      session (previous full-suite attempts were always cancelled/cut off before reaching it) and
+      ran to a REAL, complete `RebuildComparisonResult` (own backfill settled, no stall, no
+      timeout) at 04:58:21.87Z, ~63.89min after the preceding test -- and FAILED with the EXACT
+      SAME mismatch signature ROUND 21 first observed BEFORE the SCD2 recompute fix (a0cc2f5) was
+      ever written: `RebuildComparisonResult(matches=False, mismatches=('checksum',
+      'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from',
+      'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'))`. This is
+      the SECOND independent live reproduction of this exact byte-identical signature at a headSha
+      that includes a0cc2f5 -- the incidental bonus run (headSha 371949c) hit the identical
+      mismatch tuple earlier the same day. rebuild-scd2-reconciliation.md's own closure rested on
+      SQL-layer/testcontainers-integration verification only (live E2E verification was abandoned
+      after 6 consecutive infra-blocked attempts, per that session's own POINTER NOTE above) --
+      it never had a real live RebuildComparisonResult to check against until now, twice, and both
+      times it reproduced the pre-fix defect exactly. RECOMMENDATION (for the user's decision, not
+      applied here): this is strong enough direct evidence to warrant reopening
+      rebuild-scd2-reconciliation.md -- the a0cc2f5 fix (cross-file-tie determinism) appears to
+      leave a DIFFERENT, still-open SCD2 defect live in production-shaped conditions for these 2
+      specific customer keys. This agent has NOT reopened that session and will not investigate it
+      further under this task's scope."
+  duration_decomposition: "Job 01:58:01Z->05:08:57Z (190m56s). Setup+cluster tests (through
+      test_no_extra_schemas_exist): ~7.3min. test_backfill_2year_sweep.py (7 tests, ALL PASSED):
+      ~68.3min -- test_idempotent_rerun_produces_zero_additional_rows alone cost 26.65min (the
+      single largest sink in this block), test_pilot_window_drains_without_cpu_starvation 13.60min,
+      test_full_2year_sweep_customers_and_orders 10.50min, test_live_run_concurrent_with_backfill_
+      same_dataset 7.29min, scd_concurrent 6.41min (PASSED cleanly this round, no recurrence of
+      R24's own near-miss). test_backfill_reentry.py: 6.89min. test_concurrent_select.py: 3.77min.
+      test_dbt_silver_pipeline.py: 3.40min. test_pod_kill_retry.py (3 tests): podkill 12.11min
+      (PASSED), dbtkill 9.09min (FAILED, fast -- see fix_1 verdict above), u3 5.49min (FAILED,
+      fast -- see fix_2 verdict above). test_rebuild_from_raw.py: 63.89min (FAILED, but via a
+      COMPLETE run, not a stall -- see flagged finding above) -- the single largest sink in the
+      ENTIRE job, dwarfing every other test. test_referential_orphan.py: 5.88min (PASSED).
+      test_smoke_and_idempotency.py: test_smoke_dag_xcom_contains_built_sha 0.66min (PASSED), then
+      test_idempotent_reupload started and was cancelled 3.35min later, never completing its own
+      2-upload cycle. NONE of this round's time went to multi-tens-of-minutes admission/queue-idle
+      stalls (the R20/R23/R24 signature) -- every reached test's duration reflects genuine,
+      organic work (backfill settle-waits, real retry cycles, or fast/clean failures), not
+      contention-driven waiting."
+  guards: "Kyverno: 0 unintended denials (only the deliberate PASSED
+      test_an_unsigned_public_image_is_denied; one transient 'webhook not yet routable' retry
+      during kyverno-policy.yaml apply at cluster bring-up, resolved by attempt 2, unrelated to
+      the test suite). Restarts: 0 across all monitored roles during the run (empty
+      restart-count-changed timeline); the one non-zero restart count observed
+      (airflow-api-server, '1 (3h4m ago)') predates the monitored window (startup-time restart,
+      same pre-existing signature seen in prior rounds, not new). OOMKilled: 0 occurrences.
+      Scheduler peak: 2,139,045,888 bytes = 2039.9MiB = 79.7% of 2560Mi -- the HIGHEST scheduler
+      peak recorded this session (prior: R24 1832.7MiB/71.6%, R23 1762.7MiB/68.9%, R21
+      1943.5MiB/75.9% -- note R21's own peak was already close; this round's own higher figure is
+      plausibly explained by MORE of the suite doing real concurrent scheduling work for longer,
+      consistent with the duration_decomposition finding that fewer tests short-circuited via
+      fast contention-failures this round). Still well under the 2560Mi limit; flagged as a trend
+      worth watching alongside the already-ticketed CPU-starvation item, not an urgent guard
+      failure."
+  structural_ceiling_analysis: "HONEST, EVIDENCE-CALIBRATED READ, not forced to either extreme.
+      Tally across this session's own cancelled-at-ceiling runs: ROUND 20 (43/44 reached) and
+      ROUND 23 (40/44) and ROUND 24 Track B (40/44, byte-identical to R23) are each attributable
+      to a NAMED, SPECIFIC, still-broken mechanism eating disproportionate budget via genuine
+      multi-tens-of-minutes STALLS (R20: dagrun_timeout-force-skip cascade; R23: u3's own
+      41m43s anomalous stall plus dbtkill's residual signature; R24 Track B: the admission-
+      starvation race this round's own Fix 1 has now closed) -- in ALL THREE of these, a
+      significant fraction of the budget was consumed by WAITING, not by real work, and fixing the
+      named mechanism was a coherent, sufficient-looking hypothesis for buying back that time.
+      ROUND 21 is the one clean counter-data-point: it self-terminated at 184.73min (5.27min/2.8%
+      under ceiling) with all 44 node-IDs reached and 5 real failures -- but several of those
+      failures were themselves FAST (retry-exhaustion resolving in ~9-10min rather than stalling
+      to a 45min dagrun_timeout), which is itself a form of budget-saving via failing quickly, not
+      evidence the FULLY-GREEN suite fits comfortably. THIS ROUND (25) is the strongest data point
+      yet for the 'honest floor' reading: BOTH of this round's own named contention mechanisms are
+      CONFIRMED CLOSED (see fix_1/fix_2 verdicts above) with zero remaining multi-tens-of-minutes
+      stalls anywhere in the job log, previously-failing tests (scd_concurrent, orphan, smoke) now
+      PASS and run their full organic duration, and test_rebuild_from_raw was reached and ran to
+      REAL completion (63.89min, not a stall) for the first time ever in a full-suite run -- and
+      the job STILL got cancelled at the ceiling, with only the FINAL test's own 2-upload cycle
+      not finishing. Critically, NONE of this round's 3 failures would have saved meaningful time
+      had they been fixed: dbtkill/u3 both failed FAST (9.09min/5.49min, not stalls) and
+      test_rebuild_from_raw's failure happens only at its very LAST assertion, after the full
+      63.89min of legitimate work -- so a fully-green version of THIS SAME suite, with every
+      currently-known bug fixed (dbtkill's cross-DagRun race, u3's memory-sampler race, and the
+      rebuild-from-raw SCD2 defect), would consume approximately the SAME total wall time as this
+      run did, plus whatever test_idempotent_reupload's own full 2-upload cycle costs (comparable
+      single-cycle tests this round ran 5.88-9.09min; idempotent_reupload runs the cycle TWICE,
+      so a plausible estimate is roughly 187.6min (elapsed at test_idempotent_reupload's own
+      start) + ~10-15min = ~198-203min) -- i.e. an estimated 8-13min / 4-7% overrun past the
+      190-min ceiling, not a dramatic multiple. COUNT: 3 of 4 informative rounds (R20, R23, R24)
+      show 'a specific remaining mechanism ate the budget'; 1 round (R25, this one) shows 'major
+      mechanisms fixed, honest floor lands marginally past the ceiling'; R21's own under-ceiling
+      finish is best read as partially artifactual (fast-failing bugs still saving time), not as
+      proof a fully-fixed suite fits. VERDICT: the evidence now leans toward the ceiling itself
+      being close to the true binding constraint for a maximally-fixed version of this suite, but
+      the overrun is MODEST (single-digit percent), not the order-of-magnitude overrun that would
+      justify reopening the previously-retired runner-migration/job-splitting restructure -- that
+      retirement decision was evidently sized against a much larger perceived gap and remains
+      reasonable on this evidence. What WOULD fully resolve the ambiguity: a live run with
+      dbtkill's cross-DagRun race, u3's memory-sampler race, AND the rebuild-from-raw SCD2 defect
+      all fixed (or explicitly stubbed/skipped) to observe the suite's own true fully-green
+      completion time against the 190-min ceiling directly, rather than estimating it from a
+      95%-complete run."
+  next_action: "AWAITING USER DECISION at the CHECKPOINT REACHED below on ROUND 26's shape: (i)
+      reopen rebuild-scd2-reconciliation.md given the second live reproduction of the exact
+      pre-fix mismatch signature (user's call, not reopened here); (ii) fix dbtkill's newly-
+      exposed cross-DagRun file-claim race (would need a production DagRun/asset-trigger
+      scheduling-semantics conversation per this session's own escalation norm, not a
+      test-harness-only fix like ROUND 25's own Fix 1); (iii) fix u3's memory-sampler race (small,
+      test-harness-only, low-risk, likely quick); (iv) a modest, evidence-justified bump to the
+      190-min ceiling itself (NOT the retired runner-migration/job-splitting restructure) given
+      the honest-floor analysis above; any combination of the above is coherent, per this
+      session's own established pattern of combining independent fixes into one round when the
+      user chooses to."
 
 ROUND 24 (2026-08-29, opened on user decision after ROUND 23's own checkpoint: two parallel
 tracks -- a dedicated narrow-scope verification run for the SCD2 fix's own test, and direct-
@@ -11732,6 +11939,55 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     for future awareness, not re-opened as a new todo since no current test is affected by it
     once `poll_run_for_file` prefers the non-replay row.
   timestamp: 2026-08-30 (ROUND 25, fix implementation)
+
+- checked: >
+    ROUND 25 live-verification run 33286862950 (job log, 16,367 lines, scratchpad
+    round25-job.log) against its own pre-registered criteria (a)-(e) + TARGET, plus the
+    incidental bonus run 33279501503's own already-gathered census (headSha 371949c, ROUND
+    22/23/24 fixes only).
+  found: >
+    conclusion=cancelled, 190m56s wall, 43/44 node-IDs reached (34 passed / 3 failed / 6 skipped /
+    1 cancelled mid-execution). Fix 1 (`wait_for_orders_dagrun_admitted`) CONFIRMED CLOSING the
+    named max_active_runs=1 admission-starvation mechanism with direct evidence:
+    `e2e-dbtkill-36281dc5fa33`'s own DagRun ran state=success end-to-end (03:43:58->03:45:54,
+    1m56s), zero admission-timeout. dbtkill's test-level outcome still FAILED via a newly-exposed,
+    DISTINCT cross-DagRun file-claim race: `meta.ingestion_runs` run_id=1060 was created
+    03:42:08.49Z and PUBLISH SUCCEEDED 03:43:31.71Z -- BEFORE this DagRun even started -- meaning
+    an independently-scheduled, already-running competing DagRun claimed and fully processed the
+    same freshly-uploaded file first, leaving this DagRun's own stage/dbt_build/list_run_ids_
+    pending_dbt_build/mark_dbt_build_running tasks correctly self-skipped. Fix 2
+    (`poll_run_for_file` non-replay-preferring ORDER BY) CONFIRMED WORKING: u3's own
+    `outcome['status']=='SUCCEEDED'` assertion passed cleanly, zero replay-row confusion. u3's
+    test-level outcome still FAILED via a genuinely NEW, previously-unseen-this-session mechanism:
+    `assert peak_bytes > 0` failed with "no memory.current sample was ever captured -- the pod may
+    have completed and been deleted before the first sample landed" -- a background
+    memory-sampler thread race, unrelated to replay/idempotency, grep-confirmed as a first
+    occurrence in this debug file. `test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_
+    pending` was REACHED for the first time in any full-suite live run this session and ran to a
+    REAL, complete `RebuildComparisonResult` (63.89min, no stall) at 04:58:21.87Z, FAILING with
+    the EXACT SAME mismatch tuple ROUND 21 first observed pre-a0cc2f5:
+    `('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from',
+    'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current')`. The
+    incidental bonus run (headSha 371949c, self-terminated failure at 150.85min, 4F/34P/6S/44)
+    independently reproduced the IDENTICAL mismatch tuple the same day, at a DIFFERENT headSha
+    also carrying a0cc2f5 -- the second live confirmation of what appears to be a real, still-open
+    SCD2 defect that rebuild-scd2-reconciliation.md's own SQL-layer-only closure never had a live
+    RebuildComparisonResult to check against. Guards green: 0 Kyverno denials, 0 new restarts, 0
+    OOMKilled, scheduler peak 2039.9MiB/79.7% of 2560Mi (highest recorded this session, still
+    under limit). Duration decomposition: zero multi-tens-of-minutes admission/queue-idle stalls
+    anywhere this run (the R20/R23/R24 signature) -- the single largest sink was
+    test_rebuild_from_raw's own legitimate 63.89min run, followed by test_idempotent_rerun_
+    produces_zero_additional_rows's 26.65min; every reached test's duration reflects genuine
+    organic work or a fast/clean failure, not contention-driven waiting.
+  implication: >
+    Both of this round's own named contention mechanisms are confirmed closed by direct evidence,
+    yet the job still cancelled at the ceiling with only the FINAL test's own 2-upload cycle not
+    finishing -- the strongest "honest floor" data point this session has produced (see Current
+    Focus's structural_ceiling_analysis for the full cross-round tally and the estimated 4-7%
+    overrun for a fully-fixed suite). The rebuild-from-raw finding is a prominent, unresolved
+    flag bearing on a CLOSED sibling debug session, surfaced for user decision, not acted on here.
+    Decision checkpoint returned to user on ROUND 26's shape.
+  timestamp: 2026-08-30 (ROUND 25, live-verification post-run analysis)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
