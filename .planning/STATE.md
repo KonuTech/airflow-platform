@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.35.5
 milestone_name: milestone
 status: executing
-stopped_at: context exhaustion at 75% (2026-08-24)
-last_updated: "2026-08-24T05:20:13.005Z"
-last_activity: 2026-08-23
+stopped_at: paused mid-debug by explicit user request, 2026-08-30 -- see .planning/.continue-here.md
+last_updated: "2026-08-30T14:41:36.149Z"
+last_activity: 2026-08-30
 progress:
   total_phases: 12
   completed_phases: 12
@@ -166,6 +166,17 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-08-25
-Stopped at: Session resumed from HANDOFF.json; user chose round-7 strategic direction for cluster-slice-verify: REDUCE CONCURRENT LOAD (throttle sweep_corpus 19-file parallel ingestion, cap active DagRuns). Loosened timeouts / job-splitting reserved for round 8 (locally); moving off GH-hosted runners is the final fallback. Proceeding to /gsd:debug continue ci-pipeline-ingestion-timeout.
-Resume file: None
+Last session: 2026-08-30
+Stopped at: Paused by explicit user request after round 27 of debug/ci-pipeline-ingestion-timeout
+  and round 30 of the reopened debug/rebuild-scd2-reconciliation, both running in parallel against
+  the same working tree. Full handoff at .planning/.continue-here.md. Session trajectory: from zero
+  E2E tests ever completing (total control-plane crash-loop) to 41/44 cluster-slice-verify node-IDs
+  reaching a resolved outcome, 30 distinct root causes fixed and live-verified. Two items remain
+  open in ci-pipeline-ingestion-timeout (dbtkill's STAGE_LOAD wiring gap -- root cause confirmed,
+  fix proposed not applied; u3's poll hardening -- offline-verified, not live-confirmed) and the
+  rebuild-scd2-reconciliation session was reopened after 2 independent live reproductions
+  contradicted an earlier premature "resolved" closure (member 2100100032's fix now
+  offline-verified but not live-confirmed; member 2100100030 completely unexplained after 3 tracing
+  attempts). CICD-09 remains unchecked in REQUIREMENTS.md -- correctly, since cluster-slice-verify
+  has never gone green in CI. Resume with /gsd:resume-work.
+Resume file: .planning/.continue-here.md
