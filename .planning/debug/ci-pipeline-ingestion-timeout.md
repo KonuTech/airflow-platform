@@ -957,8 +957,20 @@ separate, already-reopened rebuild-scd2-reconciliation.md session):
       tree during this round by the separate, already-reopened parallel session -- confirmed via
       `git diff --stat` immediately before staging, NOT read, NOT touched, and explicitly
       excluded from this round's own `git add`/commit (named files only, never `git add -A`)."
-  live_verification_state: "PENDING -- see this block's own update immediately below once code +
-      docs are pushed and the authoritative run ID is recorded."
+  live_verification_state: "RECORDED 2026-08-30T06:52:03Z: code commit ae55318 (workflow/test
+      changes) + docs commit 5864b04 (charter + reasoning + offline status) pushed together in
+      ONE push, headSha 5864b04, neither commit carrying a skip-ci marker (grep-confirmed against
+      both commit messages before committing, per this round's own charter requirement).
+      AUTHORITATIVE: E2E full (merge) run 33297885371, headSha 5864b048b1c25d793531ae820590be
+      225053ccde, status=in_progress as of this recording. Companion: Publish images run
+      33297885383 (in_progress -- must complete so cluster-up can pull this SHA's own image, same
+      ordering dependency every prior round's own live-verification has relied on). CI run
+      33297885404 and E2E chaos (merge) run 33297885336 also triggered by the same push -- NOT
+      this round's concern (CI has 2 pre-existing baseline failures unrelated to this round's
+      changes per every prior round's own documented disposition; chaos suite is out of scope).
+      Analysis criteria: see this block's own `next_action` above (pre-registered before the
+      push). Scratchpad convention: save the job log as round26-job.log. Session manager runs
+      ONE 60s watcher on run 33297885371 -- do NOT self-watch further this turn."
   next_action: "Push code+docs together in one push (no skip-ci marker -- this round needs a
       normal push trigger for e2e-full.yml AND publish.yml), record the authoritative e2e-full
       run ID (and publish.yml's own companion run) in live_verification_state above, then return
