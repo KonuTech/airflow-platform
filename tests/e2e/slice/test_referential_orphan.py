@@ -42,6 +42,7 @@ from tests.e2e.slice.conftest import (
     poll_file_discovered,
     poll_ingestion_run,
     poll_run_for_file,
+    wait_for_orders_dagrun_admitted,
     wait_for_orders_dagrun_queue_idle,
 )
 
@@ -221,6 +222,12 @@ def test_orphan_order_quarantined_while_valid_rows_publish(
             run_id_marker,
         )
         assert trigger.returncode == 0, f"airflow dags trigger failed:\n{trigger.stderr}"
+
+        # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race
+        # `wait_for_orders_dagrun_queue_idle`'s own docstring accepted but ROUND 24 Track B
+        # proved can cost up to ~15-32min, not ~50s -- wait for THIS run_id specifically to be
+        # admitted before starting the discovery budget below.
+        wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=run_id_marker)
 
         file_row = poll_file_discovered(
             analytics_connection,

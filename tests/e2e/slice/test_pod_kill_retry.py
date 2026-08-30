@@ -52,6 +52,7 @@ from tests.e2e.slice.conftest import (
     poll_ingestion_run,
     poll_run_for_file,
     trigger_orders_dagrun,
+    wait_for_orders_dagrun_admitted,
     wait_for_orders_dagrun_queue_idle,
 )
 
@@ -502,6 +503,12 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     app.put_object(Bucket="raw", Key=key, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=dag_run_id)
 
+    # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race
+    # `wait_for_orders_dagrun_queue_idle`'s own docstring accepted but ROUND 24 Track B
+    # proved can cost up to ~15-32min, not ~50s -- wait for THIS run_id specifically to be
+    # admitted before starting the discovery budget below.
+    wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=dag_run_id)
+
     file_row = poll_file_discovered(
         analytics_connection,
         dataset=_ORDERS_DATASET,
@@ -636,6 +643,7 @@ def test_u3_throughput_and_peak_rss_baseline(
     marker = uuid.uuid4().hex[:12]
     key = f"orders/e2e-u3-{marker}.csv"
     object_uri = f"s3://raw/{key}"
+    dag_run_id = f"e2e-u3-{marker}"
 
     # ROUND 18 (finding 25/R17 adjudication): start the 180s discovery budget
     # honestly -- same queue-drain knock-on class as the dbtkill test above,
@@ -644,7 +652,13 @@ def test_u3_throughput_and_peak_rss_baseline(
     wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
     app.put_object(Bucket="raw", Key=key, Body=payload)
-    trigger_orders_dagrun(kubectl, run_id=f"e2e-u3-{marker}")
+    trigger_orders_dagrun(kubectl, run_id=dag_run_id)
+
+    # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race
+    # `wait_for_orders_dagrun_queue_idle`'s own docstring accepted but ROUND 24 Track B
+    # proved can cost up to ~15-32min, not ~50s -- wait for THIS run_id specifically to be
+    # admitted before starting the discovery budget below.
+    wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=dag_run_id)
 
     file_row = poll_file_discovered(
         analytics_connection,

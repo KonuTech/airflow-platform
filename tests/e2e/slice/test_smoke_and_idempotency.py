@@ -32,6 +32,7 @@ from tests.e2e.slice.conftest import (
     poll_ingestion_run,
     poll_run_for_file,
     trigger_orders_dagrun,
+    wait_for_orders_dagrun_admitted,
     wait_for_orders_dagrun_queue_idle,
 )
 
@@ -319,8 +320,15 @@ def test_idempotent_reupload(
     # tracked separately and now adjudicable via the poll's error columns).
     wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
+    dag_run_id_1 = f"e2e-idempotent-{marker}-1"
     app.put_object(Bucket="raw", Key=key_1, Body=payload)
-    trigger_orders_dagrun(kubectl, run_id=f"e2e-idempotent-{marker}-1")
+    trigger_orders_dagrun(kubectl, run_id=dag_run_id_1)
+
+    # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race
+    # `wait_for_orders_dagrun_queue_idle`'s own docstring accepted but ROUND 24 Track B
+    # proved can cost up to ~15-32min, not ~50s -- wait for THIS run_id specifically to be
+    # admitted before starting the discovery budget below.
+    wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=dag_run_id_1)
 
     file_1 = poll_file_discovered(
         analytics_connection,
@@ -353,8 +361,13 @@ def test_idempotent_reupload(
     # asset-event arrivals can still be draining).
     wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
+    dag_run_id_2 = f"e2e-idempotent-{marker}-2"
     app.put_object(Bucket="raw", Key=key_2, Body=payload)
-    trigger_orders_dagrun(kubectl, run_id=f"e2e-idempotent-{marker}-2")
+    trigger_orders_dagrun(kubectl, run_id=dag_run_id_2)
+
+    # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race, same reasoning
+    # as the first upload above.
+    wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=dag_run_id_2)
 
     file_2 = poll_file_discovered(
         analytics_connection,

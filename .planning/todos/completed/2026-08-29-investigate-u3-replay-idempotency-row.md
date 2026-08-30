@@ -110,3 +110,59 @@ Candidate directions (not mutually exclusive):
    deterministic defect (like ROUND 22's scd_concurrent finding, this was observed exactly
    once as of this writing) -- CPU-contention level and the specific interleaving with
    dbtkill's own background retries may be load-bearing to reproduction, not incidental.
+
+## Resolution (ROUND 25, debug/ci-pipeline-ingestion-timeout)
+
+Root-caused via static code reading (candidate 1 above): `csv_ingest_orders`' `discover` task
+re-scans the ENTIRE `raw/orders/` bucket on every DagRun, and `dataplat.discovery`'s
+idempotency-key formula includes `schema.get_current(dataset_id).version` -- a MUTABLE,
+DATASET-WIDE pointer, not a per-file value (`discovery.py`'s own docstring: "resolved once per
+call"). `test_backfill_2year_sweep.py`'s own fixture corpus deliberately widens BOTH datasets'
+schemas partway through (`schema_change_day_index`, `tools/corpus/dated_series.py`), which
+permanently bumps orders' CURRENT schema version once a post-change file is staged
+(`csv_processor/source.py`'s `derived_from="INFERRED"` branch, via `SchemaRepository.sync()`).
+ROUND 24 Track B independently proved `csv_ingest_orders`' DagRun backlog can still be draining
+LONG after `test_backfill_2year_sweep.py` itself has already asserted PASSED -- so a
+schema-widening file's `discover`/`stage` can land squarely inside a LATER, unrelated test's
+(u3's) own polling window. The very next `discover` call re-evaluates u3's OWN
+already-`SUCCEEDED` file under the new idempotency-key formula (per D-18, `discovery.py`'s own
+documented mechanism) and allocates a legitimate "replay" row (`replay_of_run_id` pointing at
+the original) for it, purely as collateral damage from an unrelated file's schema bump -- not a
+bug in the replay mechanism itself, which is deliberate (D-16's backfill depends on it).
+
+**Puzzle 1 (this file's own "how did `poll_ingestion_run` observe SUCCEEDED then STAGED for the
+same run_id" question) is resolved as a MISDIAGNOSIS, not a state-machine violation**: the
+failing test's own captured `idempotency_key` came from `poll_run_for_file`'s missing
+`ORDER BY`/`LIMIT` returning the REPLAY row (`run_id=280`) instead of u3's own genuine, already
+fully-`SUCCEEDED` original run (`run_id=64`) on an unlucky poll where both rows already existed
+-- the test then correctly observed run_id=64's own terminal `SUCCEEDED` at some point via
+whatever the query happened to return that call (Postgres does not guarantee scan order without
+`ORDER BY`), while the end-of-job dump's later, deterministic-in-a-different-way read of the
+same file_id's rows surfaced run_id=280 (a genuinely separate row, still `STAGED`) -- two
+DIFFERENT rows being conflated as "the same run", not one row reverting status.
+
+**Fix applied** (`tests/e2e/slice/conftest.py::poll_run_for_file`): the query now orders
+`(replay_of_run_id IS NOT NULL) ASC` first (non-replay rows win), then the earliest run_id among
+non-replay rows -- unambiguously "this caller's own fresh upload's genuine first-ever run",
+which by construction can never itself be a replay. Falls back to the newest row (this
+codebase's own "newest row wins" convention) only if every row for a `file_id` is itself a
+replay (a defensive path, not expected to fire for a freshly-uploaded file). This closes u3's
+observed failure without touching `discovery.py`'s production replay-creation logic at all --
+run_id=64 (u3's own real run) was ALWAYS `SUCCEEDED` with the fixture's real, nonzero
+`rows_loaded`; the bug was purely in which of two legitimate rows the test harness read, per
+this file's own candidate framing "distinguishing 'query reads the wrong one of two legitimate
+rows' from 'a row shouldn't exist at all'" -- this is confirmed to be the former.
+
+**Not changed, deliberately**: `discovery.py`'s idempotency-key formula (the dataset-wide,
+mutable `schema.get_current()` pointer as a per-file idempotency component) is a genuine
+structural fragility -- ROUND 12 already found and partially closed one shape of it (the
+narrower-file "replay-wave" oscillation, `csv_processor/source.py`'s own D-13 comment) -- but a
+full fix (e.g., resolving each file's OWN schema at idempotency-key time, which would require
+`discover_files` to read file headers, a stage-time operation today) is a genuine
+production-idempotency-key redesign, out of this round's CI-focused scope. Not needed to close
+this specific failure (the harness-level fix above fully resolves it), and flagged here for
+future awareness rather than re-opened as a new todo.
+
+Files changed: `tests/e2e/slice/conftest.py` (`poll_run_for_file`, `wait_for_orders_dagrun_
+admitted`), `tests/e2e/slice/test_pod_kill_retry.py`, `tests/e2e/slice/test_referential_orphan.py`,
+`tests/e2e/slice/test_smoke_and_idempotency.py`.

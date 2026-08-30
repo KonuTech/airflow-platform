@@ -1,5 +1,23 @@
 ---
-status: investigating
+status: fixing
+round25_status: "ROUND 25 offline COMPLETE 2026-08-30, awaiting live verification: (1) new
+  `wait_for_orders_dagrun_admitted` helper closes the max_active_runs=1 admission-starvation
+  race ROUND 24 Track B named (waits for the caller's OWN dag_run_id to leave 'queued', reusing
+  the already-validated 2400s worst-case budget), applied at all 6 existing
+  `wait_for_orders_dagrun_queue_idle` call sites that also trigger a DagRun (dbtkill, u3,
+  orphan, both idempotent_reupload uploads). (2) `poll_run_for_file`'s missing ORDER BY/LIMIT
+  fixed to prefer the earliest non-replay row -- root-caused u3's replay row as legitimate D-18
+  replay-on-schema-change collateral damage from test_backfill_2year_sweep.py's own
+  schema-widening corpus (both datasets, tools/corpus/dated_series.py) landing inside u3's own
+  later polling window (per ROUND 24 Track B's own backlog-draining proof), NOT a state-machine
+  violation -- the todo's own status-reversion puzzle resolved as two rows conflated by the
+  missing ORDER BY, not one row reverting. Production discovery.py replay-creation logic
+  deliberately left untouched (out of CI-focused scope, flagged for future awareness). Offline
+  battery all green/byte-identical-baseline (ruff, mypy, unit 568/568, dagtest 14/14, policy
+  157/2 byte-identical, manifests+kubeconform clean, integration discovery/schema 21/21,
+  collect-only 17/17). Todo moved to completed/ with full resolution recorded. See Current
+  Focus's ROUND 25 block for full reasoning_checkpoint detail on both fixes. NEXT: live
+  verification trigger."
 round24_track_a_outcome: "ROUND 24 Track A TERMINAL 2026-08-29: run 33272229642 (headSha 4436311,
   workflow_dispatch, pytest_scope=test_rebuild_from_raw.py) conclusion=failure at `make
   cluster-up` (step 7) -- Kyverno denied the Airflow Helm install with MANIFEST_UNKNOWN because
@@ -232,7 +250,14 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-30 (ROUND 24 Track B TERMINAL: run 33272070899 cancelled at the 190-min
+updated: 2026-08-30 (ROUND 25 offline COMPLETE: two fixes -- `wait_for_orders_dagrun_admitted`
+  closes the max_active_runs=1 admission-starvation race ROUND 24 Track B named, and
+  `poll_run_for_file`'s ORDER BY/LIMIT fix root-causes+closes u3's replay/idempotency-row
+  regression (legitimate D-18 replay collateral damage from the sweep's own schema-widening
+  corpus, misdiagnosed by a non-deterministic query, not a state-machine violation). Offline
+  battery all green/byte-identical-baseline. See Current Focus's ROUND 25 block. Awaiting live
+  verification.)
+updated_prior_round24_track_b: 2026-08-30 (ROUND 24 Track B TERMINAL: run 33272070899 cancelled at the 190-min
   ceiling; new `_dbt_build_stall_diagnostics` instrumentation survived cancellation as designed
   and produced a DEFINITIVE answer to the dbtkill scheduling question unresolved since ROUND 21
   -- `csv_ingest_orders`' `max_active_runs=1` DagRun-admission contention, not the
@@ -645,6 +670,177 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 25 (2026-08-30, opened on user decision after ROUND 24's own checkpoint: (a)+(b)
+combined -- fix the newly-confirmed max_active_runs=1 contention mechanism for dbtkill/u3-class
+tests, AND root-cause + fix u3's replay/idempotency-row finding, promoted from todo to active
+fix):
+  charter: >
+      (1) Fix the max_active_runs=1 contention mechanism ROUND 24 Track B named and evidenced:
+      `csv_ingest_orders`' sole DagRun-admission slot can be captured, in the tiny window
+      between `wait_for_orders_dagrun_queue_idle` returning idle and the test's own
+      upload+trigger, by an independently-scheduled `asset_triggered` DagRun whose failure path
+      (observed ~15m31s, ROUND 22's own arithmetic: up to ~1920s/32min worst case) is 18-30x
+      the helper's own accepted "~50s" race-window sizing -- starving the test's own DagRun of
+      scheduler attention for its entire polling budget. (2) Root-cause and fix u3's replay/
+      idempotency-row finding (`.planning/todos/pending/2026-08-29-investigate-u3-replay-
+      idempotency-row.md`): a second `meta.ingestion_runs` row (`replay_of_run_id` set) for
+      u3's own single, uniquely-marked file, plus `poll_run_for_file`'s missing `ORDER BY`/
+      `LIMIT`.
+  reasoning_checkpoint_item_1:
+    hypothesis: "The dbtkill/u3-class residual race (`wait_for_orders_dagrun_queue_idle`'s own
+        accepted-but-undersized race window) cannot be closed by widening downstream polling
+        budgets alone (ROUND 23 already live-disproved that for `_DBT_BUILD_POLL_TIMEOUT_
+        SECONDS`: a budget increase bought zero improvement because the polled `run_id`/
+        `meta.run_stages` row cannot exist until `stage` is SCHEDULED, and `stage` cannot be
+        scheduled while the test's own DagRun sits `queued` behind a captor) -- the fix must
+        instead explicitly wait for THIS test's own `dag_run_id` to be admitted (leave
+        `state='queued'`) before starting the existing, already-correctly-sized downstream
+        budgets."
+    confirming_evidence:
+      - "ROUND 24 Track B's own direct evidence (round24-trackB-job.log:1420, :11127-11128):
+          `e2e-dbtkill-109e0af99035` sat behind `asset_triggered__2026-08-29T21:00:32...` (which
+          held the sole slot 21:17:03Z->21:32:34Z, state=failed) for its ENTIRE trigger-to-
+          poll-timeout window; its own `stage`/`list_run_ids_pending_dbt_build`/
+          `mark_dbt_build_running` task_instances were all state=None/try=0 -- never scheduled,
+          not slow."
+      - "ROUND 23's own live-confirmed finding that bumping `_DBT_BUILD_POLL_TIMEOUT_SECONDS`
+          300->2400s produced ZERO improvement in outcome (still 'last observed: None' at the
+          full 2400s budget) -- proves the gap is admission, not processing time."
+    falsification_test: "If a future dbtkill/u3-class run still produces 'last observed: None'
+        (or an admission-timeout AssertionError) even with `wait_for_orders_dagrun_admitted`'s
+        own dag_run_id-scoped 2400s budget exhausted, that would mean the backlog can
+        genuinely exceed even this generous, already-once-validated worst-case budget (a
+        legitimate, more severe finding, not a bug in this fix)."
+    fix_rationale: "Adds a new, narrowly-scoped, test-harness-only helper
+        (`wait_for_orders_dagrun_admitted`) that waits for the CALLER's own `dag_run_id` to
+        leave `queued`, reusing (not re-guessing) `wait_for_orders_dagrun_queue_idle`'s own
+        already-validated 2400s worst-case budget -- addresses the root cause (admission
+        starvation) rather than the symptom (downstream poll timeouts), and stays entirely
+        within CI-profile/test-harness scope (no production DAG `max_active_runs` change,
+        which would need its own checkpoint per this session's established norm)."
+    blind_spots: "Does not shrink the race WINDOW itself (the few seconds between the idle-check
+        and the trigger call) -- deliberately: the window is already small and shrinking it
+        further would reduce an already-low-probability event without changing its consequence.
+        Does not touch `max_active_runs=1` itself (a production DAG-semantics change, out of
+        this round's test-harness-only scope) -- if the admission-wait budget itself proves
+        insufficient on a future run, that would be the trigger to revisit DagRun scoping via a
+        checkpoint, not now."
+  fix_1: >
+      New helper `wait_for_orders_dagrun_admitted(airflow_conn, *, dag_run_id, dag_id, timeout=
+      2400)` (tests/e2e/slice/conftest.py, inserted immediately after
+      `wait_for_orders_dagrun_queue_idle`): polls `dag_run.state` for the CALLER's own
+      `dag_run_id` until it leaves `'queued'`, raising (naming which OTHER DagRun(s) currently
+      hold the slot) if `timeout` elapses first. Called immediately after `trigger_orders_
+      dagrun`/the raw CLI trigger, before the existing `poll_file_discovered`/`poll_run_for_
+      file`/`_poll_dbt_build_running_signal` budgets, at ALL SIX existing `wait_for_orders_
+      dagrun_queue_idle` call sites that also trigger a DagRun (matches this session's own
+      practice of fixing a shared root-cause mechanism once for every caller of the SAME
+      helper, not just the two charter-named tests): test_pod_kill_retry.py (dbtkill, u3),
+      test_referential_orphan.py (orphan), test_smoke_and_idempotency.py (idempotent_reupload,
+      both uploads). test_concurrent_select.py's own trigger site does NOT call
+      `wait_for_orders_dagrun_queue_idle` at all today (a different, pre-existing design,
+      untouched -- out of this round's scope). In the common, uncontended case this adds
+      negligible latency (one query observing `state != 'queued'`).
+  reasoning_checkpoint_item_2:
+    hypothesis: "u3's `rows_loaded=0` failure and the second `meta.ingestion_runs` row
+        (`replay_of_run_id` set) are explained by a LEGITIMATE platform mechanism (D-18's
+        replay-on-schema-change design, `dataplat.discovery`) firing SPURIOUSLY on u3's own
+        already-`SUCCEEDED` file as collateral damage from an UNRELATED file's dataset-wide
+        schema-version bump, combined with `poll_run_for_file`'s missing `ORDER BY`/`LIMIT`
+        non-deterministically returning that spurious replay row instead of u3's own genuine,
+        fully-`SUCCEEDED` original run."
+    confirming_evidence:
+      - "`dataplat/discovery.py`'s idempotency-key formula appends `schema_version_term`,
+          resolved via `schema.get_current(dataset_id)` -- a DATASET-WIDE, mutable pointer
+          (module docstring: 'resolved once per call'), not a per-file value; `csv_ingest_
+          orders`'s `discover` task re-scans the ENTIRE `raw/orders/` bucket on every DagRun."
+      - "`tools/corpus/dated_series.py`'s `schema_change_day_index` widens BOTH datasets'
+          schemas (including orders) partway through `test_backfill_2year_sweep.py`'s own
+          corpus -- confirmed via direct source read (`extra_column = _SCHEMA_CHANGE_COLUMN
+          [dataset]`, applied to both 'customers' and 'orders')."
+      - "`csv_processor/source.py`'s own D-13 comment (lines 866-870) explicitly names 'ROUND
+          12's measured replay-wave mechanism' -- a prior round in THIS SAME debug session
+          already found and partially closed one shape of this general class (the narrower-
+          file oscillation); the wider/new-columns branch (source.py:801-835) has no equivalent
+          guard, confirming this is a real, previously-only-partially-addressed structural
+          fragility, not a one-off coincidence."
+      - "ROUND 24 Track B's own duration_decomposition independently proved `csv_ingest_
+          orders`' DagRun backlog can still be actively draining LONG after `test_backfill_
+          2year_sweep.py` itself has already asserted PASSED -- the timing precondition this
+          hypothesis needs (a schema-widening file's discover/stage landing inside u3's own
+          later polling window) is directly supported, not merely assumed."
+      - "The todo's own ROUND 23 evidence: run_id=280's FULL idempotency_key exactly matched
+          what the failing test's own traceback captured -- confirming `poll_run_for_file`
+          really did return the replay row on that occasion, consistent with an ORDER-BY-less
+          `fetchone()` racing the replay's creation, not a wrong-file/wrong-key bug elsewhere."
+    falsification_test: "If a future run shows u3 (or dbtkill/orphan/idempotent_reupload) still
+        observing `rows_loaded=0` on a `SUCCEEDED` run AFTER this fix (which always prefers the
+        non-replay row), that would mean either a genuinely fresh upload can ITSELF be marked
+        `replay_of_run_id` at creation (this hypothesis's own 'impossible for a file this call's
+        own caller just uploaded moments ago' claim would be REFUTED), or a different, unrelated
+        mechanism produces zero-row SUCCEEDED runs -- not yet observed, would need fresh
+        investigation."
+    fix_rationale: "Fixes the harness-level symptom (`poll_run_for_file` reading the wrong one
+        of two LEGITIMATE rows) rather than the platform-level replay-creation mechanism itself:
+        the replay mechanism is deliberate, documented, production-load-bearing (D-16's backfill
+        depends on it), and a full fix (resolving each file's OWN schema at idempotency-key time
+        would require `discover_files` to read file headers, a stage-time operation today) is a
+        genuine idempotency-key redesign -- out of this round's CI-focused scope and exactly the
+        kind of production-semantics change this session's own norm reserves for a checkpoint,
+        not a unilateral fix. u3's own observed failure is fully explained and fully closed by
+        the harness-level fix alone: run_id=64 (u3's own real run) was ALWAYS `SUCCEEDED` with
+        the fixture's genuine nonzero `rows_loaded` -- the bug was purely in which of two
+        legitimate rows the test harness read."
+    blind_spots: "The exact live trigger (which specific backlogged file's discover/stage call
+        actually flipped orders' current schema version during u3's own window, and precisely
+        when) is not re-confirmed via a fresh live query this round -- the mechanism is
+        confirmed via direct, convergent static-code evidence plus this session's own prior
+        live findings (ROUND 24 Track B's backlog-draining proof, ROUND 12's own prior
+        replay-wave precedent), not a fresh live reproduction. The status-reversion puzzle
+        (todo's own puzzle 1, 'SUCCEEDED observed then STAGED an hour later for the SAME
+        run_id') is resolved here as a MISDIAGNOSIS (two different rows conflated, not one row
+        reverting) rather than independently re-verified live."
+  fix_2: >
+      (a) `poll_run_for_file` (tests/e2e/slice/conftest.py): query now orders
+      `(replay_of_run_id IS NOT NULL) ASC` first (non-replay rows win), then earliest `run_id`
+      among non-replay rows (unambiguously "this caller's own fresh upload's genuine first-ever
+      run" -- by construction never itself a replay), falling back to the newest row (this
+      codebase's own "newest row wins" convention) only if every row for a `file_id` is itself a
+      replay (defensive path, not expected to fire for a freshly-uploaded file). (b) No
+      production code changed -- `dataplat/discovery.py`'s replay-creation mechanism is left
+      untouched, deliberately (see fix_rationale above). Todo moved to `.planning/todos/
+      completed/2026-08-29-investigate-u3-replay-idempotency-row.md` with a `## Resolution`
+      section recording this round's full root-cause chain and the deliberate not-fixed-here
+      scope boundary.
+  offline_battery: "ruff check: clean (4 changed files). ruff format --check: clean (the ONE
+      pre-existing unformatted line in test_pod_kill_retry.py, byte-identical before/after this
+      round's changes via `git stash` A/B, confirmed unrelated). mypy: clean, 0 issues, 4 files.
+      tests/unit: 568/568 passed (byte-identical baseline). tests/dagtest: 14/14 passed
+      (byte-identical baseline). tests/policy -m 'not manifests': 157 passed / 2 failed
+      (BYTE-IDENTICAL failing-test set and pass/fail count to a `git stash` A/B run on the SAME
+      tree -- test_csv_ingest_customers_stays_under_150_lines and test_the_main_gate_does_not_
+      lint_the_bad_samples, both confirmed pre-existing and unrelated to this round's
+      test-harness-only changes). make manifests (kubeconform -strict, K8s 1.35.5): 378
+      valid / 0 invalid / 0 errors. tests/integration -k 'discovery or schema': 21/21 passed
+      (no production code touched this round, run as an extra regression check given this
+      round's own discovery.py forensic reading). tests/e2e/slice --collect-only: all 17 tests
+      collect cleanly, 0 import errors (confirms `wait_for_orders_dagrun_admitted`'s new import
+      resolves at every one of the 5 files it was added to)."
+  pre_registered_criteria:
+    - "(a) dbtkill clears -- PENDING live verification."
+    - "(b) u3 clears -- PENDING live verification."
+    - "(c) zero new failures -- offline battery shows zero regressions; live census pending."
+    - "(d) guards green (Kyverno 0, restarts 0, scheduler peak vs 2560Mi) -- PENDING live
+        verification."
+    - "(e) duration decomposition -- PENDING live verification."
+    - "TARGET: fully green census or green-except-known-out-of-scope for
+        cluster-slice-verify -- PENDING live verification."
+  next_action: "AWAITING LIVE VERIFICATION. Trigger a plain (non-skip-ci) push carrying both
+      fixes, obtain the authoritative e2e-full.yml run ID (+ companion publish.yml), record in
+      live_verification_state, then return CHECKPOINT REACHED (human-action) with the run ID --
+      per this round's own instructions, do NOT start the `gh run watch` here; the session
+      manager runs the single 60s watcher."
 
 ROUND 24 (2026-08-29, opened on user decision after ROUND 23's own checkpoint: two parallel
 tracks -- a dedicated narrow-scope verification run for the SCD2 fix's own test, and direct-
@@ -11475,6 +11671,58 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     unanalyzed by this task, per scope.
   timestamp: 2026-08-29 (ROUND 24, Track A RE-DISPATCH post-run analysis)
 
+- checked: >
+    ROUND 25: `wait_for_orders_dagrun_queue_idle`/`trigger_orders_dagrun` call sites across
+    tests/e2e/slice/*.py (6 found via grep); `csv_ingest_orders.py`'s own `max_active_runs=1`/
+    `schedule=[customers_asset]` declaration; `dataplat/discovery.py`'s idempotency-key formula
+    and its `schema_version_term` resolution (`schema.get_current(dataset_id)`); `dataplat/
+    schema/repository.py`'s `SchemaRepository.sync()`/`get_current()`/`resolve_by_hash()`;
+    `csv_processor/source.py`'s per-file schema-resolution branches (bootstrap/INFERRED-wider/
+    narrower-D-13/exact-match); `tools/corpus/dated_series.py`'s `schema_change_day_index`
+    handling; `pipeline/run.py`'s `claim_ingestion_run`/`_skipped_receipt`/`stage_ingest`/
+    `publish_ingest` status-transition logic.
+  found: >
+    (1) `wait_for_orders_dagrun_queue_idle`'s own docstring already named and "accepted" the
+    exact race ROUND 24 Track B measured as catastrophically undersized (~50s assumed vs
+    ~15m31s observed, up to ~1920s/32min per ROUND 22's own worst-case arithmetic) -- no
+    downstream budget in any of the 6 call sites accounted for a captor needing its OWN full
+    worst-case failure-path duration. (2) `csv_ingest_orders`'s `discover` task re-scans the
+    ENTIRE `raw/orders/` bucket on every DagRun (no "only new since last run" scoping observed
+    anywhere in `discovery.py`), and its idempotency-key formula's `schema_version_term` reads
+    `schema.get_current(dataset_id)` -- a DATASET-WIDE mutable pointer any file can move, not a
+    per-file value. (3) `tools/corpus/dated_series.py` confirms `schema_change_day_index`
+    widens BOTH 'customers' AND 'orders' fixture schemas partway through
+    `test_backfill_2year_sweep.py`'s own corpus (`_SCHEMA_CHANGE_COLUMN[dataset]` applied to
+    both). (4) `csv_processor/source.py`'s own D-13 comment (lines 866-870) directly references
+    "ROUND 12's measured replay-wave mechanism" as a KNOWN, previously-encountered instance of
+    this general class -- the wide/new-columns branch (lines 801-835) has no equivalent
+    hash-based guard the narrower branch was given, confirming the general mechanism (a
+    dataset-wide schema-version bump spuriously re-eligibilizing OTHER, unrelated
+    already-`SUCCEEDED` files) is a real, only-partially-closed structural property of this
+    idempotency-key design, not a one-off coincidence. (5) `find_latest_succeeded_run_for_file`
+    (postgres.py:345-357) is itself correctly scoped (`WHERE file_id = %s AND status =
+    'SUCCEEDED' ORDER BY run_id DESC LIMIT 1`) -- the replay row's CREATION is the D-18
+    mechanism working exactly as designed on a genuinely different idempotency_key, not a query
+    bug. (6) `poll_run_for_file` (conftest.py) had no `ORDER BY`/`LIMIT` on a query that can
+    legitimately return >1 row per `file_id` -- confirmed as the proximate cause of u3's own
+    observed failure (a `fetchone()` race between u3's own original run, `SUCCEEDED` with real
+    nonzero `rows_loaded`, and a later spurious replay row, `SUCCEEDED`/`STAGED` with
+    `rows_loaded=0` since nothing NEW needed loading for already-fully-processed content).
+  implication: >
+    Two independent, well-evidenced, minimal, test-harness-only fixes close both charter items
+    without touching production DAG concurrency settings or `discovery.py`'s idempotency-key
+    formula (both would be production-semantics changes needing their own checkpoint, per this
+    session's established norm) -- see Current Focus's ROUND 25 block for the full
+    reasoning_checkpoint on each and the fixes applied (`wait_for_orders_dagrun_admitted`,
+    `poll_run_for_file`'s non-replay-preferring `ORDER BY`). The general "dataset-wide
+    schema-version churn can spuriously replay unrelated already-processed files" structural
+    fragility remains a real, only-partially-closed platform property (ROUND 12 closed one
+    shape of it; this round found and closed its test-harness-visible symptom for a second
+    shape without closing the shape itself) -- flagged in the completed todo's own Resolution
+    for future awareness, not re-opened as a new todo since no current test is affected by it
+    once `poll_run_for_file` prefers the non-replay row.
+  timestamp: 2026-08-30 (ROUND 25, fix implementation)
+
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
 
@@ -12871,6 +13119,15 @@ files_changed:
     helpers extracted from _delete_detection_forensics)
   - tests/unit/test_dag_structure.py (2 new red/green regression tests)
   - tests/policy/test_dag_line_budget.py (orders budget 161 -> 170, documented precedent)
+  ROUND 25 (2026-08-30, offline complete, awaiting live verification):
+  - tests/e2e/slice/conftest.py (new `wait_for_orders_dagrun_admitted` helper;
+    `poll_run_for_file`'s ORDER BY fix preferring the earliest non-replay row)
+  - tests/e2e/slice/test_pod_kill_retry.py (dbtkill/u3 call `wait_for_orders_dagrun_admitted`)
+  - tests/e2e/slice/test_referential_orphan.py (orphan calls `wait_for_orders_dagrun_admitted`)
+  - tests/e2e/slice/test_smoke_and_idempotency.py (both idempotent_reupload uploads call
+    `wait_for_orders_dagrun_admitted`)
+  - .planning/todos/completed/2026-08-29-investigate-u3-replay-idempotency-row.md (moved from
+    pending/, `## Resolution` section added)
 
 COMBINED VERIFICATION TRIGGER (2026-08-29): Deliberate plain, non-skip-ci push against current
 HEAD (stack: ROUND 22's timeout/retry-budget bundle commit e6f37fb/2009065 + the separate
@@ -13003,3 +13260,39 @@ No fix applied (diagnosis was this round's explicit charter). Decision checkpoin
 user on ROUND 25's shape (fix the newly-confirmed contention mechanism, pursue u3's own root
 cause, or accept this round as closing the dbtkill-scheduling investigation without a code
 fix).
+
+---
+
+ROUND 25 (2026-08-30, offline COMPLETE, awaiting live verification): User chose (a)+(b)
+combined. Fix 1 -- new `wait_for_orders_dagrun_admitted` helper (tests/e2e/slice/conftest.py)
+closes the max_active_runs=1 admission-starvation race ROUND 24 Track B named: waits for the
+CALLER's own `dag_run_id` to leave `'queued'` (reusing `wait_for_orders_dagrun_queue_idle`'s own
+already-validated 2400s worst-case budget) before starting the existing, already-correctly-sized
+downstream polling budgets. Applied at all 6 existing `wait_for_orders_dagrun_queue_idle` call
+sites that also trigger a DagRun: test_pod_kill_retry.py (dbtkill, u3), test_referential_
+orphan.py (orphan), test_smoke_and_idempotency.py (idempotent_reupload x2). No production DAG
+`max_active_runs`/scheduling changes made (deliberately out of test-harness-only scope). Fix 2
+-- root-caused u3's replay/idempotency-row regression (`2026-08-29-investigate-u3-replay-
+idempotency-row.md`): confirmed via static-code reading that `csv_ingest_orders`'s `discover`
+task re-scans the entire `raw/orders/` bucket every DagRun using a DATASET-WIDE, mutable
+`schema.get_current(dataset_id)` pointer in its idempotency-key formula, and
+`test_backfill_2year_sweep.py`'s own fixture corpus deliberately widens BOTH datasets' schemas
+partway through (`tools/corpus/dated_series.py`) -- combined with ROUND 24 Track B's own proof
+that the orders DagRun backlog can still be draining long after the sweep test itself has
+already asserted PASSED, this produces a LEGITIMATE (D-18-designed, not buggy) "replay" row for
+u3's own already-`SUCCEEDED` file as collateral damage, landing inside u3's own polling window.
+`poll_run_for_file`'s missing `ORDER BY`/`LIMIT` then non-deterministically returned that
+replay row (correctly `SUCCEEDED`/`rows_loaded=0`, since nothing NEW needed loading) instead of
+u3's own genuine original run (always `SUCCEEDED` with real nonzero `rows_loaded`) -- the
+todo's own "SUCCEEDED then STAGED an hour later for the same run_id" puzzle is resolved as two
+different rows conflated by the missing ORDER BY, not a state-machine violation. Fixed by
+making `poll_run_for_file` prefer the earliest non-replay row (unambiguously "this caller's own
+fresh upload's genuine first-ever run"). Production `discovery.py` replay-creation logic
+deliberately left untouched (a production idempotency-key redesign, out of this round's
+CI-focused scope; flagged in the completed todo's own Resolution for future awareness). Todo
+moved to `.planning/todos/completed/` with full resolution recorded. Offline battery all
+green/byte-identical-baseline: ruff clean, mypy clean, unit 568/568, dagtest 14/14, policy
+157/2 byte-identical pre-existing failures, manifests+kubeconform clean, integration
+discovery/schema 21/21, e2e/slice collect-only 17/17 (0 import errors). Full detail in Current
+Focus's ROUND 25 block (both `reasoning_checkpoint`s) and the new Evidence entry. LIVE
+VERIFICATION: PENDING.

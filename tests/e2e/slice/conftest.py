@@ -972,6 +972,95 @@ def wait_for_orders_dagrun_queue_idle(
     raise AssertionError(msg)
 
 
+def wait_for_orders_dagrun_admitted(
+    airflow_conn: psycopg.Connection[Any],
+    *,
+    dag_run_id: str,
+    dag_id: str = "csv_ingest_orders",
+    timeout: float = 2400,
+) -> None:
+    """Bounded wait until `dag_run_id`'s OWN DagRun leaves `queued` -- closes the residual race.
+
+    debug/ci-pipeline-ingestion-timeout ROUND 25 (root-causing ROUND 24 Track B's direct
+    evidence): `wait_for_orders_dagrun_queue_idle`'s own docstring named this exact race and
+    explicitly ACCEPTED it, sized against a "~50s, one cron tick" assumption -- a DagRun created
+    by an unrelated `asset_triggered` event (fired by a customers publish, D-15) in the tiny
+    window between that helper returning and this test's own `trigger_orders_dagrun` call can
+    still capture `csv_ingest_orders`' sole `max_active_runs=1` slot first. ROUND 24 Track B
+    directly measured that assumption as WRONG by 18-30x under real contention: the racing
+    DagRun took ~15m31s to fail via retry-exhaustion (consistent with ROUND 22's own documented
+    worst case of up to ~1920s/32min for a SINGLE DagRun, or ~1800-2250s for a short chain of
+    them draining serially) -- starving this test's own manually-triggered DagRun of the
+    scheduler's only slot for its ENTIRE downstream polling budget and producing the
+    uninformative "last observed: None" signature (`stage` never scheduled at all, not slow --
+    absent).
+
+    Widening the downstream polls themselves (`_poll_dbt_build_running_signal` et al.) cannot
+    fix this: ROUND 23 already live-confirmed that bumping ONE such budget to 2400s bought ZERO
+    improvement, because those polls watch a `run_id`/`meta.run_stages` row that cannot exist
+    until `stage` itself has been SCHEDULED -- and `stage` cannot be scheduled while this test's
+    own DagRun sits `queued` behind a captor. This helper closes the actual gap instead: it waits
+    for `dag_run_id` (the run THIS test just triggered, identified by name, not by inference)
+    to leave `queued`, using the SAME worst-case arithmetic and the SAME 2400s budget already
+    established and live-validated for `wait_for_orders_dagrun_queue_idle`'s own pre-upload
+    wait -- reused, not re-guessed, because losing this race puts the triggered DagRun in
+    exactly the same "wait out a slow captor" situation the pre-upload wait already handles.
+    Shrinking the race WINDOW itself (the few seconds between the idle-check and the trigger
+    call) was considered and rejected: the window is already small (an S3 PUT plus one `kubectl
+    exec` round-trip, not a full cron tick), so shrinking it further would reduce an
+    already-low-probability event without changing its consequence when it does land -- the
+    actual defect is that the CONSEQUENCE (an unbounded-feeling stall) was never budgeted for,
+    not that the window is too wide.
+
+    In the common, uncontended case this returns almost immediately (one query observing
+    `state != 'queued'`) -- it adds negligible latency to a test that was never going to race.
+
+    Args:
+        airflow_conn: An open connection to the AIRFLOW metadata database (see
+            `wait_for_orders_dagrun_queue_idle`'s own `airflow_conn` docstring).
+        dag_run_id: The exact `--run-id` this test passed to `trigger_orders_dagrun`.
+        dag_id: The DAG the DagRun belongs to.
+        timeout: Maximum seconds to wait. Defaults to 2400 (see this docstring's own
+            worst-case-arithmetic paragraph).
+
+    Raises:
+        AssertionError: `timeout` elapses with `dag_run_id` still `queued` (names which OTHER
+            DagRun(s), if any, currently hold the `running` slot) or `dag_run_id` never appears
+            at all (names the exact failure: `trigger_orders_dagrun`'s own CLI call should have
+            already asserted a zero exit code, so a missing row here is a distinct, worse
+            finding than a merely-queued one).
+    """
+    deadline = time.monotonic() + timeout
+    last_state: str | None = None
+    while time.monotonic() < deadline:
+        with airflow_conn.cursor() as cur:
+            cur.execute(
+                "SELECT state FROM dag_run WHERE dag_id = %s AND run_id = %s",
+                (dag_id, dag_run_id),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            last_state = str(row[0])
+            if last_state != "queued":
+                return
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    with airflow_conn.cursor() as cur:
+        cur.execute(
+            "SELECT run_id, state FROM dag_run "
+            "WHERE dag_id = %s AND state IN ('queued', 'running') "
+            "ORDER BY run_id",
+            (dag_id,),
+        )
+        still_active = [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+    msg = (
+        f"dag_run_id={dag_run_id!r} (dag_id={dag_id!r}) never left state='queued' within "
+        f"{timeout}s (last observed state: {last_state!r}) -- captured the sole "
+        f"max_active_runs=1 slot never came free. Currently queued/running for this dag_id: "
+        f"{still_active!r}"
+    )
+    raise AssertionError(msg)
+
+
 def poll_file_discovered(
     conn: psycopg.Connection[Any],
     *,
@@ -1182,13 +1271,52 @@ def poll_run_for_file(
     the caller can hand the discovered `idempotency_key` to
     `poll_ingestion_run` for the terminal-status wait.
 
+    debug/ci-pipeline-ingestion-timeout ROUND 25 (root-causing u3's ROUND
+    23/24 regression, `2026-08-29-investigate-u3-replay-idempotency-row.md`):
+    this query originally had NO `ORDER BY`/`LIMIT` and used `fetchone()` --
+    non-deterministic whenever `file_id` legitimately has MORE than one
+    `meta.ingestion_runs` row. That is a real, documented platform mechanism
+    (D-18, `dataplat.discovery`'s own module docstring): if this dataset's
+    CURRENT schema version changes for ANY reason -- including one caused by
+    a COMPLETELY UNRELATED file elsewhere in the same bucket, since
+    `schema.get_current(dataset_id)` is a dataset-wide, mutable pointer, not
+    a per-file value -- the NEXT `discover` call re-evaluates EVERY
+    already-`SUCCEEDED` file under the new idempotency-key formula and
+    allocates a fresh "replay" row (`replay_of_run_id` pointing at the
+    original) for each one, per file. Confirmed live for this exact case:
+    `test_backfill_2year_sweep.py`'s own fixture corpus deliberately widens
+    BOTH datasets' schemas partway through (`schema_change_day_index`,
+    `tools/corpus/dated_series.py`), and this session's own ROUND 24 Track B
+    finding independently proved `csv_ingest_orders`' backlog can still be
+    draining (queued/asset-triggered DagRuns processing OLDER, backlogged
+    sweep-era files) LONG after the sweep test itself has already asserted
+    PASSED -- so a schema-widening file's `discover`/`stage` can land
+    squarely inside a LATER, unrelated test's own polling window, spuriously
+    replaying that test's own just-created, already-`SUCCEEDED` file.
+    A replay row is a LEGITIMATE row (D-18 is deliberate, D-16's backfill
+    depends on it) -- but it is never THIS caller's OWN fresh upload's
+    genuine first-ever run, because a run can only ever be marked
+    `replay_of_run_id` when an OLDER succeeded run for the SAME file ALREADY
+    existed at discovery time, which is impossible for a file this call's
+    own caller just uploaded moments ago under a fresh, unique marker. The
+    fix: prefer the earliest NON-replay row (`replay_of_run_id IS NULL`) --
+    unambiguously "this caller's own run" -- and only fall back to the
+    newest replay row (this codebase's own established "newest row wins"
+    convention, e.g. `_latest_backfill_id`) on the defensive path where no
+    non-replay row exists at all (should not happen for a freshly-uploaded
+    file, but keeps this helper from raising `IndexError`/returning nothing
+    on that unexpected shape).
+
     Args:
         conn: An open connection to the analytical database.
         file_id: The `meta.files.file_id` to find a run for.
         timeout: Maximum seconds to wait. Defaults to 120.
 
     Returns:
-        `{"run_id": ..., "idempotency_key": ..., "status": ...}`.
+        `{"run_id": ..., "idempotency_key": ..., "status": ...}` -- the
+        earliest non-replay run for `file_id`, or (defensive fallback) the
+        newest run of any kind if every row for `file_id` is itself a
+        replay.
 
     Raises:
         AssertionError: `timeout` elapses with no matching
@@ -1199,7 +1327,11 @@ def poll_run_for_file(
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT run_id, idempotency_key, status "
-                "FROM meta.ingestion_runs WHERE file_id = %s",
+                "FROM meta.ingestion_runs WHERE file_id = %s "
+                "ORDER BY (replay_of_run_id IS NOT NULL) ASC, "
+                "CASE WHEN replay_of_run_id IS NULL THEN run_id END ASC, "
+                "run_id DESC "
+                "LIMIT 1",
                 (file_id,),
             )
             row = cur.fetchone()
