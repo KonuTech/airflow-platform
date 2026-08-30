@@ -31,10 +31,11 @@ updated: 2026-08-30 (ROUND 27 OFFLINE COMPLETE, awaiting live verification: (1) 
   540/378/0/0, policy 156 passed/3 failed -- all 3 pre-existing and byte-identical with/without
   this round's changes, integration discovery/schema 21/21). Decision checkpoint returned to
   user on the STAGE_LOAD fix.)
-round27_status: "ROUND 27 OFFLINE COMPLETE 2026-08-30 -- see 'ROUND 27' in Current Focus for full
-  detail. Both named items investigated; item 1 fixed+tested+verified offline; item 2 diagnosed
-  conclusively with direct evidence, fix proposed but not applied (production pipeline change,
-  returned to checkpoint). Live verification pending -- run IDs to be recorded once pushed."
+round27_status: "ROUND 27 OFFLINE COMPLETE 2026-08-30, PUSHED commit 7d631c5 -- see 'ROUND 27' in
+  Current Focus for full detail. Both named items investigated; item 1 fixed+tested+verified
+  offline; item 2 diagnosed conclusively with direct evidence, fix proposed but not applied
+  (production pipeline change, returned to checkpoint). Live verification IN PROGRESS: e2e-full.yml
+  run 33309793805, publish.yml run 33309793782 (both triggered off this round's own push)."
 round26_live_verification: 2026-08-30 (ROUND 26 LIVE-VERIFIED: run 33297885371 cancelled at 226m5s, ~1min past the
   225-min ceiling, 41/44 node-IDs reached. dbtkill's cross-DagRun-claim race fix CONFIRMED HOLDING
   (no recurrence of that signature) but dbtkill failed via a NEW, uncatalogued signature (app-layer
@@ -1057,10 +1058,13 @@ meta.run_stages completely empty):
     - "(d) zero new failures beyond already-known open items -- MET offline (see offline_battery
         above); pending live confirmation."
     - "(e) guards green -- pending live verification."
-  live_verification_state: "PENDING -- not yet pushed at the time this Current Focus entry was
-      written. Authoritative run IDs (e2e-full.yml + companion publish.yml) to be recorded in a
-      follow-up append to this same field once the push completes and the workflow runs are
-      identified, per this round's own instruction not to start the long watch itself."
+  live_verification_state: "PUSHED 2026-08-30, commit 7d631c5. Authoritative run: e2e-full.yml
+      ('E2E full (merge)') run 33309793805 -- https://github.com/KonuTech/airflow-platform/
+      actions/runs/33309793805. Companion: publish.yml ('Publish images') run 33309793782 --
+      https://github.com/KonuTech/airflow-platform/actions/runs/33309793782. Both confirmed
+      triggered off this round's own push (gh run list, headSha 7d631c5). Per this round's own
+      instruction, the long e2e-full watch itself is NOT started here -- the session manager
+      runs it."
   next_action: "Push this round's commit(s), identify the resulting e2e-full.yml and publish.yml
       run IDs, append them to live_verification_state above, and return CHECKPOINT REACHED
       (type: human-action) with those run IDs -- the session manager runs the watcher. On the
