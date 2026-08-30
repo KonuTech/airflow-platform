@@ -1,5 +1,23 @@
 ---
-status: investigating (ROUND 29 -- specialist code review of ROUND 28's own fix (commit e614a64)
+status: investigating (SESSION PAUSED, ROUND 30, by explicit user decision -- NOT resolved,
+  NOT abandoned. ROUND 30 analyzed the one live-CI run built on this session's own ROUND 27-29
+  fix chain (run 33301626793, headSha c9f000f): the target test WAS reached (item 41/44) and
+  made real progress through Step 0-3's customers-side settle-wait, but FAILED with a genuine
+  AssertionError at its own ORDERS-side settle-wait (a raw-file processing stall, 6/16 orders
+  files STAGED with zero movement for 600s) BEFORE ever reaching Step 4's
+  RebuildComparisonResult comparison. This is a DIFFERENT, already-known failure class (the same
+  orders-queue-backlog/CPU-contention condition this session's own ROUND 23 Evidence already
+  documented, targeted by the SIBLING ci-pipeline-ingestion-timeout session's own later ROUND
+  26/27 fixes, which post-date this run's headSha) -- NOT a new SCD2 defect, and it produced
+  ZERO new information on either open question. The ROUND 27 `[SCD2 BATCH-BOUNDARY DIAGNOSTIC]`
+  capture never fired (confirmed via full-log string search). Member 2100100032's ROUND 28/29
+  fix remains SQL-layer/integration-verified only, STILL NOT live-confirmed. Member 2100100030
+  remains COMPLETELY UNEXPLAINED, untouched since ROUND 28. Per the user's explicit instruction,
+  this session stops here -- no further round, no new dispatch. See Current Focus.next_action
+  for the full three-part handoff (confirmed / open / precise next step) and the new ROUND 30
+  Evidence entry for the full run analysis. Prior ROUND 29 status text preserved below for
+  continuity.)
+status_prior_round29: investigating (ROUND 29 -- specialist code review of ROUND 28's own fix (commit e614a64)
   found a SUGGEST_CHANGE-level flaw in `_VANISHED_SQL`'s freshness scoping (per-row `event_ts`
   value equality, not per-run/file granularity -- would have misclassified same-file customers
   as vanished under real per-row timestamp variance). CORRECTED this round: rescoped to
@@ -12,7 +30,16 @@ status: investigating (ROUND 29 -- specialist code review of ROUND 28's own fix 
   round. Status intentionally stays "investigating", not "resolved".)
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-30 (ROUND 29: a specialist code review of ROUND 28's own committed fix
+updated: 2026-08-30 (ROUND 30, FINAL WRAP-UP -- SESSION PAUSED: analyzed live-CI run 33301626793
+  (headSha c9f000f, this session's own ROUND 27-29 fix + diagnostic-capture chain). The target
+  test was reached and made real progress but FAILED at its own orders-side settle-wait (a raw
+  file processing stall, unrelated to SCD2 recompute/delete-detection logic) before Step 4's
+  RebuildComparisonResult comparison ever ran -- the ROUND 27 diagnostic capture never fired.
+  Zero new information obtained on member 2100100032's fix or member 2100100030's mechanism.
+  Full detail in the new ROUND 30 Evidence entry and Current Focus.next_action. Per explicit
+  user instruction, this session is PAUSED here -- not resolved, not abandoned, no further round
+  or dispatch initiated. Prior ROUND 29 update text preserved below for continuity.)
+updated_prior_round29: 2026-08-30 (ROUND 29: a specialist code review of ROUND 28's own committed fix
   (e614a64) was run against the actual diff plus the customers dataset contract and two
   independent corpus generators, and found the fix's `_VANISHED_SQL` freshness CTE compared
   each individual bronze ROW's own `event_ts` against a single scalar batch-wide maximum --
@@ -236,7 +263,34 @@ updated_prior_round24: 2026-08-29 (sibling session's ROUND 23 live-verification 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-hypothesis: ROUND 29 (this update). A specialist code review of ROUND 28's own committed fix
+hypothesis: ROUND 30 (this update, FINAL WRAP-UP -- no new hypothesis, a verification-run
+    analysis only). This round did not form or test a new hypothesis about either member's
+    mechanism -- it analyzed the one live-CI run (33301626793, headSha c9f000f) built on this
+    session's own ROUND 27-29 fix chain, to determine whether it produced a verdict. It did not:
+    the target test reached Step 3 (real progress through Step 0-2 and the customers-side
+    settle-wait) but FAILED with a genuine AssertionError at its own ORDERS-side settle-wait
+    (`_wait_for_all_raw_files_settled(dataset="orders", ...)`, test_rebuild_from_raw.py:525) --
+    "dataset='orders': rebuild settle STALLED -- 6 of 16 raw files unsettled with ZERO observed
+    progress ... for 600.0s (2690s total elapsed)" -- BEFORE Step 4's snapshot/
+    RebuildComparisonResult comparison ever ran. This is a DIFFERENT failure mechanism than the
+    ROUND 21 SCD2 mismatch this session exists to investigate: a raw-file processing stall on
+    the ORDERS side, matching this session's own already-documented ROUND 23 "orders-queue-
+    backlog/CPU-contention" finding, and directly targeted by the SIBLING
+    ci-pipeline-ingestion-timeout session's own ROUND 26/27 fixes (commits d92be10/7d631c5),
+    both of which chronologically post-date this run's own headSha (c9f000f) -- so this run
+    predates those fixes and its failure does not indicate they are insufficient. Confirmed via
+    full-log string search that the ROUND 27 `_dump_scd2_batch_boundary_diagnostic`'s own
+    `[SCD2 BATCH-BOUNDARY DIAGNOSTIC]` marker never printed -- `customers_comparison.matches` was
+    never evaluated, so the diagnostic capture correctly never fired. A later `if: always()`
+    diagnostics step (6 minutes after the stall assertion fired) shows the exact 6 "stalled"
+    orders files had in fact reached SUCCEEDED by then -- genuine forward progress that merely
+    exceeded the test's own fixed 600s stall_timeout window, not a permanent deadlock; still,
+    zero pass/fail information on either member's mechanism was obtained. Both members' status
+    is UNCHANGED by this round: member 2100100032's ROUND 28/29 fix remains SQL-layer/
+    integration-verified only, still not live-confirmed; member 2100100030 remains COMPLETELY
+    UNEXPLAINED. Per the user's explicit instruction, this session PAUSES here -- see
+    next_action for the full handoff, not a new investigation step.
+hypothesis_prior_round29: ROUND 29 (this update). A specialist code review of ROUND 28's own committed fix
     (commit e614a64) found the `_VANISHED_SQL` freshness CTE's per-ROW `event_ts`-value-equality
     scoping generalizes incorrectly: it silently assumes every row in the freshest staged file
     shares one identical `event_ts`, which this dataset's own contract
@@ -688,7 +742,62 @@ reasoning_checkpoint_prior_round25:
       produced the original tie, since it closes the general non-determinism class, not one
       specific instance of it."
 tdd_checkpoint: null
-next_action: "ROUND 29 (2026-08-30). No decision needed from the user right now -- this round
+next_action: "ROUND 30 (2026-08-30), FINAL WRAP-UP -- SESSION PAUSED BY EXPLICIT USER DECISION.
+    This is a session-handoff paragraph, not a proposal to continue investigating right now.
+
+    CONFIRMED: (1) Member 2100100032's batch-boundary/vanish-detection defect (originally
+    SQL-layer-confirmed at ROUND 27) has a production fix in place across two rounds --
+    `delete_detection.py`'s `_VANISHED_SQL` restricted to the freshest staged snapshot (ROUND
+    28), then rescoped from per-row `event_ts` value-equality to per-run/file `MAX(event_ts)`
+    granularity after a specialist review caught a real generalization gap (ROUND 29), plus
+    `load/publish/scd.py`'s `touched_keys`/`vanished_ids` exclusion (ROUND 28). This fix scope is
+    CONFIRMED at the SQL-layer/integration level: genuine RED/GREEN cycles against
+    `tests/integration/test_scd2_batch_boundary_vanish_detection.py` (now 4 tests) at both ROUND
+    28 and ROUND 29, plus a full offline battery (unit 568/568, dagtest 14/14, the 6-file SCD
+    integration surface 37/37, ruff/mypy clean, policy 166/3 byte-identical to the established
+    baseline, collect-only 1059) showing zero regressions at each round. (2) This round's own
+    live-verification run (33301626793, headSha c9f000f -- the exact commit carrying this fix
+    chain) was fetched and analyzed job-log line-by-line: the target test WAS reached and made
+    real forward progress (Step 0 through the customers-side settle-wait), CONFIRMING the fix
+    chain does not itself block or crash the pipeline under live conditions as far as it was
+    exercised.
+
+    OPEN (unresolved, exactly as before this round): (1) Member 2100100032's fix is STILL NOT
+    live-confirmed against an actual `RebuildComparisonResult` comparison -- this round's run
+    failed at its own ORDERS-side settle-wait (a raw-file processing stall, 6/16 orders files
+    STAGED with zero progress for 600s, 2690s total elapsed) BEFORE Step 4's comparison could
+    run at all, so the ROUND 27 `_dump_scd2_batch_boundary_diagnostic` never fired (confirmed:
+    zero `[SCD2 BATCH-BOUNDARY DIAGNOSTIC]` occurrences in the full job log). This failure mode
+    is DIFFERENT from and UNRELATED to the SCD2 recompute/delete-detection logic -- it matches
+    this session's own already-documented ROUND 23 'orders-queue-backlog/CPU-contention' finding,
+    and this run's headSha (c9f000f) chronologically PREDATES the sibling
+    ci-pipeline-ingestion-timeout session's own ROUND 26/27 fixes for exactly that class of issue
+    (commits d92be10, 7d631c5) -- so this is not evidence those fixes are insufficient, merely
+    that this particular run was built before they existed. (2) Member 2100100030's mechanism
+    remains COMPLETELY UNEXPLAINED -- untouched since ROUND 28, no new investigation this round
+    (out of scope for a live-run-analysis wrap-up).
+
+    PRECISE NEXT STEP for whoever resumes this session: dispatch a fresh live-verification run
+    against current `main` (which will include the sibling session's ROUND 26/27
+    orders-queue-contention fixes, chronologically after this run's own c9f000f), specifically
+    watching for `tests/e2e/slice/test_rebuild_from_raw.py`'s own
+    `test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending` to reach Step 4 and
+    print (or not print) the `[SCD2 BATCH-BOUNDARY DIAGNOSTIC]` block. Given this session's own
+    established history of this specific test sitting behind ~2+ hours of preceding suite time
+    inside a single ~225-min job (and this round's own run consuming ~2h39m before even reaching
+    this test), a narrow-scope `workflow_dispatch` (the `pytest_scope` mechanism already built at
+    ROUND 24, `make cluster-slice-verify-scoped`) is the stronger option once CI job-ceiling
+    capacity/timing allows it to be dispatched and run to completion without being cancelled or
+    stalled -- NOT a blind re-dispatch of the full-suite `push`-triggered path that produced this
+    round's own inconclusive result. Do not mark this session `resolved` until that live
+    confirmation lands for member 2100100032, and member 2100100030's mechanism is still
+    completely open regardless.
+
+    NO FURTHER ACTION IS BEING TAKEN THIS ROUND. This session is deliberately PAUSED here per
+    explicit user instruction -- no new hypothesis, no new fix, no new CI dispatch.
+
+    HISTORICAL, ROUND 29 (superseded by the above, retained for continuity): No decision needed
+    from the user right now -- this round
     addressed a specialist code review's SUGGEST_CHANGE findings on ROUND 28's own committed fix,
     fully offline-verified with zero regressions. Concrete next steps for a FUTURE round: (1)
     Watch for the ROUND 27 diagnostic capture (`_dump_scd2_batch_boundary_diagnostic` in
@@ -1845,6 +1954,82 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     yet been live-confirmed -- this is a second, independent illustration of why this session
     continues to withhold 'resolved' status pending an actual live run."
 
+- timestamp: 2026-08-30 (ROUND 30 -- FINAL WRAP-UP: live-verification run 33301626793 outcome,
+    session pause)
+  checked: "Analyzed GitHub Actions run 33301626793 (headSha c9f000f, this session's own ROUND
+    27-29 fix + diagnostic-capture commit chain 03b942a -> e614a64 -> c9f000f), a `push`-
+    triggered full `make cluster-slice-verify` run on `.github/workflows/e2e-full.yml`'s
+    `e2e-full` job (job id 99245093447, name 'Full local E2E suite + rebuild-from-raw capstone').
+    Terminal job conclusion: `cancelled` at the 225-min ceiling (job started 10:38:15Z, completed
+    14:24:11Z = 3h45m56s). Confirmed via `gh run view --json jobs` that the 'Run cluster + slice
+    E2E suite' step (step 13, which contains `tests/e2e/slice/test_rebuild_from_raw.py`) is
+    itself the step marked `cancelled`; the separate, later 'Run rebuild-from-raw (D-24
+    capstone)' step (step 16, `make rebuild-from-raw` -- a DIFFERENT, whole-suite-external
+    reprocessing pass, not this test) was `skipped` because the job never got that far. Fetched
+    the full job log via `gh api repos/KonuTech/airflow-platform/actions/jobs/99245093447/logs`
+    (15,775 lines) and searched directly for (a) the target test's own PASSED/FAILED collection
+    line, (b) its own traceback, (c) the `[SCD2 BATCH-BOUNDARY DIAGNOSTIC]` marker strings the
+    ROUND 27 `_dump_scd2_batch_boundary_diagnostic` function prints when (and only when)
+    `customers_comparison.matches` is `False`, and (d) the diagnostics step's own later
+    `meta.ingestion_runs` dump (runs `if: always()`, so it executed even though the main suite
+    step was cancelled)."
+  found: "The run DID reach the target test -- `tests/e2e/slice/test_rebuild_from_raw.py::
+    test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending FAILED [ 93%]`, collected
+    item 41 of 44 total. It executed Step 0 (fixture seeding, including the ROUND 24 `>=`
+    relaxation, which held cleanly), Step 1 (pre-drop snapshots), Step 2 (the real
+    `scripts/rebuild-from-raw.py` subprocess, `proc.returncode == 0` -- passed), and the
+    customers-side call of Step 3's `_wait_for_all_raw_files_settled` -- but then FAILED with a
+    genuine `AssertionError` at `test_rebuild_from_raw.py:525`, inside the SAME Step 3's
+    immediately-following ORDERS-side call (`test_rebuild_from_raw.py:754` in the traceback,
+    `dataset=\"orders\"`): `AssertionError: dataset='orders': rebuild settle STALLED -- 6 of 16
+    raw files unsettled with ZERO observed progress (no discovery, no status transition, no
+    rows_read heartbeat tick) for 600.0s (2690s total elapsed). Still pending:
+    {'orders_20240108.csv': 'STAGED', 'orders_20240109.csv': 'STAGED', 'orders_20240110.csv':
+    'STAGED', 'orders_20240111.csv': 'STAGED', 'orders_20240112.csv': 'STAGED',
+    'orders_20240113.csv': 'STAGED'}`. This failure occurred BEFORE Step 4's snapshot/
+    `RebuildComparisonResult` comparison was ever reached -- `customers_comparison` was never
+    computed, `customers_comparison.matches` was never evaluated, and the ROUND 27
+    `_dump_scd2_batch_boundary_diagnostic` call (gated on that exact condition) never fired --
+    confirmed independently by a full-log string search for `[SCD2 BATCH-BOUNDARY DIAGNOSTIC]`,
+    which returned ZERO matches anywhere in the 15,775-line log. This is a DIFFERENT failure
+    mechanism from the ROUND 21 SCD2 checksum/current-version mismatch this session exists to
+    investigate: a raw-file processing stall confined to the `orders` dataset, matching the exact
+    class of issue this session's own ROUND 23 Evidence already documented as an out-of-scope
+    'orders-queue-backlog/CPU-contention condition, NOT a defect in this fix's own SCD2 recompute
+    logic'. Checked `git log` ordering: this run's headSha (c9f000f) is an ANCESTOR of the
+    sibling ci-pipeline-ingestion-timeout session's own later ROUND 26 commit (d92be10, 'u3
+    rows_loaded=0 confirmed ... not peak_bytes race') and ROUND 27 commit (7d631c5, 'harden
+    poll_run_for_file loop, root-cause dbtkill's STAGE_LOAD gap') -- both of which target
+    exactly this class of orders/staging-throughput contention and post-date this run. This run
+    therefore predates those fixes; its failure is not evidence they are insufficient, only that
+    this particular dispatch ran before they existed. A further, non-obvious data point: the same
+    job's later 'DEBUG: dump control-plane resource monitor + final diagnostics' step (`if:
+    always()`, so it ran despite the main suite step's cancellation) queried
+    `meta.ingestion_runs` at 14:24:07 -- about 6 minutes AFTER the test's own stall assertion
+    fired at 14:17:54 -- and shows the exact same 6 'stalled' orders files
+    (`orders_20240108.csv`-`orders_20240113.csv`, run_ids 267-272) had in fact transitioned to
+    `SUCCEEDED` by then. This indicates genuine, if slow, forward progress that simply exceeded
+    the test's own fixed 600s `stall_timeout` window, not a permanent deadlock -- a nuance
+    relevant to the sibling session's own charter, not this session's core questions. After this
+    test's own failure, pytest continued into its next collected item; the overall job's 225-min
+    ceiling cancellation landed separately, ~5.5 minutes later (14:23:28), with 3 of 44 collected
+    items never run -- the ceiling cancellation is a distinct, later event from this test's own
+    genuine assertion failure, not its cause."
+  implication: "ZERO new pass/fail information was obtained on member 2100100032's ROUND 28/29
+    fix (commits e614a64/c9f000f) or on member 2100100030's still-unexplained mechanism from this
+    run. This is best classified alongside ROUND 23's own 'orders-queue-backlog' miss in this
+    session's live-verification chase: a distinct-reason miss caused by a known,
+    already-separately-tracked infra contention issue owned by the sibling
+    ci-pipeline-ingestion-timeout session, not by anything in `delete_detection.py`,
+    `recompute.py`, or `load/publish/scd.py`. The ROUND 27 diagnostic capture remains correctly
+    in place, additive-only, and unfired -- it will only produce data the next time a live run's
+    own `customers_comparison.matches` assertion is actually evaluated, which requires a run that
+    both (a) survives long enough to clear the orders settle-wait (plausibly more likely on a
+    commit at or after the sibling session's own ROUND 26/27 fixes) and (b) is not itself
+    cancelled by the job ceiling before Step 4. Per the user's explicit instruction, this session
+    is PAUSED here, not continued into a further round or dispatch -- see Current Focus.
+    next_action for the full three-part (confirmed/open/next-step) handoff."
+
 ## Specialist Review
 <!-- APPEND only - findings from external code review, mirrors Evidence's timestamped-entry style -->
 
@@ -2022,7 +2207,18 @@ verification_round28_member_2100100032: "RED/GREEN-verified: reverted delete_det
     genuinely-RED/GREEN-verified test suite and still contain a real generalization gap that only
     surfaces under conditions the fixture data never exercised -- reinforcing why this session
     continues to withhold 'resolved' status pending an actual live run, not just pending the
-    self-verification standard alone."
+    self-verification standard alone.
+    UPDATE (ROUND 30, FINAL WRAP-UP): this session's own live-verification run built on this
+    exact fix chain (33301626793, headSha c9f000f) was analyzed and did NOT produce a verdict --
+    it failed at an unrelated ORDERS-side raw-file settle stall (a known, already-separately-
+    tracked infra contention class, see this round's Evidence entry) before Step 4's
+    RebuildComparisonResult comparison could run, so the ROUND 27 diagnostic capture never fired.
+    STILL NOT verified against live CI. This session is PAUSED here by explicit user decision --
+    see Current Focus.next_action for the full handoff. The precise next step for a future round
+    is a fresh live-verification dispatch against a commit at or after the sibling session's own
+    ROUND 26/27 orders-queue-contention fixes, ideally via the existing narrow-scope
+    `pytest_scope`/`cluster-slice-verify-scoped` mechanism (ROUND 24) once CI capacity allows it
+    to run to completion."
 root_cause_round28_member_2100100030: "STILL UNEXPLAINED. This round ruled out one additional,
     concrete candidate mechanism (cross-test-file S3-key-lexicographic-vs-real-upload-
     chronological-order divergence in file_id assignment -- confirmed as a REAL, already
@@ -2030,7 +2226,12 @@ root_cause_round28_member_2100100030: "STILL UNEXPLAINED. This round ruled out o
     but confirmed NOT to affect member 30's valid_from because both files' own echoes of member
     30 carry byte-identical content) without finding the true mechanism. See Evidence for the
     full trace. The ROUND 27 live diagnostic capture remains the most promising unexploited path
-    to a direct answer."
+    to a direct answer.
+    UPDATE (ROUND 30, FINAL WRAP-UP): untouched this round -- the one live run analyzed
+    (33301626793) never reached the diagnostic capture (see member 2100100032's UPDATE above for
+    the same reason), so no new evidence on member 30 was obtained. Still STILL UNEXPLAINED.
+    Session PAUSED by explicit user decision -- this remains the single largest open gap for
+    whoever resumes this session."
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
     `_select_lineage_rows`, which independently duplicates its grouping rule) sorts/ranks one
     customer_id's full bronze history using `(event_ts, source_row_number)` as if it were a total
