@@ -1,6 +1,21 @@
 ---
 status: investigating
-round26_status: "ROUND 26 offline COMPLETE 2026-08-30, awaiting live verification. Charter: fix
+updated: 2026-08-30 (ROUND 26 LIVE-VERIFIED: run 33297885371 cancelled at 226m5s, ~1min past the
+  225-min ceiling, 41/44 node-IDs reached. dbtkill's cross-DagRun-claim race fix CONFIRMED HOLDING
+  (no recurrence of that signature) but dbtkill failed via a NEW, uncatalogued signature (app-layer
+  FAILED while Airflow retries the same task). u3's memory-sampler fix UNEVALUATED (never reached
+  peak_bytes -- failed earlier). u3's rows_loaded=0 CONFIRMED, via exact idempotency_key match, to
+  be a RECURRENCE of ROUND 23's original D-18 replay-row mechanism (NOT ROUND 25's peak_bytes
+  race) -- poll_run_for_file's ROUND 25 fix is present/unmodified/logically-correct but this run's
+  own evidence shows it can still return a replay row's key; exact timing mechanism flagged as
+  inconclusive with a precise list of what would close it. Overrun fully attributable to u3
+  (+35min vs R25) and test_rebuild_from_raw (+11min, pre-existing out-of-scope settle-stall), not
+  an under-margined ceiling. Recommendation: do not bump ceiling further; fix poll_run_for_file's
+  stop-on-first-row behavior instead. See Current Focus's 'ROUND 26 OUTCOME' block. Decision
+  checkpoint returned to user.)
+round26_status: "ROUND 26 LIVE-VERIFIED 2026-08-30 -- see 'ROUND 26 OUTCOME' in Current Focus and
+  the 'updated' field above for the full post-run analysis. Original offline-completion record
+  preserved below for history. Charter: fix
   ALL THREE items ROUND 25's checkpoint named except the SCD2/rebuild-from-raw finding (owned by
   the separate, already-reopened rebuild-scd2-reconciliation.md session -- NOT touched here).
   (1) dbtkill's cross-DagRun file-claim race: root-caused as an upload-before-admission ordering
@@ -983,6 +998,168 @@ separate, already-reopened rebuild-scd2-reconciliation.md session):
       regression); (d) guards green (Kyverno/restarts/OOMKilled/scheduler-memory trend); (e)
       duration comfortably under 225min. TARGET: fully green cluster-slice-verify census, modulo
       the SCD2 thread."
+
+ROUND 26 OUTCOME (2026-08-30, post-run analysis of run 33297885371, headSha
+5864b048b1c25d793531ae820590be225053ccde -- CURRENT STATE):
+  run_facts: "conclusion=cancelled, job 06:52:06Z->10:38:11Z = 226m5s wall (`##[error]The
+      operation was canceled.` fired 10:37:19Z, 225m13s in -- ~1min past the new 225-min ceiling,
+      the closest-to-ceiling cancellation this session has recorded). Step 13 (pytest) cancelled
+      mid-suite (never reached test_referential_orphan.py/test_smoke_and_idempotency.py); step 14
+      (end-of-job diagnostics dump) completed without truncation (all sections present, including
+      the ROUND 12 ingestion_runs<->files mapping, which is NOT `tail`-truncated this round: its
+      own result set is 93 rows, well under the 120-line `tail` window)."
+  census: "32 passed / 3 failed (dbtkill, u3, test_rebuild_from_raw) / 6 skipped / 3 never reached
+      (test_orphan_order_quarantined_while_valid_rows_publish, test_smoke_dag_xcom_contains_
+      built_sha, test_idempotent_reupload) = 41 of 44 node-IDs reached. SHALLOWER than ROUND 25's
+      43/44 -- entirely explained by two abnormally-long reached tests eating the budget that
+      ROUND 25 spent reaching two additional node-IDs (see duration_decomposition below), not by
+      any new stall class."
+  fix_1_dbtkill_upload_reorder_verdict: "The NAMED mechanism (an independently-admitted competing
+      DagRun claiming and fully processing the freshly-uploaded file before this DagRun's own
+      discover pass) DID NOT RECUR -- no evidence anywhere in this run of another run_id reaching
+      PUBLISH/SUCCEEDED for dbtkill's own object_uri before this DagRun's own tasks ran. dbtkill
+      still FAILED, but via a DIFFERENT, NOT-PREVIOUSLY-CATALOGUED-THIS-SESSION signature: this
+      DagRun's OWN triggered run (`e2e-dbtkill-bfed429b87ef`, run_id=874 per the test's own
+      captured value, started_at=08:21:22Z) reached `meta.ingestion_runs.status='FAILED'`
+      (error_type/error_message both NULL) while Airflow's own `stage` task instance was STILL
+      `up_for_retry` (try=3 of what the DAG allows) as late as 08:25:07Z -- i.e. the APPLICATION
+      layer gave up and marked the run FAILED while the AIRFLOW layer kept retrying the SAME task,
+      an 'orphaned-at-last-real-status' mismatch this session's own ROUND 18/ROUND 23 precedent
+      already named as a distinct class from admission-starvation or cross-DagRun-claim races.
+      `meta.run_stages[run_id=874]` was completely EMPTY (`[]`) -- `STAGE_LOAD` itself never wrote
+      even a starting row, meaning whatever failed did so very early in `stage_ingest`, before its
+      own first stage-tracking write. NOT investigated further this pass (not this task's named
+      priority) -- flagged as a genuinely new dbtkill failure mode for a future round, distinct
+      from both ROUND 25's cross-DagRun-claim race (CLOSED, confirmed by the absence of its own
+      signature here) and the original ROUND 20/23 admission-starvation stalls (also absent -- no
+      multi-tens-of-minutes queued signature, dbtkill's own total test duration was a fast
+      ~10m55s, consistent with a quick, non-stalling failure)."
+  fix_2_u3_memory_sampler_verdict: "CANNOT BE EVALUATED this run -- u3 never reached the
+      `peak_bytes > 0` assertion ROUND 25 found failing and ROUND 26's `_poll_pod_by_label` fix
+      targeted. u3 failed EARLIER, at `_read_run_metrics`'s own `assert rows_loaded > 0` (test_pod_
+      kill_retry.py:611) -- the EXACT SAME assertion TEXT (`AssertionError: expected a nonzero
+      rows_loaded, got 0`) as the ORIGINAL ROUND 23 regression, not ROUND 25's `peak_bytes`
+      assertion. This is investigated in full detail below (u3_rows_loaded_recurrence)."
+  u3_rows_loaded_recurrence: "CONFIRMED, via direct cryptographic-strength evidence (a 20-char
+      SHA256 idempotency_key prefix match, not merely a coincidental integer), to be a RECURRENCE
+      of the SAME GENERAL MECHANISM ROUND 23 originally found and ROUND 25 diagnosed (D-18's
+      dataset-wide schema-version-churn replay-wave creating a spurious second `meta.ingestion_
+      runs` row for an already-processed file) -- NOT a new/different mechanism, and definitively
+      NOT ROUND 25's own `peak_bytes` memory-sampler race (which u3 never reached this run).
+      DIRECT EVIDENCE (end-of-job `meta.ingestion_runs -> meta.files` mapping dump, scratchpad
+      round26-job.log:15439/15455): `file_id=104` (`s3://raw/orders/e2e-u3-241d07a482ec.csv`, u3's
+      own single, uniquely-marked upload this run) has TWO rows -- `run_id=64` (`status=SUCCEEDED`,
+      `replay_of_run_id` BLANK/NULL, `idem_prefix=0505d4eaf6dc01fcab11`) and `run_id=260`
+      (`status=SUCCEEDED`, `replay_of_run_id=64`, `idem_prefix=93ba3837a6468c1d8a67`). The FAILING
+      TEST'S OWN captured `idempotency_key`
+      (`93ba3837a6468c1d8a67b6b2fa50b954837d397179a546a3f5b8261f8a3707bb`, from the pytest
+      traceback frame) matches run_id=260's `idem_prefix` EXACTLY -- the REPLAY row, not the
+      non-replay original (run_id=64). SYSTEMIC, not isolated: the SAME original+replay pairing
+      pattern appears for EVERY OTHER orders file in this dump without exception -- run_id 61->257
+      (concurrent-select), 62->258 (dbtkill, both FAILED), 63->259 (podkill), 65->261 through
+      70->26x (the six static `orders_2024*.csv` backfill files) -- meaning the D-18 replay-wave
+      mechanism fired for the WHOLE orders dataset this run, not selectively for u3, a materially
+      WIDER occurrence than ROUND 25's own single-file finding. `poll_run_for_file`'s FIX ITSELF
+      IS PRESENT, UNMODIFIED, AND LOGICALLY CORRECT: `git log --oneline -- tests/e2e/slice/
+      conftest.py` confirms the file's last modification is ROUND 25's own commit `c03624a`
+      -- ROUND 26's commit (`ae55318`) did not touch `conftest.py` at all. Direct source read
+      (tests/e2e/slice/conftest.py:1325-1334) plus hand-evaluation of its `ORDER BY (replay_of_
+      run_id IS NOT NULL) ASC, CASE WHEN replay_of_run_id IS NULL THEN run_id END ASC, run_id DESC
+      LIMIT 1` against run_id=64's and run_id=260's ACTUAL column values confirms the non-replay
+      row (64) sorts strictly before the replay row (260) under this ORDER BY -- IF the query had
+      run with both rows already visible, it would have returned 64, not 260. INCONCLUSIVE (not
+      resolvable from static log evidence, flagged precisely rather than guessed): WHY the test's
+      poll nonetheless captured 260's key. `poll_run_for_file`'s own loop returns on the FIRST
+      poll iteration that finds ANY row for `file_id` (not the first iteration where the
+      'best' row exists) -- its own ROUND 25 docstring's load-bearing assumption is that a
+      genuinely-fresh upload's file_id can only ever have ONE row (the non-replay original) at
+      the moment of that first successful poll, since a replay requires `find_latest_succeeded_
+      run_for_file` (postgres.py:345-357, confirmed unchanged, still strictly `WHERE status =
+      'SUCCEEDED'`) to find an ALREADY-SUCCEEDED prior run for the SAME file_id -- which should be
+      impossible this early for a fresh upload. This run's own evidence is consistent with EITHER
+      (a) that assumption being violated under contention neither ROUND 25 nor this round tested
+      for directly (the replay row becoming the ONLY visible row at poll time, if the original's
+      own creation-to-SUCCEEDED cycle plus a competing DagRun's own re-discovery both complete
+      before this test's OWN poll_run_for_file first executes -- plausible given `poll_file_
+      discovered`'s own 180s budget and this session's well-documented backlog-draining delays can
+      push the first poll's actual wall-clock execution much later than upload time), or (b) an
+      as-yet-unidentified mechanism at the poll/DB layer. A separate, UNEXPLAINED oddity
+      surfaced during this investigation and is flagged, not resolved: dbtkill's OWN
+      live-captured `run_id` (874, from its in-test AssertionError) is far outside the numeric
+      range (1-266) the SAME end-of-job dump shows for the SAME dbtkill object_uri (`run_id=62`/
+      `258`) -- an apparent discrepancy this pass could not reconcile from the available log
+      evidence, and which is NOT explained by log truncation (the dump's own row count, 93, is
+      confirmed below its 120-line `tail` limit). This session's EXISTING guard checks do not
+      monitor the CNPG `analytics-db` pods (`data` namespace) for restarts at all (confirmed:
+      the end-of-job diagnostics dump's only pod-restart/pod-list sections cover the `airflow`
+      namespace and the triggerer specifically -- no equivalent section exists for `data`) -- so a
+      CNPG-level event (failover, restart) cannot be ruled out as a contributing factor to the
+      run_id discrepancy, but also cannot be confirmed from this run's own evidence. WHAT WOULD
+      CLOSE THIS FULLY: (1) add `created_at`/`claimed_at` timestamps to both `poll_run_for_file`'s
+      query and the end-of-job ingestion_runs dump so exact creation ordering is directly
+      observable, not inferred; (2) add CNPG/`data`-namespace pod-restart monitoring to this
+      session's existing guard checks (a real, previously-unnoticed coverage gap, independent of
+      whether a restart actually occurred this run); (3) a live run with `poll_run_for_file`
+      itself logging every row it observes on every iteration (not just the one it returns) to
+      directly show whether the non-replay row was ever visible before the replay row appeared."
+  duration_decomposition: "Job 06:52:06Z->10:38:11Z (226m5s). Setup+cluster tests: ~7m4s (matches
+      baseline). tests/e2e/slice/test_backfill_2year_sweep.py (7 tests, ALL PASSED): ~52m49s.
+      test_backfill_reentry.py: 7m19s. test_concurrent_select.py: 3m49s. test_dbt_silver_
+      pipeline.py: 1m26s. test_pod_kill_retry.py (3 tests): podkill 10m26s (PASSED, in line with
+      ROUND 25's 12.11min), dbtkill 10m55s (FAILED, in line with ROUND 25's 9.09min -- fast, NOT a
+      stall, see fix_1 verdict above), u3 40m45s (FAILED -- a MASSIVE, ANOMALOUS outlier vs ROUND
+      25's own 5.49min for this same test, and near-IDENTICAL to ROUND 23's own original ~41m43s
+      anomalous u3 duration -- direct, strong corroborating evidence that this round's u3 failure
+      is the SAME slow backlog-interacting mechanism ROUND 23 first saw, not ROUND 25's fast/clean
+      peak_bytes race). test_rebuild_from_raw.py: 75m10s (FAILED via the pre-existing, already-
+      ticketed, explicitly out-of-scope orders-settle-stall signature -- `dataset='orders': rebuild
+      settle STALLED -- 6 of 16 raw files unsettled ... for 600.0s (2794s total elapsed)` -- larger
+      than ROUND 25's own 63.89min COMPLETE run, but via the SAME known backlog-draining mechanism
+      this whole debug session has repeatedly documented and kept out of scope, not a new defect).
+      VERDICT: the overrun past 225min (and the shallower 41/44 vs ROUND 25's 43/44 reach) is NOT
+      evenly distributed -- it concentrates almost entirely in two SPECIFIC, ALREADY-NAMED
+      mechanisms (u3's own replay-row recurrence, ~35min above its ROUND 25 baseline; test_
+      rebuild_from_raw's own settle-stall, ~11min above its ROUND 25 baseline), both already
+      tracked (this session's own active investigation; the sibling out-of-scope backlog/CPU-
+      starvation ticket respectively). Every OTHER reached test's duration is in line with or
+      better than ROUND 25's own baseline -- the 190->225min ceiling arithmetic itself was not
+      wrong given ROUND 25's own assumption (that dbtkill/u3 would keep failing fast, ~9min/5.5min)
+      -- that assumption simply did not hold this round because u3 hit its OLD slow mechanism
+      again instead of ROUND 25's fast one."
+  guards: "Kyverno: 0 unintended denials (only the deliberate PASSED test_an_unsigned_public_
+      image_is_denied). Restarts (Airflow namespace only -- see the coverage gap named above):
+      0 across scheduler/dag-processor/triggerer/statsd during the run (empty restart-count-
+      changed timeline); airflow-api-server's own '1 (3h39m ago)' restart predates the monitored
+      window (startup-time restart, same pre-existing signature every prior round has documented).
+      OOMKilled: 0 occurrences observed. Scheduler peak: 1,935,962,112 bytes = 1846.5MiB = 72.1% of
+      2560Mi -- comfortably under ROUND 25's own 79.7%-of-2560Mi high-water mark, still well under
+      the limit."
+  ceiling_recommendation: "DO NOT bump the ceiling further this round. The 1-minute overrun is
+      fully and specifically explained by two named, already-tracked mechanisms (u3's replay-row
+      recurrence; test_rebuild_from_raw's settle-stall), not by an under-margined ceiling formula
+      or an evenly-distributed slowdown -- bumping the ceiling further would only buy time for a
+      KNOWN-FLAKY duration (u3 alone has now shown BOTH a ~5.5min fast fail (ROUND 25) and a
+      ~40.75min slow fail (ROUND 23, this round) for what is nominally the SAME test), not fix
+      anything, and a ceiling sized to comfortably absorb u3's own worst-case-so-far plus
+      test_rebuild_from_raw's own settle-stall would approach several hundred minutes -- into the
+      territory this session's own runner-migration/job-splitting restructure was deliberately
+      retired against. The higher-leverage, ACTIONABLE move is fixing u3's own replay-row-timing
+      race directly (see u3_rows_loaded_recurrence's own 'what would close this fully' list) --
+      that is the one lever in this evidence that would reliably recover the ~35min this round's
+      own overrun came from, rather than just buying more margin for a mechanism that will keep
+      firing unpredictably."
+  next_action: "AWAITING USER DECISION on ROUND 27's shape. Proposed direction: harden
+      `poll_run_for_file` so it does not stop on the FIRST row found when that row is itself a
+      replay -- e.g. continue polling (within the existing timeout budget) until either a
+      non-replay row appears or the timeout elapses, only then falling back to the newest replay
+      row (preserving the existing defensive fallback), rather than treating 'any row exists' as
+      sufficient to stop. Recommend pairing this with the two diagnostics/guard gaps named above
+      (created_at timestamps on the relevant queries; CNPG/data-namespace restart monitoring) so a
+      future recurrence (if any) is fully resolvable without the ambiguity this pass hit. dbtkill's
+      newly-observed 'orphaned-at-last-real-status while Airflow retries' signature and the
+      run_id-874-vs-62/258 discrepancy are flagged as open items for a future round or a fresh,
+      narrowly-scoped investigation -- not actioned here. rebuild-scd2-reconciliation.md and
+      CPU-starvation remediation remain explicitly out of scope, unchanged."
 
 ROUND 25 (2026-08-30, opened on user decision after ROUND 24's own checkpoint: (a)+(b)
 combined -- fix the newly-confirmed max_active_runs=1 contention mechanism for dbtkill/u3-class
@@ -12269,6 +12446,69 @@ next_action: "Awaiting human verification (checkpoint returned) before this debu
     flag bearing on a CLOSED sibling debug session, surfaced for user decision, not acted on here.
     Decision checkpoint returned to user on ROUND 26's shape.
   timestamp: 2026-08-30 (ROUND 25, live-verification post-run analysis)
+
+- checked: >
+    ROUND 26 live-verification run 33297885371 (job log, 15,581 lines, scratchpad
+    round26-job.log) against its own pre-registered criteria. `git log --oneline -- tests/e2e/
+    slice/conftest.py` to confirm `poll_run_for_file`'s ROUND 25 fix is present/unmodified. Direct
+    source read of `poll_run_for_file` (tests/e2e/slice/conftest.py:1259-1341) and hand-evaluation
+    of its `ORDER BY` clause against the actual column values of both `meta.ingestion_runs` rows
+    found for u3's own `file_id`. Direct source read of `find_latest_succeeded_run_for_file`
+    (packages/dataplat/src/dataplat/metadata/postgres.py:345-357) to reconfirm its `WHERE status =
+    'SUCCEEDED'` scoping is unchanged. Searched the end-of-job 'ROUND 12: meta.ingestion_runs ->
+    meta.files mapping' dump for the failing test's own captured idempotency_key (an exact
+    20-char SHA256 prefix match, not an inferred/approximate match).
+  found: >
+    conclusion=cancelled, 226m5s wall (~1min past the new 225-min ceiling), 41/44 node-IDs reached
+    (32 passed / 3 failed: dbtkill, u3, test_rebuild_from_raw / 6 skipped / 3 never reached).
+    dbtkill's ROUND 26 upload-reorder fix HELD -- zero evidence of another DagRun's own run
+    reaching PUBLISH/SUCCEEDED before this DagRun's own tasks ran (the exact mechanism the fix
+    targeted) -- but dbtkill still FAILED via a NEW signature: `meta.ingestion_runs.status=
+    'FAILED'` for this DagRun's own run_id=874 while Airflow's own `stage` task instance was still
+    `up_for_retry` (try=3) minutes later, with `meta.run_stages[run_id=874]` completely empty --
+    an app-layer/Airflow-layer status mismatch, not admission-starvation or cross-DagRun-claim.
+    u3 never reached the `peak_bytes > 0` assertion ROUND 26's `_poll_pod_by_label` fix targeted
+    (so that fix is UNEVALUATED, not confirmed or refuted this run) -- it failed EARLIER, at
+    `_read_run_metrics`'s `assert rows_loaded > 0` (test_pod_kill_retry.py:611), the IDENTICAL
+    assertion text to ROUND 23's original regression. Direct DB evidence: `file_id=104` (u3's own
+    upload) has run_id=64 (`SUCCEEDED`, non-replay, idem_prefix `0505d4ea...`) AND run_id=260
+    (`SUCCEEDED`, `replay_of_run_id=64`, idem_prefix `93ba3837...`) -- the FAILING TEST'S OWN
+    captured idempotency_key exactly matches run_id=260 (the replay), not run_id=64 (the
+    original). The SAME original+replay pairing appears for EVERY other orders file in the same
+    dump (concurrent-select, dbtkill, podkill, and all six static `orders_2024*.csv` files) --
+    systemic this run, not isolated to u3. `poll_run_for_file`'s own SQL, confirmed unmodified
+    since ROUND 25 (`git log` shows ROUND 26's commit did not touch conftest.py) and hand-verified
+    correct against both rows' actual values (non-replay sorts strictly first), would have
+    returned run_id=64 had both rows already existed at query time -- so the fix's LOGIC is not
+    at fault; the discrepancy points at a TIMING assumption (poll_run_for_file returns on the
+    FIRST row found, assuming that row can only be the fresh original) that this run's evidence
+    is consistent with being violated under contention, though the exact mechanism could not be
+    pinned down from static log evidence alone. A separate, unexplained oddity: dbtkill's own
+    live-captured run_id (874) sits far outside the numeric range (1-266) the SAME end-of-job dump
+    shows for dbtkill's own object_uri (run_id=62/258) -- not resolvable from available evidence,
+    not caused by dump truncation (confirmed 93 total rows, under the 120-line tail limit), and
+    coincides with a genuine, previously-unnoticed gap: this session's existing guards do not
+    monitor CNPG `analytics-db` (`data` namespace) pod restarts at all, only the `airflow`
+    namespace. Duration decomposition: u3 ran 40m45s (vs ROUND 25's 5.49min for the same test,
+    and near-identical to ROUND 23's own original ~41m43s anomaly); test_rebuild_from_raw ran
+    75m10s via the pre-existing, already out-of-scope settle-stall signature (vs ROUND 25's
+    63.89min complete run); every other reached test matched or beat its ROUND 25 baseline.
+    Guards green: 0 Kyverno denials, 0 new Airflow-namespace restarts, 0 OOMKilled, scheduler peak
+    1846.5MiB/72.1% of 2560Mi (below ROUND 25's own 79.7% high-water mark).
+  implication: >
+    dbtkill's ROUND 26 fix is confirmed working for its own stated purpose but a new dbtkill
+    failure mode is now flagged for a future round. u3's ROUND 26 fix remains unevaluated pending
+    a run where u3 reaches that assertion. u3's rows_loaded=0 is CONFIRMED a recurrence of ROUND
+    23's original D-18 replay-row mechanism, not ROUND 25's peak_bytes race -- ROUND 25's own
+    poll_run_for_file fix is present, unmodified, and logically correct, but this run shows it is
+    not fully sufficient under some (not yet pinned-down) timing condition. The ceiling overrun is
+    fully attributable to two named, already-tracked mechanisms (u3's replay recurrence,
+    test_rebuild_from_raw's settle-stall), not to an under-margined ceiling formula -- recommend
+    against a further ceiling bump; recommend hardening `poll_run_for_file` to not stop on a
+    first-found row when that row is itself a replay. Full detail, including the precise
+    'what would close this fully' list, in Current Focus's 'ROUND 26 OUTCOME' block. Decision
+    checkpoint returned to user on ROUND 27's shape.
+  timestamp: 2026-08-30 (ROUND 26, live-verification post-run analysis)
 
 ## Eliminated
 <!-- APPEND ONLY - never delete -->
