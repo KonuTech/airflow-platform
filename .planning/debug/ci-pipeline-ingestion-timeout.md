@@ -836,11 +836,21 @@ fix):
     - "(e) duration decomposition -- PENDING live verification."
     - "TARGET: fully green census or green-except-known-out-of-scope for
         cluster-slice-verify -- PENDING live verification."
-  next_action: "AWAITING LIVE VERIFICATION. Trigger a plain (non-skip-ci) push carrying both
-      fixes, obtain the authoritative e2e-full.yml run ID (+ companion publish.yml), record in
-      live_verification_state, then return CHECKPOINT REACHED (human-action) with the run ID --
-      per this round's own instructions, do NOT start the `gh run watch` here; the session
-      manager runs the single 60s watcher."
+  live_verification_state: "RECORDED 2026-08-30T01:58Z: both fixes pushed as plain (non-skip-ci)
+      commit c03624a1dffc2d8c1d973f6f514b4d2f2df00812 (`fix(debug/ci-pipeline-ingestion-timeout):
+      ROUND 25 -- close orders DagRun admission race + u3 replay misdiagnosis`), confirmed clean
+      of the 'skip ci' substring before commit. Four workflows dispatched at this exact headSha,
+      all confirmed in_progress immediately after push: Publish images (run 33286862946) --
+      companion image build, gates e2e-full's own Kyverno admission; E2E full (merge) (run
+      33286862950) -- the AUTHORITATIVE run for this round's pre-registered criteria; CI (run
+      33286862954); E2E chaos (merge) (run 33286862944, unrelated to this round's scope).
+      Awaiting terminal outcome -- NOT watched by this agent per this round's own instructions."
+  next_action: "AWAITING LIVE VERIFICATION (session manager's single 60s watcher on run
+      33286862950). On terminal: check pre_registered_criteria (a)-(e) and TARGET against the
+      job log/end-of-job diagnostics dump, update Current Focus + Evidence with a 'ROUND 25
+      OUTCOME' block, and either (i) archive/request human-verify if fully green or
+      green-except-known-out-of-scope, or (ii) return to investigation_loop with any new
+      finding if either fix did not close its target failure."
 
 ROUND 24 (2026-08-29, opened on user decision after ROUND 23's own checkpoint: two parallel
 tracks -- a dedicated narrow-scope verification run for the SCD2 fix's own test, and direct-
