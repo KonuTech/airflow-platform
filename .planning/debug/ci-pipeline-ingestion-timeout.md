@@ -1,6 +1,41 @@
 ---
 status: investigating
-updated: 2026-08-30 (ROUND 26 LIVE-VERIFIED: run 33297885371 cancelled at 226m5s, ~1min past the
+updated: 2026-08-30 (ROUND 27 OFFLINE COMPLETE, awaiting live verification: (1) hardened
+  `poll_run_for_file` so the polling LOOP itself (not just the query) prefers a non-replay row --
+  it now keeps polling within budget whenever the best-visible row is a replay, only falling back
+  to it if the budget expires with no non-replay row ever appearing. New testcontainers-backed
+  integration test (`tests/integration/test_poll_run_for_file.py`) proves RED against the
+  pre-fix code (returns the replay row) and GREEN against the fix (returns the non-replay row),
+  by seeding a replay row immediately and the real non-replay row only after a real 1.5s delay
+  on a background thread. (2) Root-caused dbtkill's ROUND 26 signature with direct git-history +
+  code-read evidence: `meta.run_stages` is empty for EVERY run, always, regardless of outcome --
+  `list_run_ids_pending_dbt_build`'s STAGE_LOAD-gated eligibility query has been structurally
+  unsatisfiable since the DBT_BUILD tracking chain was created (commit 2ee0c1c, 09-04,
+  2026-08-19): no commit in this repo's ENTIRE history has ever called `claim_run_stage`/
+  `complete_run_stage` with `stage_name="STAGE_LOAD"` from `stage_ingest`/`run_ingest` -- only
+  `publish_ingest` ever wires that mechanism, for `stage_name="PUBLISH"`. This means DBT_BUILD's
+  own `run_stages` row can NEVER be written for any run, meaning dbtkill's own
+  `_poll_dbt_build_running_signal` can never succeed -- explaining why dbtkill has never once
+  passed in this session's entire 26-round history, independent of (and underneath) every
+  scheduling-contention mechanism previously found and fixed for it. Separately, the
+  'ingestion_runs.status=FAILED while stage TI is up_for_retry' half of ROUND 26's puzzle is
+  RE-DIAGNOSED as expected, documented behavior (`claim_ingestion_run`'s own claim predicate
+  explicitly allows re-claiming a FAILED row; `_release_failed_claim`'s own docstring names this
+  exact transient state as intentional), not a bug -- the one genuinely open sub-question (why
+  `stage` failed 3 consecutive attempts for run_id=874) is not conclusively resolvable from
+  available evidence (error_type/error_message both NULL, the `_release_failed_claim`
+  best-effort-release signature) and is left flagged, not guessed at. STAGE_LOAD wiring fix
+  PROPOSED, precisely, but NOT implemented this round (production `stage_ingest` change,
+  reserved for a checkpoint decision per this session's own norm). See Current Focus's 'ROUND 27'
+  block. Offline battery green (ruff/mypy clean, unit 568/568, dagtest 14/14, manifests
+  540/378/0/0, policy 156 passed/3 failed -- all 3 pre-existing and byte-identical with/without
+  this round's changes, integration discovery/schema 21/21). Decision checkpoint returned to
+  user on the STAGE_LOAD fix.)
+round27_status: "ROUND 27 OFFLINE COMPLETE 2026-08-30 -- see 'ROUND 27' in Current Focus for full
+  detail. Both named items investigated; item 1 fixed+tested+verified offline; item 2 diagnosed
+  conclusively with direct evidence, fix proposed but not applied (production pipeline change,
+  returned to checkpoint). Live verification pending -- run IDs to be recorded once pushed."
+round26_live_verification: 2026-08-30 (ROUND 26 LIVE-VERIFIED: run 33297885371 cancelled at 226m5s, ~1min past the
   225-min ceiling, 41/44 node-IDs reached. dbtkill's cross-DagRun-claim race fix CONFIRMED HOLDING
   (no recurrence of that signature) but dbtkill failed via a NEW, uncatalogued signature (app-layer
   FAILED while Airflow retries the same task). u3's memory-sampler fix UNEVALUATED (never reached
@@ -773,6 +808,269 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 27 (2026-08-30, opened on user decision after ROUND 26's own checkpoint: (1) harden
+`poll_run_for_file` so it never returns a replay row when a non-replay row exists within the
+polling budget, AND (2) root-cause dbtkill's newly-discovered signature -- ingestion run reaches
+status='FAILED' while Airflow's own stage TI is still up_for_retry minutes later, with
+meta.run_stages completely empty):
+  charter: >
+      (1) `poll_run_for_file`: continue polling within budget until a non-replay row appears,
+      falling back to the newest replay row only on genuine timeout. Cover with a red/green test.
+      (2) dbtkill: get direct evidence (TI history, the actual write path setting
+      status='FAILED') to determine whether this is an app-layer write racing ahead of Airflow's
+      retry state, a stale/wrong write, or something else. Do not guess a fix without evidence.
+      Pre-registered: (a) u3 clears, or fails differently in a way that confirms the poll fix
+      worked; (b) dbtkill either clears or has a confirmed root cause with evidence; (c)
+      rebuild-from-raw's own outcome is the parallel session's concern, not adjudicated here; (d)
+      zero new failures beyond already-known open items; (e) guards green. 225-min ceiling
+      unchanged (ROUND 26's own overrun was fully explained by named mechanisms, not budget).
+  item_1_reasoning_checkpoint:
+    hypothesis: "`poll_run_for_file`'s ROUND 25 query fix is correct GIVEN both a replay and a
+        non-replay row are visible in the SAME poll iteration, but the LOOP itself still returns
+        on the FIRST iteration that finds ANY row, even a replay -- so a replay row that happens
+        to be the ONLY row visible on an early iteration wins permanently, even if the genuine
+        non-replay row would have appeared moments later within the same budget."
+    confirming_evidence:
+      - "Direct source read of the pre-fix loop (tests/e2e/slice/conftest.py:1325-1342, ROUND
+          25's own version): `if row is not None: return {...}` -- unconditional on the FIRST
+          non-null row, with no check of `replay_of_run_id`."
+      - "ROUND 26 OUTCOME's own live evidence (file_id=104, run_id=64->260): the query's own
+          ORDER BY would have returned run_id=64 (non-replay) had both rows been visible in the
+          SAME query, but the test's captured key matched run_id=260 (the replay) instead --
+          consistent with only the replay row being visible to whichever poll iteration
+          succeeded."
+    falsification_test: "If a future run still shows a replay row's key captured by
+        `poll_run_for_file` even after this fix, WITHIN the polling timeout, with direct
+        evidence the non-replay row existed and was queryable before the timeout elapsed, that
+        would mean the loop-continuation fix alone is insufficient and a deeper transaction-
+        visibility issue exists (e.g. connection-level isolation/snapshot staleness) -- not yet
+        observed, not ruled out by this round's evidence, but ROUND 26's own live evidence is
+        consistent with a same-transaction-snapshot explanation being unnecessary: a plain
+        `conn.cursor()` per iteration under default READ COMMITTED gets a fresh snapshot each
+        statement, so the most parsimonious explanation is simply 'the non-replay row was not
+        yet committed at that specific iteration's timestamp,' which loop-continuation directly
+        fixes."
+    fix_rationale: "Addresses the root cause (the loop stopping too early, before the DESIRED row
+        is visible, when the polling budget explicitly exists to absorb exactly this kind of
+        timing gap) rather than a symptom (e.g. widening the query's own ORDER BY further, which
+        cannot help if the row itself is not yet committed/visible). Zero production code
+        touched -- test-harness-only, matching this session's own established scope precedent
+        for `poll_run_for_file`."
+    blind_spots: "Does not explain (and does not need to, to fix the symptom) WHY the non-replay
+        row was not yet visible to the earliest poll iteration in ROUND 26's own live run -- the
+        two candidate mechanisms ROUND 26 OUTCOME named (backlog-draining timing; an
+        unidentified DB-visibility mechanism) remain equally live. The two diagnostics/guard
+        gaps ROUND 26 OUTCOME also named (created_at/claimed_at timestamps on the relevant
+        queries; CNPG/data-namespace restart monitoring) are NOT added this round -- the
+        loop-continuation fix is expected to fully close the OBSERVED symptom regardless of
+        which underlying timing mechanism caused it, making those diagnostics lower-priority
+        unless a future run somehow still exhibits the bug."
+  item_1_fix: >
+      `poll_run_for_file` (tests/e2e/slice/conftest.py): the query now additionally selects
+      `replay_of_run_id` so the loop can inspect it. On each iteration, if the best-visible row
+      is NON-replay (`replay_of_run_id IS NULL`), return it immediately (unchanged fast path). If
+      the best-visible row IS a replay, remember it as `replay_fallback` (ROUND 25's own
+      "newest row wins" defensive value) but keep polling -- do NOT return yet. Only once
+      `timeout` elapses does the function fall back to `replay_fallback` (if any row was ever
+      observed) or raise (if literally no row for `file_id` ever appeared, unchanged from
+      before). Docstring extended with a ROUND 27 paragraph recording the mechanism and citing
+      ROUND 26's own file_id=104 evidence.
+  item_1_test: >
+      New `tests/integration/test_poll_run_for_file.py` (real testcontainers Postgres, migrated
+      schema, `PostgresMetadataRepository` -- not mocks/fakes, matching
+      `test_run_recovery_view.py`/`test_claim_lease_split.py`'s own precedent for
+      timing/ordering-sensitive claims). Test 1
+      (`test_prefers_non_replay_row_even_when_only_a_replay_is_initially_visible`): seeds a
+      replay row for `file_id` immediately (visible to the very first poll iteration; its own
+      `replay_of_run_id` points at a throwaway anchor row under `file_id=None`, since the FK is
+      not file_id-scoped at the DB level -- migration 0004), then a background thread inserts
+      the SAME file_id's genuine non-replay row only after a REAL 1.5s delay (3x
+      `_POLL_INTERVAL_SECONDS`). RED-confirmed live against the pre-fix code (`git stash` the
+      fix, rerun): returned the replay row's `run_id` (assertion: `2 == 3`, i.e. replay's run_id
+      vs the original's). GREEN against the fix: returns the non-replay row's `run_id`
+      unconditionally. Test 2 (`test_falls_back_to_newest_replay_row_when_timeout_elapses_with_
+      no_non_replay_row`): seeds ONLY a replay row, never a non-replay one -- proves the
+      defensive fallback still fires (returns the replay row once `timeout` elapses, does not
+      raise). Test 3 (`test_raises_when_no_row_appears_at_all`): unchanged raise behavior when
+      literally no row ever appears. All 3 pass with the fix; only Test 1 fails (RED) without it.
+  item_2_investigation: >
+      Direct evidence mined from THIS session's own surviving scratchpad (round26-job.log:1443,
+      the exact embedded AssertionError for run_id=874): `meta.ingestion_runs[run_id=874] =
+      ('FAILED', None, None, started_at=08:21:22.314315Z)`; `stage` task_instance =
+      `('up_for_retry', try=3, start=08:24:44.088959Z, end=08:25:07.683638Z)`; `meta.run_stages`
+      (all stages) = `[]`. `error_type`/`error_message` both NULL matches EXACTLY the
+      `_release_failed_claim`/`fail_ingestion_run_claim` signature (run.py:677-711,
+      postgres.py:459-473) -- a best-effort claim release that, by design, never records error
+      detail -- confirming an in-pod exception was caught cleanly (not a SIGKILL, which would
+      leave the row `RUNNING` with an expiring lease, not `FAILED`). `started_at` (08:21:22)
+      predates try=3's own start (08:24:44) by >3min because `claim_ingestion_run`'s own
+      `started_at = COALESCE(started_at, now())` only ever sets it on the FIRST successful claim
+      -- consistent with try=1 and try=2 having ALSO already failed and been released to
+      `FAILED` before try=3 ran (retries=4 for orders' `stage`, csv_ingest_orders.py:144 -- try=3
+      is well within budget, 2 attempts remain).
+
+      SEPARATELY, direct git-history archaeology (the actual root cause of `meta.run_stages`
+      being empty): `git log -S'STAGE_LOAD' --all -- packages/dataplat/src/dataplat/pipeline/
+      run.py` returns ZERO commits, ever -- the literal string "STAGE_LOAD" has never appeared
+      in `run.py`'s entire history, under either its current name (`stage_ingest`) or its
+      pre-rename name (`run_ingest`). `claim_run_stage`/`complete_run_stage` (the ONLY methods
+      that ever write `meta.run_stages`, postgres.py:475-620) are called from exactly TWO call
+      sites in the whole codebase (grep across packages/dataplat and airflow/, confirmed), both
+      inside `publish_ingest`, both `stage_name="PUBLISH"` (run.py:1434,1480), both added by
+      commit 013eb67 (`feat(08.1-10): publish_ingest()...`, 2026-08-18) -- the SAME commit that
+      introduced `claim_run_stage`/`complete_run_stage` calls into `run.py` at all. `stage_ingest`
+      claims/releases/completes its OWN state entirely via `meta.ingestion_runs.status`
+      (`claim_ingestion_run`/`update_ingestion_run_status`/`fail_ingestion_run_claim` --
+      postgres.py:359-473), a SEPARATE, self-contained mechanism that never touches
+      `meta.run_stages` at all. `airflow/dags/_common/run_stage_recorder.py`'s own
+      `list_run_ids_pending_dbt_build` (created by commit 2ee0c1c, `feat(09-04)`, 2026-08-19 --
+      ONE DAY after 08.1-10) requires `JOIN meta.run_stages sl ON sl.stage_name = 'STAGE_LOAD'
+      AND sl.status = 'SUCCEEDED'` for a run to be dbt_build-eligible at all -- unchanged, byte
+      for byte, since its own creation (`git show 2ee0c1c:...` confirms identical SQL). Since
+      NOTHING has EVER written that row, this JOIN can never match, for ANY run, ever --
+      `list_run_ids_pending_dbt_build` always returns `[]`, `mark_dbt_build_running`/
+      `mark_dbt_build_done` always no-op (their own `if not run_ids: return`), and
+      `meta.run_stages` can structurally never get a `DBT_BUILD` row for any run, success or
+      failure. Confirmed this is NOT merely a documentation-vs-reality drift: `test_stage_
+      ingest.py` (the integration test for the exact function in question) contains ZERO
+      mentions of `run_stages`/`STAGE_LOAD` -- no test anywhere in the suite has ever directly
+      asserted `stage_ingest` writes this row, so the gap was never caught. `grep -c 'dbtkill.*
+      PASSED'` against this ENTIRE debug file (all 26 prior rounds) returns ZERO -- dbtkill
+      (`test_pod_kill_mid_dbt_build_produces_no_duplicates`) has never once passed in this
+      session's recorded history, consistent with a structural defect underneath every
+      previously-diagnosed proximate cause (admission starvation ROUND 24, cross-DagRun claim
+      race ROUND 25/26), none of which could have ever produced a PASS regardless of how well
+      they were fixed, because `_poll_dbt_build_running_signal` (dbtkill's own poll target,
+      conftest.py:1190-1256) polls exactly the `meta.run_stages[run_id,'DBT_BUILD']` row this
+      gate can never produce. (u3 does NOT share this exposure -- it polls `poll_ingestion_run`
+      against `meta.ingestion_runs.status` directly, never `_poll_dbt_build_running_signal`,
+      confirmed by direct source read of `test_u3_throughput_and_peak_rss_baseline`.)
+  item_2_reasoning_checkpoint:
+    hypothesis: "`meta.run_stages` reads empty for run_id=874 (and for every dbtkill run this
+        whole session has ever observed) not because `stage` failed 'very early, before its own
+        first stage-tracking write' (ROUND 26 OUTCOME's own tentative reading), but because NO
+        such write exists anywhere in the current pipeline -- `stage_ingest` has never, in this
+        repository's entire git history, written a `STAGE_LOAD` row to `meta.run_stages`, making
+        `list_run_ids_pending_dbt_build`'s STAGE_LOAD-gated eligibility query permanently
+        unsatisfiable and dbtkill's own `_poll_dbt_build_running_signal` structurally
+        unwinnable, independent of scheduling health."
+    confirming_evidence:
+      - "`git log --oneline --all -S'STAGE_LOAD' -- packages/dataplat/src/dataplat/pipeline/
+          run.py` returns zero commits across the file's entire history."
+      - "`grep -rn 'claim_run_stage(\\|complete_run_stage(' packages/dataplat/src airflow/`
+          returns exactly two call sites, both in `publish_ingest`, both `stage_name=\"PUBLISH\"`,
+          both from the SAME commit (013eb67) that first introduced these calls into `run.py` at
+          all."
+      - "`git show 2ee0c1c:airflow/dags/_common/run_stage_recorder.py`'s own eligibility SQL is
+          byte-identical to the current tree's -- the STAGE_LOAD gate was never looser at
+          creation and tightened later; it has always required a row nothing ever writes."
+      - "Zero occurrences of 'dbtkill' + 'PASSED' anywhere in this debug file's own 26-round
+          history (grep-confirmed) -- fully consistent with a permanent, not intermittent,
+          blocker sitting underneath every previously-diagnosed transient mechanism."
+      - "`tests/integration/test_stage_ingest.py` (the direct integration test for the function
+          in question) contains zero mentions of `run_stages`/`STAGE_LOAD` -- the gap was never
+          exercised by a targeted test."
+    falsification_test: "If a future live run's own end-of-job `meta.run_stages` dump (or a
+        targeted query) ever shows a `STAGE_LOAD` row for ANY run_id, that would directly refute
+        'nothing ever writes this row' and point at some OTHER, not-yet-found write path (e.g. a
+        script/Job this investigation did not check) -- not observed in this round's own
+        evidence gathering (which covered `packages/dataplat/src` and `airflow/` exhaustively via
+        grep, but did not exhaustively check `scripts/`)."
+    fix_rationale: "NOT APPLIED this round. The correct fix -- wire `claim_run_stage`(`stage_name
+        =\"STAGE_LOAD\"`)/`complete_run_stage` into `stage_ingest`, mirroring `publish_ingest`'s
+        own pattern (claim after/alongside the existing `claim_ingestion_run` call, complete
+        after the existing `update_ingestion_run_status(status=\"STAGED\")` call, release-to-
+        FAILED alongside the existing `_release_failed_claim` path in the `finally` block) --
+        touches the single most complex, most heavily-exercised function in the whole pipeline
+        (transaction boundaries, the heartbeat thread, the quality gate, PLR0915 already near its
+        threshold), is genuinely production pipeline code (not a test harness), and has never
+        been reviewed or scoped by the user. Per this session's own established norm (ROUND
+        25/26's own treatment of the dbtkill cross-DagRun race and the ceiling bump), a
+        production-semantics change of this shape is proposed precisely here and returned to a
+        checkpoint, not unilaterally applied."
+    blind_spots: "Not yet confirmed live (this round has no live-verification run of its own for
+        this finding) that wiring STAGE_LOAD claim/complete would not ITSELF interact badly with
+        `meta.v_run_recovery` (migration 0033, which already joins on STAGE_LOAD and has
+        presumably always shown 'retry stage STAGE_LOAD' for every run, live, silently wrong,
+        this whole time -- fixing the write path would also start correctly resolving that view,
+        a likely GOOD side effect but not verified against any test that currently depends on the
+        view's CURRENT, wrong-but-tested behavior). `scripts/` was not exhaustively grepped for
+        an alternate write path (see falsification_test)."
+  item_2_secondary_finding: >
+      The OTHER half of ROUND 26's puzzle -- `status='FAILED'` while `stage`'s own TI is still
+      `up_for_retry` "minutes later" -- is RE-DIAGNOSED as expected, documented behavior, not a
+      bug. `claim_ingestion_run`'s own claim predicate (`status IN ('PENDING','FAILED') OR
+      (status='RUNNING' AND lease_expires_at<now())`, postgres.py:391-394) explicitly treats a
+      `FAILED` row as re-claimable by the NEXT retry attempt; `_release_failed_claim`'s own
+      docstring (run.py:677-693) names this exact transient window as the INTENDED mechanism
+      ("Releasing to FAILED lets the retry claim genuinely"). The observed state is the normal,
+      momentary gap between one failed attempt's release and Airflow's own next-scheduled retry
+      -- not an app-layer write racing ahead of Airflow's bookkeeping, and not a stale/wrong
+      write. The genuinely open sub-question -- WHY `stage` failed on (at least) 3 consecutive
+      attempts for run_id=874, each apparently fast (try=3's own ~23s runtime rules out
+      `HEAVY_TASK_EXECUTION_TIMEOUT`'s 6-minute SIGALRM path) -- is NOT conclusively resolvable
+      from available evidence: `error_type`/`error_message` are both NULL (the best-effort-
+      release signature never records detail), and neither the end-of-job diagnostics dump nor
+      `_dbt_build_stall_diagnostics` captures the crashed `stage` pod's own kubectl logs. This
+      session's own already-documented, already-named "KubernetesJobWatcher 30s-read-timeout
+      race" (kpo.py ROUND 14/21/22 comments -- the reason `stage`/`dbt_build`/`publish` retries
+      exist at all) and the SAME job log's own numerous "Insufficient cpu" FailedScheduling
+      events for `stage-*` pods in this run's own time window are both PLAUSIBLE,
+      already-ticketed contributing mechanisms consistent with a fast, error-detail-less
+      failure -- but which one (if either) actually fired for these 3 specific attempts is not
+      conclusively determined this round, and CPU-starvation remediation is explicitly out of
+      this round's scope. Flagged precisely, not guessed at.
+  offline_battery: "ruff check + ruff format --check: clean on both touched files (conftest.py,
+      the new test file). mypy: clean, 0 issues, both files. tests/unit: 568/568 passed,
+      byte-identical baseline. tests/dagtest: 14/14 passed, byte-identical baseline. tests/policy
+      -m 'not manifests': 156 passed / 3 failed -- CONFIRMED byte-identical failing-test set
+      with vs without this round's changes (`git stash` A/B on conftest.py): the 2 already-known
+      pre-existing failures (`test_csv_ingest_customers_stays_under_150_lines`, `test_the_main_
+      gate_does_not_lint_the_bad_samples`) PLUS a third, ALSO pre-existing at HEAD before this
+      round touched anything (`test_no_inline_suppression_relaxes_the_ban_off_the_agreed_paths`,
+      against `tests/e2e/slice/test_rebuild_from_raw.py` -- a file this round never touched,
+      already committed at HEAD, owned by the parallel rebuild-scd2-reconciliation.md session's
+      own scope). make manifests (kubeconform -strict, K8s 1.35.5): 540/378/0/0, byte-identical
+      (zero helm/ files touched). tests/e2e/slice --collect-only: all 17 tests collect cleanly, 0
+      import errors. tests/integration -k 'discovery or schema': 21/21 passed, byte-identical to
+      ROUND 25's own recorded baseline. tests/integration/test_poll_run_for_file.py (new): 3/3
+      passed against the fix; RED-confirmed (1 failed, 2 passed) against a `git stash` of the
+      fix alone, live-verified this round, not merely asserted. Zero packages/dataplat source
+      touched (item 2's fix was proposed, not applied)."
+  pre_registered_criteria:
+    - "(a) u3 clears, or fails differently confirming the poll fix worked -- NOT YET EVALUATED
+        (pending live verification). The offline red/green test directly proves the loop-level
+        mechanism ROUND 26 flagged as the residual gap is now closed; whether u3 clears on the
+        next live run also depends on whether the SAME timing race recurs at all (it may not,
+        being non-deterministic) and on `test_rebuild_from_raw`'s own unrelated, out-of-scope
+        settle-stall not consuming so much budget that u3 is never reached."
+    - "(b) dbtkill either clears or has a confirmed root cause with evidence -- MET on the
+        'confirmed root cause with evidence' branch. dbtkill will almost certainly still FAIL on
+        the next live run (the STAGE_LOAD gate fix is proposed, not applied), but the failure
+        should now be fully explained by the ALREADY-CONFIRMED structural gap rather than
+        surfacing as a new, uncatalogued mystery -- if the next run's own diagnostics show
+        anything OTHER than `meta.run_stages` empty + `_poll_dbt_build_running_signal` timeout,
+        that would be a genuinely new finding worth flagging."
+    - "(c) rebuild-from-raw's own outcome is the parallel session's concern -- untouched,
+        unread beyond acknowledging its existence, per the user's explicit instruction."
+    - "(d) zero new failures beyond already-known open items -- MET offline (see offline_battery
+        above); pending live confirmation."
+    - "(e) guards green -- pending live verification."
+  live_verification_state: "PENDING -- not yet pushed at the time this Current Focus entry was
+      written. Authoritative run IDs (e2e-full.yml + companion publish.yml) to be recorded in a
+      follow-up append to this same field once the push completes and the workflow runs are
+      identified, per this round's own instruction not to start the long watch itself."
+  next_action: "Push this round's commit(s), identify the resulting e2e-full.yml and publish.yml
+      run IDs, append them to live_verification_state above, and return CHECKPOINT REACHED
+      (type: human-action) with those run IDs -- the session manager runs the watcher. On the
+      next live run: confirm (1) u3's own outcome (cleared, or a different/unrelated failure --
+      distinguish precisely from 'poll fix did not work', which would show the SAME replay-row
+      idempotency_key mismatch signature as ROUND 26's own file_id=104 evidence); (2) dbtkill's
+      own diagnostics now show ONLY the already-confirmed STAGE_LOAD-gate signature (run_stages
+      empty, `_poll_dbt_build_running_signal` timeout) and nothing new; (3) guards green; (4)
+      whether to proceed with the proposed STAGE_LOAD wiring fix into `stage_ingest` (a
+      production pipeline change) is the user's own decision at the checkpoint, not applied here.
 
 ROUND 26 (2026-08-30, opened on user decision after ROUND 25's own checkpoint: fix ALL THREE
 named items except the SCD2/rebuild-from-raw finding, which is OUT OF SCOPE -- owned by the

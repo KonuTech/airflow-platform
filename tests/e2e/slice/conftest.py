@@ -1307,6 +1307,27 @@ def poll_run_for_file(
     file, but keeps this helper from raising `IndexError`/returning nothing
     on that unexpected shape).
 
+    debug/ci-pipeline-ingestion-timeout ROUND 27 (hardening against ROUND
+    26's live u3 recurrence, `file_id=104`/`run_id=64`->`260`): the fix
+    above is correct GIVEN both rows are visible in the SAME poll query, but
+    the polling LOOP itself still returned on the FIRST iteration that found
+    ANY row at all -- not the first iteration where the *preferred* (non-
+    replay) row exists. ROUND 26's own live evidence showed this can bite:
+    a replay row can apparently be the ONLY row visible to a given poll
+    iteration even though its own `replay_of_run_id` target must have been
+    committed earlier (see ROUND 26 OUTCOME's `u3_rows_loaded_recurrence`
+    for the full, still-not-fully-explained visibility-ordering discussion).
+    Regardless of the exact mechanism, "stop on the first row, even if it is
+    itself a replay" is strictly weaker than necessary: the polling budget
+    already exists specifically to absorb exactly this kind of transient
+    ordering gap. The loop now keeps polling (within `timeout`) whenever the
+    best available row is itself a replay, remembering it as the defensive
+    fallback, and only returns it if the non-replay row never appears before
+    the deadline -- turning a one-shot "first row wins" read into "wait for
+    the RIGHT row, budget permitting" without changing the query itself or
+    the defensive-fallback semantics for the genuinely-only-replay-exists
+    shape.
+
     Args:
         conn: An open connection to the analytical database.
         file_id: The `meta.files.file_id` to find a run for.
@@ -1320,13 +1341,14 @@ def poll_run_for_file(
 
     Raises:
         AssertionError: `timeout` elapses with no matching
-            `meta.ingestion_runs` row.
+            `meta.ingestion_runs` row at all (not even a replay).
     """
     deadline = time.monotonic() + timeout
+    replay_fallback: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT run_id, idempotency_key, status "
+                "SELECT run_id, idempotency_key, status, replay_of_run_id "
                 "FROM meta.ingestion_runs WHERE file_id = %s "
                 "ORDER BY (replay_of_run_id IS NOT NULL) ASC, "
                 "CASE WHEN replay_of_run_id IS NULL THEN run_id END ASC, "
@@ -1336,7 +1358,18 @@ def poll_run_for_file(
             )
             row = cur.fetchone()
         if row is not None:
-            return {"run_id": row[0], "idempotency_key": row[1], "status": row[2]}
+            result = {"run_id": row[0], "idempotency_key": row[1], "status": row[2]}
+            if row[3] is None:
+                # Non-replay row -- unambiguously this caller's own fresh
+                # run. Return immediately, no need to keep polling.
+                return result
+            # Best row currently visible is itself a replay. Remember it as
+            # the defensive fallback (ROUND 25's own "newest row wins" path)
+            # but keep polling within budget: a non-replay row may simply
+            # not be visible to THIS iteration yet (ROUND 26 OUTCOME).
+            replay_fallback = result
         time.sleep(_POLL_INTERVAL_SECONDS)
+    if replay_fallback is not None:
+        return replay_fallback
     msg = f"meta.ingestion_runs has no row for file_id={file_id} within {timeout}s"
     raise AssertionError(msg)
