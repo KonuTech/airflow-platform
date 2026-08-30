@@ -31,11 +31,14 @@ updated: 2026-08-30 (ROUND 27 OFFLINE COMPLETE, awaiting live verification: (1) 
   540/378/0/0, policy 156 passed/3 failed -- all 3 pre-existing and byte-identical with/without
   this round's changes, integration discovery/schema 21/21). Decision checkpoint returned to
   user on the STAGE_LOAD fix.)
-round27_status: "ROUND 27 OFFLINE COMPLETE 2026-08-30, PUSHED commit 7d631c5 -- see 'ROUND 27' in
-  Current Focus for full detail. Both named items investigated; item 1 fixed+tested+verified
-  offline; item 2 diagnosed conclusively with direct evidence, fix proposed but not applied
-  (production pipeline change, returned to checkpoint). Live verification IN PROGRESS: e2e-full.yml
-  run 33309793805, publish.yml run 33309793782 (both triggered off this round's own push)."
+round27_status: "ROUND 27 OFFLINE COMPLETE 2026-08-30, PUSHED commit 7d631c5 (+docs 555052b) --
+  see 'ROUND 27' in Current Focus for full detail. Both named items investigated; item 1
+  fixed+tested+verified offline; item 2 diagnosed conclusively with direct evidence, fix proposed
+  but not applied (production pipeline change, returned to checkpoint). AUTHORITATIVE live
+  verification IN PROGRESS: e2e-full.yml workflow_dispatch run 33309917776 (headSha 555052b;
+  the original push-triggered run was superseded/cancelled by a self-inflicted docs-commit
+  double-trigger, recovered via manual dispatch -- see live_verification_state for the full
+  story), publish.yml run 33309793782 (conclusion=success, still valid)."
 round26_live_verification: 2026-08-30 (ROUND 26 LIVE-VERIFIED: run 33297885371 cancelled at 226m5s, ~1min past the
   225-min ceiling, 41/44 node-IDs reached. dbtkill's cross-DagRun-claim race fix CONFIRMED HOLDING
   (no recurrence of that signature) but dbtkill failed via a NEW, uncatalogued signature (app-layer
@@ -1058,13 +1061,34 @@ meta.run_stages completely empty):
     - "(d) zero new failures beyond already-known open items -- MET offline (see offline_battery
         above); pending live confirmation."
     - "(e) guards green -- pending live verification."
-  live_verification_state: "PUSHED 2026-08-30, commit 7d631c5. Authoritative run: e2e-full.yml
-      ('E2E full (merge)') run 33309793805 -- https://github.com/KonuTech/airflow-platform/
-      actions/runs/33309793805. Companion: publish.yml ('Publish images') run 33309793782 --
-      https://github.com/KonuTech/airflow-platform/actions/runs/33309793782. Both confirmed
-      triggered off this round's own push (gh run list, headSha 7d631c5). Per this round's own
-      instruction, the long e2e-full watch itself is NOT started here -- the session manager
-      runs it."
+  live_verification_state: "PUSHED 2026-08-30, commit 7d631c5, THEN a self-inflicted duplicate:
+      the docs-only follow-up commit (555052b, recording run IDs) was pushed WITHOUT this
+      session's own established `[skip ci]` convention for exactly this kind of doc-only commit
+      (see git log's own `3ad41e6 docs(...): record ROUND 25 live-verification run IDs [skip
+      ci]` precedent, missed this round) -- it re-triggered a SECOND `push`-event e2e-full.yml
+      run (33309832692) in the SAME concurrency group (`E2E full (merge)-refs/heads/main-`,
+      `cancel-in-progress: false` for push). Both the original run (33309793805) AND the
+      duplicate ended up `conclusion=cancelled` (33309793805 was still `pending`/zero-jobs when
+      the second push landed in the same group -- GitHub superseded it rather than queuing it
+      strictly FIFO, contrary to this round's own initial assumption; this agent's own manual
+      `gh run cancel` of the duplicate was issued after both were already heading to
+      `cancelled`, not the cause). RECOVERED: dispatched a fresh, blank-`pytest_scope`
+      `workflow_dispatch` run against the SAME headSha (555052b) -- e2e-full.yml's own concurrency
+      comment (ROUND 24) confirms a blank-scope dispatch shares the exact same group and behaves
+      identically to `push` (full suite, same steps). THIS is now the AUTHORITATIVE run:
+      e2e-full.yml ('E2E full (merge)') run 33309917776 --
+      https://github.com/KonuTech/airflow-platform/actions/runs/33309917776 (event=
+      workflow_dispatch, headSha=555052b, includes BOTH this round's code commit 7d631c5 AND the
+      docs-only run-ID commit 555052b). Companion: publish.yml ('Publish images') run 33309793782
+      (from the FIRST, code-bearing push, conclusion=success -- unaffected by the e2e-full
+      duplicate/cancel saga, still valid since no code changed between 7d631c5 and 555052b) --
+      https://github.com/KonuTech/airflow-platform/actions/runs/33309793782. LESSON recorded for
+      future rounds: always append `[skip ci]` to docs-only follow-up commits that record run
+      IDs, per this session's own ROUND 25 precedent -- missing it this round cost ~2min of
+      duplicate scheduling churn but no wasted E2E wall-time (both cancelled runs died within
+      ~1min, before any real cluster-up work). Per this round's own instruction, the long
+      e2e-full watch itself is NOT started here -- the session manager runs it, against run
+      33309917776."
   next_action: "Push this round's commit(s), identify the resulting e2e-full.yml and publish.yml
       run IDs, append them to live_verification_state above, and return CHECKPOINT REACHED
       (type: human-action) with those run IDs -- the session manager runs the watcher. On the
