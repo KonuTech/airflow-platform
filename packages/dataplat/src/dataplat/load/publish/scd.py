@@ -26,7 +26,15 @@ docstring):
   10-RESEARCH.md's summary recommendation of a self-derived watermark:
   unlike dbt's own ``post_hook``, this Python code already has direct
   access to ``staged_run_ids``, so re-deriving it would be strictly more
-  code for zero behavioral gain).
+  code for zero behavioral gain). Debug session ``rebuild-scd2-reconciliation``
+  (ROUND 28): keys Step A's ``vanished_ids`` already covers this pass are
+  EXCLUDED from this set -- ``find_vanished_customer_ids``'s freshest-
+  snapshot scoping (``dataplat.scd.delete_detection``'s own module
+  docstring) means a key can now be vanished per Step A while still having
+  stale bronze presence in an older, co-staged file, which would otherwise
+  make it "touched" here too; Step C's full-history recompute has no
+  concept of "vanished" (bronze carries no tombstone), so leaving it in
+  would silently undo Step A's own disposition in the same transaction.
 * **Step C -- per touched key, full-history recompute.** Reads THIS key's
   ENTIRE ``staging.customers`` history -- unscoped to ``staged_run_ids``,
   the one deliberate exception in this whole module (Finding F-1: a late
@@ -339,7 +347,27 @@ class SCDPublisher(Publisher):
             _TOUCHED_KEYS_SQL,
             {"staged_run_ids": list(staged_run_ids)},
         )
-        touched_keys = [str(row[0]) for row in touched_keys_cursor.fetchall()]
+        # Debug session `rebuild-scd2-reconciliation` (ROUND 28): `vanished_ids` is EXCLUDED
+        # here -- `_TOUCHED_KEYS_SQL` scopes to literal presence anywhere among
+        # `staged_run_ids`' own bronze rows (any day/file in this pass's batch, not just the
+        # freshest one), so a key Step A just correctly closed as vanished (present ONLY in an
+        # OLDER, already-superseded co-staged file, per `find_vanished_customer_ids`'s own
+        # freshest-snapshot scoping) would otherwise ALSO be "touched" here. Step C's full-
+        # history recompute has no concept of "vanished" at all -- bronze carries no tombstone
+        # for "this key stopped appearing on day X" -- so `recompute_version_chain` would
+        # deterministically re-derive that key's is_current=true from its own (stale) bronze
+        # content alone, silently UNDOING Step A's own delete-semantics disposition inside the
+        # SAME transaction. Before this fix, `vanished_ids` and `touched_keys` were always
+        # disjoint by construction (both were scoped to the SAME staged_run_ids union), so this
+        # interaction was never observable; the freshest-snapshot narrowing above makes
+        # `vanished_ids` a strict subset of "present somewhere in this pass's batch", so the two
+        # sets can now genuinely overlap and this exclusion is required for Step A's own
+        # disposition to actually stick. A key excluded here for THIS pass is not lost -- a
+        # later pass that genuinely touches it again (a new file, a further correction) will
+        # recompute its full history from scratch as usual.
+        touched_keys = [
+            str(row[0]) for row in touched_keys_cursor.fetchall() if str(row[0]) not in vanished_ids
+        ]
 
         # --- Step C + D: per touched key, full-history recompute + atomic replace ---
         for customer_id_text in touched_keys:

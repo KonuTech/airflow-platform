@@ -73,6 +73,40 @@ accounting. This correctly excludes Phase 4's pre-bronze legacy rows from
 BOTH the denominator (``current_count``) and the numerator (vanished set)
 while still catching a real mass-deletion among genuinely SCD-managed keys.
 
+Debug session ``rebuild-scd2-reconciliation`` (ROUND 26-28, live runs
+33279501503/33286862950): ``staged_snapshot`` used to be the UNION of every
+bronze row tagged with ANY of ``staged_run_ids``, regardless of which day's
+file each row came from. That makes vanish-detection sensitive to how many
+runs happen to be co-staged into ONE publish pass -- a TIMING-DEPENDENT,
+arbitrarily-sized batch (``pipeline/run.py``'s ``list_staged_run_ids``), not
+a fixed per-file/per-day granularity. During the original live run (one
+``*/1 * * * *`` scheduler tick at a time), a file that omits a customer is
+very likely published ALONE, correctly registering that customer as
+vanished. During a bulk ``rebuild-from-raw`` backfill, many files discover
+and stage in quick succession, so ``staged_run_ids`` can span MANY days'
+files in ONE pass -- if the omitting file is co-batched with ANY OLDER,
+already-superseded file that still delivers the customer, the old
+union-of-the-whole-batch semantics would union-heal the pass and never
+detect the vanish at all, producing a genuinely different terminal
+``is_current``/``valid_to`` state than the original run (confirmed at the
+real SQL layer against the real ``SCDPublisher.publish()`` entry point by
+``tests/integration/test_scd2_batch_boundary_vanish_detection.py``).
+
+Fix: ``staged_snapshot`` is now further restricted to bronze rows whose
+``event_ts`` equals the MAXIMUM ``event_ts`` among ``staged_run_ids``' own
+bronze rows -- i.e. only THIS pass's own freshest staged snapshot day is
+authoritative for "is this key currently present", never an older,
+already-superseded day that merely happens to be co-staged in the same
+batch. This restores the correct invariant -- vanish-detection depends only
+on the freshest snapshot content THIS pass staged, never on how many
+runs/days happened to be bundled alongside it -- without weakening the
+existing ``staged_run_ids`` scoping itself (a key from a run entirely
+outside ``staged_run_ids`` still never counts as present, per Finding F-2
+above): a small, live-like batch (``staged_run_ids`` = one day's file) and a
+large, rebuild-like batch (``staged_run_ids`` = many days' files) now agree,
+because both ultimately key off the SAME freshest-day content once the
+older, superseded days in the batch are excluded from the presence check.
+
 ``MassDeleteCircuitBreaker`` mirrors ``validate/circuit_breaker.py``'s
 ``RejectionRateCircuitBreaker`` shape exactly (constructor-parameterized
 totals, ``apply(ctx)`` never re-derives them, ``current_count == 0`` is the
@@ -140,6 +174,19 @@ if TYPE_CHECKING:
 # columns are nullable, and a single NULL inside a `NOT IN (...)` subquery
 # would silently empty the whole vanished set.
 #
+# `freshest_staged_event_ts` (debug session `rebuild-scd2-reconciliation`
+# ROUND 26-28, module docstring's newest paragraph): the MAX `event_ts`
+# among ONLY this pass's own `staged_run_ids` bronze rows -- this pass's own
+# freshest staged snapshot day. `staged_snapshot` is additionally restricted
+# to rows AT that day, so an older, already-superseded file that merely
+# happens to be co-staged in the SAME batch (a bulk rebuild's large,
+# multi-day `staged_run_ids`) can never resurrect a key that the freshest
+# day's own file already omitted. `event_ts::timestamptz` casts bronze's
+# all-TEXT convention (migration 0022), matching
+# `load/publish/scd.py`'s own `_SNAPSHOT_MAX_EVENT_TS_SQL` cast exactly --
+# the two queries MUST agree on what "this pass's freshest snapshot instant"
+# means, since one gates presence and the other dates the DELETE action.
+#
 # `bronze_known` (10-07-PLAN.md Task 1, live finding): scopes the vanished
 # candidate set to customer_ids that have EVER appeared in `staging.
 # customers` (bronze) -- see the module docstring's live-cluster finding
@@ -150,11 +197,17 @@ if TYPE_CHECKING:
 # mass-delete ratio trends toward 100% as the shared table accumulates more
 # unrelated legacy data over the project's life.
 _VANISHED_SQL = """
-WITH staged_snapshot AS (
-    SELECT DISTINCT customer_id
+WITH freshest_staged_event_ts AS (
+    SELECT max(event_ts::timestamptz) AS max_event_ts
     FROM   staging.customers
     WHERE  _run_id = ANY(%(staged_run_ids)s)
-      AND  customer_id IS NOT NULL
+),
+staged_snapshot AS (
+    SELECT DISTINCT sc.customer_id
+    FROM   staging.customers sc, freshest_staged_event_ts f
+    WHERE  sc._run_id = ANY(%(staged_run_ids)s)
+      AND  sc.customer_id IS NOT NULL
+      AND  sc.event_ts::timestamptz = f.max_event_ts
 ),
 bronze_known AS (
     SELECT DISTINCT customer_id
@@ -182,6 +235,16 @@ def find_vanished_customer_ids(
     carries an arbitrary ``_run_id`` under a byte-identical replay, so a
     silver-scoped snapshot misreports every tie-loser key as vanished.
 
+    Debug session ``rebuild-scd2-reconciliation`` (ROUND 26-28): "this
+    pass's staged bronze" is further narrowed to only the rows dated at
+    ``staged_run_ids``' own MAXIMUM ``event_ts`` -- i.e. only THIS pass's
+    own freshest staged snapshot day. Without this, a bulk pass whose
+    ``staged_run_ids`` happens to span several days would union-heal a
+    vanish that an older, already-superseded day's file still delivered,
+    even though the freshest day's own file omits the key -- making the
+    result sensitive to how many runs/days happen to be co-staged in ONE
+    pass, not just to what the freshest snapshot actually contains.
+
     Args:
         conn: An already-open connection. Read-only -- never committed or
             rolled back here.
@@ -194,9 +257,10 @@ def find_vanished_customer_ids(
         ``PublishResult.published_business_keys``'s own string convention)
         of every ``normalized.customers`` row with ``is_current = true``
         AND a bronze presence in ``staging.customers``, whose key does not
-        appear in ``staging.customers`` among rows tagged with one of
-        ``staged_run_ids``. Empty when ``normalized.customers`` has no
-        bronze-known current rows at all (nothing can vanish from nothing).
+        appear among ``staged_run_ids``' own bronze rows dated at this
+        pass's freshest staged ``event_ts``. Empty when ``normalized.
+        customers`` has no bronze-known current rows at all (nothing can
+        vanish from nothing).
     """
     cursor = conn.execute(_VANISHED_SQL, {"staged_run_ids": list(staged_run_ids)})
     return {str(row[0]) for row in cursor.fetchall()}

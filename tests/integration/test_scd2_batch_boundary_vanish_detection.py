@@ -1,28 +1,35 @@
-"""SQL-layer integration proof/refutation for the ROUND 26 batch-boundary vanish hypothesis.
+"""SQL-layer integration proof for the ROUND 26/27 batch-boundary vanish hypothesis, and its fix.
 
-Debug session ``.planning/debug/rebuild-scd2-reconciliation.md`` (REOPENED, ROUND 26):
-after two independent live reproductions of the pre-fix mismatch signature with the a0cc2f5
-fix genuinely deployed, this session identified a SECOND, previously-untouched candidate
-mechanism -- completely independent of a0cc2f5's own sort-key fix -- that could plausibly
-explain customer_id 2100100032's full-field mismatch (``current_valid_from``,
-``current_valid_to``, ``current_is_current`` all differing, vs. member 30's
-``valid_from``-only mismatch): ``dataplat.scd.delete_detection.find_vanished_customer_ids``
-scopes its "is this key present in THIS pass" check to ``staged_run_ids`` -- whatever set of
-runs happens to be staged-but-unpublished at the moment ``publish_ingest`` calls
-``ctx.metadata.list_staged_run_ids(...)`` and hands the WHOLE list into ONE
-``SCDPublisher.publish()`` call (``pipeline/run.py:1338``). This batch composition is a
-TIMING-DEPENDENT quantity, not a fixed per-file granularity.
+Debug session ``.planning/debug/rebuild-scd2-reconciliation.md`` (REOPENED, ROUND 26; CONFIRMED,
+ROUND 27; FIXED, ROUND 28): after two independent live reproductions of the pre-fix mismatch
+signature with the a0cc2f5 fix genuinely deployed, this session identified a SECOND,
+previously-untouched candidate mechanism -- completely independent of a0cc2f5's own sort-key
+fix -- that could plausibly explain customer_id 2100100032's full-field mismatch
+(``current_valid_from``, ``current_valid_to``, ``current_is_current`` all differing, vs. member
+30's ``valid_from``-only mismatch): ``dataplat.scd.delete_detection.find_vanished_customer_ids``
+scoped its "is this key present in THIS pass" check to the UNION of every bronze row tagged with
+ANY of ``staged_run_ids`` -- whatever set of runs happens to be staged-but-unpublished at the
+moment ``publish_ingest`` calls ``ctx.metadata.list_staged_run_ids(...)`` and hands the WHOLE
+list into ONE ``SCDPublisher.publish()`` call (``pipeline/run.py:1338``). This batch composition
+is a TIMING-DEPENDENT quantity, not a fixed per-file granularity.
 
-Hypothesis under test here: during the ORIGINAL live incremental run (one ``*/1 * * * *``
-scheduler tick at a time, over real wall-clock hours), the file that omits a vanishing
-customer is very likely published ALONE or with very few companions -- correctly registering
-that customer as vanished. During a bulk ``rebuild-from-raw`` backfill, many files get
-discovered+staged in quick succession, so ``list_staged_run_ids`` can return a substantially
-LARGER batch spanning many files into ONE publish pass -- and ``_VANISHED_SQL``'s own
-union-of-this-pass's-files semantics means that if the omitting file is co-batched with ANY
-other file that still includes the customer, that customer is NEVER detected as vanished in
-that pass at all -- a genuinely different terminal ``is_current``/``valid_to`` state than the
-original run.
+ROUND 27 CONFIRMED the mechanism at the real SQL layer: during the ORIGINAL live incremental run
+(one ``*/1 * * * *`` scheduler tick at a time, over real wall-clock hours), the file that omits a
+vanishing customer is very likely published ALONE or with very few companions -- correctly
+registering that customer as vanished. During a bulk ``rebuild-from-raw`` backfill, many files
+get discovered+staged in quick succession, so ``list_staged_run_ids`` can return a substantially
+LARGER batch spanning many files into ONE publish pass -- and the PRE-FIX
+``_VANISHED_SQL``'s own union-of-this-pass's-files semantics meant that if the omitting file was
+co-batched with ANY OTHER file that still included the customer (even an OLDER, already-
+superseded day), that customer was NEVER detected as vanished in that pass at all -- a genuinely
+different terminal ``is_current``/``valid_to`` state than the original run.
+
+ROUND 28 FIXED it: ``_VANISHED_SQL`` now additionally restricts ``staged_snapshot`` to bronze
+rows dated at ``staged_run_ids``' own MAXIMUM ``event_ts`` -- this pass's own freshest staged
+snapshot day. An older, already-superseded day's file merely co-staged in the same batch can no
+longer resurrect a key the freshest day's own file omits. The tests below, UPDATED for this fix,
+now assert that the small-batch and large-batch scenarios agree (both correctly detect the
+vanish) -- the batch-boundary sensitivity is closed.
 
 This module isolates that ONE variable -- the ``staged_run_ids`` argument passed to
 ``SCDPublisher.publish()`` -- while holding the underlying ``staging.customers`` (bronze) rows
@@ -467,7 +474,7 @@ def test_small_batch_correctly_detects_the_vanish(
     assert valid_to is not None
 
 
-def test_large_batch_co_staged_with_a_covering_file_never_detects_the_vanish(
+def test_large_batch_co_staged_with_a_covering_file_still_detects_the_vanish_post_fix(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
     """``staged_run_ids`` spans BOTH day11 AND day12 -- mirrors a bulk rebuild's batched staging.
@@ -477,9 +484,13 @@ def test_large_batch_co_staged_with_a_covering_file_never_detects_the_vanish(
     cumulative, session-shared tables -- reusing the prior test's own rows would silently
     layer a second pass on top of the first's already-committed state rather than presenting
     an identical, untouched starting point). day11's file (co-staged in the SAME pass as
-    day12's) still delivers the target customer, so the union-of-this-pass's-files snapshot
-    DOES contain it -- ``find_vanished_customer_ids`` must NOT report it vanished, even though
-    day12's own file, in isolation, omits it exactly as before.
+    day12's) still delivers the target customer, but day11 is an OLDER, already-superseded
+    day relative to day12 -- POST-FIX, ``staged_snapshot`` is restricted to this pass's own
+    FRESHEST staged day (day12), so day11's stale co-presence must no longer resurrect the
+    target: ``find_vanished_customer_ids`` must report it vanished here, exactly as the
+    small-batch scenario above does. PRE-FIX, this scenario incorrectly reported ``is_current``
+    still ``True`` (the batch-boundary defect this test file was built to confirm, ROUND 27) --
+    that pre-fix behavior is preserved in this test's own git history for reference.
     """
     with psycopg.connect(migrated_dsn) as conn:
         day11_run_id, day12_run_id = _seed_fixed_scenario(
@@ -500,19 +511,17 @@ def test_large_batch_co_staged_with_a_covering_file_never_detects_the_vanish(
         )
         conn.commit()
 
-    is_current, _valid_to = _current_state(
-        migrated_dsn, customer_id=_TARGET_CUSTOMER_ID_LARGE_BATCH
-    )
-    assert is_current is True, (
+    is_current, valid_to = _current_state(migrated_dsn, customer_id=_TARGET_CUSTOMER_ID_LARGE_BATCH)
+    assert is_current is False, (
         "large-batch (day11+day12 co-staged): the target customer's day12-omitting file was "
-        "co-batched with day11's own file (which still delivers the target), yet the target "
-        "was STILL reported vanished and closed -- the batch-boundary hypothesis's own "
-        "union-healing claim does not hold; find_vanished_customer_ids's staged_run_ids "
-        "scoping is not the live mechanism explaining customer_id 2100100032's mismatch"
+        "co-batched with day11's own OLDER, already-superseded file, yet the target was NOT "
+        "reported vanished -- the ROUND 28 fix (restricting staged_snapshot to this pass's own "
+        "freshest staged event_ts) is not closing the batch-boundary defect"
     )
+    assert valid_to is not None
 
 
-def test_same_bronze_rows_only_staged_run_ids_composition_differs_yields_opposite_vanish_outcomes(
+def test_same_bronze_rows_only_staged_run_ids_composition_differs_yields_same_correct_outcome(
     repository: PostgresMetadataRepository, migrated_dsn: str
 ) -> None:
     """The direct, side-by-side confirmation: ONE fixed bronze/gold seed, TWO publish() calls.
@@ -525,6 +534,12 @@ def test_same_bronze_rows_only_staged_run_ids_composition_differs_yields_opposit
     re-running with the large-batch ``staged_run_ids`` against the SAME pre-pass state. This
     isolates ``staged_run_ids`` composition as the ONLY variable between the two calls -- not
     merely "the same shape of data" (the two tests above) but the literal same rows.
+
+    POST-FIX (ROUND 28): both calls must now agree (both detect the vanish) -- this is the
+    core invariant the fix restores: vanish-detection must not depend on how many runs/days
+    happen to be co-staged into one pass. PRE-FIX, this assertion was inverted (the two
+    outcomes were required to DIFFER, confirming the defect existed at the SQL layer, ROUND
+    27) -- see this test's own git history for that confirmatory shape.
     """
     target_id = _TARGET_CUSTOMER_ID + 1000  # disjoint from the two tests above (979001)
     companion_id = _COMPANION_CUSTOMER_ID + 1000  # 979002
@@ -618,15 +633,17 @@ def test_same_bronze_rows_only_staged_run_ids_composition_differs_yields_opposit
     assert small_batch_is_current[0] is False, (
         "small-batch scenario: expected the target to be detected vanished (is_current=False)"
     )
-    assert large_batch_is_current[0] is True, (
-        "large-batch scenario: expected the target to survive (is_current=True) because "
-        "day11's co-staged file still delivers it"
+    assert large_batch_is_current[0] is False, (
+        "large-batch scenario: expected the target to ALSO be detected vanished "
+        "(is_current=False), post-fix -- day11's co-staged file is an OLDER, already-superseded "
+        "day and must no longer resurrect a key day12's own freshest file omits"
     )
-    assert small_batch_is_current[0] != large_batch_is_current[0], (
-        "CONFIRMED-VS-REFUTED marker for the ROUND 26 batch-boundary hypothesis: against the "
-        "literal SAME staging.customers bronze rows and the literal SAME pre-pass "
+    assert small_batch_is_current[0] == large_batch_is_current[0], (
+        "FIX-VERIFICATION marker for the ROUND 26/27 batch-boundary defect (ROUND 28 fix): "
+        "against the literal SAME staging.customers bronze rows and the literal SAME pre-pass "
         "normalized.customers state, changing ONLY the staged_run_ids composition passed to "
-        "SCDPublisher.publish() must flip the vanish outcome for this to be a live, "
-        "reproducible mechanism. If this assertion ever fails, the batch-boundary hypothesis "
-        "is REFUTED at the SQL layer, not merely unconfirmed."
+        "SCDPublisher.publish() must NO LONGER flip the vanish outcome -- vanish-detection must "
+        "depend solely on this pass's own freshest staged snapshot day, never on how many "
+        "runs/days happen to be co-staged alongside it. If this assertion ever fails, the "
+        "batch-boundary fix has regressed."
     )
