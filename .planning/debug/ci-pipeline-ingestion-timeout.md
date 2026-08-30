@@ -1,6 +1,17 @@
 ---
 status: investigating
-updated: 2026-08-30 (ROUND 27 OFFLINE COMPLETE, awaiting live verification: (1) hardened
+updated: 2026-08-30 (SESSION PAUSED after ROUND 27's live-verification run (33309917776) failed
+  at cluster bring-up before the E2E slice suite ever started -- a self-inflicted CI-process
+  mishap (Kyverno correctly denied deployment for an unpublished image tag on the recovery
+  dispatch's headSha), unrelated to the pipeline, u3, or dbtkill. Neither of ROUND 27's two named
+  items was confirmed or refuted live; both remain exactly as ROUND 27's own offline work left
+  them (u3's poll_run_for_file fix: offline red/green-verified, not live-confirmed; dbtkill's
+  STAGE_LOAD root cause: confirmed via git-history/grep evidence that does not require live
+  confirmation, fix proposed but not applied). Per explicit user instruction, debugging STOPS
+  here -- no ROUND 28. See the 'SESSION HANDOFF -- FINAL STATUS' block at the top of Current
+  Focus for the complete pause-point summary: what's fixed, what's open, and the precise next
+  step. Prior state preserved below for history.)
+updated_prior_round27: 2026-08-30 (ROUND 27 OFFLINE COMPLETE, awaiting live verification: (1) hardened
   `poll_run_for_file` so the polling LOOP itself (not just the query) prefers a non-replay row --
   it now keeps polling within budget whenever the best-visible row is a replay, only falling back
   to it if the budget expires with no non-replay row ever appearing. New testcontainers-backed
@@ -39,6 +50,19 @@ round27_status: "ROUND 27 OFFLINE COMPLETE 2026-08-30, PUSHED commit 7d631c5 (+d
   the original push-triggered run was superseded/cancelled by a self-inflicted docs-commit
   double-trigger, recovered via manual dispatch -- see live_verification_state for the full
   story), publish.yml run 33309793782 (conclusion=success, still valid)."
+round27_live_verification: "ROUND 27 LIVE-VERIFICATION TERMINAL 2026-08-30: run 33309917776
+  concluded `failure` after only 3m23s of actual job execution (queued ~2h34m first) -- FAILED
+  AT CLUSTER BRING-UP, before the E2E slice suite ever started. Root cause: Kyverno correctly
+  denied deploying the airflow Deployments because NO image was ever published under the
+  recovery dispatch's own headSha (555052b) -- its own publish.yml run (33309832705) was
+  collateral damage from the SAME self-inflicted duplicate-push/missing-[skip ci] incident this
+  round's own live_verification_state note already flagged, just not checked before dispatching.
+  A CI-process/tooling self-inflicted failure, unrelated to the pipeline, to u3, or to dbtkill.
+  Neither item 1 (poll_run_for_file/u3) nor item 2 (dbtkill/STAGE_LOAD) could be confirmed or
+  refuted live this round -- both remain exactly where ROUND 27's own offline work left them. See
+  'ROUND 27 OUTCOME' in Current Focus for the full post-run analysis, and the 'SESSION HANDOFF --
+  FINAL STATUS' block at the top of Current Focus for the complete session-pause summary. Per
+  explicit user instruction, debugging is PAUSED here -- no ROUND 28 is proposed or opened."
 round26_live_verification: 2026-08-30 (ROUND 26 LIVE-VERIFIED: run 33297885371 cancelled at 226m5s, ~1min past the
   225-min ceiling, 41/44 node-IDs reached. dbtkill's cross-DagRun-claim race fix CONFIRMED HOLDING
   (no recurrence of that signature) but dbtkill failed via a NEW, uncatalogued signature (app-layer
@@ -813,6 +837,160 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
+SESSION HANDOFF -- FINAL STATUS (2026-08-30, session paused after ROUND 27 by explicit user
+decision; this debug file is NOT resolved and NOT archived -- it remains active for whoever
+resumes it. No ROUND 28 is proposed or started here. See 'ROUND 27 OUTCOME' below for the full
+post-run evidence this summary is built on.):
+
+  TRAJECTORY: This session opened against a control-plane that could not complete a SINGLE
+  E2E test (total scheduler/dag-processor crash-loop). 27 rounds of hypothesis-driven debugging
+  progressively eliminated CPU, memory, scheduling, admission-policy, and data-race root causes,
+  reaching a peak of 41/44 node-IDs completing with a resolved outcome (32 passed / 3 failed with
+  named, evidence-backed causes / 6 skipped / 3 never reached, ROUND 26's own live census) --
+  i.e. the session drove the pipeline from "nothing runs" to "everything runs except two
+  precisely named, well-understood mechanisms." ROUND 27 did not extend this trajectory with new
+  LIVE evidence (its own verification run failed at cluster bring-up before the suite ever
+  started, for CI-process reasons unrelated to the pipeline -- see ROUND 27 OUTCOME), but it DID
+  convert one of those two remaining mechanisms (dbtkill) from "confirmed root cause, evidence
+  gathered across several rounds" to "structurally certain via git-history archaeology, with a
+  scoped candidate fix ready for review" -- real forward progress even without a fresh live run.
+
+  CONFIRMED FIXED THIS SESSION (chronological, one root cause/fix per line; all LIVE-VERIFIED
+  unless noted -- derived from this file's own Resolution section and the session's own fix
+  commits, not from memory):
+    1. Scheduler/dag-processor crash-loop under real CI CPU contention (CPU limits + Airflow
+       health-check threshold alignment with K8s probe timeouts) -- commit a73282e.
+    2. Dag-processor OOM (256Mi/512Mi too tight for its fork-based parse cycle on CI) + a CI CPU
+       budget regression -- commit 8681d69.
+    3. Scheduler OOM, newly exposed once the dag-processor stopped crash-looping and DAGs
+       actually started registering/running -- commit 103829e, LIVE-CONFIRMED via c23d120.
+    4. Vault-0 "pod not found" race: a NAMED `kubectl wait` immediately after `helm upgrade
+       --install vault` fails fast on a not-yet-created pod instead of polling for it -- fixed in
+       `wait_for_pod_running`, LIVE-CONFIRMED (c23d120).
+    5. The SAME vault-0 wait-race pattern, independently re-implemented inline in two other e2e
+       test files that never routed through the fixed helper -- commit 0ef5ae6.
+    6. LocalExecutor worker-pool oversizing (stock `core.parallelism=32` vs. this pipeline's real
+       fan-out ceiling) trimmed for scheduler memory headroom -- commit b1ef8e2.
+    7. Scheduler OOM retry livelock broken via a bounded `dagrun_timeout` -- commit 20d151f.
+    8. A DAG-pause test fixture that was silently freezing backfill DagRuns -- removed, commit
+       f0ebfe3.
+    9. Kyverno admission denials under CI CPU contention (admissionController CPU 200m->500m +
+       capped KPO retry_delay) -- commit 87cddd4.
+    10. Aggregate concurrent load on the CI node reduced (parallelism tuning) -- commit 32d9911
+        (later superseded/refined by later rounds' more precise fixes).
+    11. Kyverno `require-signed-images` exemption for the runtime-injected KPO XCom sidecar image
+        (stale alpine-version pin + Docker Hub 429 exposure) -- commit ce73d9d, LIVE-FALSIFIED
+        before/after.
+    12. `vault-bootstrap` never provisioning the `analytics_db_default` Airflow Connection (root
+        cause of dbt_build's spurious `upstream_failed` cascade) + scheduler limit sized to a
+        measured real burst -- commit ee87708.
+    13. stage/publish pods unschedulable on the CI node (resource right-sizing) -- commit
+        d0d1ad6.
+    14. A dbt-layer root cause plus two test-fixture artifacts (dataset_id registration guard /
+        least-privilege lookup path) -- commit 377c068.
+    15. Publish-path mass-delete data-loss risk: bronze-scoped staged snapshot + deterministic
+        silver tie-break -- commit 794db33.
+    16. `csv_ingest_orders` DAG born paused by default, silently breaking every scheduling
+        assumption downstream -- commit 4d3db56.
+    17. Quarantine-on-deterministic-breaker-trip semantics + a timeout bump -- commit a247b67.
+    18. A 5-column optional-column schema crash + a silent-drop claim-lifecycle defect -- commit
+        25b6eb0.
+    19. A bundle of fixture, claim-ledger, grant, and quarantine-exclusion fixes (ROUND 16 full
+        scope) -- commit 55c8e41.
+    20. O(delta) orders-publish performance fix, fixture right-sizing, a missing grant, sweep
+        forensics -- commit 79dd299.
+    21. Test-layer repoint + error forensics + budget dispositions (ROUND 18) -- commit 4818867.
+    22. `execution_timeout` zombie-detection gap on heavy KPO tasks closed, orders-publish
+        right-sized, sweep assertion scoped to the real batch -- commit 5f3aa61.
+    23. Timeout-budget rebalanced so worst-case retry sequences genuinely fit under
+        `dagrun_timeout` with real margin -- commit c01d022.
+    24. MinIO credentials Kubernetes Secret `stringData` scalar-quoting bug -- commit e1f8782.
+    25. A bundle of timeout/retry-budget fixes: queue-idle budget, dbtkill poll budget, orders
+        retries -- commit e6f37fb.
+    26. dbtkill poll-budget bump reverted (wrong lever) + `scd_concurrent`'s zero-margin race
+        genuinely fixed -- commit 8f67ed8.
+    27. `workflow_dispatch` queuing-behind-an-in-progress-push handling + rebuild-from-raw's
+        Step-0 scheduling race -- commits 4436311, 8b9d5ee.
+    28. Orders DagRun admission race closed + a prior u3 replay-row misdiagnosis corrected --
+        commit c03624a.
+    29. dbtkill's cross-DagRun file-claim race closed (test-fixture-only reorder), u3's
+        memory-sampler race fixed (`_poll_pod_by_label` replacing `_poll_pod_name`), job ceiling
+        raised 190->225min with real margin -- commit ae55318, LIVE-VERIFIED (41/44 reached).
+    30. `poll_run_for_file`'s polling LOOP hardened to prefer a non-replay row within budget
+        rather than stopping on the first (possibly replay) row seen -- commit 7d631c5,
+        OFFLINE red/green-verified this round; NOT YET live-confirmed (see STILL OPEN (b) below).
+
+  STILL OPEN AT SESSION END:
+    (a) dbtkill (`test_pod_kill_mid_dbt_build_produces_no_duplicates`) -- ROOT CAUSE CONFIRMED,
+        FIX NOT IMPLEMENTED. `meta.run_stages` can structurally never receive a `STAGE_LOAD` row
+        for any run, ever: `claim_run_stage`/`complete_run_stage` are called from exactly two
+        sites in the entire codebase, both inside `publish_ingest` for `stage_name="PUBLISH"`;
+        `stage_ingest`/`run_ingest` has never, in this repo's entire git history, called either
+        function for `STAGE_LOAD`. This makes `list_run_ids_pending_dbt_build`'s
+        STAGE_LOAD-gated eligibility query permanently unsatisfiable, and dbtkill's own
+        `_poll_dbt_build_running_signal` structurally unwinnable -- consistent with dbtkill
+        never having passed once across this session's full 27-round history (grep-confirmed).
+        Confidence: HIGH -- this is a git-log/grep structural fact, not a behavioral/timing
+        inference, so it does not require a live run to be trusted. Fix proposed but
+        deliberately NOT applied: wire `claim_run_stage("STAGE_LOAD")`/`complete_run_stage` into
+        `stage_ingest`, mirroring `publish_ingest`'s own pattern -- withheld because it touches
+        production pipeline code (transaction boundaries, the heartbeat thread, the quality
+        gate, in the single most complex function in the codebase) and has never been
+        reviewed/scoped by the user.
+    (b) u3 (`test_u3_throughput_and_peak_rss_baseline`) -- FIX APPLIED AND OFFLINE-VERIFIED, NOT
+        LIVE-CONFIRMED. The `poll_run_for_file` loop-continuation hardening (item 30 above) is
+        proven correct against the exact replay-row race ROUND 26's own live evidence exposed,
+        via a real testcontainers-backed RED/GREEN integration test -- but ROUND 27's own
+        live-verification run (33309917776) failed at cluster bring-up before the E2E slice
+        suite ever started (Kyverno correctly denied deployment because no airflow image was
+        ever published for the recovery dispatch's headSha -- a self-inflicted CI-process
+        mishap, not a code or pipeline defect; full detail in 'ROUND 27 OUTCOME' below).
+        Confidence the fix itself is correct: MEDIUM-HIGH. Confidence it holds under real CI
+        timing/load: UNTESTED.
+    (c) rebuild-from-raw / SCD2 reconciliation -- OUT OF SCOPE for this file, owned entirely by
+        the sibling `.planning/debug/rebuild-scd2-reconciliation.md` session (which itself
+        reached its own ROUND 30 wrap-up the same day, per this repo's git history). Not
+        investigated here; consult that file directly for its own status.
+    (d) Other carried follow-ups, named across multiple rounds, deliberately never promoted to
+        their own charter and still unaddressed:
+        - CPU starvation on the single-node CI cluster (chronic, thousands of "Insufficient cpu"
+          FailedScheduling events per run) -- root cause named early, remediation explicitly
+          out-of-scope every round it surfaced, still present as of ROUND 26's own live run.
+        - "Follow-up B": mirror + sign the KPO XCom sidecar image (alpine) into GHCR and remove
+          the ROUND 8 Kyverno exemption, restoring a verify-everything admission posture and
+          removing the Docker Hub 429 exposure. Deliberately deferred, never implemented.
+        - Minor watch items raised once and never revisited: stage-side breaker classification,
+          `meta.v_run_recovery`'s STAGE_LOAD-referencing wording (would very likely start
+          resolving correctly as a side effect of fixing (a) above), quarantine-silver leakage
+          (20b), scheduler headroom margin.
+        - `smoke_kubernetes_pod` DagRun reaching a genuine functional 'failed' terminal state --
+          flagged once, never a root cause of this session, would need its own
+          differently-scoped investigation (this session's diagnostics never captured the `etl`
+          namespace's own pod details).
+        - e2e-chaos.yml: a shared data-precondition/test-ordering issue across 5-6 chaos tests
+          (all failing on "insufficient prior customers ingestion"), flagged once, out of scope,
+          not revisited since.
+
+  PRECISE NEXT STEP FOR WHOEVER RESUMES:
+    1. (Cheapest, zero code changes needed first) Get ONE clean live-verification run at the
+       SAME code state (commit 7d631c5) with no self-inflicted duplicate-push/cancelled-publish
+       incident: dispatch against a headSha that has a CONFIRMED, non-cancelled publish.yml run
+       (verify with `gh run list --workflow=publish.yml` filtered to that sha BEFORE dispatching
+       -- this exact gap is what cost ROUND 27's entire live-verification budget for zero test
+       evidence). This closes the purely observational gap ROUND 27 left open: does u3 clear,
+       and does dbtkill now show ONLY the confirmed STAGE_LOAD-empty signature and nothing new.
+    2. (Highest-leverage code change) Implement the STAGE_LOAD wiring fix in `stage_ingest`/
+       `run_ingest` (`packages/dataplat/src/dataplat/pipeline/run.py`), mirroring
+       `publish_ingest`'s own `claim_run_stage`/`complete_run_stage` pattern: claim alongside
+       the existing `claim_ingestion_run` call, complete after the existing
+       `update_ingestion_run_status(status="STAGED")` call, release-to-FAILED alongside the
+       existing `_release_failed_claim` path in the `finally` block. This is a production
+       pipeline change (not a test-fixture fix) and needs the user's own review/scoping decision
+       before implementation, plus a fresh live-verification round once landed -- but it is now
+       a confirmed, well-understood structural gap rather than a guess, and closing it is the
+       single highest-leverage remaining action given dbtkill has never passed in 27 rounds.
+    Steps 1 and 2 are independent and can be done in either order or in parallel.
+
 ROUND 27 (2026-08-30, opened on user decision after ROUND 26's own checkpoint: (1) harden
 `poll_run_for_file` so it never returns a replay row when a non-replay row exists within the
 polling budget, AND (2) root-cause dbtkill's newly-discovered signature -- ingestion run reaches
@@ -1099,6 +1277,81 @@ meta.run_stages completely empty):
       empty, `_poll_dbt_build_running_signal` timeout) and nothing new; (3) guards green; (4)
       whether to proceed with the proposed STAGE_LOAD wiring fix into `stage_ingest` (a
       production pipeline change) is the user's own decision at the checkpoint, not applied here.
+
+ROUND 27 OUTCOME (2026-08-30, post-run analysis of run 33309917776, headSha
+555052b8fd595e46a5dc10578911a2c4a51df0a6, event=workflow_dispatch -- THE FINAL LIVE-VERIFICATION
+RUN OF THIS SESSION; user is pausing debugging after this analysis, no ROUND 28):
+  run_facts: "conclusion=failure. Single job ('Full local E2E suite + rebuild-from-raw capstone')
+      created 11:50:13Z, but did not actually START executing steps until 14:24:15Z (~2h34m
+      queued -- almost certainly concurrency-group serialization behind other main-branch
+      e2e-full.yml activity from the sibling rebuild-scd2-reconciliation session's own concurrent
+      pushes sharing the same `E2E full (merge)-refs/heads/main-` group). Once started, the job
+      ran for only 3m23s (14:24:15Z->14:27:38Z) before HARD-FAILING at step 7, 'Bring up the
+      ephemeral kind cluster (CI profile)' (exit code 2) -- every subsequent step (13, the actual
+      pytest slice suite; 16, rebuild-from-raw) shows `skipped`. The API's own `run_duration_ms`
+      (9,447,000ms = 157.45min) reflects mostly QUEUE time, not test-execution time; the 225-min
+      job-execution ceiling was never approached, let alone tested."
+  cluster_up_failure_root_cause: "Direct log evidence (job log line 810-813): `admission webhook
+      \"ivpol.validate.kyverno.svc-fail-finegrained-require-signed-images\" denied the request:
+      Policy require-signed-images error: failed to evaluate policy: GET
+      https://ghcr.io/v2/konutech/airflow/manifests/555052b8fd595e46a5dc10578911a2c4a51df0a6:
+      MANIFEST_UNKNOWN` -- for airflow-api-server, airflow-dag-processor, airflow-scheduler, and
+      airflow-triggerer, all four. Kyverno's cosign/manifest-verification step is working EXACTLY
+      as designed here: it correctly detected that NO airflow image was ever published under the
+      git-sha tag `555052b` (the docs-only run-ID commit this round's own recovery dispatch was
+      pointed at) and denied deployment rather than silently running a stale/wrong image. Direct
+      confirmation via `gh run list --workflow=publish.yml`: the publish.yml run for
+      headSha=555052b (databaseId 33309832705) shows `conclusion=cancelled` -- it was collateral
+      damage from the SAME self-inflicted duplicate-push saga this round's own
+      `live_verification_state` note already documented (the missing `[skip ci]` on the docs-only
+      commit re-triggered a second push-event run in the same concurrency group, which GitHub
+      superseded/cancelled rather than queuing FIFO) -- but that saga's fallout was previously
+      understood to have hit only e2e-full.yml's duplicate; it ALSO silently cancelled
+      publish.yml's own build for that exact headSha, which nobody checked for before dispatching
+      the 'recovery' workflow_dispatch run against it. NET EFFECT: this round's recovery run was
+      always going to fail at cluster-up, deterministically, regardless of the poll_run_for_file
+      or dbtkill fixes' own correctness -- it never had a chance to reach the E2E slice suite."
+  item_1_evaluation: "u3 UNEVALUATED LIVE this round -- the E2E slice suite never started, so
+      `poll_run_for_file`'s ROUND 27 loop-continuation hardening was never exercised against a
+      real cluster/timing race. Offline evidence (RED/GREEN testcontainers-backed integration
+      test in tests/integration/test_poll_run_for_file.py, live-executed this round, not merely
+      asserted) is UNCHANGED and stands on its own merits, but zero additional live confirmation
+      exists beyond what ROUND 27's own offline_battery already recorded before this run."
+  item_2_evaluation: "dbtkill's STAGE_LOAD root cause is NEITHER newly confirmed NOR refuted by
+      this run's own live evidence (there is none -- dbtkill never ran). The root cause itself
+      does NOT depend on live-run evidence to be trusted: it rests on exhaustive git-history
+      archaeology (`git log -S'STAGE_LOAD' --all` across `run.py`'s entire history = zero
+      commits) and exhaustive grep (`claim_run_stage`/`complete_run_stage` called from exactly
+      two call sites codebase-wide, both `publish_ingest`/PUBLISH) -- a structural code fact, not
+      a behavioral timing inference, and this run's failure to reach dbtkill neither strengthens
+      nor weakens that evidence. It remains HIGH confidence, UNCHANGED from ROUND 27's own offline
+      finding, and the proposed fix remains unimplemented (production pipeline change, still
+      awaiting the user's own decision)."
+  census: "0/44 node-IDs reached ANY outcome this round (suite never launched) -- versus ROUND
+      26's baseline of 41/44 reaching a resolved outcome (32 passed / 3 failed [dbtkill, u3,
+      rebuild-from-raw] / 6 skipped / 3 never reached). This is a REGRESSION in test EVIDENCE
+      gathered, not a regression in the underlying pipeline or in either of this round's own code
+      changes -- it is entirely attributable to the CI-process/tooling mishap above, orthogonal
+      to every previously-catalogued mechanism this session has ever named (not the ROUND 7/8
+      Kyverno-cosign policy gap, not scheduler/dag-processor OOM, not CPU starvation)."
+  guards: "Kyverno: fired 4 times, but for the CORRECT reason (missing manifest for an
+      unpublished tag) -- not a recurrence of ROUND 6/7/8's CI-contention or sidecar-exemption
+      mechanisms. Restarts/scheduler-memory/duration guards: N/A -- no pods beyond the
+      admission-denied Deployments were ever created; the slice suite's own resource envelope was
+      never exercised."
+  pre_registered_criteria_disposition: "(a) u3 clears or fails differently -- UNEVALUATED (suite
+      never ran). (b) dbtkill clears or has a confirmed root cause with evidence -- MET on the
+      'confirmed root cause with evidence' branch, UNCHANGED from before this run (this run added
+      no new dbtkill evidence, positive or negative). (c) rebuild-from-raw -- parallel session's
+      concern, untouched. (d) zero new failures beyond already-known open items -- technically
+      true (zero NEW pipeline/test failures; the one new failure is a CI-process/dispatch mishap,
+      not a pipeline or test regression). (e) guards green -- N/A, suite never reached the point
+      where they'd be meaningfully exercised. NONE of (a)/(b)/(e) could be genuinely closed this
+      round; this is the outcome to carry forward, not a new round's charter (per explicit
+      instruction, no ROUND 28 is opened here)."
+  next_action: "SESSION PAUSED by user decision after this analysis. See the 'SESSION HANDOFF --
+      FINAL STATUS' block below (top of Current Focus) for the complete pause-point summary,
+      still-open items, and the precise next step for whoever resumes this debug session."
 
 ROUND 26 (2026-08-30, opened on user decision after ROUND 25's own checkpoint: fix ALL THREE
 named items except the SCD2/rebuild-from-raw finding, which is OUT OF SCOPE -- owned by the
