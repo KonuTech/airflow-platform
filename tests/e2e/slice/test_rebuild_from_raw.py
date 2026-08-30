@@ -278,6 +278,116 @@ def _latest_backfill_id(conn: psycopg.Connection[Any], *, dag_id: str) -> int | 
     return None if row is None else int(row[0])
 
 
+# Debug session `rebuild-scd2-reconciliation` (ROUND 26): the two customer_ids this session's
+# own two live reproductions (runs 33279501503/33286862950) both mismatched on, traced to
+# `tools/corpus/dated_series.py`'s corpus roster (see that debug file's Evidence). This
+# dispatch's own customers dataset never seeds these exact ids itself (D-30's own small,
+# self-contained fixture pair uses `bad_business_key`'s randomized range) -- but the shared,
+# persistent-history cluster this suite runs against DOES accumulate the wider corpus's own
+# rows across many e2e tests/rounds (this debug file's own Evidence: `snapshot_complete_
+# customers_csv` echoes the full gold roster on every call), so a mismatch on these two keys
+# is directly observable here too if/when it recurs.
+_DIAGNOSTIC_CUSTOMER_IDS: tuple[int, ...] = (2100100030, 2100100032)
+
+
+def _dump_scd2_batch_boundary_diagnostic(
+    conn: psycopg.Connection[Any], *, customer_ids: tuple[int, ...] = _DIAGNOSTIC_CUSTOMER_IDS
+) -> None:
+    """Print bronze rows + ingestion-run/batch composition for `customer_ids`, best-effort.
+
+    Purely additive diagnostic capture -- never asserts, never raises, never changes this
+    test's own pass/fail outcome. Exists SOLELY so that the next time this test's own
+    `customers_comparison.matches` assertion fails live in CI, the job log (already the
+    debug session's own established evidence source -- see that file's ROUND 26 Evidence,
+    `gh api .../jobs/<id>/logs`) captures the ACTUAL bronze/batch data behind the mismatch,
+    rather than only the field-name tuple the bare `AssertionError` message carries (ROUND 26's
+    own documented finding: the existing assertion message was never designed to carry real
+    field values). Called only when `customers_comparison.matches` is False (see call site) --
+    zero overhead, zero behavioral change, on the (overwhelmingly common) passing path.
+
+    Two independent, best-effort queries, each wrapped so a schema surprise in one never
+    prevents the other from printing:
+
+    1. Every `staging.customers` (bronze) row for `customer_ids`, across the WHOLE cumulative
+       history (never scoped to this test's own runs) -- `event_ts`/`_file_id`/
+       `_source_row_number`/`_run_id`/`name`/`country`, plus the owning file's `object_uri`,
+       for exactly the fields this debug session's hypotheses (echo-tie sort order,
+       staged_run_ids batch boundary) both need.
+    2. Every `meta.ingestion_runs` row for the `customers` dataset whose `run_id` appears
+       among those bronze rows' `_run_id` values, ordered by `finished_at` -- `list_staged_
+       run_ids`'s own actual argument at publish time is a transient, in-memory list never
+       persisted anywhere (confirmed: `pipeline/run.py`'s `publish_ingest` never writes it to
+       a table), so this is the closest AFTER-THE-FACT reconstruction available: runs whose
+       `finished_at` cluster tightly together were very likely finalized in the SAME publish
+       pass (the same mechanism `pipeline/run.py`'s own documented
+       `resolved_by_run_id=max(finalized_run_ids)` multi-run-pass attribution already relies
+       on), while runs whose `finished_at` are hours/days apart were almost certainly
+       separate, single-file-or-few-file passes.
+    """
+    placeholders = ",".join(["%s"] * len(customer_ids))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT sc.customer_id, sc.event_ts, sc._file_id, sc._source_row_number,
+                       sc._run_id, sc.name, sc.country, mf.object_uri
+                  FROM staging.customers sc
+                  LEFT JOIN meta.files mf ON mf.file_id = sc._file_id
+                 WHERE sc.customer_id::text = ANY(ARRAY[{placeholders}]::text[])
+                 ORDER BY sc.customer_id, sc.event_ts, sc._file_id, sc._source_row_number
+                """,  # noqa: S608 -- placeholders are literal %s markers, never interpolated values
+                [str(cid) for cid in customer_ids],
+            )
+            bronze_rows = cur.fetchall()
+        print(  # noqa: T201 -- deliberate diagnostic capture, see docstring
+            f"\n[SCD2 BATCH-BOUNDARY DIAGNOSTIC] staging.customers bronze rows for "
+            f"customer_id IN {customer_ids!r} ({len(bronze_rows)} rows):"
+        )
+        for row in bronze_rows:
+            print(f"  {row!r}")  # noqa: T201 -- deliberate diagnostic capture, see docstring
+    except Exception as exc:  # noqa: BLE001 -- diagnostic-only, must never mask the real assertion
+        print(  # noqa: T201 -- deliberate diagnostic capture, see docstring
+            f"[SCD2 BATCH-BOUNDARY DIAGNOSTIC] bronze-row query failed (non-fatal, diagnostic "
+            f"only): {exc!r}"
+        )
+        conn.rollback()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT ir.run_id, ir.status, ir.finished_at, ir.file_id, mf.object_uri,
+                       ir.replay_of_run_id
+                  FROM meta.ingestion_runs ir
+                  JOIN meta.datasets d ON d.dataset_id = ir.dataset_id
+                  LEFT JOIN meta.files mf ON mf.file_id = ir.file_id
+                 WHERE d.dataset_name = 'customers'
+                   AND ir.run_id IN (
+                       SELECT DISTINCT sc._run_id
+                         FROM staging.customers sc
+                        WHERE sc.customer_id::text = ANY(ARRAY[{placeholders}]::text[])
+                   )
+                 ORDER BY ir.finished_at NULLS LAST, ir.run_id
+                """,  # noqa: S608 -- placeholders are literal %s markers, never interpolated values
+                [str(cid) for cid in customer_ids],
+            )
+            run_rows = cur.fetchall()
+        print(  # noqa: T201 -- deliberate diagnostic capture, see docstring
+            f"[SCD2 BATCH-BOUNDARY DIAGNOSTIC] meta.ingestion_runs rows that staged "
+            f"customer_id IN {customer_ids!r} ({len(run_rows)} runs, ordered by finished_at -- "
+            f"runs with tightly-clustered finished_at were very likely the SAME publish pass, "
+            f"per pipeline/run.py's own max(finalized_run_ids) multi-run-pass attribution):"
+        )
+        for row in run_rows:
+            print(f"  {row!r}")  # noqa: T201 -- deliberate diagnostic capture, see docstring
+    except Exception as exc:  # noqa: BLE001 -- diagnostic-only, must never mask the real assertion
+        print(  # noqa: T201 -- deliberate diagnostic capture, see docstring
+            f"[SCD2 BATCH-BOUNDARY DIAGNOSTIC] ingestion_runs query failed (non-fatal, "
+            f"diagnostic only): {exc!r}"
+        )
+        conn.rollback()
+
+
 def _wait_for_new_backfill_completed(
     conn: psycopg.Connection[Any],
     *,
@@ -663,6 +773,12 @@ def test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending(  # noqa:
     )
 
     customers_comparison = compare_snapshots(customers_before, customers_after)
+    if not customers_comparison.matches:
+        # Debug session `rebuild-scd2-reconciliation` (ROUND 26): best-effort, additive-only
+        # diagnostic capture -- see `_dump_scd2_batch_boundary_diagnostic`'s own docstring.
+        # Never raises, never affects the assertion below; exists purely so the live job log
+        # carries real bronze/batch data behind a mismatch instead of only the field-name tuple.
+        _dump_scd2_batch_boundary_diagnostic(analytics_owner_connection)
     assert customers_comparison.matches, (
         f"normalized.customers did not reconcile to its pre-drop state -- named mismatches: "
         f"{customers_comparison.mismatches!r}"

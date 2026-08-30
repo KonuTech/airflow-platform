@@ -1,8 +1,29 @@
 ---
-status: investigating
+status: investigating (REOPENED, round 27 -- member 32's batch-boundary mechanism CONFIRMED via
+  testcontainers; member 30 still unexplained; diagnostic capture added, pending live
+  confirmation; NOT YET fix-confirmed)
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-30 (REOPENED by user decision after being closed as resolved: TWO independent
+updated: 2026-08-30 (ROUND 27: user decision-checkpoint chose the testcontainers reproduction of
+  the round 26 batch-boundary/vanish-detection hypothesis for member 2100100032 PLUS a live
+  diagnostic-capture addition to test_rebuild_from_raw.py, simultaneously, rather than waiting
+  for a live run. The testcontainers reproduction (new file
+  tests/integration/test_scd2_batch_boundary_vanish_detection.py, 3 tests) CONFIRMED the
+  mechanism at the real SQL layer: calling the real SCDPublisher.publish() against the literal
+  SAME staging.customers bronze rows and normalized.customers pre-pass state, varying ONLY the
+  staged_run_ids composition, flips the vanish outcome exactly as hypothesized. The diagnostic
+  capture (_dump_scd2_batch_boundary_diagnostic in test_rebuild_from_raw.py, additive-only,
+  invoked when customers_comparison.matches is False) is PENDING LIVE CONFIRMATION -- no
+  dedicated dispatch was triggered; it rides the sibling ci-pipeline-ingestion-timeout session's
+  own in-flight ROUND 26 run (33297885371) if that run naturally reaches this test. Member
+  2100100030's mechanism remains completely unexplained -- unchanged from ROUND 26, not
+  re-investigated this round. Full offline battery (unit 568/568, the new integration file's own
+  3 tests + the 5 other SCD-related integration files together -- 36/36 zero cross-test
+  interference, dagtest 14/14, policy 167/2 byte-identical baseline, ruff/ruff-format/mypy clean
+  on both touched files, collect-only unchanged) shows zero regressions. Status remains
+  REOPENED/investigating -- see Current Focus next_action for the round-27 decision point. Prior
+  ROUND 26 content preserved verbatim below for continuity.)
+updated_prior_round26: 2026-08-30 (REOPENED by user decision after being closed as resolved: TWO independent
   live full-suite reproductions of the EXACT pre-fix mismatch signature occurred the SAME day,
   after the fix (commit a0cc2f5) was live on the cluster. (1) Bonus/incidental run 33279501503
   (headSha 371949c, the session's own closing docs commit, auto-triggered, not a deliberate
@@ -134,7 +155,92 @@ updated_prior_round24: 2026-08-29 (sibling session's ROUND 23 live-verification 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-hypothesis: CONFIRMED (framing (B), not (A) -- see Evidence). `dataplat.scd.recompute.
+hypothesis: ROUND 27 (this update). Member 2100100032's batch-boundary/vanish-detection
+    mechanism (round 26's hypothesis (3) below) is now CONFIRMED, not merely plausible: a
+    dedicated testcontainers-Postgres integration test
+    (`tests/integration/test_scd2_batch_boundary_vanish_detection.py`, 3 tests, all passing)
+    calls the REAL production entry point (`SCDPublisher.publish()`, which internally calls the
+    real `find_vanished_customer_ids`/`_VANISHED_SQL`) against the literal SAME seeded
+    `staging.customers` bronze rows and the literal SAME pre-pass `normalized.customers` state,
+    varying ONLY the `staged_run_ids` argument passed to `publish()` between two calls (a
+    small-batch call scoped to just the file that omits the target customer, vs. a large-batch
+    call that ALSO includes an adjacent file which still delivers that customer) -- and the
+    vanish outcome flips accordingly: small-batch correctly detects the vanish
+    (`is_current` -> `False`), large-batch does NOT (`is_current` stays `True`), solely because
+    of `_VANISHED_SQL`'s own union-of-this-pass's-staged-files semantics. This directly confirms,
+    at the real SQL layer, that member 2100100032's live mismatch shape (full-field:
+    `current_valid_from`/`current_valid_to`/`current_is_current` all differing) IS mechanistically
+    explained by `delete_detection.py`'s `staged_run_ids` batch-boundary sensitivity -- a REAL,
+    reproducible, order/batch-composition-dependent defect, completely independent of and
+    UNTOUCHED by a0cc2f5's own sort-key fix (which only edits `recompute.py`/`load/publish/
+    scd.py`). This is evidence the mechanism EXISTS and CAN produce exactly this mismatch shape
+    under a batch-composition difference plausible between live-incremental and bulk-rebuild
+    staging -- it is NOT yet direct proof this is what happened in the two specific live runs
+    (33279501503/33286862950), since neither run's actual `staged_run_ids` composition was
+    observed (both ephemeral clusters are gone). A diagnostic capture
+    (`_dump_scd2_batch_boundary_diagnostic` in `tests/e2e/slice/test_rebuild_from_raw.py`, see
+    Evidence) was added to close that specific remaining gap the NEXT time this test's own
+    `customers_comparison.matches` assertion fails live -- PENDING LIVE CONFIRMATION, not yet
+    observed (see next_action).
+    Member 2100100030's mechanism remains COMPLETELY UNEXPLAINED -- unchanged from round 26,
+    no new investigation was performed on it this round (the user's own decision-checkpoint
+    scoped this round to the batch-boundary testcontainers repro plus the diagnostic addition,
+    not further code-tracing for member 30). This is still the single largest open gap.
+    NOT YET ACTIONED: no production-code fix has been designed or implemented for
+    `delete_detection.py`'s batch-boundary sensitivity -- this round's own testcontainers test is
+    confirmatory/diagnostic only (mirrors the ROUND 25 precedent of adding proof before deciding
+    a fix shape), and member 30's own unexplained mechanism means a production fix scoped only to
+    member 32's mechanism would still not close out this debug session even if implemented.
+hypothesis_prior_round26: REOPENED, round 26. a0cc2f5's own tie-break mechanism (adding `file_id` as a
+    third sort level) is CONFIRMED CORRECT for the scenario it targeted (unchanged from ROUND 25 --
+    see below), but is now suspected INSUFFICIENT to explain the live defect for at least ONE of
+    the two mismatched keys. TWO NEW, falsifiable, code-grounded findings this round:
+    (1) The two mismatched customer_ids (2100100030, 2100100032) are NOT generic "corpus" keys --
+    forensically traced to `tools/corpus/dated_series.py`'s `_CUSTOMER_ID_BASE=2_100_100_000`
+    roster, consumed exclusively by `tests/e2e/slice/test_backfill_2year_sweep.py`: member_index
+    30 = `_ATTRIBUTE_CHANGE_MEMBER_INDEX` (a Type-2 content-change target, day_index=8), member_index
+    32 = `_MISSING_CUSTOMER_MEMBER_INDEX` (a DELETE-detection/vanish target, on the LAST day,
+    day_index=12). This is new, load-bearing forensic detail the ROUND 21-25 investigation never
+    established (it only speculated generically about "corpus customer_ids").
+    (2) Careful tracing of `recompute_version_chain`'s actual grouping algorithm (valid_from =
+    `ordered[start_index].event_ts`, where tied rows at a group boundary carry a LITERALLY EQUAL
+    event_ts value, not merely a comparable one) shows that the `snapshot_complete_customers_csv`
+    echo-tie mechanism the ORIGINAL root-cause narrative pinned this whole bug on CANNOT actually
+    change `current_valid_from` for member 30: every echo of member 30 (from
+    test_backfill_reentry.py, test_dbt_silver_pipeline.py, AND test_rebuild_from_raw.py's own
+    original.csv/corrected.csv) reproduces `normalized.customers.event_ts` VERBATIM (confirmed:
+    `_INSERT_VERSION_SQL` writes `event_ts = %(valid_from)s` -- the echoed value literally IS the
+    group's own valid_from, byte-identical across every echo, not just tied in sort order), so
+    which physical row "wins" the tie is content-and-value-irrelevant for this specific mechanism.
+    The ORIGINAL fix's own root-cause narrative for member 30 does not survive this closer trace --
+    it remains UNEXPLAINED by any mechanism identified so far.
+    (3) A SEPARATE, previously-uninvestigated mechanism was identified that DOES plausibly explain
+    member 32's full-field mismatch (current_valid_from/valid_to/is_current ALL differing, vs.
+    member 30's valid_from-ONLY mismatch -- a shape difference suggesting the two keys may have
+    TWO DIFFERENT root mechanisms, not one shared one): `dataplat.scd.delete_detection.
+    find_vanished_customer_ids` scopes its "is this key present in the CURRENT observation" check
+    to `staged_run_ids` -- literally whatever set of runs happen to be staged-but-unpublished at
+    the moment `publish_ingest` calls `ctx.metadata.list_staged_run_ids(dataset_id=...)`
+    (`pipeline/run.py:1338`) and hands the WHOLE list into ONE `SCDPublisher.publish()` call. This
+    batch boundary is a TIMING-DEPENDENT quantity, not a fixed per-file granularity: during the
+    original live run (one `*/1 * * * *` scheduler tick at a time, over real wall-clock hours),
+    day-12's own file (the one that omits member 32) was very likely published ALONE or with very
+    few companions, correctly registering member 32 as vanished. During a bulk `rebuild-from-raw`
+    backfill, MANY files get discovered+staged in quick succession, so `list_staged_run_ids` can
+    return a LARGE batch spanning many files/days into ONE publish pass -- and `_VANISHED_SQL`'s
+    own union-of-this-pass's-files semantics (confirmed by its own docstring: "a co-staged
+    roster-covering file would union-heal the pass") means if day-12's file gets co-batched with
+    ANY other file that still includes member 32 (an adjacent day, an echo file, etc.), member 32
+    is NEVER detected as vanished in that pass at all -- producing a genuinely different terminal
+    is_current/valid_to state than the original run. This mechanism lives entirely in
+    `delete_detection.py`/`pipeline/run.py`'s claim-batching, is COMPLETELY UNTOUCHED by a0cc2f5
+    (which only edited `recompute.py`/`load/publish/scd.py`'s sort key), and would explain why the
+    fix -- correct for its own narrow scope -- does not close the live defect.
+    NOT YET CONFIRMED: no live data exists to directly observe (1) the actual `staged_run_ids`
+    batch composition for either run, or (2) member 30's real mechanism (still unexplained). This
+    is a refined, falsifiable HYPOTHESIS SET, not a confirmed root cause -- see reasoning_checkpoint
+    below for why fix_and_verify is not yet warranted.
+hypothesis_prior_round25: CONFIRMED (framing (B), not (A) -- see Evidence). `dataplat.scd.recompute.
     recompute_version_chain` (and `load/publish/scd.py`'s `_select_lineage_rows`, which duplicates
     its grouping rule) sorts one customer_id's full bronze history by `(event_ts, source_row_number)`
     and treats that pair as a total order, but `source_row_number` is the row's ordinal position
@@ -157,7 +263,38 @@ hypothesis: CONFIRMED (framing (B), not (A) -- see Evidence). `dataplat.scd.reco
     sibling session (settle-wait only started succeeding then) -- NOT something introduced by rounds
     18-21's changes, which touched only test-harness timeout/quarantine/schema code, never
     `dataplat/scd/*` or `load/publish/scd.py`.
-test: ROUND 25 (final): built a self-contained testcontainers-Postgres integration test
+test: ROUND 27 (this update). User decision-checkpoint chose option (2) from round 26's
+    next_action decision point (the testcontainers reproduction of the batch-boundary hypothesis)
+    PLUS the diagnostic-capture option (1), simultaneously: (a) built
+    `tests/integration/test_scd2_batch_boundary_vanish_detection.py` -- 3 tests calling the real
+    `SCDPublisher.publish()` entry point against real seeded `staging.customers`/
+    `normalized.customers` rows, isolating `staged_run_ids` composition as the one variable
+    between a small-batch and large-batch publish() call over otherwise-identical bronze data.
+    (b) added `_dump_scd2_batch_boundary_diagnostic` to `tests/e2e/slice/test_rebuild_from_raw.py`,
+    called only when `customers_comparison.matches` is False, printing `staging.customers` bronze
+    rows and `meta.ingestion_runs` batch/finished_at composition for customer_id IN (2100100030,
+    2100100032) -- purely additive, zero behavior change on the passing path, intended to be
+    picked up passively by the sibling ci-pipeline-ingestion-timeout session's own in-flight
+    ROUND 26 live run (33297885371) if it naturally reaches this test, NOT via a dedicated
+    dispatch of this session's own. Full offline battery run (see Evidence) confirms zero
+    regressions from either change.
+test_prior_round26: ROUND 26 (reopening): (1) confirmed via `git merge-base --is-ancestor` that a0cc2f5
+    is genuinely an ancestor of BOTH reproduction runs' headShas (371949c, c03624a) -- the fix's
+    code definitely ran, ruling out a stale-image/packaging explanation entirely (reopening_context
+    item 2, answered: NOT a build/packaging issue). (2) Pulled full job logs for both runs
+    (`gh api .../jobs/<id>/logs`) and grepped for the mismatch tuple: BYTE-IDENTICAL in both runs
+    and identical to ROUND 21's original pre-fix signature (reopening_context item 1, answered:
+    no divergence in the signature itself). (3) Forensically traced customer_ids 2100100030/
+    2100100032 to their exact origin (`tools/corpus/dated_series.py`'s roster, consumed by
+    `test_backfill_2year_sweep.py`) and re-derived, line by line, whether the ORIGINAL root-cause
+    narrative's `snapshot_complete_customers_csv` echo-tie mechanism can actually produce member
+    30's specific mismatch -- traced `recompute_version_chain`'s literal grouping algorithm and
+    `_INSERT_VERSION_SQL`'s `event_ts=valid_from` mapping to show it CANNOT (echoed event_ts values
+    are byte-identical across every echo, not merely tied). (4) Read `delete_detection.py` and
+    `pipeline/run.py`'s `list_staged_run_ids`/`publish_ingest` call site in full to check for a
+    SECOND, unaddressed order/batch-sensitivity mechanism -- found one (see hypothesis above).
+    This SUPERSEDES ROUND 25's closure as the final word; see Evidence for the full trace.
+test_prior_round25: ROUND 25 (final, prior to reopening): built a self-contained testcontainers-Postgres integration test
     (`tests/integration/test_scd2_cross_file_tie_determinism.py`) that drives the REAL
     production entry point (`SCDPublisher.publish()` -> the real `_BRONZE_HISTORY_SQL`, no
     `ORDER BY`) against a real Postgres instance seeded with the exact cross-file-tie bug shape,
@@ -167,12 +304,94 @@ test: ROUND 25 (final): built a self-contained testcontainers-Postgres integrati
     miss chase documented in `updated_prior_round24_trackA_attempt6_terminal` above and in the
     Evidence entries below (retained for history) -- see the newest Evidence entry and
     Resolution for the outcome.
-expecting: Both physical-insertion-order sub-cases must publish an IDENTICAL version chain
+expecting: The small-batch `SCDPublisher.publish()` call must detect the vanish (target
+    customer's row flips to `is_current=False`); the large-batch call (SAME underlying bronze
+    rows, day11's covering file added to `staged_run_ids`) must NOT detect it
+    (`is_current` stays `True`) -- if both scenarios agreed, the batch-boundary hypothesis would
+    be refuted at the SQL layer, not merely unconfirmed (see the third test's own explicit
+    CONFIRMED-VS-REFUTED marker assertion).
+expecting_prior_round26: N/A this round -- forensic/code-tracing investigation, not a single designed
+    experiment. See hypothesis above for what was found.
+expecting_prior_round25: Both physical-insertion-order sub-cases must publish an IDENTICAL version chain
     with the current/winning row carrying the HIGHER file_id's content in both, proving the real
     SQL path (not just the pure function) is order-independent; the pre-fix reconstruction must
     disagree with itself across hypothetical retrieval orders, proving the OLD key was unsafe
     against real SQL-layer data too.
-reasoning_checkpoint:
+reasoning_checkpoint_round27_NOT_PROCEEDING_TO_FIX:
+  hypothesis: "Member 2100100032's mismatch is CONFIRMED explained by delete_detection.py's
+      staged_run_ids batch-boundary sensitivity (round 27's own testcontainers proof, real SQL
+      layer, real SCDPublisher.publish() entry point). Member 2100100030's mismatch remains
+      COMPLETELY UNEXPLAINED (unchanged from round 26 -- not re-investigated this round by the
+      user's own decision-checkpoint scoping)."
+  confirming_evidence:
+    - "tests/integration/test_scd2_batch_boundary_vanish_detection.py's third test
+        (test_same_bronze_rows_only_staged_run_ids_composition_differs_yields_opposite_vanish_outcomes)
+        directly observed the vanish outcome flip against the LITERAL SAME bronze rows and
+        pre-pass gold state, varying only staged_run_ids -- this is direct observation, not
+        inference from code reading alone (round 26's own reasoning_checkpoint explicitly named
+        'not directly observed against real staged_run_ids composition' as the blind spot this
+        closes)."
+  falsification_test: "Already run: if the small-batch and large-batch scenarios had produced the
+      SAME vanish outcome against identical underlying data, the hypothesis would have been
+      refuted (see that third test's own explicit assertion message naming this). They did not
+      -- confirmed."
+  fix_rationale: "N/A -- still no fix proposed or implemented. Confirming the MECHANISM EXISTS
+      and CAN produce this mismatch shape is not the same as confirming it IS what happened in
+      the two specific live reproduction runs (neither run's actual staged_run_ids composition
+      was directly observed -- both ephemeral clusters are gone), and even a fully-confirmed
+      mechanism for member 32 alone would leave member 30 -- the session's largest remaining gap
+      -- completely unaddressed. Designing a production fix for delete_detection.py's batching
+      before (a) live-confirming this is the actual live mechanism (the diagnostic capture added
+      this round exists exactly to close that gap) and (b) explaining member 30, risks fixing
+      one confirmed-in-isolation mechanism while leaving the live defect only partially closed --
+      the same 'fix one thing, declare victory, discover a second live reproduction' pattern this
+      session already lived through once (ROUND 25's premature closure, reopened at ROUND 26)."
+  blind_spots: "Member 2100100030's own mechanism is STILL completely unexplained -- this is now
+      the single largest, longest-standing gap across two full rounds. The batch-boundary
+      mechanism is confirmed to EXIST and to be CAPABLE of producing member 32's mismatch shape,
+      but not yet confirmed as the ACTUAL mechanism in either of the two live runs -- that
+      requires either the diagnostic capture (added this round, pending a live run reaching it)
+      or a future live occurrence. No production fix design has been attempted or discussed for
+      delete_detection.py's batching even for member 32's now-confirmed mechanism."
+reasoning_checkpoint_round26_NOT_PROCEEDING_TO_FIX:
+  hypothesis: "TWO candidate mechanisms, neither fully confirmed: (a) delete_detection.py's
+      staged_run_ids batch-boundary sensitivity explains member 2100100032's full-field
+      (valid_from+valid_to+is_current) mismatch -- plausible, code-grounded, but NOT directly
+      observed against real staged_run_ids composition from either live run; (b) member
+      2100100030's valid_from-only mismatch has NO confirmed mechanism at all -- the original
+      echo-tie narrative was traced through recompute_version_chain's actual algorithm and
+      _INSERT_VERSION_SQL's event_ts=valid_from mapping and does NOT hold up (echoed event_ts
+      values are byte-identical across every echo of that key, not merely tied, so tie-break
+      winner cannot change the emitted valid_from)."
+  confirming_evidence:
+    - "delete_detection.py's own _VANISHED_SQL and docstring directly confirm the union-healing/
+        batch-scoping mechanism is real and would produce different vanish outcomes under
+        different staged_run_ids groupings -- but this is EVIDENCE THE MECHANISM EXISTS AND IS
+        PLAUSIBLE, not evidence it is WHAT HAPPENED in either of the two live runs."
+    - "pipeline/run.py:1338's list_staged_run_ids(dataset_id=...) confirms batch composition is a
+        timing-dependent quantity (whatever is staged-but-unpublished at publish_ingest call time),
+        not a fixed per-file granularity -- supports plausibility of a live/rebuild batching
+        divergence, but the actual batch compositions in the two live runs were never observed."
+  falsification_test: "NOT YET DESIGNED. Would require either: (i) live diagnostic capture of the
+      actual staged_run_ids list passed to SCDPublisher.publish() for the pass(es) that touch
+      customer_id=2100100032 in a rebuild run vs. the original run, or (ii) a testcontainers
+      reproduction that calls SCDPublisher.publish() twice with the SAME underlying bronze rows
+      but two DIFFERENT staged_run_ids groupings (mirroring live-incremental vs. bulk-rebuild
+      batch sizes) and checks whether the vanish outcome for a held-out key differs."
+  fix_rationale: "N/A -- no fix proposed this round. Per this session's own mandatory reasoning-
+      checkpoint discipline (debugger-philosophy.md, hypothesis_testing.md): a hypothesis this
+      session cannot yet state a completed falsification test for, and has not directly observed
+      confirming evidence for (only code-level plausibility), does not meet the bar to act on.
+      Applying a fix to delete_detection.py's batching now would be exactly the 'Let me just try
+      this' pitfall this session's own established discipline (visible throughout its own
+      six-round live-CI history) explicitly rejects."
+  blind_spots: "Member 2100100030's own mechanism remains completely unexplained -- this is the
+      single largest gap. Both live runs' ephemeral clusters are gone, so neither can be inspected
+      directly. The batch-boundary hypothesis for 2100100032 is plausible but unconfirmed. It
+      is also possible a THIRD mechanism, not yet identified, explains BOTH keys uniformly (which
+      would be a stronger, more parsimonious finding than two unrelated mechanisms) -- this
+      session did not have the source data to test that possibility."
+reasoning_checkpoint_prior_round25:
   hypothesis: "`recompute_version_chain`'s (and `_select_lineage_rows`'s duplicated copy of its
       grouping rule) sort/tie-break key `(event_ts, source_row_number)` is not actually a total
       order across a customer_id's FULL bronze history, because `source_row_number` is scoped
@@ -236,7 +455,49 @@ reasoning_checkpoint:
       produced the original tie, since it closes the general non-determinism class, not one
       specific instance of it."
 tdd_checkpoint: null
-next_action: "NONE -- SESSION RESOLVED (ROUND 25, 2026-08-30). User decision-checkpoint chose
+next_action: "DECISION NEEDED (ROUND 27, 2026-08-30). Member 2100100032's batch-boundary
+    mechanism is now CONFIRMED (not merely plausible) via a real-SQL-layer testcontainers
+    reproduction. A live diagnostic capture has also been added and is PENDING -- it will
+    surface the actual bronze/batch-composition data the next time
+    test_rebuild_from_raw.py's own customers_comparison.matches assertion fails live in CI
+    (potentially via the sibling ci-pipeline-ingestion-timeout session's own already-in-flight
+    ROUND 26 run 33297885371, per this round's user decision-checkpoint -- results to be relayed
+    by the orchestrator when that run lands, no dedicated dispatch of this session's own).
+    Options for the NEXT round, not actioned unilaterally: (1) Wait for the diagnostic capture's
+    live results (from the sibling session's natural run, or a future dedicated dispatch) before
+    designing any production fix -- lowest risk of another premature-closure cycle (ROUND 25's
+    own precedent), but leaves the confirmed mechanism unfixed for however long that takes. (2)
+    Design and implement a production fix for delete_detection.py's batch-boundary sensitivity
+    NOW, given the mechanism is SQL-layer-confirmed (not merely plausible) for member 32, while
+    continuing to treat member 30 as a separate, still-open gap -- risks fixing one confirmed
+    mechanism while the live defect (which may also involve member 30's still-unknown mechanism)
+    remains only partially closed, but does not block on live-CI timing the way option (1) does.
+    (3) Resume code-level tracing for member 2100100030's still-completely-unexplained mechanism
+    before deciding anything about a delete_detection.py fix -- lowest cost, but round 26 already
+    attempted this without success; a genuinely NEW angle (not yet identified) would be needed
+    rather than repeating the same trace. See this round's reasoning_checkpoint for why
+    fix_and_verify is not yet warranted for either mechanism.
+    HISTORICAL, ROUND 26 (superseded by the above, retained for continuity): DECISION NEEDED
+    (ROUND 26, 2026-08-30, reopening investigation). Three options, not
+    actioned unilaterally: (1) Add a live diagnostic capture to test_rebuild_from_raw.py's own
+    comparison step (or rebuild_reconciliation.py) that dumps, on mismatch, the actual
+    staging.customers bronze rows (event_ts, file_id, source_row_number, filename) AND the
+    meta.ingestion_runs/staged_run_ids batch composition for customer_id IN (2100100030,
+    2100100032), for both the pre-drop and post-rebuild passes -- cheapest, lowest-risk option,
+    but only pays off the NEXT time this test runs live (requires another ~190min CI job,
+    mirroring this session's own six-attempt history of orchestration misses). (2) Build a
+    testcontainers reproduction of the NEW delete_detection.py batch-boundary hypothesis
+    specifically: call SCDPublisher.publish() twice with the SAME underlying bronze rows (a
+    held-out key present in most files, absent from one) but two DIFFERENT staged_run_ids
+    groupings (small-batch vs. large-batch, mirroring live-incremental vs. bulk-rebuild), and
+    check whether the vanish outcome differs -- directly testable NOW, without live CI, mirroring
+    ROUND 25's own successful testcontainers-verification precedent for the ORIGINAL fix, but does
+    not explain member 2100100030's still-unmechanism-confirmed mismatch even if confirmed. (3)
+    Continue code-level tracing to find a unifying THIRD mechanism explaining BOTH keys before
+    building any new test -- lowest cost but has already been attempted this round without success
+    for member 30. See CHECKPOINT REACHED / this round's Evidence entries for full detail.
+    HISTORICAL, PRIOR ROUND 25 CLOSURE (superseded by this reopening, retained for continuity):
+    NONE -- SESSION RESOLVED (ROUND 25, 2026-08-30). User decision-checkpoint chose
     option (3) from the ROUND 24 Track A ATTEMPT #6 TERMINAL decision point below: a
     self-contained testcontainers-Postgres integration reproduction, bypassing live Airflow/kind
     orchestration. That test now exists
@@ -855,8 +1116,233 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     goal for this fix (see Resolution.verification for the explicit standard and reasoning),
     and this debug session is marked RESOLVED."
 
+- timestamp: 2026-08-30 (ROUND 26 -- REOPENING, code/fix verification)
+  checked: "`git merge-base --is-ancestor a0cc2f5 <headSha>` for both reproduction runs: run
+    33279501503 (headSha 371949cf32932878cf98c60d9500abf947df2251) and run 33286862950 (headSha
+    c03624a1dffc2d8c1d973f6f514b4d2f2df00812)."
+  found: "Both commands report a0cc2f5 as a genuine ancestor of both headShas. `git log --oneline`
+    confirms 371949c is this session's own ROUND 25 closing docs commit and c03624a is the sibling
+    session's ROUND 25 fix commit, both strictly after a0cc2f5 in history."
+  implication: "Rules out reopening_context item 2 (stale image / build-packaging issue) entirely
+    -- the fix's actual code (the `(event_ts, file_id, source_row_number)` sort key) is confirmed
+    present in both runs' deployed commit. Whatever explains the reproduction, it is not a
+    packaging/deployment gap."
+
+- timestamp: 2026-08-30 (ROUND 26)
+  checked: "Full job logs for both runs via `gh api repos/KonuTech/airflow-platform/actions/jobs/
+    <id>/logs` (job 99174038848 for run 33279501503, 17,431 lines; job 99191442299 for run
+    33286862950, 16,367 lines), grepped for the mismatch tuple and for '2100100030'/'2100100032'."
+  found: "Both logs show the IDENTICAL AssertionError: `RebuildComparisonResult(matches=False,
+    mismatches=('checksum', 'scd2_key:2100100030.current_valid_from',
+    'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to',
+    'scd2_key:2100100032.current_is_current'))` -- byte-identical field-name tuple to each other
+    AND to ROUND 21's original pre-fix signature. Run 33279501503's job step list shows step 13
+    ('Run cluster + slice E2E suite') itself completed with conclusion=failure (not cancelled) --
+    a genuine, complete test run and assertion failure, not a partial/truncated one. Run
+    33286862950's step 13 is conclusion=cancelled (the whole job hit its ceiling later), but the
+    assertion itself already fired and is present in the log BEFORE that cancellation -- both are
+    genuine, complete comparisons, not partial reads. No other occurrence of either customer_id
+    appears anywhere else in either log (no additional diagnostic detail available beyond the
+    field-name tuple itself -- the test's own assertion message does not include actual field
+    values, only mismatched field NAMES)."
+  implication: "Answers reopening_context item 1: the two reproductions are genuinely
+    byte-identical to each other and to ROUND 21, not merely similar -- no divergence-as-clue
+    exists in the signature itself. Also confirms no richer diagnostic value is extractable from
+    the existing logs alone -- the test's own assertion message was never designed to carry actual
+    field values, only mismatched field names, which is why a future live diagnostic capture (see
+    next_action option 1) would need to be a NEW addition, not something already latent in
+    existing CI artifacts."
+
+- timestamp: 2026-08-30 (ROUND 26)
+  checked: "grep across the whole repo for the literal customer_id values '2100100030'/
+    '2100100032'/'2_100_100_000' to identify their exact origin, since the ROUND 21-25
+    investigation only ever described them generically as 'corpus customer_ids' without tracing
+    the specific generator or anomaly semantics involved."
+  found: "`tools/corpus/dated_series.py:157`: `_CUSTOMER_ID_BASE: Final = 2_100_100_000`. The
+    roster formula is `customer_id = _CUSTOMER_ID_BASE + member_index`. `tests/e2e/slice/
+    test_backfill_2year_sweep.py:337`: `_ATTRIBUTE_CHANGE_MEMBER_INDEX = 30` (so customer_id
+    2100100030). Line 357: `_MISSING_CUSTOMER_MEMBER_INDEX = 32` (customer_id 2100100032). Member
+    30 is the D-11 Type-2 content-change anomaly target (attribute_change_day_index=8: name/
+    country change from day 8 onward). Member 32 is the D-11 missing-customer/DELETE-detection
+    anomaly target, omitted specifically on `_MISSING_CUSTOMER_DAY_INDEX = _NUM_DAYS - 1` (the
+    LAST day of the 13-day main sweep window), by the test's OWN documented design ('Only an
+    absence from the FINAL day's own snapshot survives as this sweep's own checked, final gold
+    state')."
+  implication: "This is new, load-bearing forensic detail. The two mismatched keys are NOT
+    generic bystander corpus rows -- they are this test's OWN two deliberately-injected SCD2
+    anomaly targets (one Type-2 content-change, one DELETE-detection/vanish), each exercising a
+    DIFFERENT platform mechanism. The mismatch SHAPE difference (member 30: valid_from ONLY;
+    member 32: valid_from+valid_to+is_current, i.e. its ENTIRE post-vanish trajectory) is
+    consistent with these being two DIFFERENT root mechanisms, not one shared mechanism -- a
+    possibility the original ROUND 21-25 investigation, which treated both keys as instances of
+    the SAME echo-tie mechanism, never considered."
+
+- timestamp: 2026-08-30 (ROUND 26)
+  checked: "Whether `snapshot_complete_customers_csv`'s echo-tie mechanism (the ORIGINAL fix's own
+    named root cause) can actually produce member 30's specific `current_valid_from` mismatch.
+    Traced `recompute_version_chain`'s literal grouping algorithm (`packages/dataplat/src/
+    dataplat/scd/recompute.py`: `valid_from = first_row.event_ts` where `first_row =
+    ordered[start_index]`, `start_index` = the first row in sort order whose tracked-attribute
+    hash differs from its predecessor) and `load/publish/scd.py`'s `_INSERT_VERSION_SQL` (writes
+    `normalized.customers.event_ts = %(valid_from)s` -- i.e. the DB's own `event_ts` column IS
+    valid_from, confirmed by direct SQL read, not inferred)."
+  found: "`snapshot_complete_customers_csv`'s `_SNAPSHOT_ROSTER_SQL` selects `normalized.
+    customers.event_ts` (= valid_from) verbatim and re-embeds it unchanged in every echo file's
+    corresponding row. Every downstream echo of member 30 (from `test_backfill_reentry.py`,
+    `test_dbt_silver_pipeline.py`, and `test_rebuild_from_raw.py`'s own `original.csv`/
+    `corrected.csv`) therefore carries the LITERALLY IDENTICAL `event_ts` value -- not merely a
+    value that ties/sorts adjacently, but the exact same timestamp, byte-for-byte, as the original
+    day-8 observation that established the override content group. Since ALL of these tied rows
+    share the SAME `event_ts` (not just a comparable sort key), `valid_from = ordered[start_index]
+    .event_ts` necessarily evaluates to that SAME value regardless of which physical row among the
+    tied set is chosen as `start_index` by the `(event_ts, file_id, source_row_number)` tie-break
+    -- the tie-break's OUTCOME is content-and-value-irrelevant for this specific mechanism, because
+    there is nothing left to disambiguate: the compared values are equal, not merely tied in a
+    comparator sense."
+  implication: "The ORIGINAL root-cause narrative (echo-tie via `snapshot_complete_customers_csv`)
+    does NOT survive this closer trace for member 30 -- it cannot explain a `current_valid_from`
+    difference, because every echo reproduces the identical `valid_from` value verbatim regardless
+    of tie-break winner. Member 30's own mismatch mechanism is therefore UNEXPLAINED by any
+    hypothesis this debug session (across all 26 rounds) has yet produced. This is a genuine,
+    open blind spot, not a solved-but-unverified detail."
+
+- timestamp: 2026-08-30 (ROUND 26)
+  checked: "`packages/dataplat/src/dataplat/scd/delete_detection.py` in full (module docstring,
+    `_VANISHED_SQL`, `find_vanished_customer_ids`) and `packages/dataplat/src/dataplat/pipeline/
+    run.py`'s `publish_ingest`/`list_staged_run_ids` call site (line 1338), searching for a
+    SECOND, unaddressed order/batch-sensitivity mechanism a0cc2f5 never touched (a0cc2f5 only
+    edited `recompute.py` and `load/publish/scd.py`)."
+  found: "`find_vanished_customer_ids` scopes its 'is this currently-current key present in the
+    CURRENT observation' check to `staged_run_ids` -- the pass's OWN `_VANISHED_SQL` CTE
+    (`staged_snapshot`) is a UNION over every file staged under ANY of `staged_run_ids`, and the
+    module's own docstring explicitly documents union-healing semantics ('a co-staged
+    roster-covering file would union-heal the pass'). `pipeline/run.py:1338`:
+    `staged = ctx.metadata.list_staged_run_ids(dataset_id=dataset_id)` -- this lists EVERY
+    currently-staged-but-unpublished run for the WHOLE DATASET at the moment `publish_ingest`
+    executes, and passes the ENTIRE list into ONE `SCDPublisher.publish(staged_run_ids=...)` call
+    (line ~1390). This batch composition is a TIMING-DEPENDENT quantity -- however many files
+    happen to be staged-but-unpublished when this specific DAG task executes -- not a fixed
+    per-file or per-day granularity."
+  implication: "This is a genuinely NEW, plausible, code-grounded mechanism, INDEPENDENT of
+    a0cc2f5's fix scope entirely. During the original live run (one `*/1 * * * *` scheduler tick
+    at a time, over real wall-clock hours), day-12's own file (the one that omits member 32) was
+    very likely published ALONE or with very few companions -- correctly registering member 32 as
+    vanished in a clean, standalone pass. During a bulk `rebuild-from-raw` backfill, many files
+    discover+stage in quick succession, so `list_staged_run_ids` can return a substantially LARGER
+    batch spanning many files into ONE publish pass -- if day-12's file is co-batched with ANY
+    other file that still includes member 32 (an adjacent day within the same batch, an echo file,
+    etc.), `_VANISHED_SQL`'s own union-healing means member 32 is NEVER flagged vanished in that
+    pass -- producing a genuinely different terminal is_current/valid_to/valid_from state than the
+    original run. This would explain member 32's full-field mismatch shape precisely, and explains
+    why a0cc2f5's fix (which never touches delete_detection.py or claim-batching) would not close
+    this portion of the live defect even though it is proven correct for its own narrow scope.
+    NOT YET CONFIRMED -- no live data exists to observe the actual staged_run_ids composition in
+    either failing run; this is a falsifiable hypothesis awaiting either live diagnostic capture
+    or a dedicated testcontainers reproduction (see Current Focus next_action)."
+
+- timestamp: 2026-08-30 (ROUND 27 -- batch-boundary hypothesis testcontainers confirmation)
+  checked: "Built `tests/integration/test_scd2_batch_boundary_vanish_detection.py` (new file, 3
+    tests), following this suite's own established per-file-helper convention
+    (`test_scd2_cross_file_tie_determinism.py`'s `_seed_run`/`_insert_config_version` shape).
+    Seeded a fixed bronze/gold shape: a 'day11' file delivering BOTH a target customer and a
+    roster-covering companion customer, and a 'day12' file delivering ONLY the companion (the
+    target is entirely absent from day12's own file -- the real anomaly shape:
+    `test_backfill_2year_sweep.py`'s own `_MISSING_CUSTOMER_MEMBER_INDEX` is omitted specifically
+    on the sweep's LAST day). Plus a pre-existing `normalized.customers` `is_current=true` row
+    for the target, representing gold state immediately before day12's own publish pass. Called
+    the REAL `SCDPublisher().publish()` entry point (never `find_vanished_customer_ids` in
+    isolation) with (a) `staged_run_ids` scoped to day12's file ALONE (small-batch, mirroring one
+    live `*/1 * * * *` scheduler tick), and (b) `staged_run_ids` spanning BOTH day11 AND day12
+    (large-batch, mirroring a bulk rebuild's rapid discover+stage sweep). A third test drove BOTH
+    scenarios against the LITERAL SAME seeded rows (via a `conn.rollback()` between the two
+    `publish()` calls, restoring the exact pre-pass state before the second call), isolating
+    `staged_run_ids` composition as the ONLY variable between them."
+  found: "All 3 tests PASSED. Small-batch: the target customer's `is_current` flipped to `False`
+    (correctly detected vanished) and `valid_to` was set. Large-batch: the target customer's
+    `is_current` remained `True` (NOT detected vanished), solely because day11's co-staged file
+    (still delivering the target) entered `_VANISHED_SQL`'s own union-of-this-pass's-staged-files
+    snapshot. The third test's direct side-by-side comparison (literal same bronze rows, literal
+    same pre-pass gold state, ONLY `staged_run_ids` differing between the two `publish()` calls)
+    confirmed the outcomes are opposite (`small_batch_is_current[0] != large_batch_is_current[0]`)
+    -- the test's own explicit assertion message names this a CONFIRMED-VS-REFUTED marker: had
+    both scenarios agreed, the hypothesis would have been refuted at the SQL layer. Full offline
+    battery: the new file's own 3 tests pass in isolation AND together with
+    `test_publish_scd.py`/`test_scd_delete_detection.py`/`test_scd_replay_delete_detection.py`/
+    `test_rebuild_reconciliation.py`/`test_scd2_cross_file_tie_determinism.py` (36/36 total, zero
+    cross-test interference); `tests/unit` 568/568 unchanged; `tests/policy` 167 passed/2 failed,
+    byte-identical to this session's own already-documented pre-existing baseline; `ruff check`/
+    `ruff format --check` clean on the new file; `mypy` on the new file reproduces the SAME
+    pre-existing `Invalid \"type: ignore\" comment` pattern already present, byte-for-byte, in
+    `test_scd2_cross_file_tie_determinism.py`'s own identical `_make_context()` shape (confirmed
+    by running mypy against that ROUND-25-accepted file directly -- not a new issue this file
+    introduces)."
+  implication: "Member 2100100032's batch-boundary/vanish-detection mechanism is now CONFIRMED
+    to exist and to be CAPABLE of producing exactly its observed live mismatch shape (the full
+    is_current/valid_to/valid_from trajectory, not just one field), at the real SQL layer through
+    the real production `SCDPublisher.publish()` entry point -- not merely argued from reading
+    `_VANISHED_SQL`'s docstring. This closes round 26's own reasoning_checkpoint blind spot ('not
+    directly observed against real staged_run_ids composition'). It does NOT yet confirm this
+    mechanism is what ACTUALLY happened in either of the two live reproduction runs
+    (33279501503/33286862950) -- neither run's real staged_run_ids composition was ever observed,
+    and both ephemeral clusters are gone. See the next Evidence entry for the diagnostic capture
+    added to close that remaining gap on a future live run."
+
+- timestamp: 2026-08-30 (ROUND 27 -- diagnostic capture addition, pending live confirmation)
+  checked: "Added `_dump_scd2_batch_boundary_diagnostic` to `tests/e2e/slice/test_rebuild_from_raw.py`,
+    called only when `customers_comparison.matches` is False (immediately before the existing
+    `assert customers_comparison.matches` line) -- purely additive, never raises, never alters
+    control flow or the assertion's own outcome. Queries (1) every `staging.customers` bronze
+    row for customer_id IN (2100100030, 2100100032) across the WHOLE cumulative history
+    (event_ts, file_id, source_row_number, run_id, name, country, owning file's object_uri), and
+    (2) every `meta.ingestion_runs` row for the `customers` dataset whose run_id appears among
+    those bronze rows, ordered by `finished_at` (the closest after-the-fact reconstruction of
+    staged_run_ids batch composition available -- `list_staged_run_ids`'s own actual argument at
+    publish time is a transient in-memory list, never persisted to any table, confirmed by
+    reading `pipeline/run.py`'s `publish_ingest` in full). Both queries independently wrapped so
+    a schema surprise in one never masks the other or the real assertion. Ran `ruff check`/`ruff
+    format --check`/`mypy` on the touched file (all clean) and
+    `pytest tests/e2e/slice/test_rebuild_from_raw.py --collect-only` (still collects exactly 1
+    item, no import/syntax regression); also re-ran `tests/dagtest` (14/14, unchanged) and
+    `tests/unit` (568/568, unchanged) as part of the same offline battery pass."
+  found: "All offline checks pass; the addition is inert on the (overwhelmingly common) passing
+    path -- this test has never once reached a passing `customers_comparison.matches` assertion
+    across all live-verification attempts documented in this file's own history, and even when
+    it does pass, the new code path is never entered at all (the `if not
+    customers_comparison.matches:` guard)."
+  implication: "PENDING LIVE CONFIRMATION -- not yet observed. Per this round's user
+    decision-checkpoint, no dedicated live dispatch was triggered for this addition; it is
+    intended to be picked up passively by the sibling ci-pipeline-ingestion-timeout session's own
+    already-in-flight ROUND 26 live run (33297885371) if that run's own E2E suite naturally
+    reaches this test and reproduces the mismatch again. If/when that happens, the job log will
+    for the first time carry the actual bronze rows and ingestion-run/batch composition behind
+    the mismatch, directly testable against both this session's still-unexplained member 30
+    mechanism and the now-SQL-layer-confirmed member 32 batch-boundary mechanism. Results to be
+    relayed by the orchestrator when/if that run lands -- not actioned or awaited synchronously
+    by this session."
+
 ## Resolution
 <!-- Populated when RESOLVED -->
+<!-- STILL REOPENED after ROUND 27 (2026-08-30): member 2100100032's batch-boundary mechanism
+    is now CONFIRMED via a real-SQL-layer testcontainers reproduction (see Evidence) -- but this
+    is confirmation the mechanism EXISTS and CAN produce the observed mismatch shape, not yet
+    confirmation it IS what happened in either live reproduction run, and no production fix has
+    been designed or implemented for delete_detection.py's batch-boundary sensitivity. Member
+    2100100030's own mechanism remains completely unexplained. A diagnostic capture was added to
+    tests/e2e/slice/test_rebuild_from_raw.py, pending a live run reaching it (see Evidence and
+    Current Focus next_action for the decision point on how to proceed). Fields below are
+    otherwise unchanged from the ROUND 26 reopening. -->
+<!-- REOPENED 2026-08-30 (ROUND 26): the fields below describe the ROUND 25 closure, which is
+    SUPERSEDED -- this session is no longer RESOLVED. Two independent live reproductions with
+    a0cc2f5 genuinely deployed reproduced the exact pre-fix mismatch signature (see Evidence's
+    newest 5 entries). a0cc2f5 itself remains CORRECT for the narrow scenario it targets (the
+    testcontainers SQL-layer verification below is not retracted), but is now understood to be
+    INSUFFICIENT to explain the live defect: member 2100100030's mismatch has NO confirmed
+    mechanism at all (the echo-tie narrative below does not survive closer tracing -- see
+    Evidence), and member 2100100032's mismatch has a NEW, plausible-but-unconfirmed candidate
+    mechanism (delete_detection.py's staged_run_ids batch-boundary sensitivity, entirely untouched
+    by a0cc2f5). See Current Focus for the reopened hypothesis and next_action for the decision
+    point on how to proceed. Fields below are retained verbatim as the ROUND 25 historical
+    record, not as the current resolution status. -->
 root_cause: "`dataplat.scd.recompute.recompute_version_chain` (and `dataplat.load.publish.scd`'s
     `_select_lineage_rows`, which independently duplicates its grouping rule) sorts/ranks one
     customer_id's full bronze history using `(event_ts, source_row_number)` as if it were a total
@@ -994,3 +1480,12 @@ files_changed:
     testcontainers integration test that closes this session -- exercises the real
     SCDPublisher.publish()/_BRONZE_HISTORY_SQL path against real Postgres under both physical
     insertion orders for a genuine cross-file tie; no production code touched)
+  - tests/integration/test_scd2_batch_boundary_vanish_detection.py (ROUND 27, NEW FILE: SQL-layer
+    testcontainers integration test confirming delete_detection.py's staged_run_ids
+    batch-boundary sensitivity against the real SCDPublisher.publish()/find_vanished_customer_ids
+    path -- 3 tests, all passing; no production code touched)
+  - tests/e2e/slice/test_rebuild_from_raw.py (ROUND 27, ADDITIVE: added
+    _dump_scd2_batch_boundary_diagnostic, called only when customers_comparison.matches is
+    False, printing staging.customers bronze rows and meta.ingestion_runs batch composition for
+    customer_id IN (2100100030, 2100100032) -- diagnostic-only, no behavior/assertion change,
+    pending a live run reaching it; see this round's Evidence)
