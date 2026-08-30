@@ -1,8 +1,27 @@
 ---
-status: resolved
+status: investigating
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-30 (ROUND 25 -- SESSION RESOLVED via SQL-layer testcontainers integration
+updated: 2026-08-30 (REOPENED by user decision after being closed as resolved: TWO independent
+  live full-suite reproductions of the EXACT pre-fix mismatch signature occurred the SAME day,
+  after the fix (commit a0cc2f5) was live on the cluster. (1) Bonus/incidental run 33279501503
+  (headSha 371949c, the session's own closing docs commit, auto-triggered, not a deliberate
+  Track A dispatch) and (2) sibling ci-pipeline-ingestion-timeout session's ROUND 25
+  verification run 33286862950 (headSha c03624a) both saw
+  test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending's post-rebuild
+  reconciliation reach a REAL, COMPLETE comparison for the first time in any full-suite live
+  run -- and BOTH mismatched with the same checksum + scd2_key:2100100030/2100100032 tuple
+  ROUND 21 observed BEFORE this fix existed. The prior RESOLVED disposition rested entirely on
+  SQL-layer/testcontainers verification (below) and never had a genuine live comparison to
+  check against until these two runs. Two independent same-day reproductions of the identical
+  pre-fix signature, live, with the fix deployed, is strong evidence the fix does NOT close the
+  actual live defect -- either the root-cause hypothesis (cross-file (event_ts,
+  source_row_number) tie broken by file_id) is incomplete/wrong for the live scenario, or the
+  live code path diverges from what the testcontainers repro exercised in some way not yet
+  identified. Re-opening for direct investigation against real data from one of these two live
+  runs, not just isolated/synthetic reproduction. Prior ROUND 25 content preserved verbatim
+  below for continuity.)
+updated_prior: 2026-08-30 (ROUND 25 -- SESSION RESOLVED via SQL-layer testcontainers integration
   verification, closing the live-CI narrow-scope chase after six consecutive infra-only misses.
   User decision-checkpoint chose option (3): a self-contained testcontainers PostgreSQL
   integration reproduction of the exact cross-file-tie bug shape, bypassing live Airflow/kind
