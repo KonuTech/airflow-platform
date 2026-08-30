@@ -87,7 +87,32 @@ jobs:
     # ~75-80 + 10 post-sweep singles ~45-60 + observability/capstone 25-40)
     # once finding (20)'s 9 stage-crash failures are fixed -- 150 did not
     # hold even green; 190 covers the projection's upper bound.
-    timeout-minutes: 190
+    #
+    # 190 -> 225 (debug/ci-pipeline-ingestion-timeout ROUND 26), from ROUND 25's own
+    # measured "honest floor" arithmetic, not a guess: ROUND 25 live-verified BOTH the
+    # admission-starvation (dbtkill/u3 fast-fail) mechanism AND the queue-drain mechanism
+    # CLOSED, reached 43/44 node-IDs (best-ever depth for a cancelled run), and the job still
+    # hit the 190-min ceiling with only the final test's (`test_idempotent_reupload`) own
+    # 2-upload cycle unfinished (187.6min elapsed at its own start). Decomposition: every
+    # other currently-known failure this round's own fixes close (dbtkill's cross-DagRun
+    # race, u3's memory-sampler race) fails/failed FAST already (9.09min/5.49min) -- a
+    # fully-green run of those two tests is not expected to cost materially more wall-clock
+    # than their own fast-failing predecessors, since both already run their real pipeline
+    # end-to-end (dbtkill's kill+recovery cycle, u3's full ingest-to-SUCCEEDED) before
+    # failing at their very last assertion. Estimated fully-green completion: ~187.6min +
+    # test_idempotent_reupload's own full 2-upload cycle (~10-15min, extrapolated from
+    # comparable single-cycle tests this round running 5.88-9.09min each) = ~198-203min,
+    # an 8-13min/4-7% overrun past the OLD 190-min ceiling. 225min gives 22-27min
+    # (11-14%) of real margin over that estimate's own upper bound -- enough to absorb
+    # estimation error without being a multiple-of-the-gap overcorrection (this session's
+    # own ROUND 22 precedent used a comparable ~25% margin over a measured worst case; 225
+    # is more conservative than the low end of that band because this is an ESTIMATE
+    # extrapolated from a 95%-complete run, not a directly-measured worst case). If a fully
+    # fixed suite still does not fit inside 225min on the next live run, that is itself a
+    # finding (the honest-floor estimate above was wrong), not evidence to keep bumping
+    # blindly -- re-decompose from the new run's own real duration data before touching this
+    # number again.
+    timeout-minutes: 225
     permissions:
       contents: read
       issues: write
@@ -235,8 +260,10 @@ jobs:
           LOG=/tmp/etl-pod-terminations.log
           : > "$LOG"
           i=0
-          # 5700 * 2s = 11400s = 190min, matching this job's own timeout-minutes ceiling.
-          while [ "$i" -lt 5700 ]; do
+          # 6750 * 2s = 13500s = 225min, matching this job's own timeout-minutes ceiling
+          # (debug/ci-pipeline-ingestion-timeout ROUND 26: 190 -> 225, see that round's own
+          # timeout-minutes comment for the full arithmetic).
+          while [ "$i" -lt 6750 ]; do
             kubectl -n etl get pods -o json 2>/dev/null | python3 -c "
           import json, sys
           try:
@@ -528,8 +555,9 @@ jobs:
           # below `dagrun_timeout=45min` (a run wedged this long is unambiguously stale
           # well before dagrun_timeout would even fire) and far above this suite's own
           # observed single-file processing pace (~1-2 min/file per the sweep test's own
-          # sizing comments) -- a normal in-flight run near the end of this ~190min job
-          # will not false-positive here. `now() - r.started_at` surfaces the exact age so
+          # sizing comments) -- a normal in-flight run near the end of this ~225min job
+          # (debug/ci-pipeline-ingestion-timeout ROUND 26: 190 -> 225) will not
+          # false-positive here. `now() - r.started_at` surfaces the exact age so
           # a genuinely-borderline row is still adjudicable from the dump text alone.
           echo "===== ROUND 19: error-bearing OR stale-non-terminal ingestion runs (widens ROUND 18 finding 26 -- FAILED/QUARANTINED/error_message, OR PENDING/RUNNING/STAGED older than 20min, ALL datasets) ====="
           kubectl -n data exec "${ROUND12_PRIMARY#pod/}" -c postgres -- psql -U postgres -d analytics -P pager=off -c "

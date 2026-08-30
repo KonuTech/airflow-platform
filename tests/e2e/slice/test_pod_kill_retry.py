@@ -201,45 +201,6 @@ def _poll_mid_load_signal(
     raise AssertionError(msg)
 
 
-def _poll_pod_name(
-    conn: psycopg.Connection[Any],
-    idempotency_key: str,
-    *,
-    timeout: float,
-) -> str:
-    """Poll `meta.ingestion_runs.k8s_pod_name` until the claiming pod is known.
-
-    Unlike `_poll_mid_load_signal`, this does not wait for `rows_read > 0`
-    -- U3's memory sampler wants to start observing as EARLY as possible,
-    including the pod's own startup/connection-pool-warmup memory, not only
-    once the first heartbeat has fired.
-
-    Args:
-        conn: An open connection to the analytical database.
-        idempotency_key: The run's idempotency key.
-        timeout: Maximum seconds to wait.
-
-    Returns:
-        The claiming pod's name.
-
-    Raises:
-        AssertionError: `timeout` elapses with no pod name recorded yet.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT k8s_pod_name FROM meta.ingestion_runs WHERE idempotency_key = %s",
-                (idempotency_key,),
-            )
-            row = cur.fetchone()
-        if row is not None and row[0]:
-            return str(row[0])
-        time.sleep(0.5)
-    msg = f"k8s_pod_name never appeared for idempotency_key={idempotency_key!r} within {timeout}s"
-    raise AssertionError(msg)
-
-
 def test_pod_kill_mid_load_produces_no_duplicates(
     s3_client: Callable[[str], Any],
     analytics_connection: psycopg.Connection[Any],
@@ -329,6 +290,17 @@ def test_pod_kill_mid_load_produces_no_duplicates(
 
 _DBT_BUILD_LABEL_SELECTOR = "dag_id=csv_ingest_orders,task_id=dbt_build"
 
+# debug/ci-pipeline-ingestion-timeout ROUND 26 (U3 memory-sampler race fix): SAME
+# max_active_tis_per_dag=1 guarantee `_DBT_BUILD_LABEL_SELECTOR`'s own comment below documents
+# for dbt_build applies identically to `stage` (csv_ingest_orders.py sets
+# `max_active_tis_per_dag=1` on BOTH tasks) -- at most one `stage` pod for this dag_id is ever
+# in flight at a time, making this selector just as precise a way to find U3's own stage pod as
+# `_DBT_BUILD_LABEL_SELECTOR` already is for dbt_build's. Used by `_poll_pod_by_label` in place
+# of U3's old `_poll_pod_name` (DB-column poll of `meta.ingestion_runs.k8s_pod_name`) -- see
+# `_poll_pod_by_label`'s own docstring for why the label-based approach closes the race
+# `_poll_pod_name` was exposed to.
+_STAGE_LABEL_SELECTOR = "dag_id=csv_ingest_orders,task_id=stage"
+
 # max_active_runs=1 (csv_ingest_orders.py) + max_active_tis_per_dag=1 (dbt_build itself)
 # together guarantee at most one dbt_build pod for THIS dag_id is ever in flight at a time
 # (T-09-18's accepted mitigation for the label selector's own imprecision -- see 09-10-PLAN.md's
@@ -378,20 +350,37 @@ _DBT_BUILD_RECOVERY_TIMEOUT_SECONDS = 600
 _DBT_BUILD_POLL_TIMEOUT_SECONDS = 300
 
 
-def _poll_dbt_build_pod_name(
+def _poll_pod_by_label(
     kubectl_fn: Callable[..., subprocess.CompletedProcess[str]],
+    label_selector: str,
     *,
     timeout: float,
 ) -> str:
-    """Poll for the real `dbt_build` pod's name via Airflow's own `dag_id`/`task_id` pod labels.
+    """Poll for a pod matching `label_selector` via Airflow's own auto-applied pod labels.
+
+    debug/ci-pipeline-ingestion-timeout ROUND 26: generalized from the original
+    `_poll_dbt_build_pod_name` (now this function called with `_DBT_BUILD_LABEL_SELECTOR`) to
+    also serve U3's own stage-pod discovery (`_STAGE_LABEL_SELECTOR`), closing U3's
+    memory-sampler race. The OLD U3 mechanism (`_poll_pod_name`, a DB-column poll of
+    `meta.ingestion_runs.k8s_pod_name`) could only observe a pod name AFTER the pod's own
+    in-process claim code had already run and committed -- by which point a genuinely fast run
+    could already be mid-COPY or even complete, leaving little-to-no window for the sampler
+    thread's first `kubectl exec` to land before `on_finish_action=delete_succeeded_pod` removes
+    it. Watching for the pod OBJECT directly via the Kubernetes API (this function) observes it
+    the moment Airflow's KubernetesExecutor creates it -- before image-pull, before container
+    start, before the in-process claim write -- giving the sampler materially more lead time,
+    using the exact same selector-precision guarantee (`max_active_tis_per_dag=1`) already
+    trusted for dbt_build's own pod discovery.
 
     Airflow's KPO auto-labels every launched pod with `dag_id`/`task_id`/`try_number` --
     `_DBT_BUILD_LABEL_SELECTOR`'s own comment explains why this selector is precise enough on
     this cluster without needing `meta.run_stages.pod_name` populated (09-10-PLAN.md's own
-    Interfaces section).
+    Interfaces section); `_STAGE_LABEL_SELECTOR`'s own comment records the identical guarantee
+    for `stage`.
 
     Args:
         kubectl_fn: The `kubectl` fixture callable.
+        label_selector: The `-l` selector to match (e.g. `_DBT_BUILD_LABEL_SELECTOR`).
         timeout: Maximum seconds to wait.
 
     Returns:
@@ -408,17 +397,14 @@ def _poll_dbt_build_pod_name(
             "get",
             "pods",
             "-l",
-            _DBT_BUILD_LABEL_SELECTOR,
+            label_selector,
             "-o",
             "jsonpath={.items[0].metadata.name}",
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip()
         time.sleep(0.5)
-    msg = (
-        f"no pod matching -l {_DBT_BUILD_LABEL_SELECTOR} appeared in namespace etl within "
-        f"{timeout}s"
-    )
+    msg = f"no pod matching -l {label_selector} appeared in namespace etl within {timeout}s"
     raise AssertionError(msg)
 
 
@@ -500,7 +486,6 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     # behind the podkill test's own 10.5-min max_active_runs=1 occupancy.
     wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
-    app.put_object(Bucket="raw", Key=key, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=dag_run_id)
 
     # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race
@@ -508,6 +493,22 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
     # proved can cost up to ~15-32min, not ~50s -- wait for THIS run_id specifically to be
     # admitted before starting the discovery budget below.
     wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=dag_run_id)
+
+    # ROUND 26 (debug/ci-pipeline-ingestion-timeout): upload ONLY after confirming this
+    # DagRun holds `csv_ingest_orders`' exclusive max_active_runs=1 slot -- closes the
+    # cross-DagRun file-claim race ROUND 25 found live (run_id=1060, an independently
+    # asset_triggered DagRun, discovered and fully processed this test's freshly-uploaded
+    # file to PUBLISH/SUCCEEDED before this DagRun's own discover/stage tasks ever ran). The
+    # OLD upload-before-trigger order made the file visible in the bucket to ANY DagRun
+    # already admitted at that moment, not only this one -- `discover`'s own bucket-prefix
+    # sweep (`list_matched_keys`) is dataset-wide, not scoped to whichever DagRun the test
+    # itself intends to own. Once `wait_for_orders_dagrun_admitted` confirms THIS dag_run_id
+    # holds the sole slot, no OTHER csv_ingest_orders DagRun can be admitted concurrently
+    # (the same admission-serialization guarantee `wait_for_orders_dagrun_admitted`'s own
+    # docstring already relies on) -- `wait_for_files`' S3KeySensor cannot succeed for
+    # anyone until a matching key exists, and the only key that will exist at this point is
+    # the one this upload is about to create.
+    app.put_object(Bucket="raw", Key=key, Body=payload)
 
     file_row = poll_file_discovered(
         analytics_connection,
@@ -536,7 +537,9 @@ def test_pod_kill_mid_dbt_build_produces_no_duplicates(
         dag_id=_ORDERS_DAG_ID,
         dag_run_id=dag_run_id,
     )
-    pod_name = _poll_dbt_build_pod_name(kubectl, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS)
+    pod_name = _poll_pod_by_label(
+        kubectl, _DBT_BUILD_LABEL_SELECTOR, timeout=_DBT_BUILD_POD_APPEAR_TIMEOUT_SECONDS
+    )
 
     delete = kubectl("-n", "etl", "delete", "pod", pod_name, "--wait=false")
     assert delete.returncode == 0, (
@@ -651,7 +654,6 @@ def test_u3_throughput_and_peak_rss_baseline(
     # throughput measurement uncontaminated by a draining backlog.
     wait_for_orders_dagrun_queue_idle(airflow_metadata_connection)
 
-    app.put_object(Bucket="raw", Key=key, Body=payload)
     trigger_orders_dagrun(kubectl, run_id=dag_run_id)
 
     # ROUND 25 (debug/ci-pipeline-ingestion-timeout): close the residual race
@@ -659,6 +661,18 @@ def test_u3_throughput_and_peak_rss_baseline(
     # proved can cost up to ~15-32min, not ~50s -- wait for THIS run_id specifically to be
     # admitted before starting the discovery budget below.
     wait_for_orders_dagrun_admitted(airflow_metadata_connection, dag_run_id=dag_run_id)
+
+    # ROUND 26 (debug/ci-pipeline-ingestion-timeout): upload ONLY after confirming this
+    # DagRun holds the exclusive max_active_runs=1 slot -- same cross-DagRun file-claim race
+    # fix applied to the dbtkill test above (see that test's own ROUND 26 comment for the
+    # full mechanism). U3 was not directly confirmed to be hitting this exact race in ROUND
+    # 25's own evidence, but the module docstring's own note that "at CI-contended rates a
+    # 250k COPY runs for minutes, far past warmup" makes a genuinely-too-fast-to-sample
+    # completion of THIS test's own file an unlikely explanation for "zero samples ever" --
+    # an independently-admitted competitor claiming and finishing a DIFFERENT (possibly much
+    # smaller) file before this DagRun's own `stage` pod ever starts is at least as plausible
+    # a contributor, and this reorder closes that possibility unconditionally at zero cost.
+    app.put_object(Bucket="raw", Key=key, Body=payload)
 
     file_row = poll_file_discovered(
         analytics_connection,
@@ -671,7 +685,12 @@ def test_u3_throughput_and_peak_rss_baseline(
     run_row = poll_run_for_file(analytics_connection, file_id=file_row["file_id"], timeout=60)
     idempotency_key = run_row["idempotency_key"]
 
-    pod_name = _poll_pod_name(analytics_connection, idempotency_key, timeout=120)
+    # ROUND 26 (debug/ci-pipeline-ingestion-timeout, U3 memory-sampler race fix): label-based
+    # discovery (`_poll_pod_by_label`), not the old DB-column poll (`_poll_pod_name`) -- see
+    # `_STAGE_LABEL_SELECTOR`'s and `_poll_pod_by_label`'s own comments for why this observes
+    # the pod materially earlier in its lifecycle, closing the "zero samples ever captured"
+    # race.
+    pod_name = _poll_pod_by_label(kubectl, _STAGE_LABEL_SELECTOR, timeout=120)
 
     samples: list[int] = []
     stop_sampling = threading.Event()

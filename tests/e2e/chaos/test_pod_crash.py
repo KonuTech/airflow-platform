@@ -140,10 +140,11 @@ def _poll_discover_pod_name(
 ) -> str:
     """Poll for the real `discover` pod's name via Airflow's own dag_id/task_id pod labels.
 
-    Same shape as `test_pod_kill_retry.py`'s own `_poll_dbt_build_pod_name` — see that
-    function's docstring for why this label selector is precise enough on this cluster (KPO
-    auto-labels every launched pod with dag_id/task_id/try_number, and `discover` is never
-    `.expand()`'d, so exactly one pod matches per DagRun).
+    Same shape as `test_pod_kill_retry.py`'s own `_poll_pod_by_label` (renamed/generalized by
+    debug/ci-pipeline-ingestion-timeout ROUND 26 from that file's own `_poll_dbt_build_pod_name`)
+    — see that function's docstring for why this label selector is precise enough on this
+    cluster (KPO auto-labels every launched pod with dag_id/task_id/try_number, and `discover`
+    is never `.expand()`'d, so exactly one pod matches per DagRun).
 
     Args:
         kubectl_fn: The `kubectl` fixture callable.
