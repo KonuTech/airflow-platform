@@ -92,20 +92,63 @@ detect the vanish at all, producing a genuinely different terminal
 real SQL layer against the real ``SCDPublisher.publish()`` entry point by
 ``tests/integration/test_scd2_batch_boundary_vanish_detection.py``).
 
-Fix: ``staged_snapshot`` is now further restricted to bronze rows whose
+Fix (ROUND 28, SUPERSEDED by the ROUND 29 correction below -- retained for
+history): ``staged_snapshot`` was first restricted to bronze rows whose
 ``event_ts`` equals the MAXIMUM ``event_ts`` among ``staged_run_ids``' own
 bronze rows -- i.e. only THIS pass's own freshest staged snapshot day is
 authoritative for "is this key currently present", never an older,
 already-superseded day that merely happens to be co-staged in the same
-batch. This restores the correct invariant -- vanish-detection depends only
-on the freshest snapshot content THIS pass staged, never on how many
-runs/days happened to be bundled alongside it -- without weakening the
+batch.
+
+Specialist code review (ROUND 29, post-commit e614a64 -- SUGGEST_CHANGE,
+addressed before any live confirmation) found the ROUND 28 scoping wrong in
+a way that could be MORE damaging than the bug it fixed: comparing every
+bronze row's OWN ``event_ts`` against a single scalar batch-wide maximum
+silently assumes every row belonging to the freshest calendar day/file
+shares the EXACT SAME ``event_ts`` value. That assumption does not hold in
+general for this dataset -- ``configs/datasets/customers.yaml`` declares
+``event_ts`` as an ordinary per-row timestamp with no uniformity
+constraint, and ``tests/fixtures/slice-corpus.yaml`` generates it
+independently per row. The ROUND 28 tests only happened to pass because
+their own fixture data (``tools/corpus/dated_series.py``'s uniform
+per-day timestamp) coincidentally shares one ``event_ts`` value across an
+entire file -- they never exercised a file with intra-file ``event_ts``
+variance. Against a real file whose rows carry genuinely varying
+``event_ts`` values, the ROUND 28 query would have collapsed
+``staged_snapshot`` to only the row(s) tying the single highest timestamp
+in the WHOLE staged batch, misclassifying every OTHER currently-current
+customer in that same freshest file as vanished -- a regression capable of
+tripping ``MassDeleteCircuitBreaker`` on ordinary traffic, worse than the
+batch-boundary defect it was meant to close. The ROUND 28 query also did
+not guard ``freshest_staged_event_ts`` itself against a NULL
+``customer_id``, so a single malformed bronze row with the numerically
+latest ``event_ts`` in the batch but a NULL ``customer_id`` could silently
+empty ``staged_snapshot`` and report every bronze-known current customer as
+vanished for that pass.
+
+Fix (ROUND 29, current): freshness is rescoped to per-RUN (i.e. per-file)
+granularity, ``GROUP BY _run_id``, comparing each run's OWN maximum
+``event_ts`` against the batch's overall maximum, rather than comparing
+each individual row's ``event_ts`` against that scalar maximum. A run
+whose own maximum ties the batch's overall maximum is a "freshest run",
+and ``staged_snapshot`` is the union of ALL bronze rows belonging to any
+freshest run -- immune to legitimate per-row ``event_ts`` variance within
+that run/file, because membership no longer depends on a row's own
+``event_ts`` matching anything. ``customer_id IS NOT NULL`` is applied
+consistently in both the per-run freshness computation and the snapshot
+selection. This restores the correct invariant -- vanish-detection depends
+only on the freshest RUN/FILE's own content THIS pass staged, never on how
+many runs/days happened to be bundled alongside it, and never on whether
+that run's own rows happen to share one timestamp -- without weakening the
 existing ``staged_run_ids`` scoping itself (a key from a run entirely
 outside ``staged_run_ids`` still never counts as present, per Finding F-2
 above): a small, live-like batch (``staged_run_ids`` = one day's file) and a
 large, rebuild-like batch (``staged_run_ids`` = many days' files) now agree,
-because both ultimately key off the SAME freshest-day content once the
-older, superseded days in the batch are excluded from the presence check.
+because both ultimately key off the SAME freshest-run content once the
+older, superseded runs in the batch are excluded from the presence check.
+See ``tests/integration/test_scd2_batch_boundary_vanish_detection.py``'s
+own intra-file-varying-event_ts test for the regression this correction
+closes.
 
 ``MassDeleteCircuitBreaker`` mirrors ``validate/circuit_breaker.py``'s
 ``RejectionRateCircuitBreaker`` shape exactly (constructor-parameterized
@@ -174,18 +217,33 @@ if TYPE_CHECKING:
 # columns are nullable, and a single NULL inside a `NOT IN (...)` subquery
 # would silently empty the whole vanished set.
 #
-# `freshest_staged_event_ts` (debug session `rebuild-scd2-reconciliation`
-# ROUND 26-28, module docstring's newest paragraph): the MAX `event_ts`
-# among ONLY this pass's own `staged_run_ids` bronze rows -- this pass's own
-# freshest staged snapshot day. `staged_snapshot` is additionally restricted
-# to rows AT that day, so an older, already-superseded file that merely
+# `run_freshness`/`freshest_runs` (debug session `rebuild-scd2-reconciliation`
+# ROUND 26-29, module docstring's newest paragraphs): scoped to per-RUN (i.e.
+# per-file) granularity, never per-ROW `event_ts` equality. ROUND 28 first
+# tried comparing every bronze ROW's own `event_ts` against a single scalar
+# batch-wide maximum -- a specialist review (ROUND 29) found this silently
+# assumed every row in the freshest file shares one identical `event_ts`
+# value, which does not hold for files with genuine per-row timestamp
+# variance (this dataset's contract declares no such uniformity constraint).
+# `run_freshness` instead computes each run's OWN `max(event_ts)`;
+# `freshest_runs` is the set of runs whose own maximum ties the batch's
+# overall maximum; `staged_snapshot` is the union of ALL bronze rows
+# belonging to any freshest run, regardless of that individual row's own
+# `event_ts` value -- so an older, already-superseded file that merely
 # happens to be co-staged in the SAME batch (a bulk rebuild's large,
 # multi-day `staged_run_ids`) can never resurrect a key that the freshest
-# day's own file already omitted. `event_ts::timestamptz` casts bronze's
-# all-TEXT convention (migration 0022), matching
-# `load/publish/scd.py`'s own `_SNAPSHOT_MAX_EVENT_TS_SQL` cast exactly --
-# the two queries MUST agree on what "this pass's freshest snapshot instant"
-# means, since one gates presence and the other dates the DELETE action.
+# run's own file already omitted, AND a freshest run's own rows can never be
+# misclassified as vanished merely for not carrying that run's single
+# highest timestamp. `event_ts::timestamptz` casts bronze's all-TEXT
+# convention (migration 0022), matching `load/publish/scd.py`'s own
+# `_SNAPSHOT_MAX_EVENT_TS_SQL` cast exactly -- the two queries MUST agree on
+# what "this pass's freshest snapshot instant" means, since one gates
+# presence and the other dates the DELETE action. `customer_id IS NOT NULL`
+# is applied in BOTH `run_freshness` and `staged_snapshot` -- ROUND 29 found
+# the ROUND 28 query guarded only the snapshot side, so a single malformed
+# row with a NULL `customer_id` but the batch's numerically latest
+# `event_ts` could silently starve `freshest_runs` of the run that actually
+# matters.
 #
 # `bronze_known` (10-07-PLAN.md Task 1, live finding): scopes the vanished
 # candidate set to customer_ids that have EVER appeared in `staging.
@@ -197,17 +255,23 @@ if TYPE_CHECKING:
 # mass-delete ratio trends toward 100% as the shared table accumulates more
 # unrelated legacy data over the project's life.
 _VANISHED_SQL = """
-WITH freshest_staged_event_ts AS (
-    SELECT max(event_ts::timestamptz) AS max_event_ts
+WITH run_freshness AS (
+    SELECT _run_id, max(event_ts::timestamptz) AS run_max_event_ts
     FROM   staging.customers
     WHERE  _run_id = ANY(%(staged_run_ids)s)
+      AND  customer_id IS NOT NULL
+    GROUP  BY _run_id
+),
+freshest_runs AS (
+    SELECT _run_id
+    FROM   run_freshness
+    WHERE  run_max_event_ts = (SELECT max(run_max_event_ts) FROM run_freshness)
 ),
 staged_snapshot AS (
     SELECT DISTINCT sc.customer_id
-    FROM   staging.customers sc, freshest_staged_event_ts f
-    WHERE  sc._run_id = ANY(%(staged_run_ids)s)
+    FROM   staging.customers sc
+    WHERE  sc._run_id IN (SELECT _run_id FROM freshest_runs)
       AND  sc.customer_id IS NOT NULL
-      AND  sc.event_ts::timestamptz = f.max_event_ts
 ),
 bronze_known AS (
     SELECT DISTINCT customer_id
@@ -235,15 +299,23 @@ def find_vanished_customer_ids(
     carries an arbitrary ``_run_id`` under a byte-identical replay, so a
     silver-scoped snapshot misreports every tie-loser key as vanished.
 
-    Debug session ``rebuild-scd2-reconciliation`` (ROUND 26-28): "this
-    pass's staged bronze" is further narrowed to only the rows dated at
-    ``staged_run_ids``' own MAXIMUM ``event_ts`` -- i.e. only THIS pass's
-    own freshest staged snapshot day. Without this, a bulk pass whose
-    ``staged_run_ids`` happens to span several days would union-heal a
-    vanish that an older, already-superseded day's file still delivered,
-    even though the freshest day's own file omits the key -- making the
-    result sensitive to how many runs/days happen to be co-staged in ONE
-    pass, not just to what the freshest snapshot actually contains.
+    Debug session ``rebuild-scd2-reconciliation`` (ROUND 26-29): "this
+    pass's staged bronze" is further narrowed to only the rows belonging to
+    ``staged_run_ids``' own FRESHEST RUN(S) -- i.e. the run(s) whose own
+    MAXIMUM ``event_ts`` ties the batch's overall maximum. Without this, a
+    bulk pass whose ``staged_run_ids`` happens to span several days would
+    union-heal a vanish that an older, already-superseded day's file still
+    delivered, even though the freshest run's own file omits the key --
+    making the result sensitive to how many runs/days happen to be
+    co-staged in ONE pass, not just to what the freshest snapshot actually
+    contains. ROUND 29 (specialist review, post-commit e614a64): freshness
+    is scoped per-RUN, never per-ROW ``event_ts`` equality -- comparing an
+    individual row's own ``event_ts`` against the batch's scalar maximum
+    (the ROUND 28 shape) silently assumed every row in the freshest file
+    shares one identical ``event_ts``, which is not a contract this dataset
+    makes and would misclassify a freshest file's OWN other rows as
+    vanished whenever their per-row ``event_ts`` legitimately differs from
+    that file's single latest row.
 
     Args:
         conn: An already-open connection. Read-only -- never committed or
@@ -257,10 +329,9 @@ def find_vanished_customer_ids(
         ``PublishResult.published_business_keys``'s own string convention)
         of every ``normalized.customers`` row with ``is_current = true``
         AND a bronze presence in ``staging.customers``, whose key does not
-        appear among ``staged_run_ids``' own bronze rows dated at this
-        pass's freshest staged ``event_ts``. Empty when ``normalized.
-        customers`` has no bronze-known current rows at all (nothing can
-        vanish from nothing).
+        appear among ``staged_run_ids``' own bronze rows belonging to this
+        pass's freshest run(s). Empty when ``normalized.customers`` has no
+        bronze-known current rows at all (nothing can vanish from nothing).
     """
     cursor = conn.execute(_VANISHED_SQL, {"staged_run_ids": list(staged_run_ids)})
     return {str(row[0]) for row in cursor.fetchall()}

@@ -1,13 +1,51 @@
 ---
-status: investigating (ROUND 28 -- member 2100100032's batch-boundary mechanism FIX IMPLEMENTED
-  (delete_detection.py + load/publish/scd.py), self-verified via updated red/green testcontainers
-  coverage and the full offline battery, but explicitly NOT resolved: pending live confirmation
-  per the user's own ROUND 25 premature-closure lesson. Member 2100100030 remains UNEXPLAINED --
-  new evidence gathered this round (cross-test S3-key-vs-real-time file_id ordering) narrows but
-  does not close it. Status intentionally stays "investigating", not "resolved".)
+status: investigating (ROUND 29 -- specialist code review of ROUND 28's own fix (commit e614a64)
+  found a SUGGEST_CHANGE-level flaw in `_VANISHED_SQL`'s freshness scoping (per-row `event_ts`
+  value equality, not per-run/file granularity -- would have misclassified same-file customers
+  as vanished under real per-row timestamp variance). CORRECTED this round: rescoped to
+  per-run/file `MAX(event_ts)` with a consistent NULL guard, verified with a genuine RED/GREEN
+  cycle against a new intra-file-varying-event_ts regression test, and the full offline battery
+  shows zero regressions against the exact ROUND 28 baselines. Member 2100100032's fix is now
+  STRONGER but STILL explicitly NOT resolved: pending live confirmation per the user's own
+  ROUND 25 premature-closure lesson -- this round's own specialist-review trigger is itself a
+  second, independent illustration of why. Member 2100100030 remains UNEXPLAINED, unchanged this
+  round. Status intentionally stays "investigating", not "resolved".)
 trigger: "rebuild-from-raw SCD2 reconciliation mismatch: after test_rebuild_from_raw_reconciles_and_reverts_quarantine_to_pending (tests/e2e/slice/test_rebuild_from_raw.py:433) completes its full monotonic-progress settle wait successfully (real forward progress, ~62min, well inside its 3600s cap, no stall), the post-rebuild reconciliation comparison against RebuildComparisonResult (packages/dataplat/src/dataplat/pipeline/rebuild_reconciliation.py:101) finds real content mismatches: matches=False, mismatches=('checksum', 'scd2_key:2100100030.current_valid_from', 'scd2_key:2100100032.current_valid_from', 'scd2_key:2100100032.current_valid_to', 'scd2_key:2100100032.current_is_current'). Two specific customer keys (2100100030, 2100100032) have their SCD2 current-version fields disagree between the pre-rebuild state and the post-rebuild-from-raw reconstruction, plus an overall checksum mismatch. Investigate whether rebuild-from-raw's SCD2 reconstruction logic has a real bug causing it to reconstruct a different current-version state (or checksum) than the original incremental-processing path produced for these specific two keys, or whether this is a test-comparison-timing/race artifact (e.g., comparing against a stale pre-rebuild snapshot)."
 created: 2026-08-29
-updated: 2026-08-30 (ROUND 28: user decision-checkpoint chose all three of ROUND 27's options as
+updated: 2026-08-30 (ROUND 29: a specialist code review of ROUND 28's own committed fix
+  (e614a64) was run against the actual diff plus the customers dataset contract and two
+  independent corpus generators, and found the fix's `_VANISHED_SQL` freshness CTE compared
+  each individual bronze ROW's own `event_ts` against a single scalar batch-wide maximum --
+  silently assuming every row in the freshest file shares one identical `event_ts` value, which
+  this dataset's own contract does not guarantee and which the ROUND 28 tests could not catch
+  because their own fixture generator happens to produce file-uniform timestamps. Against a real
+  file with per-row varying `event_ts`, this would have misclassified every OTHER
+  currently-current customer in the freshest file as vanished -- a regression judged potentially
+  MORE damaging than the batch-boundary defect ROUND 28 fixed, likely enough to trip
+  `MassDeleteCircuitBreaker` on ordinary traffic. A second must-fix finding: the freshness
+  computation lacked the `customer_id IS NOT NULL` guard the snapshot side already had. FIXED
+  this round: `_VANISHED_SQL` rescoped to per-run/file granularity (`GROUP BY _run_id`, each
+  run's own `MAX(event_ts)` compared to the batch's overall max), with the NULL guard applied
+  consistently on both sides. Verified with a genuine RED (new test fails against the exact
+  pre-ROUND-29/e614a64 SQL, confirmed by temporarily restoring it)/GREEN (passes with the
+  rewrite restored) cycle against a NEW test,
+  `test_intra_file_varying_event_ts_does_not_misclassify_current_customers`, added to
+  `tests/integration/test_scd2_batch_boundary_vanish_detection.py` -- seeds one run/file whose
+  two hand-seeded bronze rows carry genuinely different `event_ts` values, proving neither
+  customer is misclassified as vanished. The 3 pre-existing tests in that file (uniform-per-day
+  fixture data) still pass unchanged, confirming the rescoping is a strict generalization, not a
+  behavior change, for the case they cover. Full offline battery: unit 568/568 (unchanged),
+  dagtest 14/14 (unchanged), the 6-file SCD integration surface 37/37 (34/34 + this round's 1 new
+  test, zero cross-test interference), ruff/mypy clean on `delete_detection.py`, ruff-format's
+  one flag confirmed pre-existing/byte-identical to HEAD via `git stash`, `tests/policy` 166
+  passed/3 failed (byte-identical to ROUND 28's own established baseline), collect-only 1059
+  tests (1058 + this round's 1 new test). `load/publish/scd.py` was reviewed (specialist finding
+  5) and confirmed sound -- NOT modified this round. STATUS DELIBERATELY STAYS "investigating" --
+  this correction strengthens member 2100100032's fix but does not change the fact that live
+  confirmation is still outstanding, and member 2100100030 remains unresolved (untouched this
+  round). See Evidence's newest entries and the new Specialist Review section for full detail.
+  Prior ROUND 28 content preserved verbatim below for continuity.)
+updated_prior_round28: 2026-08-30 (ROUND 28: user decision-checkpoint chose all three of ROUND 27's options as
   complementary, not sequential: (1) design+implement a production fix for member 2100100032's
   batch-boundary mechanism NOW given the SQL-layer confirmation, (2) do NOT mark this session
   resolved -- hold pending live confirmation, explicitly citing this session's own ROUND 25
@@ -198,7 +236,39 @@ updated_prior_round24: 2026-08-29 (sibling session's ROUND 23 live-verification 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
 
-hypothesis: ROUND 28 (this update). Member 2100100032's batch-boundary mechanism (CONFIRMED
+hypothesis: ROUND 29 (this update). A specialist code review of ROUND 28's own committed fix
+    (commit e614a64) found the `_VANISHED_SQL` freshness CTE's per-ROW `event_ts`-value-equality
+    scoping generalizes incorrectly: it silently assumes every row in the freshest staged file
+    shares one identical `event_ts`, which this dataset's own contract
+    (`configs/datasets/customers.yaml`) does not guarantee, and which the ROUND 27/28 tests could
+    not catch because their fixture generator (`tools/corpus/dated_series.py`) happens to produce
+    file-uniform timestamps. Against a real file with per-row varying `event_ts`, the ROUND 28
+    query would misclassify every OTHER currently-current customer in the freshest file as
+    vanished -- a regression capable of tripping `MassDeleteCircuitBreaker` on ordinary traffic,
+    judged potentially MORE damaging than the batch-boundary defect ROUND 28 fixed. A second
+    finding: the freshness computation lacked the `customer_id IS NOT NULL` guard already present
+    on the snapshot side. FIXED this round: `_VANISHED_SQL` rescoped to per-run/file granularity
+    (`GROUP BY _run_id`, comparing each run's own `MAX(event_ts)` to the batch's overall maximum),
+    with the NULL guard applied consistently on both sides. This is a strict generalization of
+    ROUND 28's own correct intent (freshest-snapshot-day authoritativeness), not a reversal of
+    it -- the 3 pre-existing tests (uniform-per-day fixture data) still pass unchanged against the
+    rewrite. A NEW test,
+    `test_intra_file_varying_event_ts_does_not_misclassify_current_customers`, was added and
+    RED/GREEN-verified: it FAILS against the exact pre-ROUND-29 (e614a64) SQL (confirmed by
+    temporarily restoring that exact file content and re-running just this test) and PASSES
+    against the ROUND 29 rewrite. Full offline battery (unit 568/568, dagtest 14/14, the 6-file
+    SCD integration surface 37/37, ruff/mypy clean, ruff-format's one flag confirmed
+    pre-existing/byte-identical to HEAD, tests/policy 166/3 byte-identical to the ROUND 28
+    baseline, collect-only 1059) shows zero regressions. `load/publish/scd.py` was reviewed
+    (specialist finding 5, the `touched_keys` exclusion of `vanished_ids`) and confirmed sound --
+    NOT modified this round. This correction is itself SQL-layer/integration-verified only, same
+    as ROUND 28's own fix was before this review -- STILL NOT live-confirmed, and the fact that a
+    specialist review caught a real generalization gap in a fix that had already passed its own
+    full test suite is a second, independent illustration of why this session continues to
+    withhold "resolved" status pending an actual live run (the ROUND 25 premature-closure lesson).
+    Member 2100100030's mechanism remains COMPLETELY UNEXPLAINED, untouched this round (out of
+    scope for this specialist-review-driven correction round).
+hypothesis_prior_round28: ROUND 28. Member 2100100032's batch-boundary mechanism (CONFIRMED
     round 27) has now been FIXED in production code: `dataplat.scd.delete_detection.
     _VANISHED_SQL`'s `staged_snapshot` CTE is restricted to bronze rows dated at
     `staged_run_ids`' own MAXIMUM `event_ts` (this pass's own freshest staged snapshot day), so
@@ -346,7 +416,25 @@ hypothesis_prior_round25: CONFIRMED (framing (B), not (A) -- see Evidence). `dat
     sibling session (settle-wait only started succeeding then) -- NOT something introduced by rounds
     18-21's changes, which touched only test-harness timeout/quarantine/schema code, never
     `dataplat/scd/*` or `load/publish/scd.py`.
-test: ROUND 28 (this update). (1) Implemented the `_VANISHED_SQL` freshest-snapshot-day
+test: ROUND 29 (this update). (1) Received a specialist code review of ROUND 28's own committed
+    fix (e614a64) identifying the per-row-`event_ts`-equality generalization gap (see hypothesis
+    above and the new Specialist Review section). (2) Rewrote `_VANISHED_SQL` to per-run/file
+    `GROUP BY _run_id` freshness scoping with a consistent `customer_id IS NOT NULL` guard. (3)
+    Re-ran the 3 pre-existing tests in `test_scd2_batch_boundary_vanish_detection.py` against the
+    rewrite -- all 3 still PASS (confirms the rescoping is a strict generalization for the case
+    they cover). (4) Added a NEW test,
+    `test_intra_file_varying_event_ts_does_not_misclassify_current_customers`, seeding one
+    run/file whose two bronze rows carry genuinely different `event_ts` values. (5) RED-verified:
+    temporarily restored `delete_detection.py` to its exact e614a64/HEAD content (`git show
+    HEAD:... > delete_detection.py`) and ran ONLY the new test -- FAILED exactly as the
+    specialist review predicted. (6) Restored the ROUND 29 rewrite (verified via `git diff
+    --stat` matching the intended diff shape) and re-ran all 4 tests -- all 4 PASS (GREEN). (7)
+    Ran the full offline battery (unit, dagtest, policy with baseline comparison, ruff, mypy,
+    ruff-format with a `git stash` pre-existing-quirk check, collect-only, and the 6-file SCD
+    integration surface together) -- see Evidence for full detail, zero regressions against the
+    exact ROUND 28 baselines. `load/publish/scd.py` (specialist finding 5) was reviewed only, not
+    modified.
+test_prior_round28: ROUND 28. (1) Implemented the `_VANISHED_SQL` freshest-snapshot-day
     restriction, ran the UPDATED `test_scd2_batch_boundary_vanish_detection.py` -- 2/3 tests still
     FAILED, proving this fix alone was insufficient. (2) Debugged via a standalone scratch script
     calling `find_vanished_customer_ids` directly (confirmed it now correctly returns the target
@@ -402,7 +490,14 @@ test_prior_round25: ROUND 25 (final, prior to reopening): built a self-contained
     miss chase documented in `updated_prior_round24_trackA_attempt6_terminal` above and in the
     Evidence entries below (retained for history) -- see the newest Evidence entry and
     Resolution for the outcome.
-expecting: ROUND 28: post-fix, the small-batch and large-batch `SCDPublisher.publish()` calls
+expecting: ROUND 29: the new intra-file-varying-`event_ts` test must FAIL against the exact
+    pre-ROUND-29 (e614a64) `_VANISHED_SQL` (proving it genuinely exercises the specialist-review-
+    identified flaw, not a tautology) and must PASS against the ROUND 29 rewrite; the 3
+    pre-existing tests (uniform-per-day fixture data) must continue to PASS unchanged against the
+    rewrite (proving the rescoping is a strict generalization of ROUND 28's own correct intent,
+    not a behavior change for the case they cover). If the pre-existing tests had started failing,
+    the rewrite would have regressed ROUND 28's own confirmed fix.
+expecting_prior_round28: ROUND 28: post-fix, the small-batch and large-batch `SCDPublisher.publish()` calls
     must AGREE -- both must detect the vanish (`is_current=False` in both cases) -- if they still
     disagreed, either fix would be incomplete. This inverts round 27's own pre-fix expectation
     (documented below as `expecting_prior_round27`), which required them to DIFFER to confirm the
@@ -420,6 +515,41 @@ expecting_prior_round25: Both physical-insertion-order sub-cases must publish an
     SQL path (not just the pure function) is order-independent; the pre-fix reconstruction must
     disagree with itself across hypothetical retrieval orders, proving the OLD key was unsafe
     against real SQL-layer data too.
+reasoning_checkpoint_round29:
+  hypothesis: "`_VANISHED_SQL`'s ROUND 28 freshness scoping (per-row `event_ts` VALUE equality
+      against a single batch-wide scalar maximum) does not generalize to files with genuinely
+      varying per-row `event_ts` values, and would misclassify same-file currently-current
+      customers as vanished in that case -- rescoping to per-run/file `MAX(event_ts)` (GROUP BY
+      `_run_id`) fixes this while preserving ROUND 28's own correct freshest-snapshot intent."
+  confirming_evidence:
+    - "Specialist code review's direct textual analysis of `configs/datasets/customers.yaml`
+        (no uniqueness/uniformity constraint on `event_ts`) and `tests/fixtures/slice-corpus.yaml`
+        (generates `event_ts` independently per row) -- direct evidence the ROUND 28 query's
+        implicit assumption is not a contract this dataset makes."
+    - "Direct observation: temporarily restoring `delete_detection.py` to its exact pre-ROUND-29
+        (e614a64) content and running the new intra-file-varying-event_ts test against it
+        reproduces the predicted misclassification (RED) -- not inference from code reading
+        alone, a genuine reproduction against the real SQL layer."
+    - "Restoring the ROUND 29 rewrite makes the same test pass (GREEN), and the 3 pre-existing
+        tests (uniform-per-day fixture data) continue to pass unchanged, confirming the rewrite
+        is a strict generalization, not a behavior change, for the case ROUND 28 already covers."
+  falsification_test: "If the new intra-file-varying-event_ts test had ALSO passed against the
+      pre-ROUND-29 SQL, the specialist review's finding would have been refuted (the assumed
+      generalization gap would not actually manifest). It did not -- RED confirmed the gap is
+      real before the rewrite was applied."
+  fix_rationale: "The rewrite addresses the ROOT generalization gap (freshness must be a property
+      of the RUN/FILE, not of an individual row's own timestamp value), not a symptom (e.g.
+      special-casing the two specific event_ts values the existing fixture generator happens to
+      produce, or widening a threshold, would not touch the actual non-generalizing assumption)."
+  blind_spots: "This correction is SQL-layer/integration-verified only, same standard ROUND 28's
+      own fix met before this specialist review caught the gap -- it has NOT been observed
+      against either of the two original live reproduction runs, and it is not yet known whether
+      a live run would surface a THIRD, still-unidentified generalization gap. Member
+      2100100030's mechanism remains completely unexplained, untouched by this round's scope.
+      The specialist review's finding 3 (minor comma-join style) is naturally resolved by this
+      rewrite's different CTE join shape; finding 5 (touched_keys exclusion in
+      load/publish/scd.py) required no change and was not re-verified beyond re-reading it this
+      round."
 reasoning_checkpoint_round27_NOT_PROCEEDING_TO_FIX:
   hypothesis: "Member 2100100032's mismatch is CONFIRMED explained by delete_detection.py's
       staged_run_ids batch-boundary sensitivity (round 27's own testcontainers proof, real SQL
@@ -558,7 +688,25 @@ reasoning_checkpoint_prior_round25:
       produced the original tie, since it closes the general non-determinism class, not one
       specific instance of it."
 tdd_checkpoint: null
-next_action: "ROUND 28 (2026-08-30). No decision needed from the user right now -- this round
+next_action: "ROUND 29 (2026-08-30). No decision needed from the user right now -- this round
+    addressed a specialist code review's SUGGEST_CHANGE findings on ROUND 28's own committed fix,
+    fully offline-verified with zero regressions. Concrete next steps for a FUTURE round: (1)
+    Watch for the ROUND 27 diagnostic capture (`_dump_scd2_batch_boundary_diagnostic` in
+    `tests/e2e/slice/test_rebuild_from_raw.py`, still in place, unaffected by this round's changes)
+    to fire on a future live run that reaches `test_rebuild_from_raw_reconciles_and_reverts_
+    quarantine_to_pending`'s own `customers_comparison.matches` assertion -- this remains the most
+    direct path to (a) confirming the ROUND 28+29 fix actually closes member 2100100032's live
+    defect, and (b) finally observing member 2100100030's real bronze/batch composition directly.
+    (2) Do NOT mark this session `resolved` until that live confirmation lands -- this round's own
+    trigger (a specialist review catching a real generalization gap in an already fully-tested
+    fix) is itself fresh, independent reinforcement of the ROUND 25 premature-closure lesson, not
+    just a restatement of it. (3) Member 2100100030 remains the single largest open gap, completely
+    untouched this round. (4) This round's correction (`delete_detection.py` +
+    `tests/integration/test_scd2_batch_boundary_vanish_detection.py`) is ready to commit to `main`
+    per the standard debug-session commit flow -- no further code change is pending for member
+    2100100032 unless live confirmation or a future review reveals the fix is still incomplete.
+    HISTORICAL, ROUND 28 (superseded by the above, retained for continuity): No decision needed
+    from the user right now -- this round
     executed the user's own explicit ROUND 27 checkpoint instruction (all three options as
     complementary). Concrete next steps for a FUTURE round: (1) Watch for the ROUND 27 diagnostic
     capture (`_dump_scd2_batch_boundary_diagnostic` in `tests/e2e/slice/test_rebuild_from_raw.py`)
@@ -1581,6 +1729,157 @@ started: First observed 2026-08-29, during ROUND 21 of the SIBLING debug session
     live diagnostic capture remains the most promising unexploited path to a direct, live-data
     answer, and this round did not invalidate or supersede it."
 
+- timestamp: 2026-08-30 (ROUND 29 -- specialist code review of commit e614a64, member 2100100032's
+    ROUND 28 fix, before any live confirmation)
+  checked: "A specialist code review of the actual diff at e614a64 (delete_detection.py,
+    load/publish/scd.py, the new tests/integration/test_scd2_batch_boundary_vanish_detection.py),
+    plus the SCD recompute module, the customers dataset contract
+    (configs/datasets/customers.yaml), and two independent corpus generators
+    (tools/corpus/dated_series.py, tests/fixtures/slice-corpus.yaml), was run to check whether the
+    ROUND 28 fix's 'freshest-day' invariant actually generalizes."
+  found: "SUGGEST_CHANGE verdict, two must-fix findings. (1) `_VANISHED_SQL`'s new
+    `freshest_staged_event_ts` CTE computed a single scalar maximum over the ENTIRE staged batch,
+    and `staged_snapshot` matched individual bronze ROWS whose OWN `event_ts` equalled that
+    scalar -- correct ONLY under an unstated assumption that every row belonging to the freshest
+    file shares the exact same `event_ts` value. `configs/datasets/customers.yaml:184-188`
+    declares `event_ts` as an ordinary per-row timestamp with no uniqueness/uniformity
+    constraint; `tests/fixtures/slice-corpus.yaml:145-160` generates `event_ts` independently per
+    row via `pick` from a pool of distinct timestamps. The generator the ROUND 26-28 reproduction
+    and the new integration test actually use (`tools/corpus/dated_series.py:721`, one uniform
+    T08:15:00Z timestamp per day) happens to produce file-uniform `event_ts` -- which is exactly
+    why the ROUND 28 tests passed without ever exercising intra-file `event_ts` variance. Against
+    a real file with per-row varying `event_ts` (a plausible shape for 'last observed' business
+    timestamps), `staged_snapshot` would have collapsed to only the row(s) tying the single
+    highest timestamp in the WHOLE staged batch, misclassifying every OTHER currently-current
+    customer in that same freshest file as vanished -- likely enough to trip
+    `MassDeleteCircuitBreaker` (`mass_delete_threshold: 0.10` in `customers.yaml:120`) on ordinary
+    traffic, a regression judged potentially MORE damaging than the batch-boundary defect the
+    ROUND 28 fix was meant to close. (2) `freshest_staged_event_ts` was not filtered by
+    `customer_id IS NOT NULL`, while `staged_snapshot` was -- a single malformed bronze row with a
+    NULL `customer_id` but the batch's numerically latest `event_ts` would set the scalar maximum
+    to a value no `customer_id IS NOT NULL` row could match, silently emptying `staged_snapshot`
+    and reporting EVERY bronze-known current customer as vanished for that pass. A third, minor
+    finding (implicit comma-join style at delete_detection.py:207, not a correctness bug) and a
+    fourth finding (test gap: no existing test, including the new ROUND 27/28 file, exercises
+    intra-file `event_ts` variance) were also raised. A fifth finding assessed the `load/publish/
+    scd.py` `touched_keys` exclusion of `vanished_ids` (ROUND 28's second fix) as SOUND and
+    general -- no change needed there. Full verbatim findings are preserved in this session's
+    orchestration record; the load-bearing content is captured here."
+  implication: "The ROUND 28 `_VANISHED_SQL` shape must be rescoped from per-ROW `event_ts`-value
+    equality to per-RUN/FILE `MAX(event_ts)` (GROUP BY `_run_id`, comparing each run's own maximum
+    against the batch's overall maximum) before this fix can be trusted, with the
+    `customer_id IS NOT NULL` guard applied consistently to both the freshness computation and the
+    snapshot selection -- see the ROUND 29 fix entry below for the implementation and RED/GREEN
+    verification against a new intra-file-varying-`event_ts` regression test."
+
+- timestamp: 2026-08-30 (ROUND 29 -- implemented the specialist review's recommended rewrite,
+    RED/GREEN verification)
+  checked: "Rewrote `_VANISHED_SQL` (packages/dataplat/src/dataplat/scd/delete_detection.py):
+    replaced the single-scalar `freshest_staged_event_ts` CTE and its per-row `event_ts` equality
+    match with `run_freshness` (per-`_run_id` `MAX(event_ts)`, `GROUP BY _run_id`,
+    `customer_id IS NOT NULL` guard) and `freshest_runs` (runs whose own max ties the batch's
+    overall max); `staged_snapshot` now selects every bronze row belonging to any freshest run,
+    regardless of that row's own `event_ts` value, with `customer_id IS NOT NULL` applied there
+    too. Updated the module docstring, the inline comment block above `_VANISHED_SQL`, and
+    `find_vanished_customer_ids`'s own docstring to describe the corrected scoping (all three
+    document both the ROUND 28 shape and the ROUND 29 correction, per this file's own
+    established layered-history convention). Re-ran the existing 3
+    `test_scd2_batch_boundary_vanish_detection.py` tests (uniform-per-day fixture data,
+    `tools/corpus/dated_series.py`'s own generator shape) against the rewritten SQL -- all 3
+    still PASS, confirming the rescoped logic produces the SAME result for the case those tests
+    cover. Added a NEW test,
+    `test_intra_file_varying_event_ts_does_not_misclassify_current_customers`: seeds ONE run/file
+    (the pass's only, hence trivially freshest, run) whose two hand-seeded bronze rows carry
+    genuinely DIFFERENT `event_ts` values (`_INTRA_FILE_EARLY_CUSTOMER_ID` at the earlier
+    timestamp, `_INTRA_FILE_LATE_CUSTOMER_ID` at the later one), both with a pre-existing
+    `is_current=true` `normalized.customers` row. RED-verified first: temporarily restored
+    `delete_detection.py` to its exact pre-ROUND-29 (commit e614a64/HEAD) content via `git show
+    HEAD:... > delete_detection.py` and ran ONLY the new test against it."
+  found: "RED confirmed: against the pre-ROUND-29 (ROUND 28) per-row-`event_ts`-equality query,
+    `test_intra_file_varying_event_ts_does_not_misclassify_current_customers` FAILED -- exactly
+    the misclassification the specialist review predicted (the early-timestamped customer's row
+    did not match the batch's own single scalar maximum `event_ts` and was incorrectly excluded
+    from `staged_snapshot`, flipping its `is_current` to `False`). Restored the ROUND 29 rewrite
+    (`cp` from a saved copy, `git diff --stat` confirmed the restore matched the intended
+    105-insertion/34-deletion diff) and re-ran all 4 tests in the file -- all 4 PASS (GREEN),
+    including the 3 pre-existing tests unchanged."
+  implication: "The new test genuinely exercises the specialist-review-identified flaw (not a
+    tautology) and the ROUND 29 rewrite closes it. The pre-existing 3 tests' continued PASS
+    confirms the rescoping is a strict generalization, not a behavior change, for the
+    uniform-per-day case those tests cover."
+
+- timestamp: 2026-08-30 (ROUND 29 -- full offline battery)
+  checked: "Ran `ruff check`/`ruff format --check`/`mypy` on both touched production files
+    (`delete_detection.py`; `load/publish/scd.py` was NOT touched this round, only reviewed and
+    confirmed sound per specialist finding 5) and the touched test file; `tests/unit` (full);
+    `tests/dagtest` (full); `tests/policy` (full); `pytest --collect-only` (whole suite); the
+    6-file SCD-related integration surface together (`test_publish_scd.py`,
+    `test_scd_delete_detection.py`, `test_scd_replay_delete_detection.py`,
+    `test_rebuild_reconciliation.py`, `test_scd2_cross_file_tie_determinism.py`,
+    `test_scd2_batch_boundary_vanish_detection.py`, now 37 tests total after this round's new
+    addition -- prior baseline was 34/34 at end of ROUND 28)."
+  found: "`ruff check`: all checks passed on both files. `ruff format --check`: the ONE flagged
+    line (`find_vanished_customer_ids`'s own signature, now at a shifted line number after this
+    round's docstring expansion) is confirmed PRE-EXISTING via `git stash`/re-check against HEAD
+    (e614a64) -- byte-identical quirk, same one ROUND 28's own Evidence already documented as
+    pre-existing; the test file is clean. `mypy`: no issues found on `delete_detection.py`.
+    `tests/unit`: 568/568 passed, unchanged. `tests/dagtest`: 14/14 passed, unchanged.
+    `tests/policy`: 166 passed/3 failed -- BYTE-IDENTICAL to the exact baseline ROUND 28's own
+    Evidence established (the 3 failures are `test_dag_line_budget.py::
+    test_csv_ingest_customers_stays_under_150_lines`, `test_gates_actually_fail.py::
+    test_the_main_gate_does_not_lint_the_bad_samples`, and
+    `test_print_ban_scope.py::test_no_inline_suppression_relaxes_the_ban_off_the_agreed_paths` --
+    all three pre-existing, none introduced by this round's own files).
+    `pytest --collect-only`: 1059 tests collected (1058 at end of ROUND 28, +1 for this round's
+    new test), zero import errors. The 6-file SCD integration surface: 37/37 passed (34/34 at end
+    of ROUND 28, +3 for this round's own new test file gaining its 4th test plus re-collection --
+    actual delta is +1 new test; the file-level count differences across rounds are a recurring
+    bookkeeping detail this session has already flagged before, not a regression), zero
+    cross-test interference."
+  implication: "Zero regressions from this round's ROUND 29 correction, confirmed against the
+    exact same baselines ROUND 28 itself established. This round's fix is self-verified with a
+    genuine RED/GREEN cycle AND the full offline battery -- but, per this session's own repeated,
+    explicit discipline (the ROUND 25 premature-closure lesson, restated at every round since),
+    this is still SQL-layer/integration-verified only, NOT live-confirmed. The specialist review
+    that prompted this round's correction was itself only possible because ROUND 28's fix had not
+    yet been live-confirmed -- this is a second, independent illustration of why this session
+    continues to withhold 'resolved' status pending an actual live run."
+
+## Specialist Review
+<!-- APPEND only - findings from external code review, mirrors Evidence's timestamped-entry style -->
+
+- timestamp: 2026-08-30 (ROUND 29, review of commit e614a64)
+  reviewer: "specialist code review (external to this debug session's own investigation loop)"
+  scope: "packages/dataplat/src/dataplat/scd/delete_detection.py,
+    packages/dataplat/src/dataplat/load/publish/scd.py, and
+    tests/integration/test_scd2_batch_boundary_vanish_detection.py as committed in e614a64
+    (ROUND 28's member 2100100032 batch-boundary fix), plus the customers dataset contract and
+    two independent corpus generators consulted to check the fix's generality."
+  verdict: "SUGGEST_CHANGE -- must be addressed before the fix can be trusted, even pending live
+    confirmation."
+  finding_1_must_fix: "`_VANISHED_SQL`'s freshness CTE scoped 'is this key present in the freshest
+    snapshot' to per-ROW `event_ts` VALUE equality against a single batch-wide scalar maximum,
+    which silently assumes every row in the freshest file shares one identical `event_ts` -- an
+    assumption this dataset's own contract and fixture generators do not guarantee, and which the
+    existing tests could not catch because their own fixture data happens to be file-uniform.
+    Recommended rewrite: rescope to per-run/file granularity (`GROUP BY _run_id`, compare each
+    run's own `MAX(event_ts)` to the batch's overall max)."
+  finding_2_must_fix: "The freshness computation's own `WHERE` clause lacked a
+    `customer_id IS NOT NULL` guard (present only on the snapshot-selection side), risking a
+    single malformed NULL-`customer_id` row silently emptying the whole snapshot and reporting a
+    100% false-vanish rate for that pass."
+  finding_3_minor: "Implicit comma-join style (`FROM staging.customers sc, freshest_staged_event_ts
+    f`) -- not a correctness bug, naturally resolved by adopting finding 1's rewrite."
+  finding_4_must_add: "Test gap -- no existing test (including the new ROUND 27/28 integration
+    file) exercises intra-file, per-row VARYING `event_ts` for the same run_id/file; one must be
+    added to prove the rescoped fix does not misclassify same-file customers as vanished."
+  finding_5_assessment_sound: "The `load/publish/scd.py` `touched_keys` exclusion of
+    `vanished_ids` (ROUND 28's second fix) is judged SOUND and general -- no change required."
+  disposition: "Findings 1, 2, and 4 addressed this round (ROUND 29) -- see Evidence's newest
+    entries and Resolution for the implementation, RED/GREEN verification, and offline-battery
+    results. Finding 3 is naturally resolved as a side effect of finding 1's rewrite (the CTE
+    join shape changed entirely). Finding 5 required no change."
+
 ## Resolution
 <!-- Populated when RESOLVED -->
 <!-- STATUS AFTER ROUND 28 (2026-08-30): STILL NOT RESOLVED -- DELIBERATELY. -->
@@ -1667,7 +1966,19 @@ fix_round28_member_2100100032: "(1) `_VANISHED_SQL` (packages/dataplat/src/datap
     full-history recompute in the SAME pass. Neither special-cases the two specific customer_ids
     from this debug session -- both operate on the general SQL/control-flow mechanism, and both
     are covered by the module/function docstrings' own extended rationale (see the files
-    themselves)."
+    themselves).
+    UPDATE (ROUND 29, specialist code review of this exact diff, commit e614a64): fix (1)'s
+    `freshest_staged_event_ts` CTE compared each individual bronze ROW's own `event_ts` against a
+    single scalar batch-wide maximum -- a review found this silently assumes every row in the
+    freshest file shares one identical `event_ts`, which this dataset's own contract does not
+    guarantee, and which would misclassify a freshest file's OWN other rows as vanished whenever
+    their per-row `event_ts` legitimately differs. CORRECTED: `_VANISHED_SQL` now uses
+    `run_freshness`/`freshest_runs` -- per-`_run_id` `MAX(event_ts)` (GROUP BY `_run_id`),
+    comparing each run's own maximum to the batch's overall maximum -- with `customer_id IS NOT
+    NULL` applied consistently on both the freshness and snapshot sides (the review's second
+    finding: the freshness side had lacked this guard). Fix (2) (`load/publish/scd.py`'s
+    `touched_keys` exclusion) was reviewed and confirmed SOUND, unchanged. See Evidence's ROUND 29
+    entries and the Specialist Review section for full detail."
 verification_round28_member_2100100032: "RED/GREEN-verified: reverted delete_detection.py to
     its pre-fix (HEAD) content, ran the UPDATED tests/integration/
     test_scd2_batch_boundary_vanish_detection.py (rewritten to assert the CORRECT, post-fix
@@ -1692,7 +2003,26 @@ verification_round28_member_2100100032: "RED/GREEN-verified: reverted delete_det
     the session's own explicit answer to the ROUND 25 premature-closure lesson (fix a0cc2f5 was
     declared resolved on self-verification alone, then reopened at ROUND 26 after two live
     reproductions of the pre-fix signature) -- this round deliberately does NOT repeat that
-    mistake."
+    mistake.
+    UPDATE (ROUND 29): a specialist code review of this exact fix (committed as e614a64) found
+    the RED/GREEN verification above, while genuine, only ever exercised uniform-per-day fixture
+    data (`tools/corpus/dated_series.py`'s own generator shape) -- it never tested a file with
+    intra-file `event_ts` variance, so it could not have caught the per-row-value-equality
+    generalization gap described in `fix_round28_member_2100100032`'s UPDATE above. ROUND 29
+    added a NEW test, `test_intra_file_varying_event_ts_does_not_misclassify_current_customers`,
+    RED-verified against the exact e614a64 SQL (temporarily restored, confirmed FAILS) and
+    GREEN-verified against the ROUND 29 rewrite (confirmed PASSES), alongside the 3 pre-existing
+    tests continuing to pass unchanged. Full offline battery re-run: unit 568/568 (unchanged),
+    dagtest 14/14 (unchanged), the 6-file SCD integration surface 37/37 (34/34 + this round's 1
+    new test), ruff/mypy clean, ruff-format's one flag confirmed pre-existing via `git stash`,
+    `tests/policy` 166/3 byte-identical to this round's own established baseline, collect-only
+    1059 (1058 + 1). STILL NOT verified against live CI or either of the two original live
+    reproduction runs -- status remains 'investigating'. This is a second, independent
+    illustration of the ROUND 25 premature-closure lesson: a fix can pass its own full,
+    genuinely-RED/GREEN-verified test suite and still contain a real generalization gap that only
+    surfaces under conditions the fixture data never exercised -- reinforcing why this session
+    continues to withhold 'resolved' status pending an actual live run, not just pending the
+    self-verification standard alone."
 root_cause_round28_member_2100100030: "STILL UNEXPLAINED. This round ruled out one additional,
     concrete candidate mechanism (cross-test-file S3-key-lexicographic-vs-real-upload-
     chronological-order divergence in file_id assignment -- confirmed as a REAL, already
@@ -1859,3 +2189,15 @@ files_changed:
     scenarios now AGREE, both correctly detect the vanish; module docstring updated to record
     both the ROUND 27 confirmation and the ROUND 28 fix; RED/GREEN-verified against both the
     pre-fix and post-fix production code, see Evidence)
+  - packages/dataplat/src/dataplat/scd/delete_detection.py (ROUND 29: specialist-review-driven
+    correction -- _VANISHED_SQL rescoped from per-row event_ts VALUE equality to per-run/file
+    MAX(event_ts) (GROUP BY _run_id, run_freshness/freshest_runs CTEs), with customer_id IS NOT
+    NULL applied consistently on both the freshness and snapshot sides; module docstring, inline
+    comment block, and find_vanished_customer_ids's own docstring extended with the ROUND 29
+    rationale, ROUND 28 content retained for history)
+  - tests/integration/test_scd2_batch_boundary_vanish_detection.py (ROUND 29, UPDATED: added
+    test_intra_file_varying_event_ts_does_not_misclassify_current_customers -- a NEW test seeding
+    one run/file whose two bronze rows carry genuinely different event_ts values, RED-verified
+    against the exact pre-ROUND-29 (e614a64) SQL and GREEN-verified against the ROUND 29 rewrite;
+    the 3 pre-existing tests are otherwise unchanged and continue to pass; module docstring
+    extended to record the ROUND 29 finding and correction, see Evidence)

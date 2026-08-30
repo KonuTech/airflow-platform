@@ -24,12 +24,31 @@ co-batched with ANY OTHER file that still included the customer (even an OLDER, 
 superseded day), that customer was NEVER detected as vanished in that pass at all -- a genuinely
 different terminal ``is_current``/``valid_to`` state than the original run.
 
-ROUND 28 FIXED it: ``_VANISHED_SQL`` now additionally restricts ``staged_snapshot`` to bronze
-rows dated at ``staged_run_ids``' own MAXIMUM ``event_ts`` -- this pass's own freshest staged
-snapshot day. An older, already-superseded day's file merely co-staged in the same batch can no
-longer resurrect a key the freshest day's own file omits. The tests below, UPDATED for this fix,
-now assert that the small-batch and large-batch scenarios agree (both correctly detect the
+ROUND 28 FIXED it (SUPERSEDED by the ROUND 29 correction below): ``_VANISHED_SQL`` first
+restricted ``staged_snapshot`` to bronze rows whose OWN ``event_ts`` equalled the MAXIMUM
+``event_ts`` among ``staged_run_ids``' own bronze rows -- this pass's own freshest staged
+snapshot day. An older, already-superseded day's file merely co-staged in the same batch could
+no longer resurrect a key the freshest day's own file omits. The tests below, UPDATED for this
+fix, assert that the small-batch and large-batch scenarios agree (both correctly detect the
 vanish) -- the batch-boundary sensitivity is closed.
+
+ROUND 29 (specialist code review of commit e614a64, SUGGEST_CHANGE, addressed before any live
+confirmation) found the ROUND 28 query's per-ROW ``event_ts``-equality comparison silently
+assumed every row belonging to the freshest file shares one identical ``event_ts`` value -- a
+contract this dataset does not make (``configs/datasets/customers.yaml`` declares ``event_ts``
+as an ordinary per-row timestamp with no uniformity constraint, and
+``tests/fixtures/slice-corpus.yaml`` generates it independently per row). The ROUND 28 tests
+above only happened to pass because their own fixture data
+(``tools/corpus/dated_series.py``'s uniform per-day timestamp) coincidentally shares one
+``event_ts`` value across an entire file -- none of them exercise a file with intra-file
+``event_ts`` variance. ``_VANISHED_SQL`` is now rescoped to per-RUN (i.e. per-file) granularity
+(``GROUP BY _run_id``, comparing each run's own maximum ``event_ts`` to the batch's overall
+maximum) rather than per-row value equality, with a ``customer_id IS NOT NULL`` guard applied
+consistently to both the freshness computation and the snapshot selection.
+``test_intra_file_varying_event_ts_does_not_misclassify_current_customers`` below is the new
+regression test this correction adds: it seeds ONE run/file whose own two bronze rows carry
+genuinely DIFFERENT ``event_ts`` values (the exact shape ROUND 28's query could not handle) and
+proves both customers stay correctly non-vanished.
 
 This module isolates that ONE variable -- the ``staged_run_ids`` argument passed to
 ``SCDPublisher.publish()`` -- while holding the underlying ``staging.customers`` (bronze) rows
@@ -41,8 +60,9 @@ rolling back before the next scenario runs. This calls the REAL production entry
 mirroring this suite's own ``test_scd2_cross_file_tie_determinism.py`` precedent for driving
 the real path against a real Postgres instance.
 
-Every ``customer_id`` used below is drawn from a disjoint range (978001-978012/979001-979002)
--- see this suite's own established per-file-disjoint-range convention
+Every ``customer_id`` used below is drawn from a disjoint range
+(977001-977002/978001-978012/979001-979002) -- see this suite's own established
+per-file-disjoint-range convention
 (``test_scd2_cross_file_tie_determinism.py``'s 976001-976003, ``test_scd_delete_detection.py``'s
 900000s, ``test_publish_scd.py``'s 970000s, ``test_rebuild_reconciliation.py``'s 9704000s,
 ``test_reconciliation.py``'s 9995000s) -- ``normalized.customers``/``staging.customers`` are
@@ -92,6 +112,14 @@ _COMPANION_CUSTOMER_ID = 978002
 # collide on normalized.customers's durable, session-shared state.
 _TARGET_CUSTOMER_ID_LARGE_BATCH = 978011
 _COMPANION_CUSTOMER_ID_LARGE_BATCH = 978012
+
+# ROUND 29 regression pair (specialist review of commit e614a64): ONE run/file's own two bronze
+# rows carry genuinely DIFFERENT event_ts values -- "early" and "late" within the SAME file --
+# to prove _VANISHED_SQL's rescoped, per-RUN freshness comparison does not misclassify a
+# freshest run's own earlier-timestamped row as vanished merely because it does not carry that
+# run's single latest timestamp (the ROUND 28 per-row-event_ts-equality shape would have).
+_INTRA_FILE_EARLY_CUSTOMER_ID = 977001
+_INTRA_FILE_LATE_CUSTOMER_ID = 977002
 
 
 def _insert_config_version(dsn: str, *, dataset_id: int) -> int:
@@ -646,4 +674,96 @@ def test_same_bronze_rows_only_staged_run_ids_composition_differs_yields_same_co
         "depend solely on this pass's own freshest staged snapshot day, never on how many "
         "runs/days happen to be co-staged alongside it. If this assertion ever fails, the "
         "batch-boundary fix has regressed."
+    )
+
+
+def test_intra_file_varying_event_ts_does_not_misclassify_current_customers(
+    repository: PostgresMetadataRepository, migrated_dsn: str
+) -> None:
+    """ROUND 29 regression: ONE run/file whose own rows carry DIFFERING ``event_ts`` values.
+
+    Specialist code review of commit e614a64 (see this module's own docstring, ROUND 29
+    paragraph) found the ROUND 28 fix's ``_VANISHED_SQL`` compared each individual bronze
+    ROW's own ``event_ts`` against a single scalar maximum computed over the WHOLE staged
+    batch -- silently assuming every row belonging to the freshest file shares one identical
+    ``event_ts``. Every OTHER test in this module only ever seeds files whose rows share one
+    uniform per-file ``event_ts`` (mirroring ``tools/corpus/dated_series.py``'s own real-world
+    generator), so none of them can catch this: they would all have passed under the ROUND 28
+    query too.
+
+    This test seeds a SINGLE run/file (the only staged run, hence trivially this pass's own
+    freshest run) whose two bronze rows carry genuinely DIFFERENT ``event_ts`` values --
+    ``_INTRA_FILE_EARLY_CUSTOMER_ID`` at the earlier ``_DAY11_EVENT_TS``, and
+    ``_INTRA_FILE_LATE_CUSTOMER_ID`` at the later ``_DAY12_EVENT_TS``, both delivered by the
+    SAME file. Both customers have a pre-existing ``is_current=true`` row in
+    ``normalized.customers``. Since BOTH rows belong to the pass's one and only (and therefore
+    freshest) run, ``find_vanished_customer_ids`` must report NEITHER as vanished.
+
+    Under the PRE-CORRECTION (ROUND 28) per-row-``event_ts``-equality shape, only
+    ``_INTRA_FILE_LATE_CUSTOMER_ID``'s row would have matched the batch's own single maximum
+    ``event_ts``, silently excluding ``_INTRA_FILE_EARLY_CUSTOMER_ID``'s row from
+    ``staged_snapshot`` even though its own file delivered it -- misclassifying it as vanished
+    and flipping its ``is_current`` to ``False``. Confirmed via a genuine RED run against the
+    ROUND 28 query (reverted locally, not committed) before this correction: exactly that row
+    flipped. This test is now GREEN against the ROUND 29 per-run-scoped query.
+    """
+    with psycopg.connect(migrated_dsn) as conn:
+        run_id, file_id, batch_id = _seed_run(
+            repository, migrated_dsn, key_suffix="intra_file_varying"
+        )
+
+        _insert_bronze_customer(
+            conn,
+            customer_id=str(_INTRA_FILE_EARLY_CUSTOMER_ID),
+            event_ts=_DAY11_EVENT_TS,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+        )
+        _insert_bronze_customer(
+            conn,
+            customer_id=str(_INTRA_FILE_LATE_CUSTOMER_ID),
+            event_ts=_DAY12_EVENT_TS,
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=2,
+        )
+        _insert_normalized_customer(
+            conn,
+            customer_id=_INTRA_FILE_EARLY_CUSTOMER_ID,
+            event_ts=datetime.fromisoformat(_DAY11_EVENT_TS),
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=1,
+        )
+        _insert_normalized_customer(
+            conn,
+            customer_id=_INTRA_FILE_LATE_CUSTOMER_ID,
+            event_ts=datetime.fromisoformat(_DAY12_EVENT_TS),
+            run_id=run_id,
+            file_id=file_id,
+            batch_id=batch_id,
+            source_row_number=2,
+        )
+        conn.commit()
+
+        SCDPublisher().publish(_make_context(), "silver.customers", conn, staged_run_ids=[run_id])
+        conn.commit()
+
+    early_is_current, _ = _current_state(migrated_dsn, customer_id=_INTRA_FILE_EARLY_CUSTOMER_ID)
+    late_is_current, _ = _current_state(migrated_dsn, customer_id=_INTRA_FILE_LATE_CUSTOMER_ID)
+
+    assert early_is_current is True, (
+        "the EARLY-timestamped customer, delivered by this pass's own (only, hence freshest) "
+        "file, was misclassified as vanished -- _VANISHED_SQL is comparing per-row event_ts "
+        "against a batch-wide scalar maximum again (the ROUND 28 defect this test guards "
+        "against), rather than scoping freshness to the whole RUN/FILE"
+    )
+    assert late_is_current is True, (
+        "the LATE-timestamped customer, delivered by this pass's own (only, hence freshest) "
+        "file, was unexpectedly reported vanished -- unrelated to the ROUND 29 defect, but "
+        "still a regression in find_vanished_customer_ids for this scenario"
     )
