@@ -1,5 +1,54 @@
 ---
 status: investigating
+round26_status: "ROUND 26 offline COMPLETE 2026-08-30, awaiting live verification. Charter: fix
+  ALL THREE items ROUND 25's checkpoint named except the SCD2/rebuild-from-raw finding (owned by
+  the separate, already-reopened rebuild-scd2-reconciliation.md session -- NOT touched here).
+  (1) dbtkill's cross-DagRun file-claim race: root-caused as an upload-before-admission ordering
+  defect -- the OLD `app.put_object` -> `trigger_orders_dagrun` -> `wait_for_orders_dagrun_
+  admitted` sequence made the freshly-uploaded file visible in the bucket to ANY
+  already-admitted csv_ingest_orders DagRun (including an unrelated `asset_triggered` run fired
+  by a concurrent customers-test publish, D-15), not only the test's own explicitly-triggered
+  one -- `discover`'s own `list_matched_keys` sweep is dataset-wide, not scoped to a specific
+  triggering DagRun. TEST-FIXTURE-ONLY fix (no production scheduling semantics touched, per this
+  round's own design-before-implementing guardrail): reordered to trigger -> wait_for_admitted ->
+  upload, so the file only becomes visible once THIS DagRun provably holds the exclusive
+  max_active_runs=1 slot (no other csv_ingest_orders DagRun can be admitted concurrently while it
+  does) -- applied to both dbtkill AND u3 (u3 was not directly confirmed hitting this exact
+  mechanism, but the same reorder closes the same class of exposure there at zero cost; orphan
+  and idempotent_reupload's identically-shaped call sites were NOT touched -- out of this round's
+  named charter and not observed failing via this mechanism, flagged as a candidate follow-up).
+  (2) u3's memory-sampler race: `_poll_pod_name` (DB-column poll of `meta.ingestion_runs.
+  k8s_pod_name`, which can only observe a pod name AFTER its own in-process claim code has
+  already run) replaced with `_poll_pod_by_label` (generalized from the pre-existing
+  `_poll_dbt_build_pod_name`), watching for the K8s pod OBJECT directly via the SAME
+  `max_active_tis_per_dag=1`-precision label-selector guarantee already trusted for dbt_build's
+  own pod discovery (new `_STAGE_LABEL_SELECTOR` constant) -- observes the pod materially
+  earlier (pod creation, before image-pull/container-start/in-process claim), maximizing the
+  sampler thread's lead time before `on_finish_action=delete_succeeded_pod` removes it. Dead
+  `_poll_pod_name` function removed (zero remaining call sites). (3) Ceiling bump: `timeout-
+  minutes` 190 -> 225 in `.github/workflows/e2e-full.yml`, from ROUND 25's own measured
+  honest-floor arithmetic (43/44 reached, 187.6min elapsed at the final test's own start, ~198-
+  203min estimated fully-green completion = 8-13min/4-7% overrun past 190) -- 225 gives 22-27min
+  (11-14%) real margin over that estimate's own upper bound, deliberately more conservative than
+  this session's own ~25%-margin precedent because this is an ESTIMATE extrapolated from a
+  95%-complete run, not a directly-measured worst case; full arithmetic recorded inline in the
+  workflow file's own comment. Companion pod-termination-watcher loop iteration count (5700 ->
+  6750 * 2s) and one descriptive comment updated to match. Offline battery: `bash -n`/`yaml.safe_
+  load` clean on the modified workflow; collect-only 6/6 (test_pod_kill_retry.py + orphan +
+  smoke, unaffected siblings); ruff check zero findings on all 3 touched files; ruff format
+  --check shows ONLY the same pre-existing `_poll_run_recovery_complete` drift every prior round
+  has documented (line number shifted, byte-identical content); `make test` (unit+regression):
+  568/568, byte-identical; `make test-dagtest`: 14/14, byte-identical; `make policy`: 2 failed/
+  157 passed, CONFIRMED the same pre-existing baseline (`test_csv_ingest_customers_stays_under_
+  150_lines`, `test_the_main_gate_does_not_lint_the_bad_samples`); `make manifests`: 540/378/0/0,
+  byte-identical (zero helm/ files touched); `uv run mypy airflow/dags`: 222 errors, byte-
+  identical baseline (zero dags/ files touched this round). Zero packages/dataplat source
+  touched -- tests/integration not re-run (unaffected surface, same disposition as every prior
+  test-fixture-only round). NOTE: `.planning/debug/rebuild-scd2-reconciliation.md` shows as
+  independently modified in the working tree this round (the parallel session's own documented
+  concurrent activity) -- NOT read, NOT touched, NOT staged by this round's own commits, per the
+  user's explicit instruction. See Current Focus's ROUND 26 block for full reasoning_checkpoint
+  detail on all three fixes. NEXT: push + live verification trigger."
 round25_status: "ROUND 25 LIVE-VERIFIED 2026-08-30, run 33286862950 terminal (cancelled at the
   190-min ceiling, 43/44 node-IDs reached). Fix 1 (`wait_for_orders_dagrun_admitted`) CONFIRMED
   WORKING for its own stated purpose -- dbtkill's own DagRun was admitted and completed
@@ -269,7 +318,14 @@ round19_status: "ROUND 19 POST-RUN ANALYSIS COMPLETE on run 33181630984 (headSha
   session set for itself is now met. See Current Focus ROUND 19 OUTCOME + Evidence."
 trigger: "CI pipeline ingestion timeout/contention: real Airflow pipeline runs (discover -> ingest -> publish) never complete within their fixed 180s test timeouts when running on GitHub Actions' single-node ephemeral CI cluster (kind/cluster-ci.yaml, ~3 allocatable CPU), even though the cluster itself comes up healthy. As a result, no test that requires a full DAG run to reach SUCCEEDED has ever been observed passing on GitHub's free-tier runners, blocking Phase 11's CICD-09 requirement from being provable end-to-end."
 created: 2026-08-24
-updated: 2026-08-30 (ROUND 25 LIVE-VERIFIED: run 33286862950 cancelled at the 190-min ceiling,
+updated: 2026-08-30 (ROUND 26 offline COMPLETE, awaiting live verification: fixed dbtkill's
+  cross-DagRun file-claim race and u3's memory-sampler race, both test-fixture-only (upload-
+  after-admission reorder + label-based pod discovery), plus a 190->225min ceiling bump with
+  full inline arithmetic. rebuild-scd2-reconciliation.md's own finding explicitly OUT OF SCOPE
+  this round -- owned by the separate, already-reopened parallel session, not touched. Offline
+  battery all green/byte-identical-baseline. See Current Focus's ROUND 26 block for full
+  reasoning_checkpoint detail on all three fixes. NEXT: live verification trigger.)
+updated_prior_round25_live: 2026-08-30 (ROUND 25 LIVE-VERIFIED: run 33286862950 cancelled at the 190-min ceiling,
   43/44 reached. Both named contention mechanisms CONFIRMED CLOSED with direct evidence -- dbtkill's
   DagRun was admitted and ran end-to-end successfully, u3's SUCCEEDED assertion passed cleanly --
   but each test still fails via a newly-exposed, distinct, out-of-round-scope mechanism (dbtkill:
@@ -702,6 +758,219 @@ updated_prior_2: 2026-08-25 (ROUND 5 opens -- ROUND 4's fix (8, DAG-pause-fixtur
 
 ## Current Focus
 <!-- OVERWRITE on each update - always reflects NOW -->
+
+ROUND 26 (2026-08-30, opened on user decision after ROUND 25's own checkpoint: fix ALL THREE
+named items except the SCD2/rebuild-from-raw finding, which is OUT OF SCOPE -- owned by the
+separate, already-reopened rebuild-scd2-reconciliation.md session):
+  charter: >
+      (1) Fix dbtkill's cross-DagRun file-claim race (ROUND 25's own newly-exposed mechanism):
+      investigate the right fix layer -- unique per-test file naming/windowing, tighter
+      discovery/claim scoping, or something else found with evidence -- and design before
+      implementing if it touches production scheduling semantics beyond test fixtures; prefer a
+      test-fixture-only fix if one cleanly closes the race, per this session's own precedent.
+      (2) Fix u3's memory-sampler race (small, likely test-harness-only) directly. (3) Apply a
+      modest, evidence-justified bump to the 190-min job ceiling given ROUND 25's own ~198-203min
+      honest-floor estimate (8-13min/4-7% overrun), with real margin, not a barely-clears number.
+      Pre-registered criteria: (a) dbtkill clears; (b) u3 clears; (c) zero new failures beyond
+      whatever the parallel SCD2 session's own rebuild-from-raw investigation may still be
+      resolving (a rebuild-from-raw failure is NOT this round's own regression -- owned
+      elsewhere, not adjudicated here); (d) guards green; (e) duration comfortably under the new
+      ceiling. TARGET: fully green cluster-slice-verify census, modulo the SCD2 thread.
+  investigation_item_1_dbtkill: >
+      Direct source read of `airflow/dags/csv_ingest_orders.py`: the DAG is Asset-scheduled
+      (`schedule=[customers_asset]`), NOT cron-scheduled -- it runs every time ANY customers
+      publish (D-15) fires an asset event, and `csv_ingest_customers` itself IS cron-scheduled
+      (`schedule="*/1 * * * *"`), so asset-triggered orders DagRuns can be admitted roughly every
+      ~1min+ throughout the ENTIRE suite's runtime, independent of what the current pytest test
+      is doing -- confirming the earlier control-plane-monitor comment's own claim ("both
+      production DAGs run on a 1-minute schedule regardless of which pytest step is currently
+      executing"). `wait_for_files >> matched_keys(list_matched_keys) >> gate >> discover`:
+      `list_matched_keys`'s own D-18 docstring confirms it lists ALL currently-matching
+      `orders/*.csv` keys at whatever moment ITS OWN task executes -- dataset-wide, not scoped to
+      a specific triggering DagRun's payload. `stage` AND `dbt_build` both carry
+      `max_active_tis_per_dag=1` (confirmed by direct read, not assumed) alongside the DAG's own
+      `max_active_runs=1` -- together these fully SERIALIZE admission: while one DagRun of
+      csv_ingest_orders is admitted (state != 'queued'), no other can also be admitted. The dbtkill
+      test's OLD sequence was `wait_for_orders_dagrun_queue_idle` -> `app.put_object` (upload) ->
+      `trigger_orders_dagrun` -> `wait_for_orders_dagrun_admitted` -- the upload happens BEFORE
+      this test's own trigger, so the file is visible in the bucket to ANY DagRun that gets
+      admitted in the gap between the queue-idle check and this test's own trigger call
+      (exactly the "residual race" `wait_for_orders_dagrun_queue_idle`'s own docstring already
+      named and accepted, "bounded to one cron tick's worth, ~50s" -- ROUND 24 Track B already
+      proved that assumption wrong by 18-30x for the ADMISSION race; this round's own evidence
+      shows the SAME underlying window also mediates a FILE-VISIBILITY race, a distinct
+      consequence of the identical timing gap). `trigger_orders_dagrun`'s own implementation
+      (`airflow dags trigger`) has zero dependency on the file already existing, confirming
+      reordering is safe.
+  reasoning_checkpoint_item_1:
+    hypothesis: "Moving the upload (`app.put_object`) to AFTER `wait_for_orders_dagrun_admitted`
+        confirms this test's own `dag_run_id` closes the cross-DagRun file-claim race because
+        `max_active_runs=1` + `max_active_tis_per_dag=1` on `stage`/`dbt_build` structurally
+        guarantee no OTHER csv_ingest_orders DagRun can be admitted while this one holds the
+        slot -- so a file uploaded only once admission is confirmed cannot be visible to any
+        DagRun except this one's own (subsequent) `discover` pass. This is a TEST-FIXTURE-ONLY
+        fix (reordering two already-existing calls) -- no production scheduling semantics are
+        touched, so no design-before-implementing checkpoint is needed per the round's own
+        charter."
+    confirming_evidence:
+      - "ROUND 25's own direct evidence: run_id=1060's `meta.ingestion_runs` row was created at
+          03:42:08.49Z and reached PUBLISH/SUCCEEDED at 03:43:31.71Z -- BEFORE
+          `e2e-dbtkill-36281dc5fa33`'s own DagRun was even admitted (03:43:58.506685Z), proving a
+          DIFFERENT DagRun's `discover` pass claimed and fully processed the file this test
+          uploaded, entirely before this test's own DagRun could run its own `discover` task."
+      - "Direct source read confirms `csv_ingest_orders`' `stage`/`dbt_build` both carry
+          `max_active_tis_per_dag=1` (not assumed from `_DBT_BUILD_LABEL_SELECTOR`'s own comment
+          alone -- independently re-verified against the DAG file itself this round) -- the same
+          admission-exclusivity guarantee `wait_for_orders_dagrun_admitted`'s own ROUND 25
+          docstring already relies on for a DIFFERENT purpose (closing the admission-starvation
+          race) applies identically here."
+      - "Direct source read of `trigger_orders_dagrun` (a plain `airflow dags unpause` +
+          `airflow dags trigger`, no dependency on the target file existing) confirms reordering
+          introduces no new failure mode of its own."
+    falsification_test: "If a future dbtkill run still shows a DIFFERENT run_id's own
+        `ingestion_runs` row (not this test's own triggered dag_run_id's eventual claim) having
+        already reached a terminal state before this test's own `_poll_dbt_build_running_signal`
+        starts polling, that refutes this hypothesis and would mean either (a) some OTHER
+        already-unclaimed orders file was sitting in the bucket at this DagRun's own admission
+        moment (violating the 'previous test always fully drains its own file' assumption this
+        fix rests on), or (b) `max_active_tis_per_dag=1`'s own admission-exclusivity guarantee
+        does not hold as understood."
+    fix_rationale: "Addresses the ROOT cause (upload-before-admission visibility, not merely the
+        one observed instance of it) rather than a narrower patch (e.g. renaming the file, which
+        would not help -- ANY currently-unclaimed file, uniquely named or not, is fair game for
+        ANY currently-admitted DagRun's dataset-wide discover sweep). Reused, not re-invented:
+        the exact admission-exclusivity property `wait_for_orders_dagrun_admitted` already
+        proved reliable for the ADMISSION-starvation race (ROUND 25) is the same property this
+        fix leans on for the FILE-VISIBILITY race -- one mechanism, two consequences, one fix
+        that closes both by re-ordering rather than adding new machinery."
+    blind_spots: "(1) Relies on the assumption that no OTHER unclaimed orders file already sits
+        in the bucket at this DagRun's own admission moment (would come from some OTHER
+        concurrently-running test's own leftover upload) -- not exhaustively proven this round,
+        only argued from the suite's own sequential-test-execution convention and each prior
+        test's own `poll_file_discovered` call already confirming ITS OWN file was claimed
+        before that test completed. (2) Not applied to `test_pod_kill_mid_load_produces_no_
+        duplicates` (podkill, 1M-row fixture) or `test_referential_orphan.py`/`test_smoke_and_
+        idempotency.py`'s idempotent_reupload uploads, which share the identical upload-before-
+        trigger shape -- out of this round's named charter (dbtkill only) and not observed
+        failing via this mechanism, but the SAME theoretical exposure exists there and is
+        flagged, not fixed, this round. (3) Live-unverified until the next full-suite run --
+        this round's own offline battery cannot exercise real Airflow admission timing."
+  investigation_item_2_u3: >
+      Direct source read of `_poll_pod_name` (DB-column poll of `meta.ingestion_runs.
+      k8s_pod_name`) vs. the pre-existing `_poll_dbt_build_pod_name` (K8s label-selector poll,
+      already proven reliable for dbt_build). `k8s_pod_name` is written by `_claim_or_await`
+      (`packages/dataplat/src/dataplat/pipeline/run.py`) EARLY in `stage_ingest` (before any
+      streaming/parsing work) -- so the write itself is not late -- but `_poll_pod_name` can only
+      OBSERVE that write via a 0.5s DB poll AFTER the in-process claim code has already executed
+      inside the pod, meaning pod creation, scheduling, image-pull, and container startup have
+      ALL already happened invisibly before this poller's very first successful observation.
+      Module-level comment (`_U3_FIXTURE_ROWS`'s own note, pre-existing, not added this round):
+      "at CI-contended rates a 250k COPY runs for minutes, far past warmup" -- making a
+      genuinely-too-fast-to-sample completion of THIS test's OWN 250k-row file an unlikely sole
+      explanation for "zero samples ever captured"; a cross-DagRun race (a DIFFERENT,
+      possibly-much-smaller competing file finishing before this DagRun's own stage pod exists)
+      is at least as plausible given item 1's own finding that this exact race class is real and
+      live-confirmed for dbtkill this session.
+  reasoning_checkpoint_item_2:
+    hypothesis: "Replacing U3's `_poll_pod_name` (DB-column poll) with a K8s label-selector poll
+        (`_poll_pod_by_label`, generalized from `_poll_dbt_build_pod_name`, using a new
+        `_STAGE_LABEL_SELECTOR` with the SAME `max_active_tis_per_dag=1` precision guarantee
+        already trusted for dbt_build) observes the pod materially earlier in its lifecycle
+        (K8s pod-object creation, before image-pull/container-start/in-process claim), closing
+        the 'zero samples ever captured' race by maximizing the sampler thread's lead time
+        before `on_finish_action=delete_succeeded_pod` removes the pod."
+    confirming_evidence:
+      - "Direct source read of `_claim_or_await`/`claim_ingestion_run` confirms `k8s_pod_name`
+          is only ever VISIBLE to a DB poller after the claim UPDATE commits -- itself only
+          reachable after full pod startup (image pull, Python interpreter start, Vault/DB
+          connection setup) -- whereas a K8s API `get pods -l ...` observes the pod object the
+          moment KubernetesExecutor creates it, structurally earlier by construction, not by
+          probabilistic margin."
+      - "`_DBT_BUILD_LABEL_SELECTOR`'s own pre-existing, already-live-validated comment
+          documents the identical `max_active_tis_per_dag=1` precision guarantee for
+          `dbt_build`; direct source read this round confirms `stage` carries the SAME
+          `max_active_tis_per_dag=1` setting in `csv_ingest_orders.py`, making the same
+          precision argument apply unchanged to a `task_id=stage` selector."
+    falsification_test: "If a future U3 run still reports zero samples despite the label-based
+        poll finding a real pod promptly, that would refute 'detection latency was the
+        mechanism' and point instead at the sampler's own `kubectl exec` round-trip latency
+        (or genuine CI-contended API-server slowness) as the binding constraint -- a materially
+        different, not-yet-addressed finding."
+    fix_rationale: "Removes a dependency on in-process application code (the claim write) ever
+        running at all as the trigger for starting observation -- watches the platform-level
+        pod-lifecycle signal directly instead, the same class of fix `_poll_dbt_build_pod_name`
+        already established as reliable for an analogous problem. Combined with item 1's own
+        reorder fix (also applied to U3 this round, see that item's own blind_spots), this
+        closes U3's exposure to BOTH plausible contributing mechanisms (detection-latency AND
+        cross-DagRun race) rather than gambling on which one was solely responsible."
+    blind_spots: "ROUND 25's own evidence did not explicitly confirm whether U3's zero-samples
+        failure was actually caused by a cross-DagRun race (item 1's mechanism) or a genuine
+        detection-latency gap (this item's mechanism) -- both fixes are applied together this
+        round without a live run that isolates which one, if either alone, would have sufficed.
+        If the next live run still fails here, the two mechanisms will need to be
+        disambiguated with a live run that intentionally reverts one fix at a time -- not
+        attempted this round given the charter's own 'fix directly, small/likely test-harness-
+        only' framing for this item."
+  investigation_item_3_ceiling: >
+      ROUND 25's own `structural_ceiling_analysis` (see that round's OUTCOME block below) is the
+      full basis: 43/44 node-IDs reached, 187.6min elapsed at `test_idempotent_reupload`'s own
+      start, comparable single-cycle tests this round ran 5.88-9.09min each, extrapolating a
+      2-cycle test to ~10-15min -> ~198-203min estimated fully-green completion (an 8-13min/
+      4-7% overrun past the OLD 190-min ceiling). Bumped `timeout-minutes` to 225 (22-27min/
+      11-14% margin over that estimate's own upper bound) -- see the workflow file's own inline
+      comment (`.github/workflows/e2e-full.yml`) for the full arithmetic recorded at the point
+      of change, deliberately more conservative than this session's own ~25%-margin precedent
+      (ROUND 22) because this is an ESTIMATE extrapolated from a 95%-complete run, not a
+      directly-measured worst case. Companion pod-termination-watcher loop iteration count
+      (5700 * 2s = 11400s = 190min) updated to match (6750 * 2s = 13500s = 225min).
+  offline_status: "COMPLETE 2026-08-30: (1) `tests/e2e/slice/test_pod_kill_retry.py`: dbtkill and
+      U3 both reordered to upload only after `wait_for_orders_dagrun_admitted` confirms
+      admission; `_poll_dbt_build_pod_name` generalized/renamed to `_poll_pod_by_label(kubectl_
+      fn, label_selector, *, timeout)`, called with `_DBT_BUILD_LABEL_SELECTOR` at dbtkill's own
+      call site (unchanged behavior) and a new `_STAGE_LABEL_SELECTOR` at U3's; dead
+      `_poll_pod_name` (DB-column poll) function removed (zero remaining call sites). (2)
+      `.github/workflows/e2e-full.yml`: `timeout-minutes` 190 -> 225 with full inline arithmetic;
+      pod-termination-watcher loop 5700 -> 6750 iterations; one descriptive comment ('~190min
+      job' -> '~225min job') updated for consistency. (3) `tests/e2e/chaos/test_pod_crash.py`:
+      one stale cross-file docstring reference (`_poll_dbt_build_pod_name` -> `_poll_pod_by_
+      label`) corrected for accuracy -- cosmetic only, that file's own behavior is unchanged.
+      VERIFICATION: `python3 -c 'import yaml; yaml.safe_load(...)'` confirms e2e-full.yml parses
+      cleanly with `timeout-minutes: 225`; `bash -n` on every `run:` step's shell fragment
+      (scripted check over all steps, not just the touched ones) passes with zero syntax errors.
+      `uv run --group cluster pytest tests/e2e/slice/test_pod_kill_retry.py tests/e2e/slice/
+      test_referential_orphan.py tests/e2e/slice/test_smoke_and_idempotency.py --collect-only`:
+      6/6 collected (confirms all touched/adjacent files remain structurally sound). `make test`
+      (unit+regression): 568 passed, byte-identical to ROUND 25's own baseline (zero packages/
+      dataplat source touched). `make test-dagtest`: 14 passed, unchanged. `make policy`: 2
+      failed/157 passed -- CONFIRMED the SAME 2 pre-existing baseline failures every prior round
+      has documented (`test_csv_ingest_customers_stays_under_150_lines`, `test_the_main_gate_
+      does_not_lint_the_bad_samples`); zero NEW failures. `make manifests`: 540/378/0/0,
+      byte-identical (zero helm/ files touched). `uv run mypy airflow/dags`: 222 errors in 10
+      files, byte-identical to every prior round's documented baseline (zero airflow/dags files
+      touched this round). `ruff check` on all 3 touched files: zero findings. `ruff format
+      --check`: the ONLY reported drift is the SAME pre-existing `_poll_run_recovery_complete`
+      one-liner every prior round has documented (line number shifted by this round's own
+      insertions/deletions above it, content byte-identical, confirmed via direct comparison of
+      the diff output) -- zero NEW drift introduced by this round's own edits. NOTE (working-
+      tree hygiene, per this session's own documented concurrent-session-hazard precedent):
+      `.planning/debug/rebuild-scd2-reconciliation.md` was independently modified in the working
+      tree during this round by the separate, already-reopened parallel session -- confirmed via
+      `git diff --stat` immediately before staging, NOT read, NOT touched, and explicitly
+      excluded from this round's own `git add`/commit (named files only, never `git add -A`)."
+  live_verification_state: "PENDING -- see this block's own update immediately below once code +
+      docs are pushed and the authoritative run ID is recorded."
+  next_action: "Push code+docs together in one push (no skip-ci marker -- this round needs a
+      normal push trigger for e2e-full.yml AND publish.yml), record the authoritative e2e-full
+      run ID (and publish.yml's own companion run) in live_verification_state above, then return
+      a CHECKPOINT REACHED (human-action) with both run IDs -- the session manager runs the
+      single 60s watcher, this agent does not self-watch. Pre-registered analysis criteria on
+      the next post-run pass: (a) dbtkill clears (no cross-DagRun-claim signature, no admission-
+      starvation signature); (b) u3 clears (`peak_bytes > 0`, real samples captured); (c) zero
+      new failures beyond whatever the parallel SCD2 session's own rebuild-from-raw thread may
+      still be resolving (a rebuild-from-raw failure there is NOT adjudicated as this round's own
+      regression); (d) guards green (Kyverno/restarts/OOMKilled/scheduler-memory trend); (e)
+      duration comfortably under 225min. TARGET: fully green cluster-slice-verify census, modulo
+      the SCD2 thread."
 
 ROUND 25 (2026-08-30, opened on user decision after ROUND 24's own checkpoint: (a)+(b)
 combined -- fix the newly-confirmed max_active_runs=1 contention mechanism for dbtkill/u3-class
