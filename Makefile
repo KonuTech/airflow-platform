@@ -55,7 +55,7 @@ FILE ?=
 
 .PHONY: help uv-guard install lock-check lint format typecheck imports test policy \
         fixtures fixtures-verify gitleaks gitleaks-selftest check ci clean \
-        install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-rebuild cluster-verify \
+        install-cluster doctor doctor-live doctor-live-check cluster-up cluster-down cluster-pause cluster-resume cluster-rebuild cluster-verify \
         minio-creds helm-lint manifests manifest-policy test-integration test-dagtest image-csv-processor \
         image-airflow image-dbt image-xcom-sidecar ingest-demo vault-unseal vault-bootstrap vault-verify vault-audit-tail \
         migrate-analytics rebuild-from-raw rollback smoke-verify cluster-slice-verify cluster-slice-verify-scoped observability-verify-ci
@@ -194,6 +194,12 @@ cluster-up: doctor             ## Create/update the kind cluster and every stage
 
 cluster-down:                  ## Delete the kind cluster if it exists, else no-op [plan 02-01]
 	scripts/cluster-down.sh
+
+cluster-pause:                 ## Stop the kind node + registry containers (no delete) to free host CPU/RAM for other work
+	DOCKER=$(DOCKER) scripts/cluster-pause.sh
+
+cluster-resume:                ## Start a paused cluster back up, wait for Ready, self-heal the DAGs mount [pairs with cluster-pause]
+	DOCKER=$(DOCKER) KUBECTL=$(KUBECTL) scripts/cluster-resume.sh
 
 cluster-rebuild: doctor        ## D-04: destroy+recreate, timed per-stage, warns past budget [plan 02-02]
 	scripts/cluster-rebuild.sh
